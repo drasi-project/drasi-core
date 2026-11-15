@@ -44,8 +44,7 @@ The implemented query profiles cover:
 - Paged native snapshot/history and snapshot/live attachment, including results
   larger than the former whole-response row/envelope/byte limits.
 
-The profiles above are implemented and
-[CW-43](computation-graph-remaining-work.md#cw-43) is closed. Remaining payload,
+The profiles above are implemented. Remaining payload,
 native-test, full-suite, performance and reference-retirement work is tracked
 separately in the [canonical backlog](computation-graph-remaining-work.md#cw-76).
 The linked reference constructors still exist; removing implicit selection does
@@ -169,8 +168,7 @@ due time and production timestamps. The existing physical-clock/test-control
 frontier waits through actual due-work and delivery confirmation, not merely
 queue admission or a wall-clock sleep.
 
-Reusable non-query scheduled work is implemented in
-[CW-81](computation-graph-remaining-work.md#cw-81). Request/replace/cancel,
+Reusable non-query scheduled work is implemented. Request/replace/cancel,
 claim and explicit completion enlist in the requesting owner's actual
 transaction, never a competing session on the same database path.
 It shares `CommittedSchedule`/`FutureWakeup` in computation-contracts and preserves
@@ -216,8 +214,7 @@ owners remain fenced.
 
 ## Implementation status and follow-ups
 
-[CW-43](computation-graph-remaining-work.md#cw-43) records completed native query
-integration and the exact scope of its qualification evidence. Evaluator reuse,
+Native query integration is complete. Evaluator reuse,
 ordinary factory selection, supported storage/publication profiles, bootstrap,
 scheduling, readers, metrics and retained recovery are implemented. Architecture
 artifacts have been regenerated and checked; rerunning their generator after a
@@ -243,8 +240,7 @@ acceptance without an actual native execution path.
 
 The mixed source/bootstrap, non-query transformer, query and capture-consumer
 proof is [CW-82](computation-graph-remaining-work.md#cw-82). It depends on the
-implemented reusable non-query scheduling contract in
-[CW-81](computation-graph-remaining-work.md#cw-81). The remaining mixed ownership, rollback,
+implemented reusable non-query scheduling contract. The remaining mixed ownership, rollback,
 clock and real-process failure checks qualify that new combined profile; they
 do not keep the implemented query plugin open or imply that query timers are
 unavailable.

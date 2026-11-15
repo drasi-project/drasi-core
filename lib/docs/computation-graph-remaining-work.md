@@ -1,202 +1,173 @@
 # ComputationGraph remaining work
 
-This is the single active list of known issues, investigations, qualification
-gaps and suggested improvements for ComputationGraph across **drasi-core**,
-**drasi-server**, **learning-drasi-server** and **test-infra**. It incorporates
-the remaining work from the architecture review, CG backlog, reliability,
-execution/isolation and breaking-release cleanup plans. Resolved defects and
-incorrect findings are not outstanding work.
+This is the list of open work for ComputationGraph in **drasi-core**, and for the
+parts of **learning-drasi-server** and **test-infra** that exercise it. Every
+entry describes work that still needs doing; finished work is not listed.
+Drasi Server work is tracked in the
+[Drasi Server remaining work](../../../drasi-server/docs/remaining-work.md)
+document (SW entries) and is linked from here only where a Core entry depends
+on it.
 
-**How to read it:** An **issue** is an established implementation or build gap;
-an **investigation** needs a reproduction before a fix is selected;
-**qualification** needs stronger evidence for an implemented contract; an
-**improvement** adds capability, efficiency or maintainability. High priority
-means important for the affected deployment or release claim, not that every
-item blocks every merge. Optional capabilities are identified explicitly.
-Areas identify the owning repositories, not assigned individuals.
-Resolved anchor stubs are labeled explicitly and are not open work.
-Implementation and integration work is grouped separately from
-[testing and qualification](#testing-and-qualification). That section owns test
-quality, coverage gaps, execution/CI selection, reliability, cost and measured
-qualification. Mixed implementation items link to their testing obligations
-instead of maintaining a second test checklist.
+**How to read it:**
 
-The [testing guide](../../docs/contributing/contributing-code/contributing-code-tests/)
-describes ordinary Cargo/CI execution. The custom profile runners, name
-inventories and qualification ledgers have been removed. A passing test does
-not qualify every provider, failure schedule or deployment.
-The recent reconciliation, controller, partial-start, snapshot-generation,
-ownership, rollback and lineage repairs are implemented; their broader
-qualification boundaries remain below. Intentional child-worker test ignores
-are exercised by their parent tests, not counted as disabled functional failures.
+- An **issue** is a confirmed gap or defect in implemented behavior.
+- An **investigation** needs a reproduction before a fix can be chosen.
+- **Qualification** means the behavior exists but lacks test evidence.
+- An **improvement** adds capability, efficiency or maintainability.
+- **USER-DEFERRED** entries are parked by an owner decision and should not
+  be started without revisiting that decision.
 
-Native query integration is implemented; [CW-43](#cw-43) is closed. Its remaining
-transport limit, broader native parity coverage, environment-dependent test
-qualification, performance and reference-cleanup work have separate entries
-[CW-76](#cw-76) through [CW-80](#cw-80). Query scheduling and the standalone
-non-query scheduling profile in [CW-81](#cw-81) are implemented. The mixed
-application proof in [CW-82](#cw-82) remains open. The memory-backed view
-transform in [CW-68](#cw-68) and native-only reconstruction recipes in
-[CW-70](#cw-70) are also implemented within their documented boundaries.
+Priority describes the impact on the affected deployment or release claim; it
+does not mean every High item blocks every merge. Areas name the owning
+repositories, not people. Statements marked **Unverified** have not been
+confirmed against the code or by running tests.
 
-Native conversion of every plugin and old-adapter retirement are **not universal
-merge prerequisites**. Supported ordinary adapters already run inside
-ComputationGraph. The replacement is an unreleased, breaking v1 design; no
-compatibility-shim or automatic old-state migration programme is implied.
+Implementation work comes first. Test quality, coverage, CI selection,
+reliability and measured qualification are grouped under
+[Testing and qualification](#testing-and-qualification); implementation entries
+link to their testing obligations there rather than repeating them. The
+[testing guide](../../docs/contributing/contributing-code/contributing-code-tests/)
+describes ordinary Cargo and CI execution.
 
-| Work area | Main entries |
+The ABI 4 design is an unreleased breaking change. Converting every plugin to
+the native SDK and retiring old adapters are not merge prerequisites, and no
+compatibility shims or automatic migration of old state are planned.
+
+| Work area | Entries |
 |---|---|
-| Implementation, lifecycle and diagnostics | [Deadlines](#cw-06), [errors](#cw-22), [status delivery](#cw-23), [background ownership](#cw-17) |
-| Managed component updates | [Safe rebootstrap coordination](#cw-92), [user-deferred graph-change/live-rebinding design review](#cw-94), [user-deferred plugin upgrade and configuration migration](#cw-95), [Pause gating of independent workers](#cw-96), [Server ABI 4 port](#cw-97), [erasing disposal](#cw-98); state-preserving factory updates and lifecycle ownership are implemented |
-| Native named references | [Deferred bind-once endpoints](#cw-93); native topology endpoints currently require assigned UUIDs |
-| Testing quality and selection | [Testing overview](#testing-and-qualification), [production-path oracles](#cw-83), [honest runners](#cw-84), [CI selection](#cw-85), [duplication](#cw-86), [behavior ledgers](#cw-88) |
-| Recovery and behavior qualification | [Pending input](#cw-14), [reset](#cw-20), [completion evidence](#cw-36), [combined failures](#cw-39), [FFI](#cw-41), [Server](#cw-46), [examples](#cw-90) |
-| Query-plugin follow-ups | [Large items](#cw-76), [native parity coverage](#cw-77), [complete test run](#cw-78), [performance](#cw-79), [linked-reference retirement](#cw-80) |
-| Integration and applications | [Connectors](#cw-44), [native network sources](#cw-100), [native network and log sinks](#cw-101), [native PostgreSQL source](#cw-102), [Server/UI](#cw-45), [examples/tutorials](#cw-47), [reconstruction](#cw-70) |
-| Scaling and maintainability | [Publication](#cw-31), [storage](#cw-28), [hot paths](#cw-32), [decomposition](#cw-34) |
-| Testing reliability and cost | [Asynchronous tests](#cw-37), [MySQL/Postgres container failures](#cw-99), [build/fixture cost](#cw-87), [shared conformance](#cw-89), [application benchmarks](#cw-40), [native-query comparison](#cw-79) |
-| Public API and release | [API curation](#cw-69), [formats](#cw-18), [lints/MSRV](#cw-61), [release documentation](#cw-73) |
-| Optional capabilities | [Non-query scheduling](#cw-81), [combined scheduling proof](#cw-82), [view transforms](#cw-68), [housekeeping](#cw-71), [pipe policies](#cw-74), [hosting profiles](#cw-75) |
+| Managed updates and lifecycle | [Rebootstrap coordination](#cw-92), [named endpoints](#cw-93), [graph changes and live rebinding](#cw-94) (deferred), [plugin upgrade and configuration migration](#cw-95) (deferred) |
+| Connectors and runtime boundaries | [Data connections](#cw-44), [old plugin support](#cw-63), [linked query entry points](#cw-80), [oversized query records](#cw-76) |
+| Native plugins: shared work | [Pause and stop](#cw-96), [erasing disposal](#cw-98), [conformance kit](#source-x-02), [configuration and secrets](#source-x-03), [update planning](#source-x-04), [retry policy](#source-x-05), [delivery contract](#sink-x-03), [observability](#source-x-07), [starter project](#dx-1), [packaging](#dx-10) |
+| Native sources | [Network runtime](#plugin-source-network), [PostgreSQL](#plugin-source-postgres), [MySQL](#plugin-source-mysql), [SQL Server](#plugin-source-mssql), [SQLite](#plugin-source-sqlite), [HTTP](#plugin-source-http), [gRPC](#plugin-source-grpc), [bridge](#plugin-source-bridge), [counter and mock](#plugin-source-counter-mock) |
+| Native sinks | [Network runtime](#plugin-sink-network-runtime), [HTTP](#plugin-sink-http), [gRPC](#plugin-sink-grpc), [SSE](#plugin-sink-sse), [log](#plugin-sink-log), [capture](#plugin-sink-capture), [profiler](#plugin-sink-profiler), [stored procedures](#plugin-sink-storedproc-shared), [PostgreSQL](#plugin-sink-storedproc-postgres), [MySQL](#plugin-sink-storedproc-mysql), [SQL Server](#plugin-sink-storedproc-mssql), [bridge](#plugin-sink-bridge), [legacy reactions](#plugin-legacy-reactions) |
+| Data, errors and diagnostics | [Saved-data formats](#cw-18), [deep data](#cw-19), [error messages](#cw-22), [status and log updates](#cw-23), [background work](#cw-17), [logging control](#cw-24), [request tracing](#cw-25), [measurements](#cw-26), [monitoring export](#cw-27) |
+| Scaling and maintainability | [Removed-component bookkeeping](#cw-33), [memory limits](#cw-29), [disk work](#cw-28), [processing repetition](#cw-32), [management code](#cw-34) |
+| Public API, dependencies and release | [API curation](#cw-69), [legacy dependencies](#cw-66), [capabilities and delegation](#cw-72), [release documentation](#cw-73) |
+| Optional capabilities | [Store housekeeping](#cw-71), [pipe policies](#cw-74), [isolated hosts](#cw-75), [mixed scheduling proof](#cw-82) |
+| Test quality and CI | [Credential-provider tests](#cw-83), [CI gates](#cw-85), [repeated tests](#cw-86), [asynchronous tests](#cw-37), [build and fixture cost](#cw-87) |
+| Behavior coverage | [Backend conformance](#cw-89), [loaded query plugin](#cw-77), [status and results](#cw-10), [query matching](#cw-13), [grouped results](#cw-12) |
+| Recovery and failure | [Native input recovery](#cw-14), [completion proof](#cw-36), [interrupted reset](#cw-20), [safe stop](#cw-05), [overlapping changes](#cw-07), [cleanup](#cw-08), [combined failures](#cw-39), [extension failures](#cw-03), [retry questions](#cw-21), [ownership and limits](#cw-35) |
+| Native boundaries, platforms and performance | [Real plugin libraries](#cw-41), [Protocol Buffers compiler](#cw-67), [isolated host profiles](#cw-91), [complete suites](#cw-78), [large applications](#cw-40), [native query overhead](#cw-79) |
 
-Keep CW IDs and anchors stable. Review H/M identifiers and historical CG IDs
-below identify the remaining portion of a finding, not acceptance of every
-claim in its original wording. Record new work here instead of creating another
-backlog or a second set of checklists in a reference guide.
+Native plugin work is grouped by plugin under [Native sources](#native-sources)
+and [Native sinks](#native-sinks), after the shared plugin work. Plugin entries
+use per-plugin IDs (for example PG-13 for the PostgreSQL source or SPG-01 for the
+PostgreSQL stored-procedure sink) because plugin design documents and code cite
+them. Shared and decision IDs are qualified as Source or Sink (for example
+Source X-03, Sink D-3) because the two families number them separately.
+
+Keep IDs and anchors stable. Add new work here, as a new CW entry or a new
+plugin ID in the plugin's section, rather than in a separate backlog or
+checklist.
 
 ## Implementation and integration
-
-<a id="cw-06"></a>
-
-### Lifecycle deadlines and contention (CW-06)
-
-**Status:** Implemented; retained anchor, not outstanding work.
-**Area:** Core, Server. **Review:** M4, M18, M31.
-
-**Implemented:** Startup has a configurable 600-second overall budget;
-stop/shutdown have 60 seconds. Construction/configuration, resource construction,
-activation and cleanup have separate configurable budgets. Core builders,
-configuration snapshots, Server YAML/environment resolution and instance creation
-carry the same settings. Typed expiry reports owner, operation, phase, budget
-and request acceptance. Cancelled/timed-out stops retain cleanup ownership and
-block unsafe restart; shutdown does not close configuration storage underneath
-unfinished processing. Dropped-management cleanup uses visible exponential
-backoff rather than fixed one-second retries.
-
-Startup is now owned independently of its caller. Stop/shutdown supersede that
-wait and join its coordinator, including when the original caller is unpolled or
-dropped. Accepted component operations remain graph-owned; late startup work
-cannot resurrect a stopped instance. Managed realization releases the instance
-gate before construction/startup waits and retains its pending graph result.
-Acknowledged interrupted construction can be retried through reconciliation or
-instance restart. Server captures native plugin bindings before releasing its
-registry guard and awaiting resource preparation.
-Native instance startup now queues generation-fenced member requests behind
-reconciliation and cleanup, and joins existing activation instead of returning
-a transient conflict. The existing lifecycle queue retains cancellation,
-replacement fencing, retirement exclusion and stop supersession.
-
-The [configuration guide](computation-graph-configuration.md#library-settings)
-describes defaults and retry behavior. Focused coverage includes total budgets
-across phases, lock admission, unpolled/dropped startup callers, component and
-instance stop retries, managed construction/reconciliation ownership, resource
-construction/disposal and plugin-registry guard release.
-
-These changes do not permit abandoning uncertain configuration commits or
-interrupting previously running owners during an uncommitted resource cutover.
-Other conflicting lifecycle work still has a bounded wait. Nonyielding native
-code cannot be preempted by an asynchronous deadline. Wider deployment/provider
-qualification remains in [CW-14](#cw-14), [CW-41](#cw-41) and [CW-46](#cw-46),
-not an unfinished instance-startup contention fix.
 
 <a id="cw-92"></a>
 
 ### Coordinate safe rebootstrap during managed updates (CW-92)
 
-**Kind:** Unsupported capability / follow-on implementation.
-**Area:** Core, native SDK/Host, query plugin, Server.
-**Priority:** Generalized native graph recovery; basic ordinary-query replacement
-does not require this broader protocol. **Effort:** Large.
-**Status:** Qualified ordinary-query reconstruction implemented; general reset
-coordination remains deferred.
+**Kind:** Unsupported capability. **Area:** Core, native SDK/Host, query plugin, Server.
+**Priority:** Needed for general native graph recovery; ordinary-query
+replacement already works without it. **Effort:** Large.
 
-**Current boundary:** The registered ordinary native-query constructor supports
-semantic `Recreate/Rebootstrap` and streaming-only `Recreate/Reset` with stable
-bindings. Controlled startup completes query-owned rebuilding before the owner
-confirms completion and releases activation. Memory and persistent atomic/non-atomic
-publication use their actual reset protocols and the accepted operation identity.
-Ordinary reaction recovery policies and source/sibling ownership remain independent.
-Other factories reject data reset by default; downstream query resynchronization,
-live input rebinding and shared resource replacement remain unsupported.
+Some configuration changes make a component's retained state wrong, so the
+component must discard it and rebuild from a snapshot (`Rebootstrap`) or restart
+from the live stream (`Reset`). Today only an ordinary query can do this on its
+own; there is no graph-wide protocol that makes a reset safe when other
+components depend on the reset component's state or input.
 
-The factory can assess a change and report that reconstruction and rebootstrap
-are necessary, but that assessment does not establish a safe graph-wide reset.
-For example, changing a query's filter, joins or grouping can invalidate retained
-state even when its output columns remain unchanged. Qualified ordinary updates
-replace and rebuild that state rather than treating it as compatible.
-Supported state-preserving updates still require an explicit factory plan;
-initialization/disposal and accepted-update journaling are already implemented.
+**What works today:** The ordinary native-query factory plans a semantic
+change with unchanged inputs as `Recreate` + `Rebootstrap` (if the query has
+bootstrap inputs) or `Recreate` + `Reset` (streaming-only), and an
+output-retention increase as `InPlace` + `Preserve`. It rejects changes to
+inputs, output stream, storage, bootstrap or recovery policy. The managed planner
+also rejects a data reset that changes the query's live inputs. Every other native
+factory rejects an update directive unless it declares `Recreate` update support,
+and none except the query plans `Rebootstrap`/`Reset`.
 
-**Work:** Add a graph-owned execution protocol that can establish all of these
-guarantees before discarding state:
+**Example of the gap:** A query `orders-by-region` changes its `WHERE` clause but
+keeps the same output columns. A second query and an SSE sink consume its output.
+The query can rebuild itself, but nothing ensures the downstream query
+resynchronizes, that changes arriving during the snapshot are neither lost nor
+applied twice, or that a crash midway resumes the same reset rather than running
+it again.
 
-1. **Authoritative snapshot and live handover.** Identify the actual input
-   snapshot frontier and retain a consistent path to changes arriving after it.
-   Provider availability or an empty bootstrap result is not proof.
-2. **Exact queued-work treatment.** Identify which admitted work the snapshot
-   supersedes, retain or replay later work, and prevent an unconfirmed output
-   from being silently dropped. Persist the required execution identity and
-   boundaries so retries and process restart cannot reset twice or resume an
-   unconfirmed operation.
-3. **Downstream reset acknowledgement.** Coordinate affected queries and
-   stateful consumers, prove their resynchronization, and preserve shared history
-   and other consumers' obligations. A local query reset must not delete data
-   owned by another component or a shared recovery domain.
+**What remains:** A graph-owned reset protocol, built on the existing
+configuration owner, lifecycle operations, bootstrap/read services and
+recovery-domain ownership, that before discarding state:
 
-Reuse the existing configuration owner, lifecycle operations, bootstrap/read
-services and recovery-domain ownership. Do not add a parallel runtime or assume
-that a Boolean plan, the presence of a factory, or `reset_configuration: true`
-provides these guarantees. Do not disguise a semantic change as `Preserve`.
+1. Identifies the actual snapshot frontier and keeps a path for changes arriving
+   after it. An available provider or an empty bootstrap result is not proof.
+2. Decides which queued work the snapshot supersedes, retains or replays the
+   rest, never silently drops unconfirmed output, and persists the operation
+   identity and boundaries so retries and restarts neither reset twice nor
+   resume an unconfirmed operation.
+3. Coordinates affected downstream queries and stateful consumers, confirms they
+   resynchronized, and leaves shared history and other consumers' obligations
+   intact.
 
-**Finish when:** Real native query pipelines exercise both changed output shape
-and changed semantics with unchanged columns. Independent result oracles verify
-the snapshot/live boundary, retained post-frontier changes, dependent-query and
-stateful-consumer resynchronization, and isolation of unaffected consumers.
-Cancellation, cleanup failure and process exit before/after reset, bootstrap and
-completion acknowledgement must either resume the same accepted operation safely
-or leave it visibly blocked without losing ownership or data. Unsupported
-provider/consumer combinations must continue to reject before destructive work.
+Do not treat a factory's plan, the presence of a factory, or
+`reset_configuration: true` as these guarantees, and do not report a semantic
+change as `Preserve`.
+
+**Evidence:** `drasi-core/components/computation-plugins/transformers/query/src/update.rs:39-118`
+(query plan), `drasi-core/lib/src/management/update_planning.rs:9-15`
+(data reset requires `Recreate`) and `:515-527` (query reset cannot change
+live inputs), `drasi-core/components/computation-plugin-sdk/src/export.rs:979-989`
+(directive rejected without declared `Recreate` support),
+`drasi-core/components/host-sdk/src/computation/query.rs:310-365` (memory and
+persistent reset handling).
+
+**Done when:** Real native query pipelines change output shape, and change
+semantics with unchanged columns. Independent result oracles verify the
+snapshot/live boundary, retained post-frontier changes, downstream query and
+stateful-consumer resynchronization, and that unaffected consumers are
+untouched. Cancellation, cleanup failure and process exit before and after reset,
+bootstrap and completion either resume the same operation safely or leave it
+visibly blocked without losing ownership or data. Unsupported
+provider/consumer combinations are rejected before any destructive work.
 
 <a id="cw-93"></a>
 
 ### Persist and resolve native named endpoints once (CW-93)
 
 **Kind:** Unsupported authoring capability. **Area:** Core, Server, test-infra.
-**Priority:** Medium; needed for separate out-of-order native declarations by name.
+**Priority:** Medium. **Effort:** Medium.
 
-**Current boundary:** Native topology relationships require component UUIDs.
-An edge to an already accepted component belongs in `relationships`, even when
-that component was created in another request; `boundary_relationships` is
-scope-boundary context, not a way to connect previous creations. A native
-consumer can be declared disconnected, then explicitly wired after its producer's
-UUID is available. Do not wait for activation before supplying required ports.
-Ordinary declarations' pending name references do not provide this native
-endpoint-authoring capability.
+Native graph edges name their endpoints by component UUID, and a UUID exists
+only after its component is declared. A native consumer therefore cannot be
+declared in one request with an edge to a producer, identified by name, that
+will be declared in a later request.
 
-**Work:** Add a configuration-owner-managed native named-endpoint declaration
-that can wait for a later component declaration and bind exactly once to its
-assigned UUID. Preserve unresolved intent and the eventual binding across
-acceptance, retries and restart. A rename or reuse of the old name must not
-retarget a resolved edge. Validate the actual role, port and schema before
-publishing the connection.
+**Example:** Request 1 declares sink `alerts-sse` with an input edge from
+`orders-query`. Request 2 later declares `orders-query`. Today request 1 must
+either omit the edge (declare the sink disconnected and wire it after request 2
+returns the query's UUID) or be submitted after request 2.
 
-Do not derive component UUIDs from names, invent placeholder component objects,
-enable external IDs as a workaround, or introduce a second mutable graph
-registry. Until this contract exists, native helpers requiring named producers
-must either require their declarations first or expose explicit two-step wiring.
+**What works today:** Native additions can declare UUID-addressed
+`relationships` to previously accepted components; `boundary_relationships`
+stores edges to ordinary queries. Required links bind once both endpoints exist.
+Ordinary declarations' pending name references do not apply to native endpoints;
+an unresolved name is not a native endpoint.
 
-**Finish when:** Separate consumer-before-producer requests, missing/wrong ports,
-duplicate names, rename/name reuse, request retry and restart have public-API
-tests proving the original binding cannot silently follow another object.
+**What remains:** A native named-endpoint declaration, managed by the
+configuration owner, that waits for a later declaration with that name and binds
+exactly once to its assigned UUID. The unresolved intent and the eventual
+binding survive acceptance, request retry and restart. Renaming the producer or
+reusing its old name never retargets a resolved edge. Role, port and schema are
+validated before the connection is published. Do not derive UUIDs from names,
+create placeholder components, use external IDs as a workaround, or add a second
+mutable graph registry. Until then, native helpers that need named producers
+must require the producer first or offer explicit two-step wiring.
+
+**Evidence:** `drasi-core/lib/src/computation/v1/graph/topology.rs:90-118`
+(`DesiredRelationship` keyed by `EdgeDefinition`; `boundary_relationships`),
+[configuration guide](computation-graph-configuration.md#configuration-ownership-and-definition-batches).
+
+**Done when:** Public-API tests cover consumer-before-producer in separate
+requests, missing and wrong ports, duplicate names, rename and name reuse,
+request retry and restart, and prove that a resolved binding never follows a
+different component.
 
 <a id="cw-94"></a>
 
@@ -204,337 +175,139 @@ tests proving the original binding cannot silently follow another object.
 
 **Kind:** Design review / disabled functional coverage.
 **Area:** Core, native SDK/Host, SSE sink.
-**Status:** USER-DEFERRED until the other build and test failures are resolved;
-not a fixed defect or an adopted implementation plan.
+**Status:** USER-DEFERRED until the other build and test failures are resolved.
+No implementation plan is adopted.
 
-**Current boundary:** DrasiLib owns managed configuration changes; public raw
-graph reconciliation cannot bypass that owner. The specification-only managed
-update planner cannot assess changed live input or resource bindings and rejects
-them before acceptance. Native update descriptions can carry actual input
-bindings, but the current graph-factory assessment path does not supply them,
-and the SSE factory does not advertise or implement managed update planning.
-Construction-time input binding and a preview's replacement decision do not
-constitute author-assessed permission to update a managed component.
+A managed update cannot change which upstream components feed a running
+component that binds its own inputs. Re-pointing a live SSE sink to a different
+query requires removing and re-adding it, and the tests that would cover live
+rebinding are disabled.
 
-**Disabled tests:** Only these two wrappers in
-`components/host-sdk/tests/native_network/sse.rs`, executed by the
-`native_network_loopback` target, have the explicit ignore reason
-`CW-94: deferred pending graph-change design review`:
+**Example:** SSE sink `alerts-sse` reads from `orders-query`. A managed update
+that changes its input to `orders-query-v2` is rejected at acceptance with
+"live input-binding changes require current/proposed graph bindings; the
+specification-only update planner cannot establish them", even though the SSE
+factory itself would assess the change as `Replace` + `Preserve`.
 
-- `sse_tests::native_sse_declared_inputs_follow_a_live_rebind_on_current_thread`
-- `sse_tests::native_sse_declared_inputs_follow_a_live_rebind_on_multi_thread`
+**Current state:** DrasiLib's configuration owner handles all managed changes;
+raw graph reconciliation cannot bypass it. The planner rejects any input change
+for a created component whose factory binds inputs. The SSE factory supports
+update planning and assesses an input change as `Replace` + `Preserve`, but that
+assessment is never reached through a managed update. Construction-time input
+binding and a preview's replacement decision do not count as permission to
+update a managed component.
 
-Their bodies, correctly typed owner-scoped fixtures, expectations and
-linked/loaded plugin loops remain intact. These are deferred functional failures,
-not intentional crash-child workers, and their ignored executions provide no
-passing coverage of live rebinding.
+**Disabled tests:** In `drasi-core/components/host-sdk/tests/native_network/sse.rs:915-931`
+(test target `native_network_loopback`), both tests carry
+`#[ignore = "CW-94: deferred pending graph-change design review"]`:
 
-**Work:** After the remaining build/test failures are resolved, revisit the
-user's desired ComputationGraph change design before selecting an implementation.
-Review managed acceptance, actual binding/factory assessment, affected
-generations, recovery and cleanup together. Do not adopt a temporary graph,
-owner bypass, forced replacement strategy or unsupported-error oracle to turn
-these tests green.
+- `native_sse_declared_inputs_follow_a_live_rebind_on_current_thread`
+- `native_sse_declared_inputs_follow_a_live_rebind_on_multi_thread`
 
-**Future coverage intent:** Preserve the current test bodies and assertions now
-as reference, not a committed replacement or generation strategy. After agreeing
-the user's desired managed graph-change design, revisit and re-enable coverage
-for affected and unaffected components and actual live streams, retaining both
-Tokio flavors and linked/loaded plugin paths. Until then, report this coverage as
-deferred rather than claiming complete functional qualification.
+Their bodies and assertions are kept intact as a reference, covering both
+statically linked and dynamically loaded plugins. They provide no passing
+coverage of live rebinding.
+
+**What remains:** Once the other build and test failures are resolved, agree the
+desired managed graph-change design with the user, covering managed acceptance,
+actual binding and factory assessment, affected generations, recovery and
+cleanup together. Do not make the tests pass with a temporary graph, an owner
+bypass, a forced replacement or an "unsupported" error oracle.
+
+**Evidence:** `drasi-core/lib/src/management/update_planning.rs:551-565`
+(rejection), `drasi-core/components/computation-plugins/sinks/sse/src/config.rs:428-444`
+(SSE assessment), `drasi-core/components/computation-plugin-sdk/src/update_planning.rs:61-66`
+(`inputs_changed`).
+
+**Done when:** The design is agreed, and re-enabled tests cover affected and
+unaffected components and live streams, on both Tokio flavors and both plugin
+loading paths. Until then, report this coverage as deferred.
 
 <a id="cw-95"></a>
 
 ### Upgrade native plugins in place and migrate their configuration (CW-95)
 
 **Kind:** Unsupported capability / design decision.
-**Area:** Core, native SDK/Host, Server.
-**Priority:** Medium; needed before routine plugin releases can keep component
-state. **Effort:** Large.
-**Status:** USER-DEFERRED. Exact version matching is kept until this item is
-picked up; nothing below is an adopted implementation.
+**Area:** Core, native SDK/Host, Server. **Priority:** Medium. **Effort:** Large.
+**Status:** USER-DEFERRED. Exact version matching stays until this is picked up.
 
-**Current boundary:** A component is bound to the exact plugin build that
-created it. `ImplementationIdentity` contains the implementation name and
-version plus the plugin package ID and version
-(`components/computation-contracts/src/identity.rs:7-18`), and the SDK exporter
-stamps the package identity onto every factory. All of these fields are matched
-exactly:
+A component is bound to the exact plugin build that created it, so a new plugin
+release cannot take over existing components. Moving to the new build means
+removing and re-adding each component, which discards its state and disrupts
+downstream components.
 
-- Native libraries are never unloaded
-  (`components/host-sdk/src/computation/loader.rs:746-748`), and plugins can be
-  loaded while the host runs. The plugin registry keys each native plugin by
-  `id@version` (`components/host-sdk/src/plugin_registry.rs:144-147, 698-703`),
-  and `FactoryRegistry` keys factories by the full identity
-  (`lib/src/computation/v1/graph/topology.rs:135-138, 242-249`). Two builds of
-  one plugin can therefore be loaded side by side.
-- A factory declares a single `configuration_version`
-  (`components/computation-plugin-sdk/src/metadata.rs:284-292`). Stored
-  recipes must match it exactly, and Server applies the same exact check when
-  it builds components from its configuration files
-  (`drasi-server/src/computation.rs:688-705`).
-- Managed updates require an unchanged implementation identity and do not
-  migrate configuration.
+**Example:** A graph contains an SSE sink created by plugin
+`drasi-computation-sink-sse@0.4.0`. After installing `@0.4.1`, the stored
+component still names `0.4.0`; restoring it fails unless `0.4.0` is also loaded.
+If `0.4.1` also raises the configuration version from 1 to 2, stored v1
+configuration is rejected because there is no migration.
 
-As a result, every plugin package release counts as a different component.
-Moving a component to a new build requires removal and addition, which
-discards its state and disrupts downstream components. A stored configuration
-written at an older schema version cannot be restored by a newer factory. ABI
-safety does not depend on the package version: `abi_version` and
-`wire_version` are checked separately.
+**Current state:** `ImplementationIdentity` (name, version, plugin ID and package
+version) is matched exactly everywhere: factory lookup, plugin registration
+(`id@version`), provenance checks and managed updates. A factory declares one
+`configuration_version`, and stored recipes and Server configuration files must
+match it exactly. Native libraries are never unloaded, so two builds of one
+plugin can be loaded side by side. ABI safety does not depend on the package
+version; `abi_version` and `wire_version` are checked separately.
 
-**Decision required first: package-version matching.**
+**Decision required first:**
 
-| Option | Behavior on a new package release | Gains | Losses |
-|---|---|---|---|
-| A: exact matching (current) | Old and new builds can be loaded together. Components move by removal and addition. | Side-by-side builds; gradual or canary moves. | Every release forces recreation and state loss. |
-| B: ignore the package version in matching | One build per plugin ID. Replace the library and restart; components upgrade in place. | Routine upgrades that keep state. | No side-by-side builds or canary moves. |
-| C: A plus an explicit "rebind to package version" upgrade | Both builds loaded; each component is upgraded in place on request. | Both. | Most complexity; needs a rule for retiring the old build. |
+| Option | On a new package release | Trade-off |
+|---|---|---|
+| A: exact matching (current) | Both builds can be loaded; components move by removal and addition. | Side-by-side and canary moves, but every release loses state. |
+| B: ignore package version in matching | One build per plugin ID; replace and restart, components upgrade in place. | Keeps state; no side-by-side builds. |
+| C: A plus explicit per-component "rebind to version" | Both builds loaded; upgrade on request. | Both benefits; most complex; needs a rule to retire old builds. |
 
-Under Option B, the version fields would play these roles:
+**What remains once B or C is chosen:**
 
-- **Plugin package version** (`PluginIdentity.version`): the release artifact.
-  It is recorded for diagnostics and supplied to the component, but it is not
-  part of lookup keys. A new package version of the same plugin ID is an
-  upgrade.
-- **Implementation identity** (name, version, plugin ID): what the component
-  is. Matched exactly; a change is a different component.
-- **Configuration version**: the settings-format revision. It must fall within
-  the factory's supported range.
+1. Allow one package version per plugin ID (Option B), and make provenance and
+   accepted-update identity checks ignore the package version on the upgrade
+   path only. Resource recipes (native bootstrap, bootstrap coordination,
+   time merge) and the transactional-transformer registry also key on the full
+   identity and must be upgraded too.
+2. Replace `configuration_version` with a supported range
+   (`minimum..=current`) and add a pure `migrate_configuration(from, config)`
+   to the factory planner: no I/O, clock, randomness or secret resolution; it
+   never changes descriptor, ports, role or bindings. Out-of-range or newer
+   versions fail without touching stored state.
+3. Provide an SDK migration-chain helper (one step per version, contiguity
+   checked at registration) with golden-fixture and idempotence test support.
+4. On load, migrate a stored component's configuration, have the plugin assess
+   the change and choose `Preserve`, `Rebootstrap` or `Reset`, check feasibility
+   with existing update planning (see [CW-92](#cw-92)), and run it as an ordinary
+   accepted update with a deterministic operation ID. Initialization receives
+   the previous package and configuration versions so the plugin can migrate its
+   own persisted state. Failure leaves a visible error state; there is no
+   automatic fallback.
+5. Make Server's file-based configuration use the same migration.
 
-Option B (and, in part, Option C) also requires the following:
+Open questions: a `Reset`/`Rebootstrap` upgrade causes a processing gap and may
+start an expensive rebuild on restart without confirmation; migration is
+forward-only, so rollback needs the old binary plus a pre-upgrade configuration
+snapshot; unverified whether the previous versions are enough for plugins to
+judge state compatibility or whether some need their own state version.
 
-- **One package version per plugin ID.** Registration rejects a second package
-  version of a loaded plugin ID with a clear error. Otherwise the two builds'
-  factories collide in every identity-keyed map.
-- **Provenance checks compare the plugin ID only**, or run after the upgrade has
-  rewritten the stored package version. Affected checks:
-  `lib/src/computation/v1/graph/resources.rs:463-487`,
-  `lib/src/computation/runtime/component.rs:364-372`,
-  `components/computation-plugin-sdk/src/metadata.rs:540-547` and
-  `computation-plugins/transformers/query/src/update.rs:47-55`.
-- **Resource recipes are upgraded as well as components.** Native bootstrap,
-  bootstrap-coordination and time-merge recipes store a full
-  `ImplementationIdentity` (`components/host-sdk/src/management/native.rs:329`
-  and the bootstrap-coordination and time-merge recipe modules). Their factory
-  maps key on it (`components/host-sdk/src/computation/bootstrap.rs:40-43`), as
-  does the transactional transformer registry
-  (`lib/src/computation/v1/transaction_transformer.rs:98-118`).
+**Evidence:** `drasi-core/components/computation-contracts/src/identity.rs:7-18`,
+`drasi-core/components/host-sdk/src/computation/loader.rs:758,1220`
+(`mem::forget`), `drasi-core/components/host-sdk/src/plugin_registry.rs:144-147,696-703`,
+`drasi-core/lib/src/computation/v1/graph/topology.rs:135-138,242-249`,
+`drasi-core/components/computation-plugin-sdk/src/metadata.rs:289-292,556-560`,
+`drasi-core/lib/src/computation/v1/graph/resources.rs:463-487`,
+`drasi-core/lib/src/computation/runtime/component.rs:401-415`,
+`drasi-core/components/computation-plugins/transformers/query/src/update.rs:44-58`,
+`drasi-core/components/host-sdk/src/management/{native,bootstrap_coordination,time_merge}.rs`,
+`drasi-core/components/host-sdk/src/computation/bootstrap.rs:40-43`,
+`drasi-core/lib/src/computation/v1/transaction_transformer.rs:82`,
+`drasi-server/src/computation.rs:688-705`.
 
-**Work, once an option allowing in-place upgrade is chosen:**
-
-1. **Configuration version ranges.** Replace `configuration_version` with
-   `configuration_versions { minimum, current }`, starting at 1 with
-   `minimum ≤ current`. New and updated recipes are always written at
-   `current`. A factory with `minimum < current` must export a migration.
-2. **Pure configuration migration.** Add
-   `migrate_configuration(from_version, configuration)` to the factory planner.
-   It returns the configuration at `current`, or `Unsupported`/`Invalid` with a
-   non-secret reason. It performs no I/O, reads no clock, uses no randomness
-   and resolves no resources or secrets: secret references may be moved or
-   dropped, but never dereferenced or turned into literals. It never changes
-   the descriptor, ports, role, completion or dependency bindings; a change
-   that needs those is a removal and addition. For native plugins it is a
-   synchronous management-table call, like factory assessment.
-   - A stored version below `minimum` fails with an error naming both
-     versions. A version newer than `current` fails as a downgrade. In both
-     cases stored state is left untouched.
-3. **SDK `MigrationChain` helper.**
-   - One step per version (`.step(1, |config| ...)` turns v1 into v2). The
-     chain must be contiguous from `minimum` to `current`, which is checked at
-     registration, and the factory's version range is derived from it.
-   - Small helpers rename a field, set a default, remove a field, and move a
-     value or reference.
-   - The exporter validates the result against the `current` schema.
-   - Test support: golden fixtures from each stored version to `current`, and
-     generated checks that migrating a `current` configuration changes nothing,
-     every supported version reaches `current`, and repeating a migration gives
-     identical output.
-   - Documented authoring rules: increase the version for every schema change,
-     never edit a published step, and treat raising `minimum` as dropping
-     support for older stored configurations.
-4. **Upgrade when a stored component is loaded.** This runs when a stored
-   component's plugin ID and implementation match a loaded factory, but its
-   package version or configuration version differs.
-   1. Migrate the configuration and validate the result with the existing
-      value validation.
-   2. Have the factory assess the change as an unconstructed component. The
-      current recipe is the migrated configuration; the previous package and
-      configuration versions are supplied as facts.
-   3. The plugin, not DrasiLib, chooses the data treatment, because only the
-      plugin knows whether its persisted state still works:
-      - `Preserve` if the state is compatible, or if the plugin migrates the
-        state itself during initialization;
-      - `Rebootstrap` if the state must be rebuilt from an authoritative
-        snapshot;
-      - `Reset` if the state must be discarded and restarted from streaming or
-        replay.
-
-      `Rebootstrap` and `Reset` require `Recreate`
-      (`lib/src/management/update_planning.rs:9-15`).
-   4. DrasiLib only checks that the choice can be carried out safely, using the
-      existing update-planning feasibility checks (see [CW-92](#cw-92) for the
-      rebootstrap limits), then provides what it needs.
-   5. Accept the upgrade as an ordinary accepted update with a deterministic
-      operation ID, so that a retry after interruption reuses the same
-      operation. The original recipe is recorded as current and the migrated
-      recipe as proposed; no new record type is introduced.
-   6. Construct the component with the accepted plan. Initialization receives
-      the previous package and configuration versions so that the component can
-      migrate its own persisted state.
-5. **No separate approval.** Loading the new plugin is the instance owner's
-   authorization. A supported assessment is executed automatically, whatever
-   its data choice. The component ends either running under the new version, or
-   in a visible error state with a non-secret reason. The error state covers an
-   unsupported assessment, a failed migration, a data choice the graph cannot
-   carry out safely, and a failed construction or initialization. Nothing falls
-   back automatically to the old plugin or the old configuration.
-6. **Rules that change.**
-   - The retained-interface and accepted-update identity checks
-     (`lib/src/management/update_planning.rs`,
-     `lib/src/management/updates.rs`, and
-     `components/computation-plugin-sdk/src/export/update.rs`) ignore the
-     package version on the upgrade path only.
-   - They allow a newer configuration version only when it came from
-     migration.
-   - Ordinary operator-submitted updates must still be at `current`.
-   - Server's file-based authoring must call the same migration, or files
-     written at an older version will be rejected.
-
-**Tradeoffs and uncertainties:**
-
-- Under Option B, upgrades happen only at load, and a `Reset` or `Rebootstrap`
-  upgrade causes a processing gap.
-- Because there is no approval step, a restart with a new plugin may start an
-  expensive rebootstrap without further confirmation.
-- Migration is forward-only. Rolling a plugin back requires restoring the
-  previous binary together with a configuration snapshot taken before the
-  upgrade.
-- Plugin authors maintain a step for every supported old version.
-  Configuration migration does not cover persisted processing state; each
-  plugin migrates its own.
-- It has not been tested against real plugins whether the previous package and
-  configuration versions are enough for a plugin to judge state compatibility.
-  Some plugins may need their own stored state version.
-
-**Finish when:**
-
-- A reference factory at configuration v3 with a v1→v3 chain restores stored
-  v1 and v2 components with the expected migrated recipes, through both static
-  and dynamically loaded paths.
-- `Preserve`, `Rebootstrap` and `Reset` upgrades each run automatically, with
-  the plugin choosing the data treatment.
-- An unsafe data choice, an unsupported assessment or a failed migration
-  leaves the component in a visible error state.
-- Out-of-range versions fail without changing stored state.
-- Secret references survive migration unresolved.
-- Retrying an interrupted upgrade reuses the same operation ID.
-- A plugin with a broken migration chain fails registration.
-- Under the chosen option, the loading rules are enforced with clear errors:
-  one package version per plugin ID (Option B), or retiring the old build
-  (Option C).
-
-<a id="cw-96"></a>
-
-### Gate independently running workers on Pause (CW-96)
-
-**Kind:** Issue. **Area:** Native plugins, in-process sources/reactions.
-**Priority:** Medium. **Effort:** Medium.
-
-**Current boundary:** Components whose output the host drives implement Pause
-and Resume as no-ops. Graph output stops while paused, but the following
-workers keep running:
-
-- the Bridge source keeps accepting input into its admission queue;
-- the MySQL, SQL Server and SQLite sources keep their replication or polling
-  workers (and SQLite its REST listener) running. These were found by the
-  [native source review](native-source-production-readiness-plan.md);
-- the profiler keeps logging its periodic reports.
-
-**Implemented for the PostgreSQL source (2026-11-15):** Pause stops reading
-and emitting at the next transaction boundary while standby feedback keeps
-the replication session alive; a live test pauses longer than
-`wal_sender_timeout`. The legacy in-process wrapper now forwards pause and
-resume instead of treating them as no-ops.
-
-**Implemented for HTTP and gRPC:** Pause now closes admission in the shared
-network runtime:
-
-- HTTP returns 503 with `Retry-After`;
-- gRPC returns `UNAVAILABLE`, and open streams end;
-- durable admission returns `Busy`.
-
-Pause waits for in-flight admissions and honours cancellation and the deadline.
-A cancelled Pause reopens admission, and Resume reopens it. Plugin and
-conformance-kit tests cover this.
-
-**Implemented for the SSE sink (2026-11-15):** Pause closes a gate: new
-subscribers and snapshot reads get 503 with `Retry-After`, and connected
-clients receive only keep-alive comments until Resume. The HTTP, gRPC and log
-sinks have no workers and rely on host-driven pause; their retry waits are
-drop-safe. See the
-[native reaction plan](native-reaction-production-readiness-plan.md#6-sse-sink-drasi-computation-sink-sse).
-
-**Work:** For each listed component, either gate its worker inside a completed
-Pause and reopen it on Resume, or return `unsupported` so that updates at the
-Pause boundary are refused instead of silently relying on host-side gating.
-Define how much input may be admitted while paused, and keep admission bounded.
-
-<a id="cw-97"></a>
-
-### Port drasi-server to the ABI 4 lifecycle (CW-97)
-
-**Kind:** Issue. **Area:** Server.
-**Priority:** High for the Server release. **Effort:** Medium.
-
-**Current boundary:** drasi-core implements the six required lifecycle hooks,
-`Dispose` with a reason and state intent, and optional separate management
-(`assess` then `apply`). drasi-server, including its examples, has not been
-ported, because its existing uncommitted work is untouched.
-
-**Work:** Port Server components, examples and tests to the required hooks and
-contexts. Replace `delete_owned_resources` with `dispose` under
-`StateIntent::Erase`, and replace `apply_update` with `ComponentManagement`.
-Rebuild every native plugin that Server loads at ABI 4.0.
-
-<a id="cw-98"></a>
-
-### Qualify erasing disposal (CW-98)
-
-**Kind:** Qualification. **Area:** Core, native SDK/Host, native plugins.
-**Priority:** Medium. **Effort:** Small.
-
-**Current boundary:**
-
-- A failed `Dispose` is retried with the same reason and intent. Under
-  `StateIntent::Erase`, each retry runs erasure again, so erasure must be
-  idempotent.
-- ABI 4 has no per-instance capability. An `Erase` dispose of a native
-  component that did not declare `erases_owned_state` fails before the plugin
-  runs, rather than being rejected at construction.
-
-**Work:**
-
-- Add retry tests that run erasure twice for every component that erases owned
-  state (view, indexed query, WAL-backed sources).
-- Decide whether removal with erasure should be refused at management
-  acceptance when the factory does not declare erasure.
-
-**Progress:** the HTTP and gRPC sources declare `erases_owned_state` with an
-idempotent no-op erase, because they own no external state. The SDK
-conformance kit runs erasure twice for both. Still open: whether the host
-erases their durable admission state (QoS producer registry and journal) on
-removal; see [CW-100](#cw-100). The HTTP, gRPC, SSE and log sinks (and the
-`drasi.network/http-delivery` consumer) also declare a no-op erase, and the
-sink conformance kit runs it twice. Whether removing the HTTP delivery consumer
-erases its DeliveryRunner progress is not yet tested.
-
-The PostgreSQL source (2026-11-15) declares `erases_owned_state` with a real
-erase: managed slot names derive from the graph and component identifiers, so
-Erase drops exactly this source's live and coordinated-snapshot slots, refuses
-while one is active, and treats an already-dropped slot as success. External
-slots are never dropped. A live test runs erasure twice and checks the
-active-slot refusal and external-slot preservation.
+**Done when:** A reference factory at configuration v3 with a v1→v3 chain
+restores stored v1 and v2 components through static and dynamic loading;
+`Preserve`, `Rebootstrap` and `Reset` upgrades each run with the plugin choosing;
+unsafe choices, unsupported assessments and failed migrations leave a visible
+error; out-of-range versions leave stored state unchanged; secret references stay
+unresolved; an interrupted upgrade retries with the same operation ID; a broken
+chain fails registration; and the chosen option's loading rule is enforced with
+a clear error.
 
 <a id="cw-44"></a>
 <a id="hosting-connectors-server-and-examples"></a>
@@ -542,340 +315,121 @@ active-slot refusal and external-slot preservation.
 
 ### Finish the remaining data connections (CW-44)
 
-**Kind:** Issue/integration and optional stronger profiles. **Area:** Core, Server.
+**Kind:** Issue/integration. **Area:** Core, Server.
 **Priority:** High for required families. **Effort:** Very large.
-**Origins:** CG-02/03/07/11/12/24; cleanup stage 6.
 
-**Work:** Complete the selected connectors using their existing connection,
-conversion and protocol logic:
+Some connectors still exist only as old-interface (ordinary) plugins, and some
+native connectors cannot yet handle realistic workloads. Until each required
+family has a working native source, initial-data provider and sink, users must
+keep the old stack for them.
+
+**What remains:**
 
 | Area | Remaining work |
 |---|---|
-| Kafka and Kubernetes | Native sources and initial-data providers, independently packaged. |
-| SQL Server | Close capture-table permission, large sink-batch and orphan-marker gaps. |
-| Database discovery | Populate the remaining family catalogs through the existing native schema reader and Server APIs; factory configuration schemas are not source data schemas. The native PostgreSQL source now implements `source_schema_reader` (selected publication tables, emitted labels and types). |
-| Network profiles | Implement stronger snapshot/progress replacement or destination-backed completion only for profiles that require them. Native gRPC TLS and mutual TLS are now implemented for the source and the sink (tonic `tls-ring`); their qualification through the loaded library is owned by [CW-41](#cw-41). The HTTP sink no longer treats a queued `202` as completion (`successStatusCodes`), offers destination-backed completion through the `drasi.network/http-delivery` consumer, and the HTTP and gRPC sinks send an `x-drasi-delivery-id` idempotency key. gRPC sink consumer completion remains in [CW-101](#cw-101). |
-| HTTP ingress authentication | **Implemented.** Bearer tokens protect the standard single-event, batch and producer-session routes on HTTP, and every gRPC RPC; two tokens are supported for rotation. Per-client rate limits and connection limits apply, and TLS/mTLS is optional. Listeners default to `127.0.0.1`; a non-loopback listener needs a token or an explicit `allowUnauthenticated: true`. Remaining follow-ups are in [CW-100](#cw-100). |
-| Application components | Move remaining old-interface application/example consumers to the native components. Test-consumer migration is owned by [CW-41](#cw-41) and [CW-77](#cw-77). |
+| Kafka and Kubernetes | Write native sources and initial-data providers, packaged independently. Only ordinary versions exist (`drasi-core/components/sources/{kafka,kubernetes}`, `drasi-core/components/bootstrappers/{kafka,kubernetes}`); there is nothing under `drasi-core/components/computation-plugins/sources/`. |
+| Schema discovery | The native PostgreSQL, MySQL, SQL Server, SQLite and HTTP sources implement `source_schema_reader`. Kafka and Kubernetes need one when they are ported. Factory configuration schemas are not source data schemas. |
 
-HTTP bootstrap, adaptive batching, multi-item gRPC delivery, output templates,
-native SSE snapshot readers and the qualified PostgreSQL/MySQL/SQLite slices
-already exist. Preserve those capabilities rather than reopening the old
-network/database implementation lists. HTTP REST bootstrap does not establish
-an atomic snapshot/live cut, and event-only sinks must not advertise replacement
-or completion guarantees they do not implement.
+**Constraints:** keep what already works natively: HTTP bootstrap, adaptive
+batching, multi-item gRPC delivery, output templates, SSE snapshot readers,
+gRPC TLS/mTLS, HTTP/gRPC ingress authentication and durable admission, and the
+PostgreSQL/MySQL/SQLite slices. HTTP REST bootstrap does not establish an
+atomic snapshot/live cut, and event-only sinks must not advertise replacement
+or completion guarantees they do not implement. Port each family as a separate,
+reviewable change. This work adds no public DrasiLib SQL API.
 
-The HTTP access-control work deferred from
-[PR #988's ingress review](https://github.com/drasi-project/drasi-core/pull/988#discussion_r4330093015)
-is implemented in the native HTTP and gRPC sources. Native durable HTTP and gRPC
-sources also restore transparent durability for unchanged clients: standard
-routes, webhooks and the legacy RPCs commit through a server-sequenced producer
-before acknowledging, with at-least-once delivery. The rejection-without-changes
-qualification remains in [CW-41](#cw-41).
-Future family conversions should be separate, reviewable changes; retaining
-required ordinary plugins through graph-owned adapters does not block runtime
-qualification or require immediate old-stack deletion.
+Per-plugin native work is listed under [Native sources](#native-sources) and
+[Native sinks](#native-sinks); which legacy reactions need a native sink is
+[Sink D-7](#sink-d-7), and moving application consumers off the ordinary
+`ApplicationReaction` is [LR-01](#lr-01).
 
-Real-service, discovery, security-boundary and static/loaded conformance work
-is consolidated in [CW-41](#cw-41), with restart coverage in [CW-14](#cw-14).
-SQL Server's user-deferred environment gate remains explicit in [CW-78](#cw-78).
+Real-service, discovery, security-boundary and static/loaded conformance tests
+are in [CW-41](#cw-41), restart coverage in [CW-14](#cw-14), and the SQL Server
+environment gate in [CW-78](#cw-78).
 
-**Finish when:** Every required source, bootstrapper and reaction/sink exists,
-and a capability-by-capability comparison finds no omitted working legacy
-functionality. Its applicable [component qualification](#cw-41) and
-[Server acceptance](#cw-46) must pass; skipped cases and matching counts are not proof.
-SQLite has no legacy reaction to port; this work adds no public DrasiLib SQL API.
+**Example:** a Server configuration with a `kafka` source can only be loaded
+through the ordinary plugin interface; there is no native factory to select.
 
-<a id="cw-100"></a>
-
-### Finish the native HTTP and gRPC source follow-ups (CW-100)
-
-**Kind:** Issue/hardening. **Area:** Native network sources (`common/network`,
-HTTP and gRPC sources), Host. **Priority:** Medium. **Effort:** Medium.
-
-**Current boundary:** the native HTTP and gRPC sources implement all six
-lifecycle hooks, managed updates at every boundary, authentication, TLS, rate
-limits and transparent durability. Their production-readiness review is
-[the native source plan, §7–§9](native-source-production-readiness-plan.md#7-shared-network-runtime-commonnetwork).
-These items remain:
-
-- **Durable state erasure:** confirm and test whether removing a durable
-  source erases its host-owned QoS producer registry and journal (plan D-12,
-  NET-08).
-- **Webhook secrets:** HTTP webhook HMAC/bearer secrets still name environment
-  variables. The host resolves secret references only on top-level fields, so
-  nested `webhooks.routes[].auth` cannot use them. Either support nested
-  references or add a flattened secret map. Replay protection (timestamp
-  tolerance) and an option to disallow HMAC-SHA1 are also missing.
-- **Input depth:** JSON, XML, YAML and protobuf `Struct` nesting depth is not
-  bounded ([CW-19](#cw-19)). There is also no total in-flight byte budget
-  beyond `ingressCapacity × maxMessageBytes` ([CW-29](#cw-29)).
-- **Throughput:** volatile admission holds the sequence lock across queue
-  reservation for a whole batch. Implicit durable admission commits one request
-  at a time per source. Measure both before changing them.
-- **Health and discovery:** there is no standard `grpc.health.v1` service; it
-  needs the `tonic-health` dependency. The gRPC `HealthCheck` RPC requires the
-  bearer token when one is configured, unlike HTTP `/health`. A listener on
-  port `0` reports its bound address only in the log. The HTTP `webhooks`
-  configuration is not published as a nested schema.
-- **Observability:** no metrics ([CW-26](#cw-26)); no readiness reported
-  through the control sender; logs depend on the plugin logging bridge in
-  [CW-24](#cw-24).
-- **Tests:** port the legacy webhook end-to-end and integration suites to
-  native construction. (The Host SDK PostgreSQL + HTTP bootstrap container
-  test now runs and passes against rebuilt libraries; its stale component IDs,
-  HTTP route and topology names were fixed on 2026-11-15.)
-
-**Finish when:** removal-with-erase of a durable network source leaves no
-host-owned admission state, webhook secrets can be secret references, the
-listed input limits hold, and the remaining tests run in CI.
-
-<a id="cw-101"></a>
-
-### Finish the native network and log sink follow-ups (CW-101)
-
-**Kind:** Issue/hardening. **Area:** Native sinks (`common/network`, HTTP,
-gRPC, SSE and log sinks), Host, `grpc-common`, `reaction-common`.
-**Priority:** Medium. **Effort:** Medium.
-
-**Current boundary:** the native HTTP, gRPC, SSE and log sinks implement all
-six lifecycle hooks, managed updates at every boundary, the shared jittered and
-budgeted retry policy, idempotency keys (HTTP and gRPC), secret credential
-fields, client TLS, and SSE exposure controls and a real pause. Their review
-is [the native reaction plan, §3–§6 and §13](native-reaction-production-readiness-plan.md#implementation-status-2026-11-15).
-These items remain:
-
-- **Object secrets:** `secretHeaders` (HTTP) and `secretMetadata` (gRPC)
-  assume the host resolves a secret reference to a whole JSON object. Confirm
-  and test it, or replace the maps with one secret field per header.
-- **gRPC consumer completion:** add a `DeliveryBatchIdentity` field to the
-  `grpc-common` acknowledgement so the gRPC sink can offer a consumer mode
-  like `drasi.network/http-delivery`.
-- **Shared helpers:** SSE and log carry local copies of the pause gate, the
-  exposure check and template-helper registration. Move them into
-  `common/network` and `reaction-common`; gRPC keeps a strict renderer of its
-  own.
-- **Observability:** no sink metrics; `failurePolicy: skip` logs skips but does
-  not count them ([CW-26](#cw-26)).
-- **Tests:** the log sink has no Host SDK real-library tests and is not in the
-  `plugin_package` mapping. The sink conformance kit runs only through the
-  linked definition; add dynamic-library and dual-flavour drivers
-  ([CW-41](#cw-41)). Two SSE live-rebind tests stay ignored under
-  [CW-94](#cw-94).
-
-**Finish when:** object-secret resolution is proven or replaced, the gRPC sink
-has a consumer mode, every sink's conformance kit runs through the loaded
-library in CI, and sink metrics are reported.
-
-<a id="cw-102"></a>
-
-### Finish the native PostgreSQL source follow-ups (CW-102)
-
-**Kind:** Issue/hardening. **Area:** Native PostgreSQL source and bootstrap
-providers (`postgres-common`). **Priority:** Medium. **Effort:** Medium.
-
-**Current boundary:** the native PostgreSQL source implements all six
-lifecycle hooks (real pause, Drain/Abort stop, deadline- and
-cancellation-aware start, real erase of managed slots), managed updates,
-reconnection in every mode, typed failures, a flat configuration with one
-secret field and activation credentials, schema discovery, and decisions
-D-7 to D-10. Its review is
-[the native source plan, §3](native-source-production-readiness-plan.md#3-postgresql-drasi-computation-source-postgres).
-The configuration change is breaking: existing cursors no longer match the
-narrowed binding, so existing sources must be removed and re-added. These
-items remain:
-
-- **Bootstrap coordination (PG-13):** the source and providers share one
-  configuration and derived slot identity but are still configured
-  separately; adopt `supports_bootstrap_coordination` /
-  `create_bootstrap_coordinator` as SQLite does.
-- **TRUNCATE (D-9 follow-up):** a typed reset that forces a rebuild, instead
-  of refusing truncate-publishing publications.
-- **Keyless tables (D-10 follow-up):** optional `REPLICA IDENTITY FULL`
-  whole-row identity.
-- **Tests:** run the SDK conformance kit for this source; add live tests for
-  activation credentials through the built library and for the PostgreSQL 12
-  refusal; add the rows and shared modes to the CW-14 crash matrix.
-- **Observability:** no metrics ([CW-26](#cw-26)).
-- **Consumers:** the Server examples listed in the source's `DESIGN.md` still
-  use the ordinary PostgreSQL source.
-
-**Finish when:** source and provider are paired through the coordinator, the
-conformance kit and the remaining live tests run in CI, and the Server
-consumers use a native factory.
-
-<a id="cw-45"></a>
-
-### Finish native Server and client workflows (CW-45)
-
-**Kind:** Integration/improvement. **Area:** Server, UI and clients.
-**Priority:** High for required workflows. **Effort:** Very large.
-**Origins:** CG-04/09/10/14/16; cleanup stages 5-6.
-
-**Work:** Complete creation, editing, discovery, lifecycle and result viewing for
-the remaining native components in Server, UI and clients. Make waiting,
-accepted, running and failed states clear. Resolve the recorded full VS Code
-type-check failures in the component and YAML tooling. The concrete gaps are:
-
-- Route first-store Server seeds through Core's common creation preparation and
-  acceptance path. `managed_configuration::configure` still assigns omitted
-  UUIDs in the Host before storing the initial `DesiredInstance`. It enforces
-  external-ID opt-in and preserves stored UUIDs, but duplicates allocation/policy
-  instead of using the normal Core creation receipt and validation path. Keep
-  the persistent-builder guard and genuine stored-record restoration; do not
-  introduce pre-acceptance component construction or a temporary runtime.
-- Expose the existing Rust named-configuration-snapshot operations through HTTP,
-  including revision-aware create/list/delete/restore and clear receipt semantics.
-- Expose supported replacement, in-place settings changes, input/resource
-  reconnection and safe quiescing with preview/revision checks. Keep persisted
-  desired-state acceptance distinct from realized readiness and rollback.
-- Add native-component UI lifecycle/editing controls; its inspector currently
-  exposes inspection only, despite existing REST start/stop/removal operations.
-- Provide first-class persisted wiring from an ordinary Server-configured query
-  into an arbitrary native input. Core execution/data contracts already permit
-  this composition, but Server validates native definitions separately and
-  rejects external component/pipe/boundary bindings. Preserve snapshot/live
-  handover and replacement ownership rather than introduce another graph owner.
-- Extend solution templates to native topology and resource recipes, with
-  owner-assigned UUIDs, bind-once references and no accidental cross-deployment
-  sharing.
-
-Existing API/UI operations do not depend on every connector conversion. Only
-workflows requiring a missing family depend on [CW-44](#cw-44); broader
-reconstructible recipes belong to [CW-70](#cw-70).
-
-**Finish when:** Required workflows run entirely through supported native
-components and current instance-scoped APIs, without old factory registrations
-or misleading success states. The stale-preview, acceptance, realization,
-receipt and instance-isolation cases are owned by [CW-46](#cw-46).
-
-<a id="cw-43"></a>
-<a id="cw-43-optional-native-query-plugin"></a>
-
-### Loadable query support and ordinary application integration (CW-43)
-
-**Status:** Implemented; umbrella closed and retained as a completion anchor.
-**Area:** Core, native SDK/Host, Server.
-**Origin:** CG-11.
-
-**Design:** [Continuous queries as standard plugin transformers](computation-graph-query-transformer-design.md)
-describes the shared implementation and its contracts.
-The [plugin guide](../../components/computation-plugins/transformers/query/README.md)
-describes current registration and supported profiles.
-
-**Completed implementation:**
-
-| Concern | Implemented behavior |
-|---|---|
-| Execution and reuse | A normal native Transformer runs the existing Core evaluator. Shared configuration, builder setup, canonical results, publication, recovery and delivery helpers live in `drasi-query-common`; there is no Host evaluator RPC or result-row mirror. |
-| Factory and ordinary APIs | Builders, runtime additions and pipelines require explicit factory registration. Empty/source-only instances need none. Server selects the unique eligible loaded factory for configured/API queries; absence is an error, never an implicit linked fallback. |
-| Evaluation and lifetime | Cypher/GQL, relationships, joins, aggregates, archives, input-local middleware, atomic source transactions and Core future evaluation use retained evaluator/index adapters. Live input and bootstrap do not rebuild the evaluator per event. |
-| Storage and recovery | Memory, persistent atomic and explicitly non-atomic profiles work through actual resource owners. Non-atomic publication preserves its three phases and deferred input visibility. SQLite bootstrap, query chains, shared/separate journals, restart, replacement and deletion are integrated. |
-| Reset safety | Identified corrupt rows/output use shared AutoReset eligibility and ownership checks. Reset baselines retain logical and transport high-water marks separately. Foreign ownership, unknown storage failures, pending delivery and bound destinations cannot be bypassed to force reset. |
-| Results and diagnostics | Ordinary snapshots/history, subscriptions, reactions and paged native reads use canonical state. Output gauges, logical advance counters, operation timing and committed progress are wired; replay/no-op input does not invent new output. |
-| Cleanup and recovery readers | Retained recovery views require completed plugin and Host cleanup. Ordinary stopped reads remain fenced. Consumer recovery reuses existing policies and checkpointed sinks; abandoned transfers release provider work without requiring a follow lease. |
-| Callers and architecture | All 19 standalone ordinary-query examples were migrated to explicit native registration and compile-checked. Matching native libraries and Server were built; dependency isolation, scoped lint/format checks and generated architecture checks passed. |
-
-**Qualification:** Historical and current execution evidence is consolidated in
-[CW-78](#cw-78); native behavioral coverage and its limits are in
-[CW-77](#cw-77). Neither a successful build nor this implementation closure
-establishes exhaustive coverage.
-
-**Follow-up ownership:** [CW-76](#cw-76) covers oversized individual items;
-[CW-77](#cw-77) covers missing native parity cases; [CW-78](#cw-78) covers the
-complete current-code test run; [CW-79](#cw-79) covers performance comparison;
-[CW-80](#cw-80) covers remaining linked-reference entry points. These are
-bounded follow-ups, not an unfinished evaluator/factory implementation.
-Architecture regeneration is complete, not an open work item.
-
-The general non-query scheduler and former combined F0 proof are
-[CW-81](#cw-81) and [CW-82](#cw-82), not missing query timers. Server composition
-remains [CW-45](#cw-45), reconstructible recipes [CW-70](#cw-70), and release
-packaging/documentation [CW-73](#cw-73). This closure is not a claim of exhaustive
-test coverage, unlimited payloads or performance parity.
-
-<a id="cw-47"></a>
-
-### Finish required examples and normal builds (CW-47)
-
-**Kind:** Issue/integration. **Area:** Core, Server, Learning, test-infra.
-**Priority:** High for required examples. **Effort:** Large overall.
-**Origins:** CG-17/28; cleanup stages 6/9.
-
-**Work:** Implement the GPU Lab deployment using the standard Server and finish
-examples for the remaining selected connectors. The stock-Server GPU directory
-is still a reserved deployment, not the implemented embedded lab. Reuse its
-shared domain/plugin/UI code.
-
-**Implemented build repair:** The older copied Learning Trading frontend now
-passes `tsc && vite build` after removing its unused `createdReaction` flag.
-Compiler checks and cleanup behavior are unchanged. The runnable tutorial
-continues to use the sibling Server application, not that older copy.
-
-**Completed query caller migration:** All 19 standalone Core ordinary-query
-examples register the native query factory. Nine checked-in PostgreSQL, MySQL
-and Trading configurations
-were regenerated from the actual native query factory; matching build and
-startup plugin lists include the query library. [CW-78](#cw-78) records the
-execution evidence. Library-owned low-level reference examples remain explicit
-baselines until [CW-80](#cw-80). Neither example compilation nor passing Server
-units substitutes for live application acceptance.
-
-All six Learning Server bundles explicitly include the native query plugin and
-its selected middleware features. Native plugin registration also retains the
-query-authoring facade identities needed to restore generated definitions; it
-does not select an implicit ordinary-query default. The shared local builder
-keeps exact per-plugin artifacts rather than relying on a global cache.
-
-Live walkthroughs, readiness/reset/restart checks and the distinction between
-earlier evidence and current acceptance are consolidated in [CW-90](#cw-90).
-This item owns missing example implementations and packaging, not a duplicate
-application test matrix.
-
-**Finish when:** Required examples build normally and run against the supported
-Server with clear setup, shutdown and recovery behavior, as verified by
-[CW-90](#cw-90).
+**Done when:** every required source, initial-data provider and sink exists as
+a native plugin, a capability-by-capability comparison with its ordinary
+counterpart finds nothing working that was dropped, and its
+[component qualification](#cw-41) and
+[Server acceptance](../../../drasi-server/docs/remaining-work.md#sw-21) pass.
+Skipped cases and matching test counts are not proof.
 
 <a id="cw-18"></a>
 
 ### Keep saved data and retries unambiguous (CW-18)
 
 **Kind:** Format/release improvement. **Area:** Core contracts, storage, SDK/Host.
-**Priority:** High. **Effort:** Medium to large. **Review:** M28.
+**Priority:** High. **Effort:** Medium to large.
 
-**Work:** Audit current saved and transmitted formats. Define which fields
-identify a request, result or configuration. Formatting or diagnostic changes
-must not turn a retry into new work. Unsupported or damaged data must fail clearly.
+Saved and transmitted records must say clearly which fields identify a request,
+result or configuration, and an old or damaged record must fail with a clear
+reason. Otherwise a harmless formatting change can make a retry look like new
+work, or an old record can look like corruption.
 
-Dispatch persisted/wire records from their version/header before decoding the
-current payload layout, so unsupported versions are distinguished from corrupt
-current records. State the current-format
-upgrade/refusal/reset policy; diagnostics and formatting are not identity fields.
-Golden bytes, identity and malformed-record checks are consolidated in
-[CW-41](#cw-41).
+**What remains:**
 
-**Finish when:** Current-format restart and retries preserve identity, and
-incompatible records are rejected without silently resetting valid state.
+- Audit current saved and wire formats and list, for each, which fields are
+  identity and which are diagnostics or formatting.
+- Read the version or header before decoding the rest of the record, so an
+  unsupported version is reported as such. Today the envelope codecs decode the
+  whole current frame layout first and only then compare the version
+  (`drasi-core/components/computation-contracts/src/codec.rs:153-162`,
+  `.../binary_codec.rs:78-82`). Records with their own embedded versions, such
+  as the time-merge snapshot (`Saved { version: 2, .. }` in
+  `drasi-core/lib/src/computation/v1/time_merge/recovery.rs:51-58`), need the
+  same check.
+- State, per format, whether an unsupported version is upgraded, refused or
+  reset. Golden bytes, identity and malformed-record tests are in
+  [CW-41](#cw-41).
+
+**Example:** an envelope written by an older layout whose fields differ fails
+with a JSON or MessagePack decode error, not "unsupported computation envelope
+format version", so an operator cannot tell an old record from a corrupt one.
+
+**Done when:** restarts and retries in the current format keep their identity,
+and incompatible records are rejected with a version error without silently
+resetting valid state.
 
 <a id="cw-19"></a>
 
 ### Reject excessively deep data safely (CW-19)
 
-**Kind:** Hardening. **Area:** Core contracts, codecs, providers.
-**Priority:** High where input could terminate the process. **Effort:** Large.
+**Kind:** Hardening. **Area:** Core contracts, codecs, providers, network
+sources. **Priority:** High where input could terminate the process.
+**Effort:** Large.
 
-**Work:** Audit supported decoders and internally constructed values beyond the
-already bounded paths. Apply appropriate size and nesting limits, including safe
-release of deeply nested values after an error or cancellation.
+Very deeply nested input can exhaust the call stack while being parsed,
+converted or dropped, which aborts the whole process rather than failing one
+request. Envelope lineage is already bounded (1,024 entries,
+`MAX_LINEAGE_DEPTH` in `drasi-core/components/computation-contracts/src/envelope.rs:225`),
+and lineage is destroyed iteratively. Nested data values are not.
 
-**Implemented:** Graph publication, JSON/binary codecs and encoded-size accounting
-enforce a 1,024-entry lineage bound. Shared lineage destruction is iterative,
-and diagnostic formatting does not recursively traverse ancestry. The broader
-deep-value audit remains distinct from this envelope-lineage boundary.
-Decoder/drop/allocation qualification is consolidated in [CW-41](#cw-41).
+**What remains:**
 
-**Finish when:** Supported malformed-input cases fail with an error rather than
-exhausting the call stack or terminating the process.
+- Audit every decoder and value conversion that accepts external data and set
+  an explicit, documented nesting limit. Current state:
+  - XML webhook bodies and other network-source input are tracked in
+    [NET-10](#net-10).
+  - Unverified: JSON (`serde_json`) and YAML (`serde_yaml`) parsing stop at
+    their library default of 128 levels, protobuf (`prost`) at 100 and
+    MessagePack (`rmp-serde`) at 1,024. Drasi neither sets nor documents these
+    limits, and whether 1,024 levels of recursive conversion and drop fit in a
+    plugin thread's stack has not been tested.
+- Make dropping a deeply nested value safe after an error or cancellation.
+- Add malformed-input tests for each source format (JSON, XML, YAML, protobuf
+  `Struct`, MessagePack). Decoder, drop and allocation qualification is in
+  [CW-41](#cw-41).
+
+**Example:** a 1 MiB XML webhook body made of about 150,000 nested `<a>`
+elements fits under a `maxMessageBytes` of 2 MiB, parses without error, and
+then recurses once per level while being converted and dropped.
+
+**Done when:** each supported input format has a documented depth limit, and
+over-deep input fails that request with an error instead of overflowing the
+stack.
 
 <a id="cw-66"></a>
 
@@ -885,81 +439,106 @@ exhausting the call stack or terminating the process.
 **Priority:** Medium for upstream replacements; reassess before expanding usage.
 **Effort:** Depends on compatible upstream releases.
 
-**Origin:** The RustSec findings recorded during
-[PR #988's dependency review](https://github.com/drasi-project/drasi-core/pull/988#pullrequestreview-5591475780).
+A few dependencies with published security advisories (RustSec) remain because
+no compatible patched release exists. Each is used in a way the advisory does
+not affect, or is wrapped by a safeguard, but those boundaries break if usage
+changes.
 
-**Remediated:** Supported dependency paths and consumer locks now use patched
-TLS, Tokio, XML, QUIC, crypto and gRPC compression versions; maintained `imbl`
-replaces `im`/`sized-chunks`. Tiberius retains the existing TDS 7.3 profile.
-HTTP/XML, MSSQL, AWS/Azure safeguards, signature verification, storage and
-test-infra HTTP/2/telemetry behavior have executable coverage.
+| Retained dependency | Where | Why it is acceptable now |
+|---|---|---|
+| Azure Core 0.21 (Core) and 0.20 (test-infra) | Azure Storage reaction; test-infra e2e framework and `arn` tool | Per-call transport safeguards keep SDK signing/TLS and redact authorization before logging. SharedKey/Table remain available. |
+| quick-xml 0.31 (via Azure) | Azure Storage | A quick-xml 0.41 preflight rejects duplicate or excessive attributes in fixed-schema service metadata; the affected namespace resolver is not used, and blob content is not parsed as XML. |
+| RSA 0.9 | MySQL | Only public-key OAEP encryption is used, not the affected private-key operations. |
+| zstd 0.13 / zstd-safe 7 | MySQL | Only read-side decoding is used, not the affected context reuse, write, dictionary or multithreaded operations. |
+| ZIP 0.6 | Server and test-infra build tooling | Only extracts the bundled Swagger UI archive, never user archives. |
+| Old `rand` | Transitive | The advisory's logging feature is disabled. |
 
-The reviewed raw audit counts fell from 30 to 7 in Core, 18 to 3 in Server,
-and 21 to 6 in test-infra. These are recorded scan results, not zero-advisory
-claims. The retained findings have the following boundaries:
+**What remains:**
 
-| Retained path | Mitigation or unaffected usage |
-|---|---|
-| Legacy Azure Core 0.20/0.21 | Per-call transport safeguards preserve SDK signing/TLS and redact authorization before retry/success/cancellation logging. SharedKey/Table capabilities remain available. |
-| Azure's quick-xml 0.31 | A 0.41 preflight rejects duplicate/excessive attributes in fixed-schema service metadata; the affected namespace resolver is not used. User blob content remains streamed and is not treated as XML. |
-| RSA 0.9 | MySQL uses public-key OAEP encryption, not the affected private-key decryption/signing operations. |
-| MySQL's zstd 0.13 / zstd-safe 7 | Existing read-side decoding does not use the affected context reuse, write-side, experimental, dictionary or multithreaded operations. |
-| ZIP 0.6 build tooling | Extraction is limited to the trusted bundled Swagger UI archive, not user-supplied archives. |
-| Old rand transitive dependency | The advisory's required logging feature is disabled. |
+- Adopt patched Azure Core/Table and MySQL compression releases once they are
+  compatible, and remove the corresponding safeguards.
+- Re-audit before using any of these libraries in a new way; the safeguards
+  cover only the current uses.
+- Do not add advisory exceptions or weaken allocator/license rules just to make
+  a scan pass. Raw audit scans in Core, Server and test-infra still report
+  these findings.
 
-**Remaining work:** Adopt compatible patched Azure/Table and MySQL compression
-releases when available, and re-audit before changing these usage boundaries.
-The safeguards do not patch every use of the retained libraries. Raw scanners
-remain nonzero; no new advisory exceptions or weakened allocator/license rules
-were added merely to make a check green. Prior Azure debug/trace logs may have
-contained credentials: affected operators should rotate their account keys.
+**Example:** using `azure_data_tables` 0.21 to parse user-supplied XML would
+fall outside the quick-xml preflight and reopen the advisory.
+
+**Done when:** each retained path is replaced by a patched release, or a scan
+shows no advisories other than ones with a documented, still-valid boundary.
 
 <a id="cw-22"></a>
 
 ### Make errors explain what happened and what to do (CW-22)
 
 **Kind:** Issue/audit and API improvement. **Area:** Core, Server, UI.
-**Priority:** High. **Effort:** Large. **Review:** H8, remaining M17.
+**Priority:** High. **Effort:** Large.
 
-**Work:** Present the same failure consistently through the library, Server, UI,
-logs and monitoring. Identify the affected component, what stopped, what work is
-saved or unfinished, whether cleanup failed, and what can safely be retried.
-Audit remaining public `expect`/panic and error-erasure paths, distinguishing
-proven internal invariants from recoverable failures. Check legacy source
-initialization/retry state and middleware recovery poisoning/retry classification.
-Replace fabricated edge identifiers and ambiguous debug-only/duplicated cause
-messages with actual operation context.
+When something fails, a user should be able to tell which component failed,
+what stopped, what was saved or left unfinished, whether cleanup failed, and
+what is safe to retry. The same failure should read the same way in the
+library, Server, UI, logs and monitoring.
 
-Typed source-subscription failures, reconciliation aggregates and the named
-manager/inspection panic paths have already been repaired. Preserve
-`DrasiError::classification()` and typed causes instead of replacing that working
-mechanism with string errors or assuming classification was lost.
-Query AutoReset now reuses shared typed eligibility and ownership checks
-internally. Audit query-facing errors after the native boundary separately:
-correct reset refusal is not proof that every plugin-owned Rust cause is
-downcastable through the public API or explained clearly in Server/UI output.
-Cross-surface error and typed-cause assertions are owned by [CW-10](#cw-10).
+**What remains:**
 
-**Finish when:** A user can diagnose and recover from the selected failures
-without guessing from a generic error or mistaking rejection for successful work.
+- Audit remaining public-path `expect`/`panic!` calls and places where a typed
+  error is converted to a string, and separate proven internal invariants from
+  recoverable failures.
+- Check ordinary-source initialization and retry state, and middleware
+  recovery poisoning and retry classification.
+- Replace fabricated edge identifiers and ambiguous, duplicated or debug-only
+  cause messages with the actual operation context.
+- For queries running as native plugins, check that a plugin-owned Rust cause
+  can still be found through `DrasiError::downcast_ref` and is explained
+  clearly in Server and UI output. A correct reset refusal does not prove this.
+- Keep using `DrasiError::classification()` and typed causes
+  (`drasi-core/lib/src/error.rs:212-240`); do not replace them with string
+  matching. Cross-surface error and typed-cause tests are in [CW-10](#cw-10).
+
+**Example:** a query plugin fails with a typed storage error. The Server API
+should return a response that names the query, says the storage is intact and
+the operation can be retried, instead of a generic "internal error" string.
+
+**Done when:** a user can diagnose and recover from the selected failures
+without guessing from a generic error, and a rejection is never reported as
+successful work.
 
 <a id="cw-23"></a>
 
 ### Make live status and log updates reliable (CW-23)
 
 **Kind:** API improvement. **Area:** Core, Server, SDK/Host.
-**Priority:** High. **Effort:** Medium to large. **Origins:** CG-05/26; observer review.
+**Priority:** High. **Effort:** Medium to large.
 
-**Work:** Complete operational-status and log handover, slow-reader and reconnect
-behavior. Detect missed updates and provide a way to obtain current state.
-Preserve instance identity and release observer state when its owner is removed.
-Document the snapshot/changed acknowledgement contract for progress
-observers so clients do not accidentally busy-loop without consuming a snapshot.
-Coalesced status is not a full event log. Observer handover, acknowledgement,
-callback and reconnect tests are consolidated in [CW-10](#cw-10).
+Clients that follow component status, events or logs can fall behind or
+reconnect. They need to know when they missed updates and how to get the
+current state, and an old subscription must never report a replacement
+component as the one it was following.
 
-**Finish when:** Readers either receive the required updates or are explicitly
-told to refresh, and old readers cannot report a replacement as their old component.
+**What remains:**
+
+- Define slow-reader and reconnect behaviour for status, event and log
+  subscriptions: missed updates are detected and a current snapshot can be
+  fetched.
+- Keep instance identity in every update, and release observer state when the
+  component that owns it is removed.
+- Document the snapshot/changed acknowledgement contract for progress
+  observers so clients do not busy-loop without consuming a snapshot.
+- State in the API docs that coalesced status is not a full event log.
+  Observer handover, acknowledgement, callback and reconnect tests are in
+  [CW-10](#cw-10).
+
+**Example:** the documented log loop for `subscribe_source_logs_by_id`
+(`drasi-core/lib/src/inspection.rs:600-630`) is
+`while let Ok(log) = receiver.recv().await { ... }`. When the reader falls
+behind, the broadcast receiver returns `RecvError::Lagged`, the loop ends, and
+the client silently stops receiving logs.
+
+**Done when:** readers either receive the required updates or are explicitly
+told to refresh, and an old reader cannot report a replacement as its old
+component.
 
 <a id="cw-17"></a>
 
@@ -968,53 +547,58 @@ told to refresh, and old readers cannot report a replacement as their old compon
 **Kind:** Ownership audit/hardening. **Area:** Core, components and providers.
 **Priority:** High. **Effort:** Medium to large.
 
-**Work:** Audit remaining components and providers that create their own tasks,
-threads or connections. Establish ownership before starting them and retain it
-until their real work has ended, including during failed startup and cancellation.
-Include already-submitted blocking storage work and rejected construction
-results. The cleanup/leak distinction is verified in [CW-08](#cw-08);
-supervised retry policy belongs to [CW-06](#cw-06).
+If a component starts a task, thread or connection that nothing owns, that work
+can keep running after the component stops or is removed. It can then hold
+resources a replacement needs or act on stale state.
 
-**Finish when:** Removed or stopped components leave no unowned background work
-that can affect a replacement or keep its resources unavailable.
+**What remains:**
 
-<a id="cw-31"></a>
+- Audit components and providers that create their own tasks, threads or
+  connections. Take ownership before starting them and keep it until the work
+  has really ended, including during failed startup and cancellation.
+- Cover blocking storage work that was already submitted and construction
+  results that were rejected.
+- The cleanup/leak distinction is verified in [CW-08](#cw-08).
 
-### Avoid rebuilding unchanged information for status updates (CW-31)
+**Example:** the ordinary PostgreSQL initial-data provider detaches its
+connection driver with `tokio::spawn` and never joins it
+(`drasi-core/components/bootstrappers/postgres/src/postgres.rs:389-394`). The
+SQLite provider runs its table scan in `spawn_blocking`
+(`drasi-core/components/bootstrappers/sqlite/src/lib.rs:118-128`); cancelling
+the bootstrap drops the await but the scan keeps running.
 
-**Status:** Implemented; retained anchor, not outstanding work.
-**Review:** M6/publication findings. **Origin:** execution-plan E2.
-
-Desired snapshots, observed/registry maps and reports share unchanged data.
-Dirty component captures refresh read capabilities without relying solely on
-topology revision. Event translation visits changed members and uses immutable
-kind lookups; producer updates select only their ordered edge range. Coherent
-addition/provider publications, weak ownership, event order and history remain
-covered.
-
-The scoped publication measurements and their limits are retained under
-[CW-40](#cw-40). See the
-[maintainer guide](computation-graph-maintainers-guide.md#inspection-and-diagnosing-a-running-system)
-for repeatable diagnostics. Whole-graph exports still cost work proportional
-to their output; tombstone reclamation and wider workloads remain in
-[CW-33](#cw-33) and [CW-40](#cw-40).
+**Done when:** a stopped or removed component leaves no unowned background
+work that can affect a replacement or keep its resources busy.
 
 <a id="cw-33"></a>
 
 ### Reclaim bookkeeping left by removed components (CW-33)
 
 **Kind:** Long-running resource improvement. **Area:** Core graph bookkeeping.
-**Priority:** Medium. **Effort:** Medium to large. **Review:** remaining M7.
+**Priority:** Medium. **Effort:** Medium to large.
 
-**Work:** Measure repeated removal and addition within one long-running graph,
-then reclaim or reuse entries no longer needed by pending work or cleanup.
-Preserve the distinction between an old component and a replacement. Live-member
-scans are fixed; node/slot tombstone reclamation is not. Consider reusable arenas
-and typed indexes only with generation-safe handles and retained cleanup/job
-references accounted for.
+The computation graph keeps a slot for every component ever added, so a
+long-running graph that keeps adding and removing components grows without
+bound even if the number of live components stays constant.
 
-**Finish when:** Keeping a stable number of active components does not accumulate
-unnecessary entries indefinitely, and delayed old requests cannot affect new ones.
+**What remains:**
+
+- Measure repeated add/remove cycles in one long-running graph.
+- Reclaim or reuse node and component slots that no pending work or cleanup
+  still references. `ComputationGraph` stores `nodes` and `components` in
+  `Vec`s indexed by stable runtime indices that survive removal
+  (`drasi-core/lib/src/computation/v1/graph.rs:1722-1735`); new components are
+  always pushed (`.../graph/addition.rs:1101-1102`).
+- Any reuse must use generation-checked handles, so a delayed request for an
+  old component cannot reach its replacement, and must account for retained
+  cleanup and job references.
+
+**Example:** a Server that adds and removes one short-lived query per minute
+holds about 525,000 dead slots after a year, although only a handful of
+components are live.
+
+**Done when:** a stable number of live components does not accumulate entries
+indefinitely, and delayed old requests cannot affect new components.
 
 <a id="cw-29"></a>
 
@@ -1023,43 +607,70 @@ unnecessary entries indefinitely, and delayed old requests cannot affect new one
 **Kind:** Capacity improvement. **Area:** Core queues, retained state and providers.
 **Priority:** Medium. **Effort:** Large.
 
-**Work:** Add the missing byte limits for shared transactional queues, saved
-output and current result rows. Reserve required capacity before processing
-commits, and define what happens to an oversized input or a full buffer. Separate
-encoded-envelope admission quotas, payload-cache bounds, receipt/progress
-metadata, backend buffers and current-result state; none alone bounds total
-process memory. Existing optional FIFO/retained/non-shared QoS byte budgets and
-paged payload caches are not missing implementations.
-Query snapshot/history paging removes whole-response transport caps, not total
-result-memory limits. Fragmenting one oversized native item is [CW-76](#cw-76);
-do not treat that transport change as completion of this capacity work.
+Several places that hold data in memory have no byte limit, so a slow consumer
+or a large result can grow memory until the process is killed. Each kind of
+buffer needs its own limit; no single existing limit bounds total memory.
 
-**Finish when:** The selected limits hold through slow consumers, cancellation
-and restart without accepting work that cannot be retained safely.
+**What remains:**
+
+- Add byte limits for shared transactional queues, saved output and current
+  result rows. Shared transactional QoS journals refuse a byte budget today
+  (`drasi-core/lib/src/computation/v1/qos_pipe.rs:252,622-625`).
+- Reserve capacity before processing commits, and define what happens to an
+  oversized input or when a buffer is full.
+- Keep these limits distinct: encoded-envelope admission quotas, payload-cache
+  bounds, receipt/progress metadata, backend buffers and current-result state.
+- Add an optional total in-flight byte budget for the HTTP and gRPC sources
+  ([NET-11](#net-11)).
+
+Existing optional byte budgets for FIFO, retained and non-shared QoS stores
+(`drasi-core/lib/src/computation/v1/retained_store.rs:116-130`,
+`.../qos_pipe.rs:409-416,452-461`) and paged payload caches are already
+implemented. Query snapshot/history paging removes whole-response transport
+caps, not result-memory limits. Splitting one oversized native item is
+[CW-76](#cw-76).
+
+**Example:** a query with a slow subscriber on a shared transactional journal
+keeps accepting input; the journal's retained entries grow with no byte limit
+until the host runs out of memory.
+
+**Done when:** the selected limits hold through slow consumers, cancellation
+and restart, and work that cannot be retained safely is refused instead of
+accepted.
 
 <a id="cw-28"></a>
 
 ### Reduce unnecessary disk work and growth (CW-28)
 
-**Kind:** Storage/concurrency improvement. **Area:** Core retained, QoS, delivery and merge stores.
-**Priority:** Medium. **Effort:** Medium to large. **Review:** M10, M22, M23, M25.
+**Kind:** Storage/concurrency improvement. **Area:** Core retained, QoS,
+delivery and merge stores. **Priority:** Medium. **Effort:** Medium to large.
 
-**Work:** Measure full-state rewrites, repeated reads, small writes and obsolete
-stored records. Improve the expensive cases while preserving exact saved progress
-and retry identity. Specifically measure whole-buffer time-merge persistence,
-whole-metadata QoS/delivery ledger rewrites, receipt/cursor/head updates and
-per-item acknowledgement/decode work. Evaluate per-entry/per-stream records,
-safe write coalescing and shorter journal locks where the measurements justify
-them. Keep actual transaction ownership, crash recovery and subscriber membership
-atomic; do not release a lock early if that invalidates the commit protocol.
+Some stores rewrite their whole state, or many small records, for every change.
+This costs disk I/O proportional to total state rather than to the change, and
+can leave obsolete records behind.
 
-Retained and QoS batch receive already exists. The remaining batching question
-is persistence/acknowledgement cost, not a missing receive API. `Busy` is bounded
-admission, not silent loss; preserve explicit caller retry/backpressure behavior.
-Known pre-commit rollback/revocation handling is repaired. Reproduce other older
-storage reports before treating them as bugs.
+**What remains:**
 
-**Finish when:** Selected workloads show lower storage cost or bounded growth
+- Measure full-state rewrites, repeated reads, small writes and obsolete stored
+  records, specifically:
+  - time-merge persistence, which re-encodes every buffered envelope on each
+    save (`drasi-core/lib/src/computation/v1/time_merge/recovery.rs:51-80`);
+  - whole-metadata rewrites of QoS and delivery ledgers;
+  - receipt, cursor and head updates;
+  - per-item acknowledgement and decode work.
+- Where measurements justify it, use per-entry or per-stream records, safe
+  write coalescing and shorter journal locks.
+- Keep transaction ownership, crash recovery and subscriber membership atomic;
+  do not release a lock early if that breaks the commit protocol. `Busy` is
+  bounded admission, not loss; keep explicit caller retry and backpressure.
+- Reproduce older storage reports before treating them as bugs. Retained and
+  QoS batch receive already exist; the open question is persistence and
+  acknowledgement cost.
+
+**Example:** a time merge holding 10,000 buffered events re-encodes and writes
+all 10,000 each time one event is admitted or released.
+
+**Done when:** selected workloads show lower storage cost or bounded growth
 without changing results, recovery or independent query retention choices.
 
 <a id="cw-32"></a>
@@ -1067,161 +678,196 @@ without changing results, recovery or independent query retention choices.
 ### Remove measured repetition from data processing (CW-32)
 
 **Kind:** Measured performance improvement. **Area:** Core processing, codecs and pipes.
-**Priority:** Medium. **Effort:** Medium. **Review:** M13, M14, M24, M29.
+**Priority:** Medium. **Effort:** Medium.
 
-**Work:** Find significant repeated encoding, hashing, metadata construction and
-history scans in the retained processing paths. Include codec round-trips used
-only for validation, size measurement, progress-map cloning, payload copies,
-per-event port parsing/hex formatting, repeated lock acquisition and boxed
-futures. Replace idle polling with owner notifications where practical, and
-measure peer-handler wake fan-out and shared-queue head-of-line delay.
+The processing path repeats some work for each event: encoding just to
+measure or validate, re-hashing, rebuilding metadata and rescanning history.
+Removing measured repetition lowers CPU cost without changing results.
 
-Use existing batched/poll paths before adding another fast-path API. Cache only
-data whose identity is truly stable: encoded size and validation may depend on
-branch-specific annotations as well as an immutable event payload. Profile
-actual outbox reads and commit topology rather than assuming every read clones
-all history or every output needs a separate transaction. Preserve required
-ordering, contiguous completion and independent subscriber obligations.
-The query evaluator is retained across input operations, and canonical output
-observations avoid a per-input metrics RPC or snapshot transfer. Further query
-boundary optimizations should follow [CW-79](#cw-79)'s measurements, not reopen
-those completed lifetime/read changes.
+**What remains:**
 
-**Finish when:** Measured processing cost falls while exact output, identity,
-replay and failure behavior remain unchanged.
+- Profile and remove significant repetition in: codec round-trips used only
+  for validation or size measurement (for example
+  `BinaryEnvelopeCodec::encoded_size` serializes the whole frame to count bytes,
+  `drasi-core/components/computation-contracts/src/binary_codec.rs:70-76`);
+  progress-map cloning; payload copies; per-event port parsing and hex
+  formatting; repeated lock acquisition; boxed futures.
+- Replace idle polling with owner notifications where practical, and measure
+  peer-handler wake fan-out and shared-queue head-of-line delay.
+- Use existing batched and polling paths before adding a fast-path API.
+- Cache only data whose identity is truly stable: encoded size and validation
+  can depend on branch-specific annotations, not just the immutable payload.
+- Profile actual outbox reads and commit topology rather than assuming every
+  read clones all history or every output needs its own transaction. Keep
+  ordering, contiguous completion and independent subscriber obligations.
+- Query-boundary optimizations should follow [CW-79](#cw-79)'s measurements.
 
-<a id="cw-61"></a>
+**Example:** an envelope that is size-checked at admission and again at a
+retained store is fully serialized twice before it is ever written.
 
-### Restore useful compiler and code-check warnings (CW-61)
-
-**Status:** Implemented for the selected library/contracts and test-framework
-packages; retained anchor, not outstanding work.
-**Area:** Core, contracts, Server and test-infra.
-**Review:** M37; MSRV/lint findings.
-
-**Implemented:** `drasi-lib`, `drasi-computation-contracts` and
-`drasi-query-common` deny unused-code warnings. The test framework enables those
-checks in all eight packages, and its normal `make lint-check` runs the whole
-workspace once without formatting sibling dependencies. Existing Clippy
-restriction-lint scope is preserved rather than silently changing the panic
-policy of previously unopted-in framework packages.
-
-Unused imports, private wrappers, the superseded internal reaction query-provider
-path and an unused profiling summary are removed. Independent ordering/encoding
-oracles and recovery-inspection helpers remain under `cfg(test)`. Shared fixtures
-retain documented, local exceptions because different test binaries use different
-parts of them. Ownership-retaining fields are preserved. No public functionality,
-ordinary plugin support, ABI versions or explicit linked query constructors were
-removed; [CW-63](#cw-63) and [CW-80](#cw-80) were not executed as cleanup.
-
-The supported Rust floor is declared as 1.95.0 in all Core, Server and framework
-workspace package manifests, matching their existing pinned toolchains. Clippy
-derives its minimum from those manifests instead of the obsolete separate 1.70
-settings. Component lifecycle, management-store and query-read contracts enforce
-public rustdoc and unchecked unwrap/expect restrictions. Unused direct library
-dependencies are removed, and the Cypher function-registration dependency used
-only by tests is a dev dependency. The earlier removal of 21 unused workspace
-dependency aliases remains complete.
-
-**Verification:** Strict default and feature-enabled all-target checks pass for
-the selected library/shared packages. Shared contracts, affected graph-management
-scenarios, legacy SDK callbacks and the retained legacy fixture are covered.
-Previously ignored reconciliation acceptance and nested publisher errors are
-checked explicitly. The framework's full affected package run also exposed
-missing query-factory registration: embedded instances now use the statically
-linked native query plugin through the validated Host ABI, with matching
-middleware. All 144 test-run-host unit tests pass, including the five previously
-failing native-instance cases. Server still builds against the cleaned-up library.
-
-This is a scoped, enforceable cleanup, not a claim that every workspace crate is
-free of unused code or that every platform/minimum-version combination is
-qualified. Broader release and feature-matrix qualification remains in
-[CW-85](#cw-85).
+**Done when:** measured processing cost falls while output, identity, replay
+and failure behaviour stay the same.
 
 <a id="cw-63"></a>
 
 ### Remove the remaining old plugin support (CW-63)
 
 **Kind:** Breaking-release cleanup. **Area:** Core, Server and remaining consumers.
-**Priority:** Medium. **Effort:** Medium to large. **Review:** M21.
-**Depends on:** Required consumer moves in CW-44/45.
+**Priority:** Medium. **Effort:** Medium to large.
+**Depends on:** The remaining consumer moves in [CW-44](#cw-44).
 
-**Work:** Remove old hosts/adapters and obsolete binary-version branches once
-their required users have moved. Remove bare-row decoding and guessed-schema
-fallbacks that turn malformed current input into apparent success. Inventory
-ordinary hosts/proxies/factories, duplicated legacy index/provider adapters,
-static registrations and old ABI field gates before removal. Port useful
-behavior assertions to current interfaces; remove compatibility-only fixtures,
-dependency edges and build paths only after their last required user moves.
-The remaining linked query constructors have their own bounded retirement item,
-[CW-80](#cw-80). Ordinary Source/Reaction ABI retirement stays here and is not a
-prerequisite for using the native query plugin.
+Ordinary (pre-native) Sources, Reactions and bootstrap providers still run
+through a second plugin ABI, Host loader and set of graph adapters. That stack
+must stay until every required plugin has a native replacement, but it carries
+dead version branches and lenient decoding that hide malformed input, and it
+doubles the surface that has to be maintained and tested.
 
-**Finish when:** The selected current interfaces are sufficient, unsupported
-libraries/data fail clearly, and required functionality no longer depends on the
-retired code.
+**What remains:**
+
+- Remove dead version gates in the ordinary loader. The loader only accepts
+  ordinary ABI 0.19.x, yet still reads trailing registration fields behind
+  per-version checks written for older, smaller layouts.
+- Remove lenient fallbacks that turn malformed current input into apparent
+  success, such as decoding an unenveloped snapshot row as a "bare row" with
+  signature 0.
+- Inventory the ordinary hosts, proxies, factories, graph adapters
+  (`legacy_source`, `legacy_reaction`, `legacy_index`, `legacy_resources`) and
+  static registrations; record which required consumer still uses each one.
+- After a component's last required user moves to a native plugin, port its
+  useful behavior assertions to the native interfaces, then delete the adapter,
+  its compatibility-only fixtures, dependency edges and build paths.
+
+Retiring the linked query constructors is a separate item, [CW-80](#cw-80).
+Using the native query plugin does not depend on this work.
+
+**Example:** `drasi-core/components/plugin-sdk/src/ffi/vtable_gen.rs:478-489`
+accepts any JSON value that is not a `KeyedSnapshotRow` envelope and yields it as
+row signature 0, so a current plugin that sends a wrongly shaped row produces a
+result instead of an error. Its test,
+`make_snapshot_stream_falls_back_to_bare_row` (`:4323-4335`), describes this
+as compatibility with pre-0.10 plugins, which the loader already rejects.
+
+**Evidence:**
+
+- `drasi-core/components/host-sdk/src/loader.rs:629-633,668-676`: only ordinary
+  ABI 0.19.x is accepted.
+- `drasi-core/components/host-sdk/src/loader.rs:470-499,516-528`: identity-provider
+  and `set_log_level` fields are still gated on older SDK versions.
+- `drasi-core/components/plugin-sdk/src/ffi/vtables.rs:871-890`: layout comments
+  for "older plugin binaries".
+- `drasi-core/lib/src/computation/v1/legacy_{source,reaction,index,resources}.rs`:
+  graph adapters for ordinary plugins.
+- Unverified: whether "guessed-schema" fallbacks exist beyond the bare-row
+  decode; none were found by searching the Host and SDK.
+
+**Done when:** Each removed path has no required user; unsupported plugin
+libraries and malformed current data fail with a clear error; native interfaces
+cover the behavior the removed code provided; behavior assertions are kept,
+not deleted.
 
 <a id="cw-34"></a>
 
 ### Simplify the remaining management code (CW-34)
 
 **Kind:** Maintainability improvement. **Area:** Core graph/query/pipe management.
-**Priority:** Medium. **Effort:** Medium to large. **Review:** M1, M2, M9, M15, M27.
+**Priority:** Medium. **Effort:** Medium to large.
 
-**Work:** Separate component ownership, commands, connections, scheduling and
-shutdown where they are still difficult to reason about. Share repeated recovery
-logic through small changes alongside the work that needs them. Concrete work:
+A small number of very large modules own graph construction, live changes,
+reconciliation, recovery and shutdown together. That makes ownership and state
+transitions hard to follow and lets similar logic drift apart. This item
+reduces that risk in small, protected steps. It is not a rewrite and is not a
+substitute for any defect fix.
 
-- Consolidate event/completion dispatch across the main controller and
-  reconciliation waits; preserve the repaired resource/peer/control servicing.
-- Finish structural-validator consolidation across construction and live
-  mutations. Absent dependencies remain valid waiting declarations; the
-  generated/property and equivalent-entrypoint checks belong to [CW-10](#cw-10).
-- Separate operation groups, reservations, connection/control state and shutdown
-  into explicit ownership/state models. Clarify slot/status coherence and share
-  relationship-policy predicates instead of adding independent registries.
-- Factor remaining duplicated commit/recovery work from the large
-  Host-processing/controller/reconciler/management modules. Share receiver,
-  acknowledgement and retention-window logic where the contracts actually match.
+**What remains:**
 
-**Completed query extraction:** Definition/configuration, evaluator setup,
-canonical result state/readers, publication markers, recovery validation/reset
-eligibility and delivery helpers are shared in `drasi-query-common`. Query
-consumers use a common recovery-reader contract rather than a second policy
-implementation. Do not schedule that extraction again or move the evaluator
-into the Host; this item concerns only remaining duplication and unclear owners.
+- Share one event/completion dispatch path between the main controller loop and
+  the reconciliation waits, keeping the current resource, peer and control
+  servicing.
+- Move operation groups, reservations, connection/control state and shutdown into
+  explicit state types with one owner each. Make the relationship between a
+  component's slot and its reported status explicit, and share
+  relationship-policy predicates instead of adding new registries.
+- Factor duplicated commit/recovery steps out of the controller, reconciler,
+  management runtime and Host processing modules. Share receiver,
+  acknowledgement and retention-window logic only where the contracts are the
+  same.
+- Keep structural validation in one place. `DesiredTopology::validate_structure`
+  and graph building both go through `reconcile::validate_definition`; new
+  checks belong there, not in a caller. Absent dependencies remain valid waiting
+  declarations. Generated/property checks that all entry points agree are
+  [CW-10](#cw-10).
 
-The specific validation holes and controller failure paths reported by the
-review are fixed. These remaining extractions reduce future drift; they are not
-substitutes for those fixes or a mandate for another executor.
+Query definition, evaluator setup, result state, publication and recovery
+helpers are already shared in `drasi-query-common`; do not move the evaluator
+into the Host or extract those again.
 
-**Finish when:** Changed areas have clear responsibilities and one authoritative
-graph. [API/structural conformance](#cw-10), [combined failures](#cw-39) and
-[matched measurements](#cw-40) must protect the refactor. Fewer files or lines
-alone is not completion.
+**Example:** A change to how a completed operation is reported currently has to
+be made in both the controller's event loop and the reconciler's waits
+(`tokio::select!` loops in `controller.rs` and `reconcile.rs`) and kept
+consistent by hand.
+
+**Evidence (current sizes):**
+
+- `drasi-core/lib/src/computation/v1/graph/controller.rs` (about 8,600 lines).
+- `drasi-core/lib/src/computation/v1/graph/reconcile.rs` (about 4,400 lines);
+  `validate_definition` at `:1580`.
+- `drasi-core/lib/src/computation/v1/graph.rs` (about 3,500 lines).
+- `drasi-core/lib/src/management/runtime.rs` (about 2,300 lines).
+- `drasi-core/components/host-sdk/src/computation/processing.rs` (about 2,000 lines).
+- `drasi-core/lib/src/computation/v1/graph/topology.rs:569-573`:
+  `validate_structure`.
+
+**Done when:** Each changed area has a clear single owner and there is one
+authoritative graph state. [API/structural conformance](#cw-10),
+[combined failures](#cw-39) and [matched measurements](#cw-40) pass before and
+after each refactor. Fewer files or lines alone is not completion.
 
 <a id="cw-24"></a>
 
 ### Let applications control logging and monitoring (CW-24)
 
-**Kind:** Operational capability. **Area:** Core observability and applications.
+**Kind:** Operational capability. **Area:** Core observability, native SDK/Host, applications.
 **Priority:** Medium. **Effort:** Large.
 
-**Work:** Implement the selected application-owned collection, filtering,
-export and shutdown controls from the
-[monitoring design](https://github.com/drasi-project/design-documents/tree/77b155319fd8160496ad059f6fdcb1e6bc93e43d/drasi-lib/tracing-logging).
-Resolve the remaining profiling interfaces and dependency choices.
+An application that embeds DrasiLib cannot fully control how Drasi logs. If
+no global tracing subscriber is installed yet, DrasiLib installs its own with a
+`RUST_LOG`/`info` filter and a stdout formatter. Native plugins loaded as
+dynamic libraries have no way to send their logs to the host at all.
 
-Dynamically loaded native plugins have no way to send log records to the host:
-the native SDK has no logging bridge, and a cdylib's `log`/`tracing` globals
-are separate from the host's. The network sources' `diag!` macro uses `log`
-only when a logger is installed in the plugin, and otherwise writes warnings
-and errors to stderr. Add an SDK/Host logging bridge so plugin logs reach the
-application's chosen logging, with component identity attached.
+**What remains:**
 
-**Finish when:** Applications can choose the required monitoring level without
-Drasi replacing their logging setup or disabling existing logs, including logs
-from dynamically loaded native plugins.
+- Implement application-owned collection, filtering, export and shutdown
+  controls from the
+  [monitoring design](https://github.com/drasi-project/design-documents/tree/77b155319fd8160496ad059f6fdcb1e6bc93e43d/drasi-lib/tracing-logging),
+  so an application can keep its own subscriber and still receive per-component
+  logs.
+- Settle the profiling interfaces (`drasi-core/lib/src/profiling/`) and their
+  dependencies.
+- Add a native SDK/Host logging bridge. A cdylib has its own `log`/`tracing`
+  globals, separate from the host's, and the native ABI has no log callback
+  (the ordinary plugin ABI does, through `set_log_callback`). Forward plugin
+  records to the host with the component identity attached.
+
+**Example:** The network plugins log through `diag!`. Inside a loaded cdylib no
+logger is installed, so `log::max_level()` is off: `info`/`debug` records are
+dropped and `warn`/`error` records go to the process's stderr as plain text,
+without the component ID and outside the application's logging pipeline.
+
+**Evidence:**
+
+- `drasi-core/lib/src/observability/tracing_layer.rs:146-167`: installs
+  `LogTracer` and a global subscriber if none is set.
+- `drasi-core/components/computation-plugins/common/network/src/lib.rs:44-53`:
+  `diag!` falls back to `eprintln!`.
+- `drasi-core/components/computation-plugin-abi/src/` and
+  `drasi-core/components/computation-plugin-sdk/src/`: no logging callback.
+- `drasi-core/components/plugin-sdk/src/ffi/vtables.rs:862-865`: the ordinary
+  ABI's log callback, for comparison.
+
+**Done when:** An application can choose the monitoring level and destination
+without Drasi replacing its logging setup or suppressing existing logs, and
+logs from dynamically loaded native plugins reach that destination tagged with
+their component.
 
 <a id="cw-25"></a>
 
@@ -1230,12 +876,38 @@ from dynamically loaded native plugins.
 **Kind:** Operational capability. **Area:** Core, plugins, Server and destinations.
 **Priority:** Medium. **Effort:** Large.
 
-**Work:** Carry useful request and attempt information across queues, plugins,
-network calls and retries. Define how a result relates to several inputs, while
-keeping diagnostic information separate from the identity of saved business work.
+Today there is no way to follow one incoming change through the queues, query,
+sinks and destination calls that it causes. An operator investigating a slow or
+missing result cannot see where the time went or which retry delivered it.
 
-**Finish when:** Selected requests can be followed through actual completion,
-with meaningful timing and no invented duration across a restart.
+**What remains:**
+
+- Carry trace context (for example a W3C `traceparent`) from source ingress
+  through pipes, plugins, network calls and retries, and record spans for the
+  main steps.
+- Define how one result relates to several inputs (joins, aggregates, batches),
+  for example with span links.
+- Keep this diagnostic information separate from the identity used to
+  deduplicate or recover business work, such as the `x-drasi-delivery-id`
+  idempotency key that the HTTP and gRPC sinks already send.
+
+**Example:** A POST to the native HTTP source updates a row; a query joins it
+and an HTTP sink delivers the result after one retry. The operator should be
+able to see one trace: ingress, commit, query evaluation, each delivery attempt
+and the final completion, with real timings and no invented duration if the
+process restarted in between.
+
+**Evidence:**
+
+- `drasi-core/components/computation-contracts/src/internal/typed_change/mod.rs:564-600`:
+  a crate-private `TraceMetadata` slot exists in system metadata, but it can only
+  be constructed in tests and nothing propagates it.
+- No `traceparent`/OpenTelemetry tracing in `drasi-core/lib/src`, the native
+  ABI/SDK or the Host.
+
+**Done when:** A selected request can be followed through actual completion,
+including retries and batching, with meaningful timing and no invented duration
+across a restart.
 
 <a id="cw-26"></a>
 
@@ -1244,34 +916,41 @@ with meaningful timing and no invented duration across a restart.
 **Kind:** Operational capability. **Area:** Core, plugins, Server.
 **Priority:** Medium. **Effort:** Large.
 
-**Work:** Implement the agreed measurements for availability, input/output,
-completed handling, queue pressure, progress lag, errors and processing time.
-Keep names and units consistent, prevent double counting and exclude sensitive data.
-Include retained/QoS pressure, earliest-subscriber lag and blocked admission so
-intentional lossless backpressure is visible rather than mistaken for a stalled
-runtime.
+Only queries and reactions report measurements, and only one of those is
+exported. Operators cannot see source throughput, pipe or QoS backpressure,
+lag or error rates, so intentional lossless backpressure looks the same as a
+stalled runtime.
 
-**Implemented query slice:** Query committed-input and produced-output positions
-can be read from their actual owners, with lifecycle/output identity and
-persistence information. Server has optional OTLP export of those measurements.
-`drasi.query.progress.sequence` distinguishes `input.committed` from
-`output.produced`; filtered inputs advance the former without inventing output.
-The standard-gRPC recovery evidence combines these observations with actual
-recorded batches and final snapshots. Remaining work is all-component
-instrumentation and qualification of the other profiles, not implementation of
-this first exporter or another Server progress endpoint.
+**What remains:**
 
-Native queries also expose canonical live-row/outbox gauges, retained bounds,
-logical output advances, operation durations and snapshot-fetch counts through
-the existing library metrics. Initialization includes bootstrap/recovered state;
-replay and no-op input do not inflate advances, and unsupported providers do not
-report meaningful-looking zeros. The Server OTLP exporter currently exports
-query progress positions, not all of these output gauges. Broader metric export,
-queue/lag/error instrumentation and consistent all-component coverage remain here.
+- Define and implement metrics for every component kind: availability,
+  input/output counts, completed handling, queue pressure, progress lag, errors
+  and processing time. Use consistent names and units, avoid double counting
+  and include no sensitive data.
+- Include retained/QoS pressure, earliest-subscriber lag and blocked admission.
+- Export the existing query output gauges and reaction metrics, not only query
+  progress (export path: [CW-27](#cw-27)).
 
-**Finish when:** Enabled measurements report exact expected counts and timing
-boundaries across normal work, retries, batching and failure. Those assertions
-are consolidated with [public observation conformance](#cw-10) and
+Already present: query committed-input and produced-output positions, exported
+by Server as `drasi.query.progress.sequence` with a `drasi.progress.stage` of
+`input.committed` or `output.produced`; query outbox/live-row gauges, sequence
+advances, transaction durations and snapshot-fetch counts; reaction checkpoint,
+recovery and dedup counters; lifecycle startup-rejection and reset counters.
+
+**Example:** A QoS channel whose slowest required subscriber is a slow HTTP
+sink blocks admission at the source. No metric shows the blocked admission or
+the subscriber's lag, so the operator only sees query progress stop advancing.
+
+**Evidence:**
+
+- `drasi-core/lib/src/metrics/` (`query_metrics.rs`, `reaction_metrics.rs`,
+  `lifecycle_metrics.rs`): no source, pipe or QoS metrics.
+- `drasi-server/src/telemetry.rs:168-235`: the only exported instrument is
+  `drasi.query.progress.sequence`.
+
+**Done when:** Each enabled measurement reports exactly the expected counts and
+timing boundaries across normal work, retries, batching and failure. Those
+assertions live with [public observation conformance](#cw-10) and
 [completion evidence](#cw-36).
 
 <a id="cw-27"></a>
@@ -1281,112 +960,98 @@ are consolidated with [public observation conformance](#cw-10) and
 **Kind:** Operational capability. **Area:** Core, Server, export adapters.
 **Priority:** Medium. **Effort:** Large.
 
-**Work:** Provide an optional application-owned export path for logs, measurements
-and completed traces to OpenTelemetry services, local Drasi consumers, or both.
-Bound waiting data, report dropped records and prevent monitoring its own output.
+Applications need to send Drasi's logs, metrics and traces to OpenTelemetry
+collectors or local consumers. A slow or unavailable collector must never slow
+down data processing, and export must not monitor its own traffic in a loop.
 
-**Implemented first slice:** Server can own a dedicated OTLP/HTTP JSON query-
-progress meter provider without replacing the application's global provider.
-Export has a configured HTTP timeout, and cancelled shutdown retains its worker.
-The broader logs/traces export and all-component measurements remain open.
+**What remains:**
 
-**Finish when:** Slow or broken monitoring destinations cannot stall business
-processing, and export/flush/shutdown have explicit ownership. Slow-destination
-and cancellation proof belongs to [CW-05](#cw-05) and [CW-39](#cw-39).
+- Provide an optional, application-owned export path for logs, measurements and
+  completed traces to OpenTelemetry, local Drasi consumers, or both. Core has
+  none today.
+- Bound buffered monitoring data, count and report dropped records, and give
+  export, flush and shutdown an explicit owner.
+- Extend Server's existing metrics exporter to logs and traces and to the
+  measurements from [CW-26](#cw-26).
 
-<a id="cw-68"></a>
+Already present: Server's optional `metrics` setting (`endpoint`,
+`exportIntervalMs`, `exportTimeoutMs`) runs a dedicated OTLP/HTTP JSON meter
+provider for query progress without replacing the application's global
+provider.
 
-### Add a stateful view-transform component (CW-68)
+**Example:** An OTLP collector that accepts connections but never responds
+must not grow memory without bound or delay source admission; the exporter
+should drop and count records once its buffer is full.
 
-**Status:** Implemented for the memory-backed profile; retained completion anchor.
-**Area:** Core/native components.
+**Evidence:** `drasi-server/src/telemetry.rs:30-47` (`MetricsConfig`);
+`drasi-server/src/config/types.rs:157-159`.
 
-The [view transformer](../../components/computation-plugins/transformers/view/README.md)
-is a distinct `drasi.standard/view` factory with graph-change `in`/`out` ports.
-It reuses map/relabel processors on reconstructed complete images, retaining
-full input state and the actual emitted node/relationship associations. Filtering,
-one-to-many changes, key changes, replacements, patches, property removals/nulls
-and deletions retract or replace the recorded outputs. Whole-envelope staging
-prevents partial state changes on failure; identity exchanges within a batch work.
-Missing patch bases and output collisions reject explicitly. Existing stateless
-map/jq components are unchanged.
-
-It exposes coherent output snapshots and volatile producer progress. Same-object
-stop/start retains its state and epoch; fresh reconstruction starts empty with a
-new epoch. Stopped reads and permanent retirement are fenced. SDK semantics and
-the [loaded Host boundary](../../components/host-sdk/tests/native_view.rs) cover
-processing, snapshots, lifecycle and deprovisioning.
-
-**Limits:** No durable storage, replay/follow, bootstrap/snapshot input, scheduling,
-transaction participation or input deduplication is advertised. Current dataset
-and fan-out memory are not capped; there is no growing history log. Faithful views
-require full initial inputs and ordered lossless delivery. Broader independent
-view-oracle and failure qualification remain in [CW-89](#cw-89) and [CW-39](#cw-39);
-the memory-backed implementation is not a claim that those additional profiles
-already exist.
+**Done when:** Slow or broken monitoring destinations cannot stall business
+processing, dropped records are reported, and export/flush/shutdown have one
+owner. Slow-destination and cancellation tests belong to [CW-05](#cw-05) and
+[CW-39](#cw-39).
 
 <a id="cw-69"></a>
 
 ### Curate the public API before a stable release (CW-69)
 
 **Kind:** API improvement. **Area:** Core, shared contracts and SDK consumers.
-**Priority:** High before advertising a stable API. **Effort:** Large. **Review:** H9.
+**Priority:** High before advertising a stable API. **Effort:** Large.
 
-**Work:** Replace accidental wildcard exposure with intentional exports and
-document what the `v1` namespace promises. Review public construction, builders,
-non-exhaustive types and third-party collection exposure; choose extensibility
-per type instead of mechanically hiding every field. Group the facade by its
-actual responsibilities while retaining one runtime owner.
+Much of `drasi-lib`'s public surface is exposed by accident through wildcard
+re-exports, and several inspection and status values have unclear or
+inconsistent meanings. Once a stable release is advertised, every exported item
+becomes a compatibility promise, so the surface has to be chosen deliberately
+first.
 
-Make inspection/configuration contracts deliberate: stable structured values
-instead of `Debug` strings, explicit component kinds rather than catch-all role
-fallbacks, documented casing/translation between public and factory settings,
-and consistent `ManagementStatus.converged` field/method meaning. Define builder
-setting precedence, including repeated `with_management` calls. Clarify
-`BroadcastPipe`'s single-receiver drop-oldest contract/name without confusing it
-with QoS multicast. Preserve typed error classification and causes.
+**What remains:**
 
-**Finish when:** Representative downstream clients can use the curated
-surface and its compatibility policy is explicit; documentation
-distinguishes Rust API, plugin ABI, wire and persisted-format promises. Numeric
-revision/fencing values are not treated as authorization capabilities.
-Downstream compilation, API/semver and publication checks are owned by
-[CW-85](#cw-85), with behavioral API conformance in [CW-10](#cw-10).
+- Replace wildcard re-exports with intentional exports and document what the
+  `computation::v1` namespace promises.
+- Review public constructors, builders, `#[non_exhaustive]` use and exposure of
+  third-party collection types; choose extensibility per type rather than
+  hiding every field.
+- Group the `DrasiLib` facade by responsibility while keeping one runtime owner.
+- Return structured values instead of `Debug` strings from inspection, use
+  explicit component kinds instead of catch-all role fallbacks, and document the
+  casing/translation between public and factory settings.
+- Give `ManagementStatus.converged` (field) and `ManagementStatus::converged()`
+  (method) distinct, documented meanings or names.
+- Define builder setting precedence, including repeated `with_management`
+  calls.
+- Clarify `BroadcastPipe`'s single-receiver, drop-oldest contract, or rename it,
+  so it is not confused with QoS multicast.
+- Preserve typed error classification and causes.
 
-<a id="cw-70"></a>
+**Example:**
 
-### Complete reconstructible component and provider recipes (CW-70)
+- `status.converged` can be `true` while `status.converged()` returns `false`,
+  because the method also requires no error, no reconciliation in progress and
+  no resource errors.
+- `builder.with_management_resources(r).with_management(opts)` silently discards
+  `r`, because `with_management` replaces the whole options value.
+- Graph inspection reports `"kind": format!("{:?}", component.kind)`, so
+  renaming a Rust enum variant changes the public JSON.
 
-**Status:** Implemented for native factories/recipes; retained completion anchor.
-**Area:** Core, SDK/Host and Server. **Origins:** CG-08/15; reliability W9.
+**Evidence:**
 
-`add_source_from_factory` and `add_reaction_from_factory` accept native
-`ComponentAddition` declarations while preserving every existing legacy
-object-based API. `ComponentAddition::declaration` can retain a missing factory;
-failed unmanaged construction uses the existing retry reconciliation.
-`GraphConfigurationSnapshot::reconstructible_topology` exports explicit
-component, resource and pipe recipes with their original references, rejecting
-opaque external objects/bindings instead of inventing empty settings.
+- `drasi-core/lib/src/computation/v1/mod.rs:196-200`,
+  `drasi-core/lib/src/computation/v1/graph.rs:52-53`,
+  `drasi-core/lib/src/queries/mod.rs:43-50`,
+  `drasi-core/lib/src/observability/mod.rs:25-28`: wildcard re-exports.
+- `drasi-core/lib/src/management/mod.rs:230-249`: `ManagementStatus`.
+- `drasi-core/lib/src/builder.rs:200-231`: `with_management` and
+  `with_management_resources`.
+- `drasi-core/lib/src/computation/v1/inspection.rs:277-319`: `Debug`-formatted
+  fields.
+- `drasi-core/lib/src/computation/v1/broadcast_pipe.rs:202-205`.
 
-The standard `drasi/source-time-merge` factory supports volatile graph-change
-merging and an explicitly owned persistent `sourceTimeMergeStorage` recipe.
-Host and Server share pinned implementation/configuration versions and the real
-IndexBackend dependency. Provider registrations may be versioned; unversioned
-registrations remain supported but cannot satisfy a pinned recipe. Server
-defers resource acquisition to graph-owned constructors, retaining cancellation,
-failed acquisition and cleanup ownership after declaration.
-
-Clean-instance Core, Host and Server cases cover connections/resource scope,
-missing factories/versions/secrets, construction failure, cancellation, retries
-and cleanup. The persistent merger's frontier survives reconstruction and routes
-a later old event to its late output.
-
-**Limits:** Per the selected scope, there are no legacy-producing factory
-constructors. Custom-schema mergers still use direct Rust construction. Durable
-merger storage requires an independent persistent atomic provider, not shared
-transaction groups or memory. Its canonical recipe namespace does not migrate
-older direct-constructor state. Configuration restoration does not rewind
-processing data. Broader recipe/failure combinations remain [CW-46](#cw-46).
+**Done when:** Representative downstream clients build against the curated
+surface; the compatibility policy is written down and distinguishes Rust API,
+plugin ABI, wire and persisted-format promises; numeric revision/fencing values
+are not presented as authorization capabilities. Downstream compilation,
+API/semver and publication checks are [CW-85](#cw-85); behavioral API
+conformance is [CW-10](#cw-10).
 
 <a id="cw-71"></a>
 
@@ -1394,93 +1059,146 @@ processing data. Broader recipe/failure combinations remain [CW-46](#cw-46).
 
 **Kind:** Optional operational improvement. **Area:** Core management, providers, Server.
 **Priority:** Medium for long-lived managed deployments. **Effort:** Large.
-**Origin:** CG-19.
 
-**Work:** Add explicitly chosen snapshot-age retention and application key-provider
-integration. Existing bounded receipt expiry, revision-checked snapshot deletion
-and atomic live-record key rotation are implemented; do not replace them with a
-second store. Define backup handling and key recovery without implying secure
-erasure or re-encryption of old backups. Configuration snapshots do not rewind
-query data or receipt batches.
+The persistent (redb) managed-configuration store keeps named configuration
+snapshots until they are deleted by hand, and its encryption key must be
+passed in as raw bytes. Long-lived deployments need age-based snapshot cleanup
+and integration with a real key provider.
 
-**Finish when:** Retention cannot delete a concurrently changed snapshot, expired
-requests cannot be reapplied as new work, and unavailable/rotated keys preserve
+**What remains:**
+
+- Add opt-in snapshot retention by age that uses the existing revision-checked
+  delete, so it cannot remove a snapshot that changed concurrently.
+- Integrate an application key provider (for example a secret store or KMS)
+  with the existing atomic key rotation, so a missing or rotated key leaves the
+  store recoverable across cancellation and restart.
+- Document backup handling and key recovery. State plainly that rotation does
+  not securely erase or re-encrypt existing backups, and that restoring a
+  configuration snapshot does not rewind query data or receipt batches.
+
+Already present, and not to be replaced by a second store: opt-in receipt
+expiry (`receipt_batch_capacity`), revision-checked snapshot deletion and
+`rotate_key`.
+
+**Example:** An operator wants "delete configuration snapshots older than 30
+days" and wants the store key fetched from Azure Key Vault at startup and
+rotated there. Today both need custom application code around
+`delete_configuration_snapshot` and `rotate_key(key: [u8; 32])`.
+
+**Evidence:**
+
+- `drasi-core/components/state_stores/redb/src/configuration/housekeeping.rs:10-16`
+  (`ConfigurationStoreOptions`), `:374` (`rotate_key`).
+- `drasi-core/components/state_stores/redb/src/configuration.rs:132`: the store
+  takes a raw 32-byte key.
+- `drasi-core/lib/src/management/mod.rs:398-450`: snapshot list/delete/restore API.
+
+**Done when:** Retention cannot delete a concurrently changed snapshot; expired
+requests cannot be reapplied as new work; unavailable or rotated keys preserve
 recoverable ownership across cancellation and restart. Persistent namespace,
-operator-recovery and race checks are consolidated in [CW-07](#cw-07) and
-[CW-39](#cw-39).
+operator-recovery and race tests are in [CW-07](#cw-07) and [CW-39](#cw-39).
 
 <a id="cw-72"></a>
 
 ### Make component capabilities and wrapper delegation explicit (CW-72)
 
 **Kind:** API/design improvement. **Area:** Core component contracts, wrappers, SDK/Host.
-**Priority:** Medium. **Effort:** Large. **Review:** remaining M19, M20.
-**Origin:** CG-11's remaining native service capabilities.
+**Priority:** Medium. **Effort:** Large.
 
-**Work:** Define which hooks are required, optional or unsupported, and reduce
-fragile manual delegation through an appropriate capability/delegation design.
-Document asynchronous `Send`/`Sync`, serialization and cancellation obligations.
-Any ABI extension must be explicit and versioned rather than inferred from a
-trait name or a successful no-op default.
+`ComputationComponent` and its sub-traits have many optional hooks with
+default implementations. A wrapper component (such as a checkpointing or proxy
+wrapper) that forgets to forward one silently uses the default, so the wrapped
+component appears to lack a capability, or a no-op default looks like success.
 
-Select further native services by concrete need, including resource injection
-and in-place plugin reconfiguration where currently unsupported. Reuse scoped
-services rather than pass arbitrary Rust objects or storage pointers across FFI.
-The query plugin's indexed processing, bootstrap-state, scheduling bindings and
-output observation/recovery services are implemented and explicitly negotiated.
-Generic non-query scheduled work is [CW-81](#cw-81); do not reopen query service
-bindings as a blanket missing capability.
+**What remains:**
 
-`CheckpointedSink` now forwards compatible hooks and checkpoints batched input.
-The remaining capability is safe scoped progress deletion and combined
-inner/wrapper retirement proof. Until that exists, retain explicit unsupported
-results; never forward permanent deletion or a batch past the progress owner.
+- Document which hooks are required, optional or unsupported for each role,
+  and the `Send`/`Sync`, serialization and cancellation obligations of the
+  asynchronous hooks.
+- Replace hand-written forwarding with a capability or delegation design that
+  makes a missing forward a compile error or an explicit "unsupported" result.
+- Any ABI extension must be explicitly versioned and negotiated, never inferred
+  from a trait name or a successful no-op default.
+- Add further native services only for a concrete need. Native factories can
+  receive only the Host's fixed resource set (bootstrap, QoS channel,
+  checkpoint, identity, processing); reuse scoped services rather than pass Rust
+  objects or storage pointers across FFI. Native in-place updates
+  (`assess`/`apply`), query processing/bootstrap/scheduling/output services and
+  non-query scheduling are already negotiated; do not reopen them.
+- For `CheckpointedSink`, add scoped progress-store deletion and combined
+  inner/wrapper retirement proof. Until then keep its explicit rejections; never
+  forward permanent deletion or a batch past the progress owner.
 
-**Finish when:** Wrapped and unwrapped components provide equivalent advertised
-behavior, demonstrated by the capability/delegation matrix in [CW-10](#cw-10).
-Unsupported combinations reject before falsely promising successful cleanup.
+**Example:** `CheckpointedSink` hand-forwards about 30 methods to its inner sink.
+A new defaulted hook added to `EnvelopeSink` would not be forwarded unless
+someone remembers to add it. Separately, deleting a checkpointed sink fails with
+"checkpointed sink cannot delete its inner state without scoped progress-store
+deletion".
+
+**Evidence:**
+
+- `drasi-core/lib/src/computation/v1/component.rs:52-311`: traits with defaulted
+  hooks.
+- `drasi-core/lib/src/computation/v1/consumer_recovery.rs:927` (`CheckpointedSink`),
+  `:943`, `:1016`, `:1058` (explicit rejections).
+- `drasi-core/components/host-sdk/src/computation/factory.rs:120-170,260-340`:
+  the fixed native resource set.
+- `drasi-core/components/computation-plugin-abi/src/lib.rs:245-250,324`:
+  native `assess`/`apply`.
+
+**Done when:** Wrapped and unwrapped components provide the same advertised
+behavior, shown by the capability/delegation matrix in [CW-10](#cw-10), and
+unsupported combinations reject before promising successful cleanup.
 
 <a id="cw-73"></a>
 
 ### Finish release and migration documentation (CW-73)
 
-**Kind:** Release preparation/documentation improvement. **Area:** Core, Server and consumers.
+**Kind:** Release preparation/documentation. **Area:** Core, Server and consumers.
 **Priority:** High before publishing the replacement. **Effort:** Medium to large.
-**Review:** remaining H10, M35, M36, M37.
 
-**Work:** Write one release migration guide covering removed/renamed APIs,
-instance-scoped Server configuration/routes, query inputs/results, supported
-Server/plugin pairing and explicit backup/reset/rebootstrap procedures for old
-state. This is a breaking replacement: do not restore deprecated aliases or
-promise automatic conversion of incompatible stored data.
+ComputationGraph is a breaking replacement for the current published Drasi
+libraries and Server. Users need one guide that tells them what changed and how
+to move an existing deployment, and the published install instructions must
+match what is actually released.
 
-Current query-plugin source-build and explicit registration instructions are in
-place. The release guide must carry that required registration, supported storage
-profiles, per-item transport limits, retained recovery rules and reset-baseline
-behavior into the published package/Server instructions. Verify distribution
-metadata and matching native library availability rather than assume the local
-build is already a published installable plugin.
+**What remains:**
 
-When the matching packages are published, update development-branch navigation
-and installation snippets to the supported release. Until then, keep truthful
-source-build instructions rather than direct users to crates lacking these APIs.
-Preserve commit-pinned evidence where provenance matters. Docs.rs/package,
-dependency/publication metadata and documented-command checks are consolidated
-in [CW-85](#cw-85), including the plural `build-native-network-plugins` target.
-One known navigation failure is `docs/README.md` linking to a nonexistent root
-`CONTRIBUTING.md`; repair that target as part of this documentation cleanup.
+- Write one release migration guide covering removed/renamed APIs,
+  instance-scoped Server configuration and routes, query inputs and results,
+  supported Server/plugin pairings, and explicit backup, reset and rebootstrap
+  procedures for old state. Do not restore deprecated aliases or promise
+  automatic conversion of incompatible stored data.
+- Carry the required query-factory registration, supported storage profiles,
+  per-item transport limits ([CW-76](#cw-76)), retained recovery rules and
+  reset-baseline behavior into the published package and Server instructions.
+- Verify distribution metadata and that matching native libraries are
+  available, instead of assuming a local build is an installable plugin.
+- Once matching packages are published, update navigation and install snippets
+  to that release. Until then keep the truthful source-build instructions
+  (component READMEs currently use `drasi-lib = { path = "../drasi-core/lib" }`).
+- Fix `drasi-core/docs/README.md:9`, which links to a nonexistent
+  `../CONTRIBUTING.md`.
+- Give each contract topic in the usage, configuration and reference documents
+  one authoritative home and link to it, instead of repeating explanations.
+- Generate versions and changelogs with release-plz (`drasi-core/release-plz.toml`),
+  never by hand.
 
-Reduce overlapping contract explanations in usage/configuration/reference
-documents by assigning each topic an authoritative home and linking to it.
-Keep the developer book's evolving example; its existing compilation of all
-40 illustrations and 23 exact excerpts is retained evidence in [CW-85](#cw-85),
-not missing implementation.
-Generate versions/changelogs through release-plz, never by hand.
+**Example:** A user running published Drasi Server with a SQLite-backed
+continuous query must be able to follow the guide to back up, install the new
+Server and native query plugin, register the query factory, and rebootstrap,
+without reading source code.
 
-**Finish when:** A reader can build/install the advertised version, choose the
-correct configuration and safely replace an old deployment using only the
-published guidance. Links, docs.rs/package builds and example checks agree with
-the release; design guides contain current behavior, not competing work queues.
+**Evidence:** `drasi-core/docs/README.md:9`;
+`drasi-core/components/computation-plugins/transformers/query/README.md:60-100`
+(current registration instructions); `drasi-core/lib/Cargo.toml:18`
+(`version = "0.9.3"`).
+
+**Done when:** A reader can build or install the advertised version, choose the
+right configuration and safely replace an old deployment using only the
+published guidance. Link, docs.rs/package, documented-command (including the
+`build-native-network-plugins` Make target) and developer-guide example checks
+are [CW-85](#cw-85).
 
 <a id="cw-74"></a>
 
@@ -1488,18 +1206,34 @@ the release; design guides contain current behavior, not competing work queues.
 
 **Kind:** Optional performance capability. **Area:** Core pipes and delivery.
 **Priority:** Measurement-led future work. **Effort:** Medium to large.
-**Origins:** pipe-guide improvement list; CG backlog's optional policies.
 
-**Work:** Evaluate asynchronous rate/burst admission or delivery limits separately
-from capacity quotas. If measured workloads need independently completing
-in-flight deliveries, design a bounded acknowledgement window that advances
-durable progress only through the contiguous completed prefix. Existing batch
-receive is not missing, and this work must not silently change its contract.
+Pipes currently limit how much data is queued (capacity) but not how fast it
+flows, and a consumer handles deliveries in order. Some workloads may benefit
+from rate limits or from letting several deliveries complete independently.
+Only adopt either if measurements show a need.
 
-**Finish when:** Each adopted policy enforces its chosen rate/burst or window
-bound without changing ordering, shared QoS accounting or required delivery
-obligations. Controlled-clock/failure cases are owned by [CW-39](#cw-39) and
-measurements by [CW-40](#cw-40). Reject unjustified complexity.
+**What remains:**
+
+- Evaluate asynchronous rate/burst limits on admission or delivery, kept
+  separate from capacity quotas.
+- If measured workloads need independently completing in-flight deliveries,
+  design a bounded acknowledgement window that advances durable progress only
+  through the contiguous completed prefix.
+- Leave the existing `receive_batch` contract unchanged.
+
+**Example:** An HTTP sink with a destination limit of 100 requests per second
+could use a rate/burst policy instead of failing and retrying. A sink with
+independent 200 ms calls could keep 8 in flight; if deliveries 1, 2 and 4
+complete, progress advances only to 2.
+
+**Evidence:** `drasi-core/lib/src/computation/v1/pipe.rs:195`,
+`qos_pipe.rs:1701`, `retained_pipe.rs:415` (`receive_batch`); no rate or
+in-flight window in the pipe implementations.
+
+**Done when:** Each adopted policy enforces its rate/burst or window bound
+without changing ordering, shared QoS accounting or required delivery
+guarantees. Controlled-clock/failure tests are [CW-39](#cw-39) and measurements
+are [CW-40](#cw-40). Reject complexity that measurements do not justify.
 
 <a id="cw-75"></a>
 
@@ -1507,17 +1241,37 @@ measurements by [CW-40](#cw-40). Reject unjustified complexity.
 
 **Kind:** Optional platform capability. **Area:** instance-host, bridge, Server.
 **Priority:** Required before advertising an additional profile. **Effort:** Large.
-**Origins:** execution/isolation bridge, hierarchical-host and prepared-peer phases.
 
-**Work:** Define and implement a Windows hosting/supervision profile if required;
-the existing process-host evidence is Unix. Select explicit kernel
-CPU/memory/process containment where a deployment needs it; in-process unwind
-handling cannot contain aborts or unsafe memory faults.
+The instance host, which runs DrasiLib instances as supervised child
+processes, works only on Unix and provides no OS-level resource containment.
+Its runtime budgets are scheduling and size limits, not a sandbox.
 
-**Finish when:** Each adopted hosting/containment profile implements its ownership
-and isolation contract and passes [CW-91](#cw-91)'s platform/network qualification.
-This adds no remote component-method executor, distributed transaction promise
-or automatic remote provisioning.
+**What remains:**
+
+- If Windows hosting is required, define and implement a Windows
+  supervision profile. On non-Unix platforms the supervisor factory is
+  registered but rejects use.
+- Where a deployment needs it, add explicit kernel CPU/memory/process
+  containment (for example cgroups or job objects) and kernel-enforced
+  parent-death fencing. In-process unwind handling cannot contain aborts or
+  unsafe memory faults.
+
+**Example:** A host configuration with
+`require_hard_resource_isolation: true` fails validation with "hard
+CPU/memory/security isolation is unsupported; runtime budgets are not an OS
+sandbox".
+
+**Evidence:**
+
+- `drasi-core/components/instance-host/src/lib.rs:7-34`: modules are
+  `#[cfg(unix)]`; `unsupported.rs` is used elsewhere.
+- `drasi-core/components/instance-host/src/config.rs:44-59,131-138`:
+  `RuntimeBudget` and the rejected isolation options.
+
+**Done when:** Each adopted hosting/containment profile implements its
+ownership and isolation contract and passes [CW-91](#cw-91)'s
+platform/network qualification. This adds no remote component-method executor,
+distributed transaction promise or automatic remote provisioning.
 
 <a id="cw-76"></a>
 
@@ -1525,121 +1279,4102 @@ or automatic remote provisioning.
 
 **Kind:** Transport capability gap. **Area:** Native contracts, ABI, SDK/Host.
 **Priority:** High before claiming parity for large individual payloads.
-**Effort:** Medium. **Origin:** CW-43 follow-up.
+**Effort:** Medium.
 
-**Current boundary:** Snapshots, history and snapshot/live attachment are already
-paged without a whole-result count or byte cap. However, each record/envelope
-must fit the [16 MiB read-page limit](../../components/computation-plugin-abi/src/output_reads.rs);
-the separate [64 MiB processing-message limit](../../components/computation-plugin-abi/src/lib.rs)
-does not make such an item readable.
+A native query can process an item up to 64 MiB, but cannot return any single
+result record or envelope larger than 16 MiB when results are read back.
+Whole result sets are already paged without a total size limit; the problem
+is only one oversized item.
 
-**Work:** Add negotiated bounded fragmentation/reassembly for individual items,
-reusing the existing codecs and owned transfers. Cover snapshot, replay, recovery
-view and follow paths consistently. Preserve schema/identity checks, coherent
-snapshot/history heads, page order, cancellation and activation retirement.
-Do not just raise all limits or allocate an unbounded second projection.
+**What remains:**
 
-**Finish when:** An item valid for processing but larger than the old read-page
-bound can be read and replayed intact, with stated end-to-end maximum and
-allocation bounds. Boundary-size, malformed-fragment and cleanup proof is owned
-by [CW-41](#cw-41).
-Aggregate queue/result-memory quotas remain [CW-29](#cw-29).
+- Add negotiated, bounded fragmentation and reassembly for individual items,
+  reusing the existing codecs and owned transfers.
+- Apply it consistently to snapshot, replay, recovery-view and follow reads.
+- Preserve schema/identity checks, coherent snapshot/history heads, page order,
+  cancellation and activation retirement.
+- Do not just raise all limits or keep an unbounded second copy.
+
+**Example:** A query emits a row containing a 20 MiB JSON document. Processing
+succeeds, but a snapshot read or replay of that row fails because the encoded
+read reply exceeds `MAX_READ_BYTES`.
+
+**Evidence:**
+
+- `drasi-core/components/computation-plugin-abi/src/output_reads.rs:19`:
+  `MAX_READ_BYTES = 16 MiB`.
+- `drasi-core/components/computation-plugin-abi/src/lib.rs:34`:
+  `MAX_MESSAGE_BYTES = 64 MiB`.
+- `drasi-core/components/host-sdk/src/computation/output_reads.rs:230`,
+  `output_reads/transfer.rs:295`, `output_follow.rs:216`: oversize rejection.
+
+**Done when:** An item valid for processing but larger than 16 MiB can be read
+and replayed intact, with a stated end-to-end maximum and allocation bound.
+Boundary-size, malformed-fragment and cleanup tests are [CW-41](#cw-41).
+Aggregate queue/result memory quotas are [CW-29](#cw-29).
 
 <a id="cw-80"></a>
 
 ### Retire the remaining linked query runtime entry points (CW-80)
 
-**Kind:** Breaking-release cleanup. **Area:** Core library, tests and examples.
+**Kind:** Breaking-release cleanup. **Area:** Core library, tests, examples and Server.
 **Priority:** Medium; after parity evidence. **Effort:** Medium.
-**Origin:** CW-43 follow-up. **Depends on:** CW-77 and CW-79.
+**Depends on:** [CW-77](#cw-77) and [CW-79](#cw-79).
 
-**Current boundary:** Ordinary query selection is already explicit and has no
-automatic linked fallback. `ContinuousQueryFactory` and
-`ContinuousQueryTransformer` still exist as explicitly selected reference
-constructors, including in low-level examples and preservation tests.
+Queries normally run through the native query plugin, and there is no automatic
+fallback to the in-process (linked) query runtime. The linked runtime is still
+reachable through explicit constructors that many tests and examples use. Keeping
+two ways to run a query means two paths to maintain and test.
 
-**Work:** Inventory those remaining callers and registrations. Move supported
-hosted-query behavior to the selected native factory, then remove the obsolete
-library entry points and dependency/build paths whose last user has moved.
-Retain the useful Core evaluator, shared implementation and behavior assertions.
-Preserve a reproducible pinned comparison baseline before removing executable
-reference fixtures; do not delete tests merely to reduce the change size.
+**What remains:**
 
-**Finish when:** Supported application and test paths no longer need the linked
-query runtime, missing native registration still fails explicitly, and current
-native behavior coverage remains intact. This does not require deleting the
-ordinary Source/Reaction compatibility stack tracked in [CW-63](#cw-63).
+- Inventory callers of the linked entry points: `ContinuousQueryFactory::default()`
+  (a factory with no constructor, which builds `ContinuousQueryTransformer`
+  in-process) and `ContinuousQueryTransformer::new`/`new_configured`/`construct`.
+  About 90 Rust files in drasi-core and 14 in drasi-server reference them
+  (mostly tests and examples, for example `drasi-core/lib/examples/stockroom.rs:119,380`).
+- Move each supported caller to the registered native query factory, then
+  remove the linked constructors and any dependency/build paths they alone use.
+- Keep `ContinuousQueryFactory::with_constructor`, or a renamed equivalent: the
+  Host uses it to wrap the native query plugin
+  (`drasi-core/components/host-sdk/src/computation/query.rs:154`).
+- Replace Server's use of `ContinuousQueryFactory::default()` to look up the
+  query implementation identity (`drasi-server/src/computation.rs:335`).
+- Keep the Core evaluator, shared query code and behavior assertions. Keep a
+  reproducible, pinned comparison baseline before removing executable reference
+  fixtures; do not delete tests just to shrink the change.
 
-<a id="cw-81"></a>
+**Evidence:** `drasi-core/lib/src/computation/v1/query.rs:186`
+(`ContinuousQueryTransformer`), `:1756-1942` (`ContinuousQueryFactory`,
+`with_constructor`), `:2232-2250` (linked construction when no constructor is
+set).
 
-### Expose transaction-owned scheduling to non-query native transformers (CW-81)
-
-**Status:** Implemented and qualified for the standalone atomic-persistent
-profile; retained completion anchor.
-**Area:** Core, native contracts, SDK/Host. **Origin:** General scheduling work
-separated from CW-43.
-
-The negotiated `scheduled_processing` capability extends the existing
-processing table without changing base native or legacy ABI layouts.
-`NativeProcessingContext` requests, looks up, replaces, cancels, claims and
-completes work through the existing revocable transaction mailbox. State,
-scheduled requests and retained output commit together; deadline observations
-publish only afterward. Incarnation tokens reject stale operations, and a
-successful claim must be explicitly completed. No second transaction owner or
-scheduler task hierarchy is introduced. Query scheduling reuses the same shared
-wakeup implementation and retains its public re-exports and behavior.
-
-The real [delayed-emission fixture](../../components/host-sdk/tests/fixtures/native_scheduling.rs)
-and [standalone Host suite](../../components/host-sdk/tests/native_scheduling.rs)
-cover controlled clocks, rollback, replacement/cancellation, due work without
-input, loaded/static paths and real subprocess exits around request/completion
-commits. Both Tokio runtime flavors are covered.
-
-**Limits:** The qualified provider is atomic persistent RocksDB with persistent
-checkpoints and declared process-restart durability. No-op memory and non-atomic
-bundles reject rather than gain stronger guarantees. Bounds are 256-byte keys,
-64-KiB payloads, 4,096 outstanding requests and 1 MiB of encoded scheduling state.
-One committed completion does not mean exactly-once external delivery.
-The mixed SQLite/query/non-query application remains [CW-82](#cw-82).
+**Done when:** Supported application and test paths no longer need the linked
+query runtime, a missing native registration still fails explicitly, and native
+behavior coverage is intact. This does not require removing the ordinary
+Source/Reaction stack ([CW-63](#cw-63)).
 
 <a id="testing-and-qualification"></a>
 
+<a id="native-plugins-shared-work"></a>
+
+## Native plugins: shared work
+
+These entries cover work that every native source, initial-data provider and
+sink depends on: the SDK lifecycle helpers, the conformance kit, configuration
+and secrets, update planning, retry and delivery rules, observability,
+documentation and distribution. Plugin-specific follow-ups live under each
+plugin's own entry; these entries hold only the shared part.
+
+<a id="cw-96"></a>
+<a id="source-x-01"></a>
+<a id="sink-x-01"></a>
+
+### Make pause and stop behave the same in every plugin (CW-96, Source X-01, Sink X-01)
+
+**Kind:** Issue. **Priority:** High (P0). **Effort:** Medium.
+
+The lifecycle rules are written down in the native source and sink guides, but
+the SDK helpers that would enforce them are unused and incomplete. Each plugin
+builds its own pause gate and worker shutdown, and several plugins keep working
+while paused.
+
+**What remains:**
+
+- `ActivationScope::stop` joins workers with no deadline and does not keep
+  workers it failed to join, so a `stop` that times out cannot be retried
+  safely. Make it deadline-aware and keep unjoined workers for the next attempt
+  (the contracts crate already has `join_owned_worker_gracefully`).
+- Move plugins onto the SDK's `ActivationScope` and `PauseGate`. No plugin uses
+  them today: PostgreSQL has its own `PauseGate`, and the SSE and log sinks
+  have local gates (the sink side is NI-03 in [CW-101](#cw-101)).
+- Add a Host test proving the Host calls no `handle` on a host-driven sink while
+  it is paused and that work already in flight settles before Pause returns.
+  The sink guide relies on this for the HTTP, gRPC and log sinks.
+- Add pause-gate checks to the conformance kit (see
+  [the conformance kit entry](#source-x-02)).
+
+The plugins that still work while paused (MySQL, SQL Server, SQLite, bridge
+source, profiler) are tracked under their own entries.
+
+**Example:** a source worker blocked on a slow database read misses the stop
+deadline. `ActivationScope::stop` keeps waiting instead of returning a timeout
+with the worker still owned, so a retried `stop` has nothing to join.
+
+**Evidence:** `drasi-core/components/computation-plugin-sdk/src/lifecycle.rs:217-295`
+(`ActivationScope`, `stop` at 273-292, `PauseGate` at 295);
+`drasi-core/components/computation-contracts/src/workers.rs:118`;
+`drasi-core/components/computation-plugins/sources/postgres/src/worker.rs:73`;
+`drasi-core/components/computation-plugins/sinks/NATIVE-SINK-GUIDE.md:17`;
+`drasi-core/components/computation-plugins/sources/NATIVE-SOURCE-GUIDE.md`.
+
+**Done when:** `ActivationScope::stop` honours its deadline and a retried stop
+joins the leftover workers; all plugins use the SDK gate or document why not;
+the Host test for host-driven sinks passes; and the conformance kit fails a
+plugin that emits or writes while paused.
+
+<a id="cw-98"></a>
+<a id="source-d-1"></a>
+<a id="sink-d-1"></a>
+
+### Make Erase work for plugins that own nothing or own shared state (CW-98, Source D-1, Sink D-1)
+
+**Kind:** Issue + Decision. **Priority:** High. **Effort:** Medium.
+
+The Host fails Erase for any factory that does not declare
+`erases_owned_state`, and there is no way for a factory to say it owns no
+external state. Removing a component with `StateIntent::Erase` therefore fails
+for plugins that have nothing to erase.
+
+**What remains:**
+
+- **Decide** the mechanism: (a) a new factory capability "owns no external
+  state" that lets the Host complete Erase without calling the plugin, or
+  (b) plugins declare `erases_owned_state` and implement a no-op erase.
+  **Recommendation:** (a); it is explicit and stops plugins from claiming an
+  erase they do not perform.
+- Define SDK idempotent-retry semantics for erase: a second Erase after a
+  partial first one must finish the job and must not fail on missing objects.
+- Add erase-twice and erase-after-failed-start cases to the conformance kit;
+  add an erase-twice test for the query transformer.
+- For `drasi.network/http-delivery` sinks, erase must also remove the Host
+  `DeliveryRunner` progress record.
+
+Per-plugin erase gaps (factories without erase, the PostgreSQL storedproc
+delivery table, the bridge sink) belong to those plugins.
+
+**Example:** removing a log sink with `StateIntent::Erase` fails at the Host
+check, although the log sink stores nothing.
+
+**Evidence:** `drasi-core/components/host-sdk/src/computation/proxy.rs:1539-1542`;
+`drasi-core/components/computation-plugin-sdk/src/metadata.rs:222`.
+
+**Done when:** the mechanism is chosen and implemented; Erase succeeds for
+plugins that own nothing and is idempotent for plugins that own state; and the
+conformance kit checks erase twice for every plugin that runs it.
+
+<a id="source-x-02"></a>
+<a id="sink-x-02"></a>
+
+### Run the conformance kit through loaded libraries and publish it (Source X-02, Sink X-02)
+
+**Kind:** Qualification. **Priority:** High (P0). **Effort:** Large.
+
+`SourceConformance` and `SinkConformance` take a linked `&dyn Factory`, so they
+never exercise a plugin through the C ABI. Only the HTTP and gRPC sources and
+the HTTP, gRPC, SSE and log sinks use them, and vendors cannot use them as an
+external qualification kit.
+
+**What remains:**
+
+- A dynamic-library driver in the Host SDK that runs the same checks against a
+  built `cdylib`, on both Tokio flavours.
+- Missing scenarios: stop timeout followed by a successful retry; the full
+  `DisposeReason` matrix (the kit uses only `Shutdown` and `Removal`); dispose
+  after a failed initialization; refusal of a stale or forged update plan;
+  pause checks ([CW-96](#cw-96)); erase twice ([CW-98](#cw-98)); a crashed
+  consumer for durable sinks.
+- Every native plugin runs the kit, linked and loaded.
+- Publish the kit and driver as a supported vendor surface with
+  documentation. The Host pipeline suite hard-codes Core package names in
+  `plugin_package`, so it cannot run a vendor plugin.
+
+The loaded-library run overlaps [CW-41](#cw-41) item 2; that entry owns the
+wider ABI contract matrix.
+
+**Example:** a vendor builds `libacme_db.dylib`. They cannot point the kit at
+it; they would have to copy Host test code that only knows Core plugins.
+
+**Evidence:** `drasi-core/components/computation-plugin-sdk/src/testing.rs:19-20,162,244,298,464`;
+`drasi-core/components/computation-plugin-sdk/Cargo.toml:13` (`test-support`);
+`drasi-core/components/host-sdk/tests/native_computation_pipeline.rs:67-76`.
+
+**Done when:** every native plugin passes the kit both linked and loaded on both
+Tokio flavours, including the missing scenarios; and a vendor can run the kit
+against their own library from published crates with documented steps.
+
+<a id="source-x-03"></a>
+<a id="sink-x-09"></a>
+
+### Finish shared configuration, secret and credential support (Source X-03, Sink X-09)
+
+**Kind:** Improvement. **Priority:** High (P1). **Effort:** Medium.
+
+`ConfigOption::secret()` exists and secrets are flattened to top-level fields,
+but nested settings are still invisible to configuration forms and some
+credential paths are missing. Database factories still mark a whole `settings`
+object secret by hand.
+
+**What remains:**
+
+- Describe nested configuration (fields, defaults, conditional requirements)
+  in published schemas and `configuration_details`, so forms can render it.
+- A shared rule and helper for `deny_unknown_fields` and a redacting `Debug`
+  on configuration types.
+- Nested secret references (for example HTTP webhook secrets, HT-04 in
+  [CW-100](#cw-100)) and proof that object-valued secrets resolve (NI-01 in
+  [CW-101](#cw-101)).
+- Consumer-wrapper factories reject the `identity` resource, so a durable
+  consumer sink cannot use activation credentials (rotation on each start).
+  Allow it, or document the alternative.
+- Document default, persistence, redaction and rotation semantics, and warn
+  against removing credentials from `configuration()`, which breaks
+  reconstruction.
+
+**Example:** the MySQL source declares one secret `settings` object. A form
+shows a single opaque field, with no host, port or TLS mode, and a pasted
+literal object is rejected because secret fields require references.
+
+**Evidence:** `drasi-core/components/computation-plugin-sdk/src/configuration.rs:221-226`;
+`drasi-core/components/computation-plugins/sources/mysql/src/lib.rs:71`;
+`drasi-core/components/host-sdk/src/computation/factory.rs:1373`;
+`drasi-core/lib/src/computation/v1/graph/specification.rs:140-160`.
+
+**Done when:** nested settings appear in published schemas; no factory sets
+`.secret = true` by hand; consumer sinks can use activation credentials or the
+limit is documented; and the semantics are documented in the SDK guide.
+
+<a id="source-x-04"></a>
+<a id="sink-x-10"></a>
+
+### Make update planning reachable for real plugin changes (Source X-04, Sink X-10)
+
+**Kind:** Issue. **Priority:** Medium (P1). **Effort:** Medium.
+
+Plugins implement `plan_update`, but the Host adapter refuses to ask most of
+them. It rejects every factory that binds its own inputs and every
+configuration that contains an unresolved reference, so "supports lifecycle"
+does not mean a plugin can be reconfigured.
+
+**What remains:**
+
+- Assess configurations that hold secret references, by comparing references
+  rather than resolved values.
+- A shared rule for what each change kind returns (`Replace`/`Recreate`,
+  `Preserve`/`Reset`/`Rebootstrap`), applied by every plugin's `plan_update`,
+  with tests. `Rebootstrap` acceptance is [CW-92](#cw-92); live input
+  rebinding is [CW-94](#cw-94).
+- Say in the SDK guide which changes a vendor can expect to apply live.
+
+**Example:** changing the PostgreSQL source's `slotName` while its password is a
+secret reference fails with "native update assessment requires literal
+configuration; unresolved references cannot be assessed", before the plugin
+sees the change.
+
+**Evidence:** `drasi-core/components/host-sdk/src/computation/factory.rs:1316-1345`
+(`binds_inputs` rejection at 1322-1325), `:1800-1815` (literal configuration);
+`drasi-core/lib/src/management/update_planning.rs:516,551-565,601`.
+
+Unverified: whether every managed update reaches this adapter check; DrasiLib
+also calls `factory.plan_update` directly.
+
+**Done when:** a plugin with secret references gets its `plan_update` called;
+each plugin's plan follows the shared rule and is tested; and the guide lists
+the supported live changes.
+
+<a id="source-x-05"></a>
+<a id="source-x-06"></a>
+<a id="sink-x-05"></a>
+
+### Share one retry, backoff and error-classification policy (Source X-05, Source X-06, Sink X-05)
+
+**Kind:** Improvement. **Priority:** Medium (P1). **Effort:** Medium.
+
+The only shared retry helper lives in `common/network` and is used by network
+sinks. PostgreSQL has its own jitter, and the database sinks, bridge, MySQL and
+SQL Server have no common policy. `ConsumerFailure::retryable` defaults to
+`false`, so most sinks report every failure as permanent.
+
+**What remains:**
+
+- Move the retry/backoff policy to a family-neutral crate usable by sources,
+  providers and sinks; adopt it in each plugin.
+- A typed error taxonomy (transient, permanent, configuration, authentication)
+  that maps onto `retryable` and onto activation failure, replacing string
+  matching such as the legacy `categorize_error`.
+- Implement `retryable` in every durable consumer sink.
+
+**Example:** a SQL Server deadlock in the storedproc sink is reported with the
+default `retryable = false`, so it is treated as permanent.
+
+**Evidence:** `drasi-core/components/computation-plugins/common/network/src/retry.rs`;
+`drasi-core/components/computation-plugins/sources/postgres/src/worker.rs:620`;
+`drasi-core/components/grpc-common/src/output/send.rs:309`;
+`drasi-core/components/computation-plugin-sdk/src/consumer.rs:59`.
+
+**Done when:** one policy crate is used by every native plugin that retries;
+errors are classified by type, not message text; and each durable consumer sink
+implements `retryable` with tests.
+
+<a id="sink-x-03"></a>
+<a id="sink-x-04"></a>
+<a id="sink-x-07"></a>
+
+### Apply one delivery contract to all sinks (Sink X-03, Sink X-04, Sink X-07)
+
+**Kind:** Improvement. **Priority:** Medium (P1). **Effort:** Medium.
+
+Sinks use three delivery styles (host-driven `DeliveryRunner`, plugin-owned
+durable consumer, and best-effort) without one documented rule for choosing
+between them or for idempotency. Vendors writing a database sink have to work
+out the delivery contract themselves.
+
+**What remains:**
+
+- Document the choice rule and the duplicate/loss outcome of each style in the
+  sink guide, with a database-sink lesson (row mapping, transaction per batch,
+  acknowledgement after commit).
+- An idempotency-key rule for remote sinks that cannot deduplicate, used by
+  future ports.
+- Move remaining sinks that fit the host-driven profile onto
+  `DeliveryRunner` (plugin parts sit with each plugin).
+
+**Example:** a vendor's sink acknowledges before its database commit; on crash
+the change is lost, and nothing in the guide warns against it.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/NATIVE-SINK-GUIDE.md`;
+`drasi-core/components/computation-plugin-sdk/src/consumer.rs:59`.
+
+**Done when:** the guide states the rule and outcomes; new sinks follow it; and
+the kit's crash case checks the declared outcome.
+
+<a id="sink-x-06"></a>
+
+### Set shared limits for batches and large inputs (Sink X-06)
+
+**Kind:** Improvement. **Priority:** Medium (P1). **Effort:** Small.
+
+Sinks handle oversized inputs differently, and some reject a batch by size
+alone. The shared rule is: split rather than reject on size, and apply a
+timeout to each external command.
+
+**What remains:** write the rule into the sink guide and add a kit scenario with
+an oversized batch. Per-plugin adoption is in [CW-44](#cw-44) and each plugin
+entry.
+
+**Example:** a 50,000-row result change arrives at a storedproc sink; it should
+be split into bounded calls, each with a timeout.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/NATIVE-SINK-GUIDE.md`.
+
+**Done when:** the rule is documented and the kit checks it.
+
+<a id="sink-x-08"></a>
+
+### Share the template renderer and SQL template validator (Sink X-08)
+
+**Kind:** Improvement. **Priority:** Low (P2). **Effort:** Medium.
+
+Handlebars setup and helpers are repeated across the HTTP, gRPC and log sinks
+and several common crates, and each SQL family has its own parameter-only
+validator.
+
+**What remains:** one renderer with the standard helpers and one SQL template
+validator in `reaction-common`, used by the native sinks. This overlaps NI-03
+in [CW-101](#cw-101).
+
+**Example:** a `json` helper fix in the HTTP sink does not reach the log sink.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/http/src/render.rs`;
+`drasi-core/components/computation-plugins/sinks/grpc/src/render.rs`;
+`drasi-core/components/computation-plugins/sinks/log/src/render.rs`;
+`drasi-core/components/postgres-common/src/sql/template.rs:75-86`;
+`drasi-core/components/mssql-common/src/sql/template.rs`.
+
+**Done when:** native sinks use the shared renderer and validator, with the
+existing template tests moved to it.
+
+<a id="source-x-07"></a>
+<a id="sink-x-11"></a>
+
+### Report readiness and metrics from plugins (Source X-07, Sink X-11)
+
+**Kind:** Improvement. **Priority:** Medium (P1). **Effort:** Medium.
+
+Several plugins discard their `ControlSender`, so they never report
+not-ready while a connection is down. The SDK has no metric facility, so
+plugins cannot publish counters through the Host.
+
+**What remains:**
+
+- Use `ControlSender::ready`/`not_ready` in every plugin with an external
+  connection.
+- An SDK metric facility with shared metric names (events, failures, retries,
+  lag), feeding [CW-26](#cw-26). Plugin log forwarding is [CW-24](#cw-24).
+
+**Example:** the gRPC sink's endpoint goes down; the component still reports
+ready because the sink dropped its `ControlSender`.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/grpc/src/lib.rs:98`;
+`drasi-core/components/computation-plugins/sources/postgres/src/lib.rs:158`;
+`drasi-core/components/computation-plugin-sdk/src/control.rs`.
+
+**Done when:** connected plugins report readiness; the SDK exposes metrics with
+documented names; and a test observes both through the Host.
+
+<a id="source-x-08"></a>
+<a id="sink-x-13"></a>
+
+### Remove panics from plugin entry paths and report export errors (Source X-08, Sink X-13)
+
+**Kind:** Issue. **Priority:** Medium (P1). **Effort:** Small.
+
+Plugin `lib.rs` files use `.expect(` while building metadata, and the export
+macro turns a failed or panicking definition into a null metadata pointer,
+discarding the reason. The loader then reports only that metadata is missing.
+
+**What remains:** make the export macro carry the error text to the Host and
+log it; adopt a rule (with a lint or test) of no `expect`/`unreachable!` on
+paths called across the ABI. Per-plugin counts are plugin work.
+
+**Example:** a typo in a field name makes `ConfigDefinition` construction fail;
+the Host reports a null metadata pointer with no cause.
+
+**Evidence:** `drasi-core/components/computation-plugin-sdk/src/lib.rs:75-100`.
+
+**Done when:** a failing definition produces an actionable Host error naming the
+plugin and cause, and the rule is enforced.
+
+<a id="source-x-09"></a>
+<a id="sink-x-14"></a>
+
+### Correct shared plugin documentation (Source X-09, Sink X-14)
+
+**Kind:** Issue. **Priority:** Medium (P1). **Effort:** Small.
+
+The Host SDK README still states native ABI 2.0.0 and wire version 2; the real
+values are ABI 4.0.0, wire 4 and ordinary ABI 0.19.0. Only seven plugins have
+`DESIGN.md` and `CONFIGURATION.md`.
+
+**What remains:** fix the Host SDK README; derive version text from the ABI
+constants or test it; require the two documents for every native plugin
+(per-plugin READMEs are plugin work). Explain in the guides that native
+libraries stay loaded for the process lifetime, so a rebuild needs a restart.
+
+**Example:** a vendor reading the Host SDK README builds against "wire 2" and
+gets an ABI rejection.
+
+**Evidence:** `drasi-core/components/host-sdk/README.md:544,594`;
+`drasi-core/components/computation-plugin-abi/src/lib.rs:26-30`.
+
+**Done when:** no shared doc states a stale version, and a check catches drift.
+
+<a id="source-x-10"></a>
+<a id="sink-x-15"></a>
+
+### Run every native plugin through named CI jobs (Source X-10, Sink X-15)
+
+**Kind:** Qualification. **Priority:** Medium (P1). **Effort:** Medium.
+
+Most test infrastructure work is already tracked: CI gates in
+[CW-85](#cw-85), loaded-library checks in [CW-41](#cw-41), recovery in
+[CW-14](#cw-14), build churn in [CW-87](#cw-87) and MySQL timeouts in
+[CW-99](#cw-99). The shared remainder is that the Host pipeline test maps only
+five Core plugins.
+
+**What remains:** replace the hard-coded `plugin_package` map with a manifest
+covering all native plugins, and give each database plugin a named CI job that
+reports "not run" when its container is unavailable.
+
+**Example:** a new native source cannot be loaded by the pipeline suite without
+editing a `match` arm.
+
+**Evidence:** `drasi-core/components/host-sdk/tests/native_computation_pipeline.rs:67-76`.
+
+**Done when:** all native plugins load in the pipeline suite and each has a named
+job.
+
+<a id="dx-1"></a>
+<a id="dx-5"></a>
+
+### Provide a standalone native plugin starter (DX-1, DX-5)
+
+**Kind:** Improvement. **Priority:** High (P0). **Effort:** Large.
+
+No native plugin project can be built outside the Core checkout. Counter's
+manifest inherits workspace settings, and the developer book's project uses
+path dependencies into `drasi-core`.
+
+**What remains:**
+
+- A standalone project with a native source and sink, registry-versioned
+  manifests, the export feature, a fake database adapter, and Host SDK
+  dependencies only in the test harness.
+- One evolving lesson: emit a change, see query output, write a destination
+  row, then swap in a real driver.
+- Lessons for snapshot plus CDC (handover, checkpoint and resume) and for a
+  database sink (mapping and delivery contract, see
+  [the delivery entry](#sink-x-03)).
+- A release gate that builds the starter from an empty directory using only
+  published crates.
+
+**Example:** a vendor copies `sources/counter`; it fails to build because
+`version.workspace = true` has no workspace.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/counter/Cargo.toml`;
+`drasi-core/lib/docs/developer-guide/stockroom/Cargo.toml:24-28`;
+`drasi-core/components/sources/README.md:8-12`.
+
+**Done when:** the starter builds and passes the conformance kit from an empty
+directory with published crates, as a maintained release gate.
+
+<a id="dx-10"></a>
+
+### Support third-party packaging and discovery (DX-10)
+
+**Kind:** Improvement. **Priority:** Medium (P1). **Effort:** Medium.
+
+The packaging tool is Core's `xtask`, which is not published, and the Host
+loader only discovers files named `libdrasi_*` or `drasi_*`.
+
+**What remains:** a versioned packaging tool or build image that generates
+native OCI metadata and signs artifacts; discovery that does not depend on the
+`drasi` filename prefix (or a documented rule); a supported platform matrix.
+Server deployment recipes are Server work.
+
+**Example:** a valid `libacme_db.so` in the plugin directory is skipped with a
+warning.
+
+**Evidence:** `drasi-core/xtask/Cargo.toml:7`;
+`drasi-core/components/host-sdk/src/loader.rs:784`.
+
+**Done when:** a vendor packages, signs and loads a non-`drasi`-named library
+with published tools.
+
+<a id="native-sources"></a>
+
+## Native sources
+
+Each source has its own section. Work shared by every plugin is under
+[Native plugins: shared work](#native-plugins-shared-work).
+
+<a id="plugin-source-postgres"></a>
+<a id="cw-102"></a>
+
+### PostgreSQL source
+
+`drasi-core/components/computation-plugins/sources/postgres` (with `drasi-core/components/postgres-common` and `drasi-core/components/computation-plugins/bootstrappers/postgres`). Production-ready: real Pause, Drain/Abort stop, managed updates, erase of managed slots, reconnection in every mode, typed failures, activation credentials and schema discovery are implemented; behaviour is in its [DESIGN.md](../../components/computation-plugins/sources/postgres/DESIGN.md) and [CONFIGURATION.md](../../components/computation-plugins/sources/postgres/CONFIGURATION.md). The items below are the remaining follow-ups (formerly CW-102).
+
+<a id="pg-13"></a>
+
+#### Pair the source and its initial-data providers through the coordinator (PG-13)
+
+**Kind:** Improvement. **Priority:** Medium. **Effort:** Medium.
+
+The source and its coordinated and shared bootstrap providers share one configuration shape and derived slot identity, but are configured and validated separately. An operator can give them different databases or publications, and the host cannot check that they belong together.
+
+**What remains:**
+
+- Implement `supports_bootstrap_coordination` and `create_bootstrap_coordinator` for the coordinated and shared factories, as the SQLite source does.
+- Validate that the provider's request matches the source's configuration and scope; keep element-ID and type mapping in `postgres-common`.
+
+**Example:** a `drasi.postgres/shared-transactions` source with `publicationName: orders_pub` and a coordinated provider configured with `publicationName: order_pub` start independently; the coordinator would reject the mismatch at creation.
+
+**Evidence:** no coordinator in `drasi-core/components/computation-plugins/sources/postgres/src/lib.rs`; SQLite reference `drasi-core/components/computation-plugins/sources/sqlite/src/lib.rs:157-177`; SDK hooks `drasi-core/components/computation-plugin-sdk/src/export.rs:86-93`.
+
+**Done when:** coordinated and shared PostgreSQL sources create their providers through the coordinator, and a mismatched provider is refused in a test.
+
+<a id="pg-truncate-reset"></a>
+
+#### Handle TRUNCATE with a typed reset (Source D-9 follow-up)
+
+**Kind:** Improvement. **Priority:** Low. **Effort:** Medium.
+
+A publication that publishes TRUNCATE is refused at start, and a TRUNCATE published later fails the source with a typed `Unsupported`. The legacy source tolerated TRUNCATE. Operators must recreate publications without TRUNCATE, which the default `CREATE PUBLICATION` does not do.
+
+**What remains:** emit a typed reset on TRUNCATE that forces downstream queries to rebuild from a fresh snapshot, then allow publications that publish TRUNCATE.
+
+**Example:** `CREATE PUBLICATION p FOR TABLE orders` (default `publish` includes truncate) is refused until it is recreated `WITH (publish = 'insert, update, delete')`.
+
+**Evidence:** "Unsupported" section of `drasi-core/components/computation-plugins/sources/postgres/DESIGN.md:167-176`.
+
+**Done when:** a TRUNCATE on a published table produces a reset that rebuilds affected queries, covered by a live test.
+
+<a id="pg-10"></a>
+
+#### Offer opt-in whole-row identity for keyless tables (PG-10, Source D-10)
+
+**Kind:** Improvement. **Priority:** Low. **Effort:** Medium.
+
+Tables without a usable key are rejected (documented). The legacy source assigned random IDs, which broke updates and deletes. Some users have keyless tables with `REPLICA IDENTITY FULL`.
+
+**What remains:** an opt-in mode that derives a stable element ID from the full row for tables with `REPLICA IDENTITY FULL`, with its duplicate-row limitation documented.
+
+**Example:** a log table with no primary key and `ALTER TABLE events REPLICA IDENTITY FULL` can be selected only after opting in.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/postgres/DESIGN.md:167-176`.
+
+**Done when:** the opt-in works in a live test, including update and delete, and stays off by default.
+
+<a id="pg-30"></a>
+<a id="pg-33"></a>
+<a id="pg-34"></a>
+<a id="pg-35"></a>
+
+#### Complete PostgreSQL qualification (PG-30, PG-33, PG-34, PG-35)
+
+**Kind:** Qualification. **Priority:** Medium. **Effort:** Medium.
+
+The live suite runs against both the static plugin and the built library, but several claimed behaviours have no test.
+
+**What remains:**
+
+- Run the SDK conformance kit (`SourceConformance`, `drasi-core/components/computation-plugin-sdk/src/testing.rs`) for each factory on both Tokio flavours.
+- Live tests: activation credentials through the built library; the refusal of PostgreSQL 12; a fault injected mid-transaction with reconnect in rows and shared modes; SQLSTATE 55006 classification.
+- Add the rows and shared modes to the [CW-14](#cw-14) crash matrix.
+
+**Example:** `cargo test -p drasi-source-postgres --test native_transactions -- --ignored` should include a case that kills the walsender between `BEGIN` and `COMMIT` of a rows-mode source and checks that no change is lost or duplicated.
+
+**Evidence:** conformance kit used only by `drasi-core/components/computation-plugins/sources/{http,grpc}/src/tests.rs`; live suite `drasi-core/components/sources/postgres/tests/native_transactions/` has no activation-credential or version-refusal case.
+
+**Done when:** the kit and the listed live tests pass in a named CI job ([CW-85](#cw-85)).
+
+<a id="pg-observability"></a>
+
+#### Report PostgreSQL readiness and metrics (Source X-07)
+
+**Kind:** Improvement. **Priority:** Low. **Effort:** Small to medium.
+
+The source logs through `log` but reports no metrics, and its factories drop the `ControlSender`, so reconnect attempts and replication lag are invisible to the host.
+
+**What remains:** report retrying/ready status through the `ControlSender`; emit the shared source metric set ([CW-26](#cw-26)): changes, transactions, bytes, LSN lag, reconnects.
+
+**Example:** during a 30-second reconnect loop the instance status stays "running" with no indication it is retrying.
+
+**Evidence:** `_control: ControlSender` unused at `drasi-core/components/computation-plugins/sources/postgres/src/lib.rs:158,189`.
+
+**Done when:** retry status and the metrics appear for a running source and are covered by a test.
+
+<a id="pg-20"></a>
+
+#### Tidy PostgreSQL mode model and metadata (PG-20, Source X-08)
+
+**Kind:** Improvement. **Priority:** Low. **Effort:** Small.
+
+A `Mode` enum drives configuration and planning, but the component still holds `progress` and `shared` as two `Option`s and bails at run time on an impossible combination. Factory metadata uses `expect`, which is reachable from the FFI exporter.
+
+**What remains:** carry the mode as an enum in the component; build metadata without `expect` (or validate once in a test-covered `LazyLock`).
+
+**Example:** `anyhow::bail!("PostgreSQL source progress binding is invalid")` is reachable only through a construction bug.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/postgres/src/component.rs:71-72,603`; `drasi-core/components/computation-plugins/sources/postgres/src/lib.rs:83,87`.
+
+**Done when:** the invalid-binding branch and metadata `expect`s are gone.
+
+<a id="pg-40"></a>
+
+#### Fix stale ABI text in the PostgreSQL bootstrapper README (PG-40)
+
+**Kind:** Issue. **Priority:** Low. **Effort:** Small.
+
+The source docs are current, but the bootstrapper README still says ABI `2.0.0`; the ABI is `4.0.0`.
+
+**Evidence:** `drasi-core/components/computation-plugins/bootstrappers/postgres/README.md:3-6`; `drasi-core/components/computation-plugin-abi/src/lib.rs:26`.
+
+**Done when:** the README states the current ABI or omits the version.
+
+<a id="plugin-source-mysql"></a>
+
+### MySQL source
+
+`drasi-core/components/computation-plugins/sources/mysql` (engine in `drasi-core/components/mysql-common/src/native`; in-process wrapper in `drasi-core/components/sources/mysql/src/native`). Seven factories with a strong data path (TLS, caching_sha2, binding-checked cursors, retention checks, bounded channels), but no reconnect, DDL fencing on unrelated statements, silent Pause, no management, and an all-secret `settings` object; not production-ready.
+
+<a id="my-01"></a>
+<a id="my-08"></a>
+
+#### Reconnect after transient failures and detect dead peers (MY-01, MY-08, Source X-06)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+
+Any worker error ends replication: the worker logs, exits, and `next()` fails with "replication ended; stop and restart the source". An idle connection never times out, so a half-open TCP connection hangs forever. The legacy source reconnected with exponential backoff.
+
+**What remains:**
+
+- Classify errors as transient or permanent (by MySQL error code, not text).
+- On transient errors, re-run preparation from the last committed position (confirmed checkpoints for tracked modes, last commit file/offset for untracked modes) with jittered, cancellation-aware backoff and a budget; report "retrying" status. Document what untracked and positional modes can lose.
+- Dead-peer watchdog: no frame (heartbeats included) for k × `heartbeat_interval_ms` is a transient error.
+
+**Example:** a MySQL failover or a 5-second network blip ends a `drasi.mysql/shared-changes` source permanently until an operator restarts it.
+
+**Evidence:** worker exits on error `drasi-core/components/mysql-common/src/native/source.rs:906-927`; `next()` bail `:956`; read deadline only after a partial packet `drasi-core/components/mysql-common/src/native/connection.rs:245-254`; legacy backoff `drasi-core/components/sources/mysql/src/stream.rs:123-153`.
+
+**Done when:** proxy-kill, server-restart and half-open-connection tests resume without loss or duplication beyond the documented mode guarantees.
+
+<a id="my-02"></a>
+
+#### Stop fencing on DDL that does not touch selected tables (MY-02, Source D-7)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+
+Any non-`CREATE` statement event in the configured database fences the source with "MySQL DDL or statement-based change requires explicit schema recovery", including `ALTER` on unselected tables and `ANALYZE`/`OPTIMIZE`. The legacy source ignored DDL.
+
+**What remains:**
+
+- Ignore statements that do not touch selected tables, including administrative statements.
+- Untracked modes with FULL row metadata: re-inspect the catalog on `ALTER` of a selected table.
+- Tracked modes: fence only selected-table changes that alter bound facts, with a typed `SchemaChanged` error, as PostgreSQL does.
+
+**Example:** `OPTIMIZE TABLE audit_log` on an unrelated table stops a source that only selects `orders`.
+
+**Evidence:** `drasi-core/components/mysql-common/src/native/binlog.rs:595-604`.
+
+**Done when:** live tests show ALTER on an unselected table, ANALYZE and OPTIMIZE are ignored, and ALTER/TRUNCATE on a selected table produce the chosen typed behaviour.
+
+<a id="my-03"></a>
+
+#### Gate the binlog worker on Pause (MY-03, CW-96)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+
+`pause()` returns success while the binlog worker keeps reading. Updates applied at a Pause boundary then assume a quiet source. Unverified: a pause longer than `net_write_timeout` probably drops the dump connection, and Resume then fails with "replication ended".
+
+**What remains:**
+
+- Either return `lifecycle::unsupported(...)` from Pause, or gate frame reading at a transaction boundary and, for pauses longer than the server timeout, disconnect deliberately and resume from the committed position.
+- The in-process wrapper uses `passive_component_lifecycle!` for pause and resume; forward them to the same gate.
+
+**Example:** a host pause for a 10-minute maintenance window returns `Ok` immediately while events keep arriving.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/mysql/src/component.rs:48-53`; wrapper `drasi-core/components/sources/mysql/src/native/source.rs:246-247`.
+
+**Done when:** a test shows no reads after Pause and resumed flow after Resume (including a pause longer than `net_write_timeout`), or an `unsupported` refusal.
+
+<a id="my-04"></a>
+
+#### Make MySQL disposal explicit and erasable (MY-04, CW-98)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Small.
+
+`dispose` does nothing: the schema publication is retired only in `Drop`, and because the factory does not declare `erases_owned_state` the host refuses removal with erase, although the source owns no server-side state. The in-process wrapper also refuses erase.
+
+**What remains:** retire the schema reader and assert no worker remains in `dispose`; apply the Source D-1 decision in [CW-98](#cw-98) (declare an idempotent no-op erase, or the host rule); double-dispose test.
+
+**Example:** removing a MySQL source with erase fails with "native component does not support permanent state removal".
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/mysql/src/component.rs:57-59`; `Drop` `drasi-core/components/mysql-common/src/native/source.rs:960-969`; `Capabilities::default()` `drasi-core/components/computation-plugins/sources/mysql/src/lib.rs:79`; wrapper `drasi-core/components/sources/mysql/src/native/source.rs:249-256`.
+
+**Done when:** erase removal succeeds (or is refused by the documented rule), twice, and the schema reader is fenced after dispose.
+
+<a id="my-09"></a>
+
+#### Honour start deadlines, cancellation and StopMode (MY-09)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Medium.
+
+`start` waits for progress readiness without a deadline and then uses `io_timeout_ms` as the whole startup budget; `stop` ignores `StopMode` and the host deadline. `io_timeout_ms` is simultaneously the packet timeout, startup budget, stop join budget and history-scan budget.
+
+**What remains:** select on `ctx.cancellation()`/`ctx.deadline()` across every await in `start`, including `wait_ready()`; Drain finishes the current transaction, Abort cancels; keep the worker owned on timeout; split `io_timeout_ms` into separate settings.
+
+**Example:** a host start deadline of 10 s with `io_timeout_ms: 60000` lets startup run for 60 s.
+
+**Evidence:** `drasi-core/components/mysql-common/src/native/source.rs:878-882,898-900,930-937`; `drasi-core/components/computation-plugins/sources/mysql/src/component.rs:45-56`.
+
+**Done when:** conformance-kit start-cancellation, Drain/Abort and stop-timeout-then-retry cases pass.
+
+<a id="my-07"></a>
+
+#### Add MySQL update planning and management (MY-07, Source X-04)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+
+The factories do not implement `Factory::assess` or `NativeManagement`, so every configuration change is refused or requires removal.
+
+**What remains:** a pure assess with `update_modes = [Restart]` (plus InPlace once Pause is real) and `NativeManagement`:
+
+| Boundary | Fields |
+|---|---|
+| Restart (recovery preserved) | `user`/`password`, `ssl_mode`, `tls_ca_pem`, `host`/`port` (same server UUID enforced), `server_id`, `heartbeat_interval_ms`, timeouts, `max_protocol_bytes`, `transactions.*` |
+| Unsupported or Recreate | `database`, `tables`, `table_keys`, `start`, `stream`, `output`, `replay`, `persistent` (all in the binding hash) |
+
+**Example:** rotating a password by editing configuration is refused instead of applied at Stop.
+
+**Evidence:** `Capabilities::default()` `drasi-core/components/computation-plugins/sources/mysql/src/lib.rs:79`; binding hash `drasi-core/components/mysql-common/src/native/source.rs:1058`.
+
+**Done when:** each field has a tested boundary in the assess matrix and Restart apply works through the loaded library.
+
+<a id="my-05"></a>
+<a id="my-06"></a>
+<a id="my-10"></a>
+<a id="my-11"></a>
+
+#### Model MySQL configuration, secrets and defaults (MY-05, MY-06, MY-10, MY-11, Source X-03)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+
+The whole `settings` object is one secret, so host, tables and limits must live in a secret store and cannot be inspected or diffed. No setting has a default, `server_id` must be supplied by hand, and `configuration()` drops `persistent` for the shared-row factories, so reconstruction changes the source.
+
+**What remains:**
+
+- Flatten: `password` a top-level secret field, the rest non-secret; publish nested schemas and `configuration_details`.
+- Activation credentials using the existing `validate_with_activation_credentials`.
+- Defaults matching legacy (port 3306, `ssl_mode`, heartbeat, transactions, `max_protocol_bytes`, timeouts, `start: end`); warn when `tables` is empty.
+- Derive `server_id` from the component ID when omitted; report duplicate-`server_id` disconnects clearly.
+- Include `persistent` in `configuration()`; round-trip test for all seven factories.
+
+**Example:** `{"stream": "orders", "settings": {...}, "persistent": true}` reconstructs as `{"stream": "orders", "settings": {...}}`, i.e. non-persistent.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/mysql/src/lib.rs:62-71`; `drasi-core/components/mysql-common/src/native/mod.rs:35-87,141-152`; `drasi-core/components/mysql-common/src/native/source.rs:868-870`; legacy auto `server_id` `drasi-core/components/sources/mysql/src/descriptor.rs:243-247`.
+
+**Done when:** only the password is secret, defaults are published and equal serde defaults, credentials can come from activation, and all seven factories round-trip.
+
+<a id="my-12"></a>
+
+#### Tolerate unsupported tables in database-wide selection (MY-12)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Small to medium.
+
+With empty `tables`, one table with an unsupported name, type or charset aborts startup. Identifiers are limited to `[A-Za-z0-9_]`, and catalog queries interpolate names into SQL.
+
+**What remains:** skip and warn on unsupported tables when `tables` is empty; allow any identifier via `quote_identifier`; use prepared statements in catalog queries.
+
+**Example:** a database with an `order-items` table cannot be captured at all.
+
+**Evidence:** `drasi-core/components/mysql-common/src/native/catalog.rs:128-160,165-187,494`; `drasi-core/components/mysql-common/src/config.rs:84-89`.
+
+**Done when:** a database-wide source starts with an unsupported table present and captures the others; hyphenated names work.
+
+<a id="my-13"></a>
+
+#### Extend MySQL type coverage (MY-13)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Medium.
+
+The decoder accepts a fixed type list; spatial types and `VECTOR` fail the table, and replication refuses non-UTF-8 charsets except in positional mode. The legacy source decoded leniently.
+
+**What remains:** decode spatial types (WKB/WKT), `VECTOR`, and non-UTF-8 charsets via `encoding_rs`; per-type live tests.
+
+**Example:** a table with a `POINT` column fails with "unsupported native MySQL column type point".
+
+**Evidence:** `drasi-core/components/mysql-common/src/native/catalog.rs:173-187,465-495`.
+
+**Done when:** each type has a live test with the documented mapping.
+
+<a id="my-14"></a>
+
+#### Add MySQL status, tracing and metrics (MY-14, Source X-07)
+
+**Kind:** Improvement. **Priority:** Medium. **Effort:** Small to medium.
+
+The only diagnostics are `log::error!` on worker exit, and the `ControlSender` is dropped. The legacy source reported connect, retry and fence status.
+
+**What remains:** spans with instance and component IDs; status for connect, retry and fence through the `ControlSender`; the shared metric set ([CW-26](#cw-26)) including binlog lag.
+
+**Evidence:** `drasi-core/components/mysql-common/src/native/source.rs:922-924`; `_: ControlSender` throughout `drasi-core/components/computation-plugins/sources/mysql/src/lib.rs`.
+
+**Done when:** status changes are visible to the host and metrics are emitted under test.
+
+<a id="my-15"></a>
+
+#### Carry GTIDs in MySQL checkpoints (MY-15)
+
+**Kind:** Improvement. **Priority:** Low. **Effort:** Medium.
+
+GTIDs are used only for the initial start position; checkpoints store file/offset, so resume after a primary failover is impossible. The legacy source tracked `current_gtid`.
+
+**What remains:** store the GTID set with each checkpoint and resume by GTID when the server UUID changes.
+
+**Evidence:** `MySqlStartPosition::Gtid` `drasi-core/components/mysql-common/src/native/mod.rs:126-128`; legacy `drasi-core/components/sources/mysql/src/stream.rs:52`.
+
+**Done when:** a failover test resumes on the new primary without loss.
+
+<a id="my-16"></a>
+
+#### Pair the MySQL source and bootstrapper through the coordinator (MY-16)
+
+**Kind:** Improvement. **Priority:** Low. **Effort:** Medium.
+
+The source and `drasi-core/components/computation-plugins/bootstrappers/mysql` duplicate `settings` and credentials. Use `supports_bootstrap_coordination`/`create_bootstrap_coordinator` as SQLite does.
+
+**Done when:** coordinated MySQL providers are created through the source's coordinator and mismatches are refused.
+
+<a id="my-17"></a>
+<a id="my-18"></a>
+<a id="my-19"></a>
+<a id="my-20"></a>
+
+#### Simplify MySQL code and its TLS stack (MY-17, MY-18, MY-19, MY-20, Source X-05, Source X-08)
+
+**Kind:** Improvement. **Priority:** Low. **Effort:** Medium.
+
+The seven factories repeat validation and construction; large functions are hard to review; the native build compiles both `mysql_async`/rustls and `native-tls`; errors are untyped prose.
+
+**What remains:**
+
+- Table-driven factories; collapse `MySqlSource` constructors into a mode enum or builder.
+- Split `Binlog::decode_inner`, `prepare_connection` and `catalog::read_tables`; replace anonymous tuples with named structs.
+- Feature-gate `mysql_async`/rustls out of the native build (track [CW-66](#cw-66) RSA/zstd advisories).
+- A typed error enum (`Config`, `Transient`, `PositionUnavailable`, `SchemaChanged`, `Unsupported`, `Auth`, `Fenced`) as PostgreSQL has; remove `expect` from metadata; `RwLock<Option<JoinHandle>>` to a plain field.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/mysql/src/lib.rs:62-81,117-376`; `drasi-core/components/mysql-common/Cargo.toml:51-54,65-67`.
+
+**Done when:** the native plugin build has one TLS stack, factories share one code path, and errors are typed.
+
+<a id="cw-99"></a>
+<a id="my-34"></a>
+
+#### Investigate MySQL multi-thread timeouts (CW-99, MY-34)
+
+**Kind:** Investigation. **Priority:** Medium. **Effort:** Small to medium.
+
+Three shared-graph MySQL source tests time out on the multi-threaded Tokio runtime while their single-threaded variants pass. This may be a concurrency bug in the native MySQL source or a test-timing problem.
+
+**Affected tests** (`drasi-core/components/sources/mysql/src/native/tests/shared.rs`):
+
+- `one_source_two_actual_queries_direct_factory_snapshot_restart_multi_thread` (`:719-721`)
+- `unequal_committed_owners_and_fresh_members_replay_only_missing_effects_multi_thread` (`:919-921`)
+- `independently_timed_snapshots_replay_concurrent_changes_without_stale_rows_multi_thread` (`:1240-1242`)
+
+They fail with "deadline has elapsed"; at least one still fails when run alone.
+
+**Example:**
+
+```bash
+cargo test -p drasi-source-mysql --lib --locked -- --ignored native:: --test-threads=1
+```
+
+**What remains:** find the cause and fix it in the source (not by raising the deadline) unless it is shown to be test-only. Fixture cost is [CW-87](#cw-87) and the crash matrix [CW-14](#cw-14).
+
+**Done when:** all three `multi_thread` variants pass repeatedly alongside their `current_thread` variants.
+
+<a id="my-30"></a>
+<a id="my-31"></a>
+<a id="my-32"></a>
+<a id="my-33"></a>
+
+#### Qualify the MySQL source (MY-30, MY-31, MY-32, MY-33)
+
+**Kind:** Qualification. **Priority:** High. **Effort:** Medium to large.
+
+The plugin crate has two metadata tests and no lifecycle tests; behaviour is covered only through the in-process wrapper's suites.
+
+**What remains:**
+
+- Run the SDK conformance kit for every factory, linked and loaded, both Tokio flavours.
+- Fault injection: proxy kill, server restart, half-open connection, long pause.
+- DDL: ALTER on selected and unselected tables, TRUNCATE, ANALYZE/OPTIMIZE; database-wide selection with an unsupported table.
+- Configuration validation matrix; `configuration()` round-trip ×7; credential rotation; `server_id` collision; per-type live tests.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/mysql/src/tests.rs:10,51`.
+
+**Done when:** these run in a named CI job ([CW-85](#cw-85)).
+
+<a id="my-40"></a>
+<a id="my-21"></a>
+<a id="source-d-11"></a>
+
+#### Write MySQL DESIGN and CONFIGURATION docs (MY-40, MY-21, Source D-11)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+
+The plugin README defers its field reference to the legacy README. MariaDB is rejected but not documented as unsupported, and mTLS client certificates are not supported.
+
+**What remains:** `DESIGN.md` (engine, binding hash, cursor formats, snapshot handover and its FTWRL use in coordinated mode, positional profile, retention checks, DDL policy, legacy differences) and `CONFIGURATION.md` (every field, privileges and server settings: `binlog_format=ROW`, `binlog_row_image`, `binlog_row_metadata=FULL`, 8.0.20+, GTID; update boundaries; credentials; failure behaviour), following `drasi-core/components/computation-plugins/sources/NATIVE-SOURCE-GUIDE.md`. State MariaDB and mTLS as unsupported.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/mysql/README.md:20-25`.
+
+**Done when:** both documents exist, match the code, and the README links them instead of the legacy README.
+
+<a id="plugin-source-mssql"></a>
+
+### SQL Server source
+
+`drasi-core/components/computation-plugins/sources/mssql` (engine in `drasi-core/components/mssql-common/src/native`). One pull-based CDC factory (`drasi.mssql/changes`) with bounded paging, catalog-bound cursors and retention checks; lifecycle hooks are no-ops, there is no retry, and it has never run against a real server ([CW-78](#cw-78)). Not production-ready.
+
+<a id="ms-01"></a>
+
+#### Gate SQL Server polling on Pause (MS-01, CW-96)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Small to medium.
+
+`pause()` returns success while an in-flight poll query keeps running; polling itself stops only because the host stops calling `next()`.
+
+**What remains:** settle or await the in-flight `Work` within the pause deadline, set a paused flag that makes `next()` park, and reopen on Resume; otherwise return `lifecycle::unsupported(...)`.
+
+**Example:** a Pause during a 25-second CDC page read returns immediately; an InPlace update then races the query.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/mssql/src/source.rs:235-240`.
+
+**Done when:** a test shows no query runs after Pause completes and polling resumes after Resume.
+
+<a id="ms-02"></a>
+
+#### Honour StopMode, deadlines and start cancellation (MS-02)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Small.
+
+Stop waits for pending work for `shutdown_timeout_ms` regardless of `StopMode` or the host deadline, and start ignores cancellation. Tiberius cannot send ATTENTION, so an in-flight query cannot be cancelled server-side.
+
+**What remains:** Drain waits within `ctx.deadline()`; Abort fails fast with a typed "server work retained" error and keeps the work owned for a later stop; start observes cancellation.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/mssql/src/source.rs:241-271`; `drasi-core/components/mssql-common/src/native/work.rs:30-41`.
+
+**Done when:** conformance-kit Drain/Abort, stop-timeout-then-retry and cancelled-start cases pass.
+
+<a id="ms-03"></a>
+
+#### Make SQL Server disposal explicit and clean up snapshot markers (MS-03, CW-98, CW-44)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Small to medium.
+
+`dispose` does nothing and erase removal is refused because the factory does not declare `erases_owned_state`, though the source owns no server-side state. Coordinated snapshots insert marker rows into the barrier table and delete them after each attempt, but rows left by a crash or failed cleanup are never removed.
+
+**What remains:** retire the generation and check no `Work` is pending in `dispose` (today only in `Drop`); apply the Source D-1 decision in [CW-98](#cw-98); decide who removes orphan markers (bootstrapper erase or a startup sweep) and implement it.
+
+**Example:** a process killed during a coordinated snapshot leaves a `token` row in the barrier table permanently.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/mssql/src/source.rs:244-246,273-279`; markers `drasi-core/components/mssql-common/src/native/snapshot.rs:336,378-399`.
+
+**Done when:** erase removal succeeds or is refused by rule, twice; orphan markers are removed by the chosen owner in a test.
+
+<a id="ms-04"></a>
+<a id="ms-14"></a>
+
+#### Add SQL Server update planning and fix its cursor binding (MS-04, MS-14, Source X-04)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+
+No `Factory::assess` or `NativeManagement` exists. The cursor binding hashes `host` and `port` although `service_broker_guid` already identifies the database, so a DNS or availability-group listener rename would invalidate every consumer's cursor.
+
+**What remains:**
+
+- Remove `host`/`port` from the binding.
+- Assess and management: InPlace (after a real Pause) `poll_interval_ms`, `max_rows`, `max_bytes`, timeouts; Restart password, `encryption`, `trust_server_certificate`, `host`/`port`; Unsupported or Recreate `database`, `tables`, `table_keys`, `barrier_table`, `stream`, consumer membership.
+
+**Example:** moving from `sql1.corp` to `sqlag-listener.corp` (same database) forces a query reset.
+
+**Evidence:** `drasi-core/components/mssql-common/src/native/catalog.rs:248-257`; `Capabilities::default()` `drasi-core/components/computation-plugins/sources/mssql/src/lib.rs:56`.
+
+**Done when:** each field has a tested boundary and a host rename keeps cursors.
+
+<a id="ms-05"></a>
+
+#### Retry transient SQL Server failures (MS-05, Source X-06)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+
+Any connection or timeout error in a poll fails the source. The legacy source retried with backoff (but fell back unsafely on invalid LSNs).
+
+**What remains:** jittered, cancellation-aware retry inside `next()` for transient connection and timeout errors only (classified by error number); retention gaps, binding changes and authentication errors stay fatal and typed; report retrying status.
+
+**Example:** a failover of the database to another replica ends the source.
+
+**Evidence:** `drasi-core/components/mssql-common/src/native/paging.rs:85-93`; legacy `drasi-core/components/sources/mssql/src/stream.rs:49-117`.
+
+**Done when:** a connection-kill test resumes without loss.
+
+<a id="ms-06"></a>
+<a id="ms-20"></a>
+
+#### Stop rejecting tables with unmapped column types (MS-06, MS-20)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Small to medium.
+
+A table with any unmapped column type (`xml`, `json`, `geography`, `geometry`, `hierarchyid`, `sql_variant`, …) is rejected entirely. Decimals and money map to Float, losing precision; identifiers are limited to `[A-Za-z0-9_.]`.
+
+**What remains:** stream unmapped types as string or null with schema type `None` (map `json` to JSON), optionally add a column-exclusion list; preserve decimal precision; allow quoted identifiers.
+
+**Example:** `dbo.Orders` with one `xml` column fails with "unsupported SQL Server CDC column type in dbo.Orders".
+
+**Evidence:** `drasi-core/components/mssql-common/src/native/catalog.rs:218-221,283-299`; `drasi-core/components/mssql-common/src/config.rs:55-66`.
+
+**Done when:** a table with each such type streams its other columns, with tests.
+
+<a id="ms-07"></a>
+
+#### Resolve the CDC capture permission requirement (MS-07, CW-44)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Small to medium.
+
+The native source reads `cdc.<capture>_CT` tables directly and needs `SELECT` on them; the legacy source used `fn_cdc_get_all_changes_*`. A least-privilege account that worked with the legacy source fails at the first poll with a permission error.
+
+**What remains:** either fall back to `fn_cdc_get_all_changes_*` with bounded LSN windows, or check the grant at start with a clear error and document it.
+
+**Evidence:** `drasi-core/components/mssql-common/src/native/paging.rs:228-234,286-288`.
+
+**Done when:** a least-privilege test either works or fails at start with an actionable message.
+
+<a id="ms-08"></a>
+<a id="ms-09"></a>
+
+#### Reuse connections and raise SQL Server throughput (MS-08, MS-09)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Medium.
+
+Every poll opens a new connection and re-reads the whole catalog, including every primary key in the database. A page holds at most 32 change groups (`KEY_WINDOW`), and each group is a separate query (N+1). `max_rows` is documented as the page size but is not.
+
+**What remains:** one connection per activation with reconnect; cache catalog and key discovery, refreshed on a cheap change detector (`cdc.change_tables`, `cdc.ddl_history`); make the window configurable or derived from `max_rows`; fetch groups by range; remove the `max_bytes/128` heuristic; document page semantics.
+
+**Example:** a backlog of 1 million changes is read 32 groups and 33 queries at a time, each poll reconnecting.
+
+**Evidence:** `drasi-core/components/mssql-common/src/native/paging.rs:15,91-93,165-169,277-288`; `drasi-core/components/mssql-common/src/keys.rs:57`.
+
+**Done when:** a backlog benchmark shows one connection and page sizes governed by configuration.
+
+<a id="ms-10"></a>
+
+#### Convert CDC commit times correctly and handle capture-instance changes (MS-10, Source D-7)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Small to medium.
+
+Commit times are shifted by today's UTC offset (`DATEDIFF(MINUTE, GETDATE(), GETUTCDATE())`), so historical commits across a DST change are off by an hour. Schema and capture-instance changes fail the source without a typed error.
+
+**What remains:** correct time conversion; capture-instance and schema changes follow the PostgreSQL policy (fence only bound facts with typed `SchemaChanged`).
+
+**Evidence:** `drasi-core/components/mssql-common/src/native/paging.rs:286`.
+
+**Done when:** a test across a DST boundary yields correct timestamps and a capture-instance change produces a typed error.
+
+<a id="ms-11"></a>
+
+#### Tolerate transient consumer non-readiness (MS-11)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Small.
+
+One consumer momentarily not ready fails the whole shared source. The legacy source allowed dynamic subscribe/unsubscribe; native membership is fixed, and a membership change should be an assessed Recreate.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/mssql/src/source.rs:140`.
+
+**Done when:** a consumer restart does not fail the source, and a membership change is assessed rather than failing at run time.
+
+<a id="ms-12"></a>
+<a id="ms-13"></a>
+
+#### Harden SQL Server configuration and credentials (MS-12, MS-13, Source X-03)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+
+The whole `settings` object is secret. The connection struct lacks `deny_unknown_fields`, so a misspelled password key silently becomes `""`; its derived `Debug` prints the password. `encryption` defaults to `NotSupported`, documented as "encrypt if supported" though it encrypts only the login. Connects have no timeout. Activation credentials are not supported, and neither legacy nor native supports Azure AD / managed identity, which Azure SQL needs.
+
+**What remains:** `password` as the only top-level secret; nested schema and `configuration_details`; `deny_unknown_fields` and a redacting `Debug`; default `encryption` to `On` and fix its doc; a connect timeout; activation credentials via `validate_with_bound_credentials`; a plan for Azure AD authentication.
+
+**Example:** `{"connection": {"pasword": "x", ...}}` is accepted and connects with an empty password.
+
+**Evidence:** `drasi-core/components/mssql-common/src/config.rs:105-115,150-168`; `drasi-core/components/mssql-common/src/connection.rs:80`; `drasi-core/components/mssql-common/src/native.rs:80`; `drasi-core/components/computation-plugins/sources/mssql/src/lib.rs:40-47`.
+
+**Done when:** unknown keys are rejected, encryption is on by default, only the password is secret, and credentials can come from activation.
+
+<a id="ms-15"></a>
+
+#### Verify split-update and command-ID grouping on a real server (MS-15)
+
+**Kind:** Investigation. **Priority:** Medium. **Effort:** Small.
+
+The pager fails a group with more than two rows or an unpaired before/after image. Whether SQL Server emits split updates (delete + insert for key changes) or multiple `__$command_id` rows for one LSN/seqval in practice has not been checked.
+
+**What remains:** reproduce on a real server, then decode those cases instead of failing.
+
+**Evidence:** `drasi-core/components/mssql-common/src/native/paging.rs:295-298,332-338`.
+
+**Done when:** primary-key updates and multi-statement transactions stream correctly in a live test.
+
+<a id="ms-21"></a>
+
+#### Decide the SQL Server replay retention profile (MS-21)
+
+**Kind:** Decision. **Priority:** Low. **Effort:** Small.
+
+The source declares `consumer_replay_retention = LOCAL_PROCESS_RESTART` without a stated reason, although CDC tables survive power loss. State the rationale or move to `LOCAL_POWER_LOSS`, and consider persisting the activation origin ([CW-14](#cw-14)).
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/mssql/src/source.rs:223-225`.
+
+**Done when:** the chosen profile is documented and tested.
+
+<a id="ms-16"></a>
+<a id="ms-17"></a>
+<a id="ms-18"></a>
+<a id="ms-19"></a>
+
+#### Simplify SQL Server code and add observability (MS-16, MS-17, MS-18, MS-19, Source X-05, Source X-07, Source X-08)
+
+**Kind:** Improvement. **Priority:** Low. **Effort:** Medium.
+
+Before images are rebuilt via a synthetic Insert; state is tracked by `cleanup`/`initialized` flags and generation parity; `next()` cannot be unit-tested without a database; errors are prose; there is almost no logging and no metrics; metadata uses `expect`.
+
+**What remains:** a codec helper for before images; an explicit state enum; a poller trait seam; typed errors; tracing spans, status through the `ControlSender` and metrics ([CW-26](#cw-26)); fallible metadata.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/mssql/src/source/processing.rs`; `drasi-core/components/computation-plugins/sources/mssql/src/source.rs:250-279`; `drasi-core/components/computation-plugins/sources/mssql/src/lib.rs:44-53`.
+
+**Done when:** `next()` has database-free state-machine tests and the source emits status and metrics.
+
+<a id="ms-30"></a>
+<a id="ms-31"></a>
+<a id="ms-32"></a>
+
+#### Qualify the SQL Server source (MS-30, MS-31, MS-32)
+
+**Kind:** Qualification. **Priority:** High. **Effort:** Large.
+
+No case has run against a real SQL Server ([CW-78](#cw-78)).
+
+**What remains:** obtain the environment and run the Host and Server real cases; port the legacy integration suite ([CW-41](#cw-41)); conformance kit; tests for unsupported column types, split updates, least privilege, orphan markers, backlog performance, retention-gap and binding-change errors; check element labels match the legacy `normalize_table_label` output.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/mssql/README.md:1-15`; `drasi-core/components/host-sdk/tests/native_mssql_components.rs:335-351` (ignored).
+
+**Done when:** these pass in a named CI job against a real server.
+
+<a id="ms-40"></a>
+
+#### Write SQL Server DESIGN and CONFIGURATION docs (MS-40)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+
+The source and bootstrapper READMEs state ABI `2.0.0` (current `4.0.0`), and there is no design or configuration reference.
+
+**What remains:** `DESIGN.md` (paging algorithm, cursor format and binding, source/bootstrapper handover, failure model) and `CONFIGURATION.md` (fields, required grants and CDC setup, encryption guidance, update matrix, secrets); fix the ABI text.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/mssql/README.md:7`; `drasi-core/components/computation-plugins/bootstrappers/mssql/README.md:6`.
+
+**Done when:** both documents exist and match the code.
+
+<a id="plugin-source-sqlite"></a>
+
+### SQLite source
+
+`drasi-core/components/computation-plugins/sources/sqlite` (engine in `drasi-core/components/sqlite-common/src/native`; in-process wrapper `drasi-core/components/sources/sqlite/src/native.rs`). Four factories that own the database connection (REST or Rust handle writes, hook-based capture, optional journal) with source/bootstrap coordination; lifecycle hooks are no-ops, journal tables leak on removal, and configuration has no defaults. Not production-ready.
+
+<a id="sq-01"></a>
+
+#### Reproduce and fix a possible stop deadlock (SQ-01)
+
+**Kind:** Investigation. **Priority:** High. **Effort:** Small to medium.
+
+While output is pending the worker stops taking commands, and `stop` waits for the REST listener to drain before signalling database shutdown. An accepted HTTP write waiting for the worker could therefore hold stop until the host timeout, and every retry repeats the wait.
+
+**What remains:** a test with a full output queue, an accepted HTTP write, then Stop. If it hangs: signal database shutdown before or with the REST drain, reject queued commands, let the worker exit with blocked output (replay modes keep it in the journal), and make Abort immediate. Report lost volatile output as a typed outcome instead of a `log::warn!`.
+
+**Evidence:** `drasi-core/components/sqlite-common/src/native/worker.rs:1198-1199,1211`; `drasi-core/components/sqlite-common/src/native/runtime.rs:205-212`.
+
+**Done when:** the scenario stops within the deadline in a test.
+
+<a id="sq-02"></a>
+
+#### Gate SQLite writes and the worker on Pause (SQ-02, CW-96)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+
+`pause()` returns success while the database worker and REST listener keep accepting writes. The in-process wrapper ignores Pause too.
+
+**What remains:** reject REST and handle admission while paused (503 or typed error), park the worker after its current transaction, reopen on Resume, bound REST/handle waits; otherwise return `unsupported`. Forward the wrapper's pause and resume.
+
+**Example:** `POST /api/tables/orders` during a host pause commits and emits.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/sqlite/src/component.rs:214-219`; wrapper `drasi-core/components/sources/sqlite/src/native.rs:365-366`; `drasi-core/components/sqlite-common/src/native/handle.rs:161-190`.
+
+**Done when:** a test shows writes refused while paused and accepted after Resume, or an `unsupported` refusal.
+
+<a id="sq-03"></a>
+
+#### Erase SQLite journal tables on removal (SQ-03, CW-98)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Small to medium.
+
+Replay and shared modes create `__drasi_native_*` tables in the user's database. Removal never drops them (erase is refused because the factory does not declare it), and a later non-replay source on the same file then fails with "native SQLite cannot disable replay on a journal-owned database".
+
+**What remains:** declare `erases_owned_state`; in `dispose(Erase)`, via `spawn_blocking`, drop `__drasi_native_{outbox,consumers,bootstrap,state}_v1` in one transaction, never touching user tables; idempotent when the file is missing, retry-safe when locked. Volatile modes follow the Source D-1 decision in [CW-98](#cw-98).
+
+**Example:** add a `drasi.sqlite/replay-transactions` source on `app.db`, remove it with erase (refused), then add `drasi.sqlite/changes` on `app.db`: start fails.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/sqlite/src/component.rs:223-225`; `drasi-core/components/sqlite-common/src/native/worker.rs:250-258`; `drasi-core/components/sqlite-common/src/native/journal.rs:177-194`.
+
+**Done when:** erase twice succeeds and a new source on the same file starts, in a test.
+
+<a id="sq-04"></a>
+
+#### Honour start deadlines and cancellation (SQ-04)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Small.
+
+`start` awaits progress readiness and runtime start with no deadline or cancellation.
+
+**What remains:** select on `ctx.cancellation()`/`ctx.deadline()` around `wait_ready()` and `runtime.start`, leaving a retry-safe state.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/sqlite/src/component.rs:211-212,241,259`.
+
+**Done when:** the conformance-kit cancelled-start case passes.
+
+<a id="sq-06"></a>
+
+#### Add SQLite update planning and management (SQ-06, Source X-04)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Medium.
+
+No assess or management exists. Restart: numeric bounds and `rest_api` (non-coordinated sources). Unsupported or Recreate: `stream`, `path`, `tables`, `table_keys`, `output`, `replay`, `coordinated_snapshot`. Coordinated sources must match their coordinator exactly, so every change is Recreate.
+
+**Evidence:** `capabilities: Default::default()` `drasi-core/components/computation-plugins/sources/sqlite/src/lib.rs:147`; `drasi-core/components/computation-plugins/sources/sqlite/src/coordinator.rs:151-172`.
+
+**Done when:** every field has a tested boundary.
+
+<a id="sq-05"></a>
+<a id="source-d-6"></a>
+
+#### Decide SQL and DDL access for the loaded SQLite plugin (SQ-05, Source D-6)
+
+**Kind:** Decision. **Priority:** High. **Effort:** Medium.
+
+The legacy and host-linked sources offer arbitrary SQL, DDL and transaction callbacks; the loaded plugin offers REST CRUD only, and its authorizer denies DDL and PRAGMA. An in-memory (`path: null`) loaded source therefore has no way to create tables and is unusable, yet it is accepted.
+
+**What remains:** choose between an `init_sql` setting plus an optional authenticated `/api/sql` route, a native service resource, or a documented exception. Until then, reject `path: null` in the dynamic factories.
+
+**Example:** a Server configuration with `settings.path: null` loads and starts, but every REST write fails because no table exists.
+
+**Evidence:** `drasi-core/components/sqlite-common/src/native.rs:48`; authorizer `drasi-core/components/sqlite-common/src/native/worker.rs:281-297`; no `path` validation in `drasi-core/components/computation-plugins/sources/sqlite/src/lib.rs`.
+
+**Done when:** the chosen mechanism is implemented or in-memory loaded mode is refused, with a test.
+
+<a id="sq-07"></a>
+
+#### Publish SQLite configuration schemas and defaults (SQ-07, Source X-03)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Small to medium.
+
+`settings` and `rest_api` are opaque `Object` fields and no setting has a default, so every bound must be supplied by hand. The legacy source allowed env/secret references for REST host and port.
+
+**What remains:** nested schemas, `configuration_details`, defaults equal to serde defaults, and references for REST host/port if the configuration mechanism allows.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/sqlite/src/lib.rs:123-128`; `drasi-core/components/sqlite-common/src/native.rs:46-60`.
+
+**Done when:** a minimal configuration (`path`, `tables`, `output`) is accepted and the published defaults round-trip.
+
+<a id="sq-08"></a>
+
+#### Harden the SQLite REST API (SQ-08)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Medium.
+
+The REST API has no authentication, body-size limit or request timeout, and binds wherever configured. `list_rows` fails once a table exceeds `transactions.max_changes`; the legacy route returned every row.
+
+**What remains:** optional bearer/API-key authentication via a secret reference (shared with the network sources); body and timeout limits; refuse non-loopback binding without authentication or explicit opt-in; paginate `list_rows`.
+
+**Evidence:** `drasi-core/components/sqlite-common/src/lib.rs:41-53`; `drasi-core/components/sqlite-common/src/rest_api.rs:180-192`; read bound `drasi-core/components/sqlite-common/src/native/worker.rs:839`.
+
+**Done when:** tests cover unauthenticated refusal, non-loopback refusal and paging past the bound.
+
+<a id="sq-09"></a>
+<a id="sq-12"></a>
+
+#### Report SQLite status and metrics (SQ-09, SQ-12, Source X-07)
+
+**Kind:** Improvement. **Priority:** Low. **Effort:** Small to medium.
+
+Every factory drops its `ControlSender`, so REST or worker failures are visible only through `next()`. There are no spans or counters.
+
+**What remains:** status through the `ControlSender`; spans and counters (commits, rollbacks, journal depth, REST requests) per [CW-26](#cw-26).
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/sqlite/src/lib.rs:180,198,231`.
+
+**Done when:** a REST bind failure after start is reported as status, and counters are emitted.
+
+<a id="sq-15"></a>
+
+#### Offer WAL mode and document the DDL restriction (SQ-15)
+
+**Kind:** Improvement. **Priority:** Low. **Effort:** Small.
+
+Non-replay file mode has no opt-in `journal_mode=WAL`, and the DDL/PRAGMA denial is undocumented.
+
+**Evidence:** `drasi-core/components/sqlite-common/src/native/worker.rs:249,281-297`.
+
+**Done when:** WAL is configurable and the restriction is documented.
+
+<a id="sq-10"></a>
+<a id="sq-11"></a>
+
+#### Simplify SQLite plugin code (SQ-10, SQ-11, Source X-05, Source X-08)
+
+**Kind:** Improvement. **Priority:** Low. **Effort:** Small to medium.
+
+Progress preparation is duplicated between the plugin and the in-process wrapper; the coordinator has three identical `ensure_active` functions and re-parses configuration; `create()` for Replay says "requires actual consumer progress" where it means source progress; metadata uses `expect`; errors are prose.
+
+**What remains:** move progress preparation into `sqlite-common`; collapse `ensure_active` and the `Single`/`Shared` dispatch; pass the validated configuration to the coordinator; fix the error text; document or hide the Rust-only `handle()`/`with_rest_api()`/`bound_rest_address()`; typed errors; fallible metadata.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/sqlite/src/component.rs:238-278`; `drasi-core/components/computation-plugins/sources/sqlite/src/coordinator.rs:63,96,143,184,307`; `drasi-core/components/computation-plugins/sources/sqlite/src/lib.rs:180-184`.
+
+**Done when:** the duplication is removed and the error text is correct.
+
+<a id="sq-30"></a>
+<a id="sq-31"></a>
+
+#### Qualify the SQLite source (SQ-30, SQ-31)
+
+**Kind:** Qualification. **Priority:** Medium. **Effort:** Medium.
+
+Data-path coverage is good, but lifecycle, management and loaded-plugin behaviour are untested.
+
+**What remains:** conformance kit (linked and loaded); the SQ-01 stop scenario; erase twice and recreate on the same file; Pause/Resume; Drain vs Abort; start cancellation; assess/apply; in-memory loaded mode per SQ-05; `list_rows` past the bound; non-loopback REST; the journal in the [CW-14](#cw-14) crash matrix; the [CW-82](#cw-82) mixed pipeline.
+
+**Done when:** these run in a named CI job ([CW-85](#cw-85)).
+
+<a id="sq-40"></a>
+
+#### Write SQLite DESIGN and CONFIGURATION docs (SQ-40)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+
+The README states ABI `2.0.0` (current `4.0.0`), the bootstrapper README says "ABI-2", and there is no design or field reference.
+
+**What remains:** `DESIGN.md` (worker and REST architecture, hooks and authorizer, journal tables and binding, coordinator lease, stop ordering, durability) and `CONFIGURATION.md` (every field and default, an example per factory, update matrix, erase semantics, REST security posture, in-memory caveat); fix the ABI text.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/sqlite/README.md:3`; `drasi-core/components/computation-plugins/bootstrappers/sqlite/README.md:21`.
+
+**Done when:** both documents exist and match the code.
+
+<a id="plugin-source-network"></a>
+<a id="cw-100"></a>
+
+### Shared network source runtime
+
+`drasi-core/components/computation-plugins/common/network` (`SourceRuntime`/`Ingress`, shared by the HTTP and gRPC sources). Pause gating, StopMode-aware stop, authentication, TLS, rate and connection limits, managed updates and server-sequenced durable admission are implemented; the items below remain.
+
+<a id="net-08"></a>
+<a id="source-d-12"></a>
+
+#### Erase host-owned durable admission state on removal (NET-08, Source D-12)
+
+**Kind:** Investigation. **Priority:** Medium. **Effort:** Small to medium.
+
+A durable HTTP or gRPC source writes through a host-owned QoS channel: a producer registry entry named by the source's component UUID, plus journal records. Both sources declare `erases_owned_state` with a no-op erase because they own nothing themselves, so this state disappears on removal only if the Host deletes it. No Host code that deletes a removed source's producer registration or journal was found.
+
+**What remains:**
+
+- Confirm whether removing a durable HTTP or gRPC source with `StateIntent::Erase` deletes its producer registration and journal records.
+- If not, add Host-side erasure owned by the Host (the plugin cannot reach it), make it idempotent, and test it through the loaded library.
+- Apply the same answer to the bridge source's durable journal ([BR-03](#br-03)).
+
+**Example:** add a durable HTTP source, post events, remove it with erase, then add a new source with the same UUID. If the old producer entry survives, `producer_status` resumes from the old head instead of zero.
+
+**Evidence:** `drasi-core/components/computation-plugins/common/network/src/durable.rs:221` (implicit producer named by the source UUID); `drasi-core/lib/src/computation/v1/qos_pipe/admission.rs:346` (`retire_producer` exists, but no dispose path calls it for a removed source); [CW-98](#cw-98) for the `erases_owned_state` rule.
+
+**Done when:** a loaded-library test removes a durable HTTP and a durable gRPC source with erase and shows no producer entry or journal record remains, and a second erase succeeds.
+
+<a id="net-10"></a>
+
+#### Bound the nesting depth of network input (NET-10)
+
+**Kind:** Issue. **Priority:** High (an over-deep body can overflow a plugin thread's stack and abort the process). **Effort:** Medium.
+
+Request size is capped (`maxMessageBytes`, Content-Length pre-check, 413), but nesting depth is not. A small body with deep nesting therefore passes the size check and is then converted and dropped recursively.
+
+**What remains:**
+
+- XML webhook bodies: add a depth limit to the explicit-stack parser in `http-common`; it currently pushes one frame per element with no bound.
+- JSON and YAML webhook bodies and standard HTTP routes: set and document an explicit depth limit instead of relying on library defaults.
+- gRPC: nested protobuf `Struct`/`ListValue` properties are converted to JSON text by a recursive function with no depth check; bound it explicitly instead of relying on `prost`'s decode limit.
+- Reject over-deep input with a 400/`INVALID_ARGUMENT` for that request only, and test each format.
+
+**Example:** a 1 MiB XML webhook body of about 150,000 nested `<a>` elements is under a `maxMessageBytes` of 2 MiB, parses without error, then recurses once per level while being converted and dropped.
+
+**Evidence:** `drasi-core/components/http-common/src/webhook/content_parser.rs:123-200`; `drasi-core/components/computation-plugins/common/network/src/wire.rs:196-222`. Unverified: the effective JSON/YAML (`serde_json`/`serde_yaml`, 128) and protobuf (`prost`, 100) defaults. The general decoder audit (contracts, codecs, MessagePack, safe drop) stays in [CW-19](#cw-19).
+
+**Done when:** each HTTP and gRPC input format has a documented depth limit, and a test per format shows over-deep input fails that request without affecting the source.
+
+<a id="net-11"></a>
+
+#### Add an optional total in-flight byte budget (NET-11)
+
+**Kind:** Improvement. **Priority:** Low. **Effort:** Small to medium.
+
+Memory held by queued input is bounded only by `ingressCapacity × maxMessageBytes` per source. With large messages that product can be far larger than an operator expects, and there is no single cap across concurrent requests.
+
+**What remains:** add an optional per-source byte budget for admitted but not yet delivered input, reject with 503/`RESOURCE_EXHAUSTED` when it is full, and document it in both sources' `CONFIGURATION.md`. The cross-component memory work is [CW-29](#cw-29).
+
+**Example:** `ingressCapacity: 1024` with `maxMessageBytes: 16777216` allows up to 16 GiB queued; `maxInFlightBytes: 268435456` would cap it at 256 MiB.
+
+**Evidence:** `drasi-core/components/computation-plugins/common/network/src/config.rs` (no total-bytes field); `drasi-core/components/computation-plugins/sources/http/CONFIGURATION.md`.
+
+**Done when:** the budget is configurable, enforced across concurrent requests, tested, and documented.
+
+<a id="net-06"></a>
+<a id="net-12"></a>
+
+#### Measure and, if needed, parallelize admission throughput (NET-06, NET-12)
+
+**Kind:** Investigation. **Priority:** Medium. **Effort:** Medium.
+
+Both admission paths serialize requests per source. Volatile admission holds the sequence lock while it reserves queue space for every event in a batch, so one slow batch blocks all other requests. Implicit durable admission commits one request at a time per source, so durable throughput is limited to one journal commit round trip at a time.
+
+**What remains:** benchmark both paths with concurrent clients; if the lock is the limit, reserve capacity before taking the sequence lock (volatile) and pipeline consecutive durable sequences while keeping their order and at-least-once semantics.
+
+**Example:** 32 clients posting single events to a durable HTTP source complete at the rate of one commit at a time, regardless of journal or CPU headroom.
+
+**Evidence:** `drasi-core/components/computation-plugins/common/network/src/ingress.rs:358-362`; `drasi-core/components/computation-plugins/common/network/src/durable.rs:220-221`.
+
+**Done when:** measured throughput for both paths is recorded, and either the serialization is removed with order-preservation tests or the measurement shows it is not the bottleneck.
+
+<a id="net-07"></a>
+<a id="net-14"></a>
+
+#### Report listener failure and publish ingress metrics (NET-07, NET-14)
+
+**Kind:** Improvement. **Priority:** Low. **Effort:** Medium.
+
+If the listener dies after start, nothing tells the Host: both factories drop the `ControlSender`. There are also no metrics, so operators cannot see request rates, rejections or queue pressure.
+
+**What remains:**
+
+- Keep the `ControlSender` and report listener death and recovery through it.
+- Publish metrics using the shared names from [CW-26](#cw-26): requests, admitted events, rejections by kind (auth, rate limit, size, paused), rate-limited clients, queue occupancy and durable commit latency.
+- Logs from a loaded plugin reach the Host only after the native logging bridge in [CW-24](#cw-24) exists; until then `diag!` writes warnings and errors to stderr and drops lower levels.
+
+**Example:** a listener task that panics leaves the source reported as running while every connection is refused.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/http/src/lib.rs:111` and `drasi-core/components/computation-plugins/sources/grpc/src/lib.rs:115` (`_control`); `drasi-core/components/computation-plugins/common/network/src/lib.rs:44-53` (`diag!`).
+
+**Done when:** listener failure appears in component status, and the metric set is emitted and documented for both sources.
+
+<a id="plugin-source-http"></a>
+
+### HTTP source
+
+`drasi-core/components/computation-plugins/sources/http` (`drasi.network/http-source`, dynamic and Rust hosting). Lifecycle, management, authentication, TLS, schema publication and transparent durability are implemented, with [DESIGN.md](../../components/computation-plugins/sources/http/DESIGN.md) and [CONFIGURATION.md](../../components/computation-plugins/sources/http/CONFIGURATION.md); webhook secret handling, schema publication details and test ports remain.
+
+<a id="ht-04"></a>
+
+#### Let webhook secrets use secret references and harden signatures (HT-04)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Medium.
+
+Webhook HMAC and bearer secrets can only name environment variables. The Host resolves secret references only in top-level configuration fields, and webhook auth is nested under `webhooks.routes[].auth`, so a webhook secret cannot come from a secret store the way `authToken` can. Signatures also have no replay protection, and HMAC-SHA1 cannot be disabled.
+
+**What remains:**
+
+- Let webhook secrets be secret references, either through a flattened top-level secret map (for example `webhookSecrets: { github: <secret ref> }` referenced by name from each route) or nested-path references in the Host resolver (Source D-2 chose flattening for the other fields).
+- Add an optional timestamp-tolerance check for signed requests, so a captured request cannot be replayed later.
+- Add an option to refuse `hmac-sha1` signatures.
+
+**Example:** `"auth": { "bearer": { "tokenEnv": "GITHUB_HOOK_TOKEN" } }` works only if the Server process has `GITHUB_HOOK_TOKEN` set; it cannot point at a secret store entry.
+
+**Evidence:** `drasi-core/components/http-common/src/webhook/config.rs:123,148` (`secret_env`, `token_env`); `drasi-core/components/computation-plugins/sources/http/src/config.rs:216-235` (presence check at initialize); `drasi-core/components/http-common/src/webhook/auth.rs:128` (SHA1 always accepted).
+
+**Done when:** a webhook secret can be a secret reference resolved by the Host, replay tolerance and SHA1 refusal are configurable and tested, and `CONFIGURATION.md` documents them.
+
+<a id="ht-08"></a>
+
+#### Publish the webhook schema and the bound listener address (HT-08)
+
+**Kind:** Improvement. **Priority:** Low. **Effort:** Small.
+
+Tools that read the factory schema see `webhooks` only as an opaque `Object`, so they cannot validate or render routes. A listener configured with `port: 0` reports its chosen port only in an `Info` log line, which a loaded plugin drops because `diag!` forwards only warnings and errors to stderr.
+
+**What remains:** publish the nested `webhooks` schema (routes, auth, mappings, CORS, error behaviour); expose the bound address through health or status so a caller of a loaded library can discover it.
+
+**Example:** a test harness starts the loaded HTTP source with `"port": 0` and has no way to learn which port to post to.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/http/src/config.rs:118`; `drasi-core/components/computation-plugins/common/network/src/ingress.rs:572-574,645-651`; `drasi-core/components/computation-plugins/common/network/src/lib.rs:44-53`.
+
+**Done when:** the factory schema describes every webhook field, and the bound address is available outside the process log.
+
+<a id="ht-09"></a>
+<a id="ht-30"></a>
+
+#### Port the webhook test suites and cover the remaining paths (HT-09, HT-30)
+
+**Kind:** Qualification. **Priority:** Low. **Effort:** Medium.
+
+The ordinary HTTP source's webhook end-to-end and integration suites test only the ordinary plugin. The native webhook handler and the durable HTTP adapter have no unit tests of their own.
+
+**What remains:**
+
+- Port `webhook_e2e.rs` and `webhook_integration.rs` to native construction.
+- Add unit tests for each `errorBehavior` and the explicit-session durable header paths in `webhook.rs`, and for `durable_http.rs`.
+- Add a CORS preflight test on the fallback (unmatched) route; the existing preflight test covers a configured webhook route.
+- Loaded-library conformance and rejection-has-no-graph-effect coverage are in [CW-41](#cw-41).
+
+**Example:** a webhook configured with `errorBehavior: "accept_and_log"` that receives an unmappable body should return 200 and emit nothing; no native test asserts this.
+
+**Evidence:** `drasi-core/components/sources/http/tests/webhook_e2e.rs`, `webhook_integration.rs`; `drasi-core/components/computation-plugins/sources/http/src/webhook.rs`, `durable_http.rs` (no tests); `drasi-core/components/host-sdk/tests/native_network/http_family.rs:168-175`.
+
+**Done when:** the ported suites and new unit tests pass against the native source in CI.
+
+<a id="plugin-source-grpc"></a>
+
+### gRPC source
+
+`drasi-core/components/computation-plugins/sources/grpc` (`drasi.network/grpc-source`, dynamic and Rust hosting). Lifecycle, management, authentication, TLS, stream limits and transparent durability are implemented, with [DESIGN.md](../../components/computation-plugins/sources/grpc/DESIGN.md) and [CONFIGURATION.md](../../components/computation-plugins/sources/grpc/CONFIGURATION.md); health probing and test coverage remain.
+
+<a id="gr-06"></a>
+<a id="gr-08"></a>
+
+#### Decide how health probes authenticate (GR-06, GR-08)
+
+**Kind:** Decision. **Priority:** Low. **Effort:** Small.
+
+The source's own `HealthCheck` RPC sits behind the same bearer-token interceptor as data RPCs, unlike HTTP `/health`, so an unauthenticated liveness probe fails when a token is set. There is also no standard `grpc.health.v1` service, which Kubernetes and most gRPC tooling expect.
+
+**What remains:** decide whether `HealthCheck` bypasses the token; decide whether to add `grpc.health.v1` (requires approving the `tonic-health` dependency); implement and document the result.
+
+**Example:** a Kubernetes `grpc` liveness probe against a source with `authToken` set fails, because it calls `grpc.health.v1.Health/Check`, which does not exist, and cannot send a bearer token.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/grpc/src/component.rs:439-466,520-521`; `drasi-core/components/computation-plugins/sources/grpc/src/tests.rs:277-281`.
+
+**Done when:** the decision is documented in `CONFIGURATION.md` and a test probes health without credentials if that is the chosen behaviour.
+
+<a id="gr-07"></a>
+<a id="gr-30"></a>
+
+#### Complete gRPC input and durable-mapping tests (GR-30, GR-07)
+
+**Kind:** Qualification. **Priority:** Low. **Effort:** Medium.
+
+Malformed, oversize and deeply nested `Struct` input is not tested, and the mapping from durable admission errors to gRPC status codes has no tests, so a change to either could silently alter what clients see.
+
+**What remains:**
+
+- Tests for malformed, oversize and deeply nested `Struct` input (depth limit in [NET-10](#net-10)).
+- A table test for the `durable_grpc` admission-error to status-code mapping.
+- Native gRPC in the [CW-36](#cw-36) completion profile; loaded-library conformance is in [CW-41](#cw-41).
+- Cleanup: deduplicate the unary admission handlers; optionally add throttled stream progress for legacy clients.
+
+**Example:** a durable `Busy` must reach the client as `UNAVAILABLE` (retryable), not `INTERNAL`; nothing asserts this.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/grpc/src/durable_grpc.rs:91-260` (no tests); `drasi-core/components/computation-plugins/common/network/src/wire.rs:196-222`.
+
+**Done when:** the input and error-mapping tests pass and native gRPC is in the CW-36 profile.
+
+<a id="plugin-source-bridge"></a>
+
+### Bridge source
+
+`drasi-core/components/computation-plugins/sources/bridge` (`drasi.bridge/source`) with `common/bridge`. Static Rust hosting only: it implements the in-process `drasi-lib` component contract rather than the plugin SDK, is registered only by `instance-host`, and has no `DESIGN.md` or `CONFIGURATION.md`. Its hostile-input codec limits, mTLS leaf pinning, bounded queues and owned workers are in place; lifecycle, observability, hosting and documentation work remains. Sink-side bridge work is in the bridge sink section (BS-NN).
+
+<a id="br-06"></a>
+<a id="source-d-3"></a>
+
+#### Port the bridge source to the native plugin SDK (BR-06, Source D-3)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Large.
+
+The bridge source and `common/bridge` depend on `drasi-lib`, which breaks the native dependency rule, and the source cannot be built as a loadable plugin. Drasi Server therefore cannot load it, and it has no real-library test coverage. The alternative (record static-only hosting as a supported profile) has not been chosen; porting is recommended.
+
+**What remains:** implement `NativeComponent`/`NativeSource` with `create_with_admission`; take TLS from configuration via `TlsResourceRecipe`; expose seal/drain through control or management; remove the `drasi-lib` dependency; add `export_computation_plugin!` and plugin metadata so `make check-native-dependencies` covers it. Coordinate with the bridge sink port (BS-10).
+
+**Example:** a Server configuration selecting `drasi.bridge/source` fails because no plugin library exports that factory.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/bridge/Cargo.toml:13`; `drasi-core/components/computation-plugins/common/bridge/Cargo.toml:13`; `drasi-core/components/computation-plugins/sources/bridge/src/lib.rs:12-16`; `drasi-core/components/instance-host/src/host.rs:724`.
+
+**Done when:** the source builds as a dynamic plugin with no `drasi-lib` dependency, passes `check-native-dependencies`, and the bridge tests run through the loaded library.
+
+<a id="br-01"></a>
+
+#### Gate or refuse Pause in the bridge source (BR-01)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+
+Pause uses the passive lifecycle macro and reports success while the receiver workers keep accepting frames and admitting them into the queue or journal. An update applied at the Pause boundary then assumes a quiet source that is still admitting input. This is the bridge part of [CW-96](#cw-96).
+
+**What remains:**
+
+- Either gate admission in `Receiver::admit` (return a retryable `Busy`/`Paused`, stop dequeuing, keep receipt and control lanes live) and reopen it on Resume, or return `lifecycle::unsupported(...)`.
+- Define how long a sender may retry against a paused receiver; the sink's fixed retry count and delay fail the sender during a long pause (shared with BS-01).
+- Bound and document what is admitted while paused.
+
+**Example:** pausing a durable bridge source for a managed update returns `Ok`, but the remote sender keeps committing frames into the journal during the update.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/bridge/src/component.rs:261-263`; `drasi-core/components/computation-plugins/common/bridge/src/receiver.rs:533-556`.
+
+**Done when:** a test shows no admission after Pause and resumed flow after Resume (or an `unsupported` refusal), and a sender rides out a pause within its documented budget.
+
+<a id="br-02"></a>
+<a id="br-09"></a>
+
+#### Honour StopMode, start context and admission readiness (BR-02, BR-09)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+
+Stop ignores the requested `StopMode` and the context deadline: it cancels the receiver and joins workers with the link's own timeout. Cancellation drops a data connection mid-commit, which can fence a durable channel. Start ignores cancellation and its deadline and does not wait for the admission mailbox to become active, which `lib/AGENTS.md` requires.
+
+**What remains:**
+
+- Drain: finish the in-flight frame's admit and receipt within `ctx.deadline()`; Abort: keep the current prompt cancel. On timeout keep ownership so stop can be retried.
+- Start: observe `ctx.cancellation()`/`ctx.deadline()` across every await, and `wait_active` on the admission mailbox before reporting ready.
+- Durable mode: wait for admission capacity (`admit_wait`) instead of failing fast with `Busy`; add jittered exponential backoff on the sender side (shared with BS-01).
+
+**Example:** stopping a durable source while a frame is being committed drops the connection; the next start finds the journal fenced.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/bridge/src/component.rs:133-259`; `drasi-core/components/computation-plugins/common/bridge/src/receiver.rs:888-904,553-556`; `drasi-core/lib/AGENTS.md:75`.
+
+**Done when:** tests show Drain completes an in-flight frame without fencing the journal, Abort cancels promptly, a cancelled start leaves nothing running, and start waits for mailbox readiness.
+
+<a id="br-03"></a>
+
+#### Make erase and re-creation of a durable link work (BR-03)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+
+The source refuses `Erase` disposal, so removal with erase always fails. Its durable journal holds one producer keyed by the link contract fingerprint, so a re-created link with a different contract fails with "receiver journal is already bound to another bridge contract", and the refusal is a prose error.
+
+**What remains:** either own the journal and erase the producer idempotently on `Erase`, or document that reprovisioning needs a fresh journal; replace the prose refusal with a typed error. Align with Host erasure of admission state ([NET-08](#net-08)), the erasing-disposal rule in [CW-98](#cw-98) and the bridge sink erase (BS-04).
+
+**Example:** remove a durable link with erase, change `limits.timeout_ms`, and re-add it against the same journal: start fails with the "already bound" error.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/bridge/src/component.rs:265-274`; `drasi-core/components/computation-plugins/common/bridge/src/receiver.rs:293-302,350-364`.
+
+**Done when:** erase removes the link's producer state idempotently (or the documented refusal rule applies), a re-created link starts cleanly, and an erase-twice test passes.
+
+<a id="br-04"></a>
+
+#### Log bridge failures and surface link status (BR-04)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+
+The bridge source logs nothing. Accept and handshake failures are swallowed and retried every 10 ms, so a persistent error such as `EMFILE` spins at about 100 Hz with no trace, and `LinkStatus` is not visible outside the process.
+
+**What remains:** structured, rate-limited logs for accept and handshake failures, generation changes, `Busy`, `AcceptanceUnknown` and worker exits; back off on repeated accept errors; surface `LinkStatus` through graph diagnostics or component status.
+
+**Example:** a receiver that has run out of file descriptors shows as running, logs nothing, and uses a CPU core retrying `accept`.
+
+**Evidence:** `drasi-core/components/computation-plugins/common/bridge/src/receiver.rs:871-904`.
+
+**Done when:** each listed event produces a log record, accept errors back off, and link status is readable through the Host.
+
+<a id="br-07"></a>
+<a id="br-08"></a>
+
+#### Separate local settings from the link contract and publish a full schema (BR-07, BR-08)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Medium.
+
+Every limit, including local settings such as `timeout_ms`, `retry_*` and `queue_capacity`, is part of the link contract fingerprint, and peers must match it exactly. Tuning a local timeout therefore breaks the link. The factory schema lists field names only, with no descriptions, defaults or enum constraints; `delivery` and `profile` use different casing; the source has no management or update planning; and `receiver_endpoint` duplicates the graph-assigned component ID.
+
+**What remains:**
+
+- Split `Limits` into wire-contract fields and local settings; local settings become InPlace or Restart updates, contract changes Recreate (refused when the peer would diverge). Shared with BS-05/BS-12.
+- Implement `Factory::assess` and `specification_from_config`; publish a full nested schema with descriptions, defaults and enum constraints, and make `delivery`/`profile` casing consistent.
+- Remove `receiver_endpoint` and use the graph-assigned ID.
+
+**Example:** raising the receiver's `limits.timeout_ms` from 5,000 to 10,000 makes the sender's Hello fail with "bridge protocol, identities, schema, namespace or delivery contract differs".
+
+**Evidence:** `drasi-core/components/computation-plugins/common/bridge/src/config.rs:168-181,372,385-410`; `drasi-core/components/computation-plugins/common/bridge/src/factory.rs:26-52`; `drasi-core/components/computation-plugins/common/bridge/src/config.rs:21,34`.
+
+**Done when:** changing a local setting keeps the link up, the assess matrix covers every field, and the published schema is complete.
+
+<a id="br-10"></a>
+<a id="br-11"></a>
+<a id="br-12"></a>
+
+#### Harden bridge code, connections and TLS (BR-10, BR-11, BR-12)
+
+**Kind:** Improvement. **Priority:** Low. **Effort:** Medium.
+
+Lifecycle paths can panic on `expect`, errors lose their cause through `to_string()`, worker roles are selected by array index, and drain waiting polls every 5 ms. Connections have no keepalive or post-hello idle timeout, two observer clients can occupy both control slots and lock out the sender's Hello, and the TLS handshake runs inside the serial accept loop.
+
+**What remains:**
+
+- Remove `expect` from lifecycle paths; keep causes (`with_cause`) instead of re-wrapping `to_string()`; name worker roles and magic constants; make `wait_drained` event-driven.
+- TCP keepalive and an idle timeout after hello; per-role control slots; TLS handshake outside the serial accept.
+- TLS: allow multiple pins for rotation, optional PEM and a reload path. Protocol: document an upgrade path or negotiate versions; consider windowed frames to lift the stop-and-wait throughput limit (shared with BS-21).
+
+**Example:** two monitoring clients connected to the control port prevent the sender from reconnecting after a restart.
+
+**Evidence:** `drasi-core/components/computation-plugins/common/bridge/src/receiver.rs:296,301,373,519-529,584,614,624,878`; `drasi-core/components/computation-plugins/common/bridge/src/config.rs:227,333,399`; `drasi-core/components/computation-plugins/sources/bridge/src/component.rs:207,215`; `drasi-core/components/computation-plugins/common/bridge/src/boundary.rs:117-126`.
+
+**Done when:** no `expect` remains on lifecycle paths, the control-slot lockout has a test, and pin rotation is supported.
+
+<a id="br-30"></a>
+
+#### Add bridge source lifecycle tests (BR-30)
+
+**Kind:** Qualification. **Priority:** High. **Effort:** Medium.
+
+The bridge source crate has no tests; `common/bridge/tests` covers the protocol and link but not the source's lifecycle hooks.
+
+**What remains:** tests for restart on the same object, pause/resume, erase retry, stop timeout and retry, negative factory validation, accept-error resilience and protocol-version mismatch. After [BR-06](#br-06), run the SDK conformance kit and real-library tests. Prepared-peer partition tests are in [CW-91](#cw-91).
+
+**Example:** `stop` → `start` on the same `BridgeSource` object, then a sender reconnect, is not tested.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/bridge/` (no `tests/`, no `#[cfg(test)]`); `drasi-core/components/computation-plugins/common/bridge/tests/bridge.rs`.
+
+**Done when:** the listed scenarios pass in CI, and after BR-06 the conformance kit passes on both Tokio flavours.
+
+<a id="br-05"></a>
+<a id="br-40"></a>
+
+#### Correct and split the bridge documentation (BR-05, BR-40)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Small to medium.
+
+The shared README states wire version 1 although the protocol is version 2, and its configuration example uses `"to-analysis"`/`"from-plant"` as endpoint IDs, which are not valid component UUIDs. One 446-line README covers both endpoints, and the source has no `DESIGN.md` or `CONFIGURATION.md`.
+
+**What remains:** fix the version text and the endpoint examples; split the README into a source `DESIGN.md` (topology, v2 state machine, generations and sessions, receipts, cuts, durability ownership, TLS, failure semantics) and `CONFIGURATION.md` (every field, contract versus local, resources, update matrix, journal provisioning, erase), following `NATIVE-SOURCE-GUIDE.md`; add rustdoc.
+
+**Example:** copying the README example fails validation because `receiver_endpoint` must be a UUID.
+
+**Evidence:** `drasi-core/components/computation-plugins/common/bridge/README.md:26-27,36-40`; `drasi-core/components/computation-plugins/common/bridge/src/protocol.rs:16`; `drasi-core/core-types/src/component_identity.rs:33,51-52`.
+
+**Done when:** both documents exist, match the code, and the README examples validate.
+
+<a id="plugin-source-counter-mock"></a>
+
+### Counter and mock sources
+
+`drasi-core/components/computation-plugins/sources/counter` (`drasi.standard/volatile-counter`, dynamic and Rust hosting) is the minimal reference source plugin authors copy; it has management and `configuration_details` but known management bugs, three tests and no `DESIGN.md`/`CONFIGURATION.md`. No native equivalent of the ordinary `components/sources/mock` exists.
+
+<a id="mk-01"></a>
+<a id="ct-01"></a>
+<a id="source-d-4"></a>
+
+#### Provide a native mock source (MK-01, CT-01, Source D-4)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Large.
+
+The ordinary mock source offers sensor and generic generators, update and relation events, a published schema and a paired bootstrap provider. The native counter emits only inserts of one node label, so tests, demos and examples that rely on mock cannot move to native plugins. The recommended choice (not yet taken) is a separate plugin, keeping counter minimal; the alternative is to extend counter.
+
+**What remains:** a new crate `computation-plugins/sources/mock` (`drasi.standard/mock`) with:
+
+- generators `counter`, `sensor_reading { sensor_count, mesh }` (Insert then Update per sensor; `CONNECTED_TO` relations with strength updates and rewiring) and `generic`;
+- a `timestamp` property, unbounded runs, interval default and validation;
+- `source_schema_reader` ported from `describe_schema`;
+- a paired bootstrap factory emitting 10 deterministic nodes via `PluginDefinition::new_with_bootstrap`, keeping the FFI bootstrap-regression role of issue #602;
+- `inject_event` as a test-support feature;
+- lifecycle, conformance-kit and documentation compliance from the start.
+
+**Example:** the ordinary configuration `{ "data_type": { "type": "sensor_reading", "sensor_count": 5, "mesh": true }, "interval_ms": 1000 }` should, in its native form, emit five sensor nodes, then updates and `CONNECTED_TO` relations, exactly as the ordinary mock does.
+
+**Evidence:** `drasi-core/components/sources/mock/src/config.rs:40-58`, `mock.rs:190-275,631`, `bootstrap.rs:15-36`; `drasi-core/components/computation-plugins/sources/` (no `mock`).
+
+**Done when:** the decision is recorded, and every ordinary mock capability above is available natively with tests, including the bootstrap path through the loaded library.
+
+<a id="ct-02"></a>
+
+#### Let the counter be removed with erase (CT-02)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Small.
+
+Counter does not declare `erases_owned_state`, so the Host fails every removal with erase before the plugin runs, although counter owns no state.
+
+**What remains:** apply the rule chosen in [CW-98](#cw-98) (declare a no-op erase, or a Host-accepted "owns nothing" capability) and add an erase-twice test.
+
+**Example:** removing a counter source with erase fails with "native component does not support permanent state removal".
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/counter/src/lib.rs:59-64`; `drasi-core/components/host-sdk/src/computation/proxy.rs:1538-1543`.
+
+**Done when:** removal with erase succeeds twice in a test.
+
+<a id="ct-03"></a>
+<a id="ct-04"></a>
+<a id="ct-08"></a>
+
+#### Fix counter management (CT-03, CT-04, CT-08)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Small.
+
+Plugin authors copy counter's management code, so its bugs spread. `apply` refuses a stopped or never-started object, mismatches are reported as `Failed` rather than `Refused`, and assessment calls `Instant::now()`, so it is not a pure function of the configuration.
+
+**What remains:**
+
+- Allow `apply` on a stopped object; return `ApplyError::Refused` for plan, identity or configuration mismatch.
+- Replace the `Instant::now()` check with a fixed `interval_ms` maximum published in the schema.
+- Make `count` increases and `paused` InPlace updates; turn control kinds and the annotation key into `pub const`s; remove `expect` from metadata; add rustdoc.
+
+**Example:** applying an `interval_ms` change to a counter after `stop` fails with "counter update requires an activated instance".
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/counter/src/component.rs:75-80,94-97,182-196,245,266-267`; `drasi-core/components/computation-plugins/sources/counter/src/lib.rs:48,53`.
+
+**Done when:** apply works on a stopped object, refusals are typed, assessment is pure, and tests cover each case.
+
+<a id="ct-05"></a>
+<a id="ct-09"></a>
+
+#### Make the counter interval drift-free and document its pause controls (CT-05, CT-09)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Small.
+
+Each `next()` sleeps the full interval after any time spent waiting, so emission drifts. Counter has two pause concepts (host Pause and the `drasi.counter.pause` control) that are not explained together, and if the control channel closes while paused, `next()` fails with a channel error.
+
+**What remains:** use `tokio::time::interval` with `MissedTickBehavior::Delay`; document both pause concepts; handle a dropped control channel while paused; optionally set `effective_from` to wall-clock milliseconds instead of the sequence number. Unverified: whether a long interval delays host Pause or Stop.
+
+**Example:** with `interval_ms: 1000` and a slow consumer, events arrive more than one second apart and the gap accumulates.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/counter/src/component.rs:209-214,234`.
+
+**Done when:** a paused-time test shows no drift, a dropped control channel is handled, and the README or `DESIGN.md` explains both pause concepts.
+
+<a id="ct-07"></a>
+
+#### Publish the counter's data schema (CT-07)
+
+**Kind:** Improvement. **Priority:** Medium. **Effort:** Small.
+
+Counter publishes no `source_schema_reader`, so it does not demonstrate schema publication to plugin authors, whereas the ordinary mock source publishes one.
+
+**What remains:** add a static schema reader returning `Counter { value: Integer }`.
+
+**Example:** schema discovery on a graph with a counter source returns no labels.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/counter/src/lib.rs:33-82` (no schema reader).
+
+**Done when:** the schema reader exists and a test checks its output.
+
+<a id="ct-06"></a>
+
+#### Test the counter fully (CT-06)
+
+**Kind:** Qualification. **Priority:** Medium. **Effort:** Small to medium.
+
+Counter has three tests, all about updates, although it is the reference implementation.
+
+**What remains:** tests for configuration validation (overflow, unknown field, defaults), the control handler (unknown kind, non-null payload), sequence monotonicity, timing with paused Tokio time, apply on a stopped object, erase, and the SDK conformance kit.
+
+**Example:** `{"stream":"s","start":9223372036854775807,"count":2}` must be rejected for overflow; no test asserts it.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/counter/src/component/tests.rs:59-160`.
+
+**Done when:** the listed tests and the conformance kit pass on both Tokio flavours.
+
+<a id="ct-40"></a>
+
+#### Write the counter design and configuration documents (CT-40)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Small.
+
+Counter has only a short README, so authors copying it have no explanation of its emission model, sequencing or update rules.
+
+**What remains:** a `DESIGN.md` (purpose, emission model, sequencing, pause concepts, volatility, patterns to copy) and a `CONFIGURATION.md` (fields, defaults, ranges, controls, update matrix, erase), following `NATIVE-SOURCE-GUIDE.md`.
+
+**Example:** the README does not say which configuration changes apply in place.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/counter/README.md`; `drasi-core/components/computation-plugins/sources/NATIVE-SOURCE-GUIDE.md`.
+
+**Done when:** both documents exist and match the code.
+
+<a id="native-sinks"></a>
+
+## Native sinks
+
+Each sink has its own section, followed by the legacy reactions that still
+need a native sink. Work shared by every plugin is under
+[Native plugins: shared work](#native-plugins-shared-work).
+
+<a id="plugin-sink-network-runtime"></a>
+<a id="cw-101"></a>
+
+### Shared network sink runtime
+
+`drasi-core/components/computation-plugins/common/network` (sink features). It
+supplies the HTTP, gRPC and SSE sinks with the retry policy (jitter,
+`Retry-After`, `retryBudgetMs`), `x-drasi-delivery-id`, the failure policy,
+log sanitising and the shared listener. The remaining work is a misleading
+secret example, duplicated helpers, metrics and loaded-library tests.
+
+<a id="ni-01"></a>
+
+#### Fix and test object-valued secret fields (NI-01)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Small.
+
+HTTP `secretHeaders` and gRPC `secretMetadata` are single secret fields of type
+object. The Host already resolves one `secret-json:NAME` reference to a whole
+JSON object, and Drasi Server uses that form, but neither sink has a test of
+it. The HTTP documentation shows a per-header reference inside a literal
+object, which the graph specification rejects because a secret field must be
+one unresolved reference.
+
+**What remains:**
+
+- Change the HTTP example to a single reference, as the gRPC documentation
+  already does.
+- Add a test for each sink that resolves a `secret-json` reference into the
+  header map and checks that the value is sent and never logged.
+
+**Example:** `"secretHeaders": {"x-api-key": "<secret reference>"}` (as
+documented) fails with "configuration field secretHeaders requires a
+compatible value or unresolved secret reference". The working form is
+`"secretHeaders": <reference to secret-json:API_HEADERS>`, where the secret
+holds `{"x-api-key":"..."}`.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/http/CONFIGURATION.md:87`,
+`drasi-core/components/computation-plugins/sinks/http/src/config.rs:141`,
+`drasi-core/components/computation-plugins/sinks/grpc/src/config.rs:163`,
+`drasi-core/components/computation-plugins/sinks/grpc/CONFIGURATION.md:48-49,73`,
+`drasi-core/lib/src/computation/v1/graph/specification.rs:141-145,161-162`,
+`drasi-core/components/host-sdk/src/management.rs:384-421`,
+`drasi-server/tests/native_computation_test.rs:236`.
+
+**Done when:** both CONFIGURATION.md files show the single-reference form, and
+an HTTP test and a gRPC test resolve a `secret-json` reference into sent
+headers.
+
+<a id="ni-03"></a>
+
+#### Share the pause gate, exposure check and template helpers (NI-03)
+
+**Kind:** Improvement. **Priority:** Medium. **Effort:** Small to medium.
+
+Each network and log sink carries its own copy of the same behaviour, so a
+fix to one copy does not reach the others. The SSE sink has its own pause
+flag, non-loopback exposure rule and bearer check. The HTTP, gRPC, SSE and log
+sinks each register the `json` helper and the allowed helper list separately.
+
+**What remains:**
+
+- Make `common/network` expose a public pause gate and a token check that the
+  SSE sink can call, and use its `validate_exposure` from SSE.
+- Provide one helper set and helper-name validator in `reaction-common`, used
+  by the HTTP, SSE and log sinks. The gRPC sink keeps its strict renderer but
+  takes the helper set from the same place. The stored-procedure SQL
+  validators and the shared renderer as a whole are in
+  [Sink X-08](#sink-x-08).
+
+**Example:** adding a helper such as `lowercase` today means editing
+`HELPERS` in the HTTP renderer, the helper list in the log renderer, the gRPC
+list and `reaction-common::sse`. Missing one makes the same template valid for
+one sink and rejected by another.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/sse/src/component.rs:278-291,482,796-803`,
+`drasi-core/components/computation-plugins/sinks/sse/src/config.rs:196-200`,
+`drasi-core/components/computation-plugins/common/network/src/config.rs:240-248`,
+`drasi-core/components/computation-plugins/common/network/src/security.rs:20-40`,
+`drasi-core/components/computation-plugins/sinks/http/src/render.rs:9-17`,
+`drasi-core/components/computation-plugins/sinks/log/src/render.rs:25,89,299`,
+`drasi-core/components/computation-plugins/sinks/grpc/src/render.rs:164`,
+`drasi-core/components/reaction-common/src/sse.rs:38`.
+
+**Done when:** SSE uses the `common/network` gate, exposure check and token
+check, and HTTP, gRPC, SSE and log take their helper set from one
+`reaction-common` definition.
+
+<a id="ni-04"></a>
+<a id="ns-03"></a>
+
+#### Report sink metrics and count skipped deliveries (NI-04, NS-03)
+
+**Kind:** Improvement. **Priority:** Medium. **Effort:** Medium.
+
+Operators can see network sink behaviour only in logs. Under
+`failurePolicy: skip` a dropped change produces a warning and nothing else, so
+data loss cannot be alerted on.
+
+**What remains:** report deliveries, items, bytes, retries, skips, failures by
+class, delivery latency and in-flight age for the HTTP, gRPC and SSE sinks,
+plus subscriber counts for SSE, through the plugin metrics facility
+([Sink X-11](#sink-x-11), [CW-26](#cw-26)).
+
+**Example:** a receiver returns 400 for every change of one output under
+`skip`. The pipe stays healthy and the only sign is a stream of
+"deliberate delivery skip" warnings.
+
+**Evidence:** `drasi-core/components/computation-plugins/common/network/src/config.rs:298-318`,
+`drasi-core/components/computation-plugins/sinks/http/DESIGN.md:287-297`,
+`drasi-core/components/computation-plugins/sinks/grpc/DESIGN.md:262,278`,
+`drasi-core/components/computation-plugins/sinks/sse/DESIGN.md:237-243`.
+
+**Done when:** each network sink reports the listed counters, skips are
+counted, and a test reads them after a retry and a skip.
+
+<a id="ni-07"></a>
+<a id="hs-30"></a>
+<a id="gs-30"></a>
+<a id="ss-30"></a>
+
+#### Run the sink conformance kit through loaded libraries (NI-07, HS-30, GS-30, SS-30)
+
+**Kind:** Qualification. **Priority:** Medium. **Effort:** Medium.
+
+`SinkConformance` runs the HTTP, gRPC, SSE and log sinks only through the
+linked `plugin()` definition, so it does not check the dynamic library or both
+Tokio runtime flavours, which is where ABI and runtime faults appear.
+
+**What remains:** add a driver that loads each freshly built sink library and
+runs the same kit on current-thread and multi-thread runtimes, and run it in
+CI ([CW-41](#cw-41)).
+
+**Example:** `cargo test -p drasi-computation-sink-http` passes the kit, but a
+library built with a mismatched exporter would only fail under the Host SDK
+loader, which the kit never exercises.
+
+**Evidence:** `drasi-core/components/computation-plugin-sdk/src/testing.rs`,
+`drasi-core/components/computation-plugins/sinks/http/src/tests/sink.rs:38-39`,
+`drasi-core/components/computation-plugins/sinks/grpc/src/tests.rs:304-305`,
+`drasi-core/components/computation-plugins/sinks/sse/src/tests.rs:368-369`,
+`drasi-core/components/computation-plugins/sinks/log/src/tests.rs:15`.
+
+**Done when:** the kit passes for all four sinks through their loaded
+libraries on both runtime flavours in a named CI job, with no skipped case
+counted as a pass.
+
+<a id="ns-05"></a>
+
+#### Deduplicate adaptive batching validation (NS-05)
+
+**Kind:** Improvement. **Priority:** Low. **Effort:** Small.
+
+The sink adaptive policy and the source ingress each validate
+`AdaptiveBatchConfig` with their own nearly identical bounds, so a change to
+one limit can silently diverge.
+
+**What remains:** one shared validator with the sink and source differences
+(`max_batch_size` limit) as parameters.
+
+**Example:** raising the maximum wait from 60 s must today be changed in two
+places.
+
+**Evidence:** `drasi-core/components/computation-plugins/common/network/src/batching.rs:15-26`,
+`drasi-core/components/computation-plugins/common/network/src/ingress.rs:836-849`.
+
+**Done when:** both call one validator.
+
+<a id="plugin-sink-http"></a>
+
+### HTTP sink
+
+`drasi-core/components/computation-plugins/sinks/http` provides
+`drasi.network/http-sink` (`Handled`, configurable `successStatusCodes`) and
+`drasi.network/http-delivery` (a DeliveryRunner consumer confirmed by
+`DeliveryBatchIdentity`); lifecycle, management, secrets, TLS and documentation
+are complete. Shared work is under [Shared network sink runtime](#plugin-sink-network-runtime).
+
+<a id="http-delivery-qualification"></a>
+
+#### Qualify the delivery consumer through the Host DeliveryRunner (HS-30)
+
+**Kind:** Qualification. **Priority:** Medium. **Effort:** Small to medium.
+
+The `drasi.network/http-delivery` consumer is tested only by calling the
+consumer directly. Its central claims (only the operation in flight repeats
+after a crash, and erasing removal deletes its progress) depend on the Host
+DeliveryRunner and are untested.
+
+**What remains:**
+
+- A Host SDK test that crashes between the receiver's confirmation and the
+  runner's progress commit, restarts, and checks that only the confirmed batch
+  is resent with the same identity.
+- A test that removing the consumer with `StateIntent::Erase` deletes its
+  host-owned DeliveryRunner progress, and that a second erase succeeds
+  ([CW-98](#cw-98)).
+
+**Example:** sequence: receiver confirms batch 7 → process killed → restart →
+the receiver must see batch 7 once more with the same identity, and never
+batch 6.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/http/src/tests/consumer.rs:90-226`,
+`drasi-core/components/computation-plugins/sinks/http/DESIGN.md:196-223`,
+`drasi-core/components/host-sdk/tests/native_network_loopback.rs:111-113`.
+
+**Done when:** both tests pass through the loaded library.
+
+<a id="plugin-sink-grpc"></a>
+
+### gRPC sink
+
+`drasi-core/components/computation-plugins/sinks/grpc` provides
+`drasi.network/grpc-sink` (`Handled` after an exact `items_processed`
+acknowledgement); lazy connection, `tonic::Code` classification, TLS/mTLS,
+secrets, management and documentation are complete.
+
+<a id="gs-08"></a>
+<a id="ni-02"></a>
+
+#### Add a destination-confirmed consumer mode (GS-08, NI-02)
+
+**Kind:** Improvement. **Priority:** Medium. **Effort:** Medium.
+
+The gRPC sink can only be `Handled`: a crash after the receiver applied a
+batch but before the host acknowledged the input replays the whole input. HTTP
+avoids this with `drasi.network/http-delivery`; gRPC cannot, because
+`ProcessResultsResponse` has no field to echo the batch identity.
+
+**What remains:**
+
+- Add a delivery-batch identity field to the `drasi.v1` request and
+  `ProcessResultsResponse` in `grpc-common`.
+- Add a consumer factory (for example `drasi.network/grpc-delivery`) on the
+  Host DeliveryRunner that completes only when the response echoes the exact
+  `DeliveryBatchIdentity`, with explicit `retryable` classification.
+- Document the receiver contract and test crash/replay as for HTTP.
+
+**Example:** a receiver writes 500 changes, replies, and the Drasi process is
+killed before acknowledgement. Today all 500 are resent; in consumer mode only
+the unconfirmed batch is resent with the same identity.
+
+**Evidence:** `drasi-core/components/grpc-common/proto/reaction/drasi/v1/reaction.proto:40-64`,
+`drasi-core/components/computation-plugins/sinks/grpc/DESIGN.md:266-271`,
+`drasi-core/components/computation-plugins/sinks/http/src/consumer.rs`.
+
+**Done when:** a gRPC consumer factory exists, is documented, and passes a
+crash/replay test through the loaded library.
+
+<a id="grpc-retryinfo"></a>
+
+#### Honour gRPC `RetryInfo`
+
+**Kind:** Improvement. **Priority:** Low. **Effort:** Small.
+
+The sink reads retry hints only from `grpc-retry-pushback-ms` and
+`retry-after` metadata; a receiver that sends the standard
+`google.rpc.RetryInfo` status detail is retried on the default backoff.
+
+**What remains:** decode `RetryInfo.retry_delay` from status details and feed
+it to the shared retry policy ([Sink X-05](#sink-x-05)), capped by `retryBudgetMs`.
+
+**Example:** a receiver returns `RESOURCE_EXHAUSTED` with `RetryInfo` of 10 s;
+the sink retries after about 100 ms.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/grpc/src/transport.rs:99-131`,
+`drasi-core/components/computation-plugins/sinks/grpc/DESIGN.md:274-275`.
+
+**Done when:** a test shows the `RetryInfo` delay is honoured.
+
+<a id="gs-02"></a>
+<a id="sink-d-14"></a>
+
+#### Report receiver readiness (GS-02, Sink D-14)
+
+**Kind:** Improvement. **Priority:** Low. **Effort:** Medium.
+
+With the default lazy connection, Start succeeds while the receiver is down,
+and the only signal is failing deliveries and warnings. Sinks have no status
+API to report "not ready" (the SDK `ControlSender::not_ready` notifies
+upstream components, not status).
+
+**What remains:** give native sinks a way to report readiness to Host status
+([CW-23](#cw-23)), then report not-ready from the gRPC sink until its channel
+connects.
+
+**Example:** `endpoint: "http://receiver:50051"` with the receiver stopped:
+the sink shows Running while every input retries.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/grpc/DESIGN.md:202-204,278`,
+`drasi-core/components/computation-plugin-sdk/src/control.rs:129-134`.
+
+**Done when:** a stopped receiver is visible as not-ready in component status
+and clears when it connects.
+
+<a id="plugin-sink-sse"></a>
+
+### SSE sink
+
+`drasi-core/components/computation-plugins/sinks/sse` provides
+`drasi.network/sse-sink` (`Accepted`, volatile broadcast) with a real Pause
+gate, deadline-bounded Stop, loopback default, authentication, CORS, TLS,
+subscriber limits and documentation. Shared work is under
+[Shared network sink runtime](#plugin-sink-network-runtime).
+
+<a id="ss-05"></a>
+
+#### Re-enable the live-rebind tests after CW-94 (SS-05)
+
+**Kind:** Qualification. **Priority:** Low (deferred with CW-94).
+**Effort:** Small.
+
+Two tests that check SSE follows a live input rebind are ignored while
+[CW-94](#cw-94) is deferred, so rebinding an SSE sink's declared inputs has no
+running test.
+
+**What remains:** once CW-94 settles the rebind design, update and enable both
+tests.
+
+**Example:** `cargo test -p drasi-host-sdk --test native_network_loopback
+native_sse_declared_inputs_follow_a_live_rebind` reports both as ignored.
+
+**Evidence:** `drasi-core/components/host-sdk/tests/native_network/sse.rs:916-927`.
+
+**Done when:** both tests run and pass on both runtime flavours.
+
+<a id="plugin-sink-log"></a>
+
+### Log sink
+
+`drasi-core/components/computation-plugins/sinks/log` provides
+`drasi.standard/log` with compiled templates, the `json` helper, consistent
+routing, `renderFailurePolicy`, `level`/`target`/`output`, management and
+documentation. Shared helper work is under
+[Shared network sink runtime](#ni-03).
+
+<a id="lg-30"></a>
+<a id="ni-05"></a>
+
+#### Add Host SDK real-library tests (LG-30, NI-05)
+
+**Kind:** Qualification. **Priority:** Medium. **Effort:** Small.
+
+The log sink is tested only in-crate. It is not in the Host SDK plugin
+package mapping, so no test loads the built library, wires it to a real
+producer and checks its output.
+
+**What remains:** add the log package to the mapping and test the six
+lifecycle hooks, templates, routes and both render-failure policies through
+the loaded library.
+
+**Example:** a query → log pipeline with `output: stdout` and a template using
+`{{json after}}`, checked line by line after an add, an update and a delete.
+
+**Evidence:** `drasi-core/components/host-sdk/tests/native_network_loopback.rs:70-77`.
+
+**Done when:** the tests run in CI through the loaded library.
+
+<a id="plugin-sink-capture"></a>
+
+### Capture sink
+
+`drasi-core/components/computation-plugins/sinks/capture` provides
+`drasi.standard/capture`, which writes one envelope JSON frame per line and is
+`Handled` after write and flush. It is the main test sink but has no erase,
+update planning, design documents or in-crate tests.
+
+<a id="cp-01"></a>
+<a id="sink-d-11"></a>
+
+#### Decide when the capture file is truncated (CP-01, Sink D-11)
+
+**Kind:** Decision. **Priority:** Medium. **Effort:** Small.
+
+With `append: false` every Start truncates the file, so stopping and
+restarting the same component (for example around an update) erases what it
+captured earlier.
+
+**What remains:** add `truncate: onCreate | onStart` (recommended default
+`onCreate`), or document per-start truncation as intended; test stop/start
+retention.
+
+**Example:** capture 100 frames, Stop, Start: the file is empty.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/capture/src/component.rs:100-112`,
+`drasi-core/components/computation-plugins/STANDARD.md:84-86`.
+
+**Done when:** the chosen behaviour is configurable or documented and covered
+by a stop/start test.
+
+<a id="cp-03"></a>
+<a id="lr-09"></a>
+
+#### Cover the legacy file reaction (CP-03, LR-09)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Small to medium.
+
+The ordinary `file` reaction has no native sink. It renders templates per
+route and supports `append`, `overwrite` and `perChange` write modes and a
+`filenameTemplate`; capture writes only raw envelopes to one path.
+
+**What remains:** add these to capture or as a new `drasi.standard/file` sink
+on the shared renderer ([NI-03](#ni-03)), with documentation of each mode's
+duplicate behaviour on replay.
+
+**Example:** `{"outputPath":"/data","writeMode":"perChange","filenameTemplate":"{{after.id}}.json"}`
+has no native equivalent.
+
+**Evidence:** `drasi-core/components/reactions/file/src/config.rs:22-56`,
+`drasi-core/components/computation-plugins/sinks/capture/src/component.rs:18-44`.
+
+**Done when:** every legacy file configuration has a native equivalent with
+tests.
+
+<a id="capture-erase-update"></a>
+
+#### Declare erase and update boundaries
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Small.
+
+Capture does not declare `erases_owned_state` ([CW-98](#cw-98)) and has no `Factory::assess`,
+so removal with erase always fails and any configuration change needs a
+recreate.
+
+**What remains:** declare erase and decide whether it deletes the file (it is
+user data, so a no-op is likely); classify `path` and `append` changes as
+Restart ([Sink X-10](#sink-x-10)).
+
+**Example:** removing a capture sink with erase fails with "native component
+does not support permanent state removal".
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/capture/src/lib.rs:51`,
+`drasi-core/components/host-sdk/src/computation/proxy.rs:1538-1543`.
+
+**Done when:** erase succeeds twice and an assess test covers both fields.
+
+<a id="cp-02"></a>
+<a id="cp-04"></a>
+
+#### Harden stop and frame writing (CP-02, CP-04)
+
+**Kind:** Improvement. **Priority:** Low. **Effort:** Small.
+
+Stop flushes without regard to `StopMode` or the deadline, a cancelled write
+can leave a partial last line, the 64 MiB codec limit is an unnamed literal,
+each frame is copied before writing, and the crate has no unit tests.
+
+**What remains:** honour Abort and the deadline in the final flush; detect or
+skip a partial trailing line on restart with `append: true`; name the limit;
+add an optional `fsync`; write without the extra copy; add unit tests.
+
+**Example:** a host aborts Stop during a large write, then restarts with
+`append: true`; the next frame is appended to a truncated line.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/capture/src/component.rs:61,113-119,132-135`,
+`drasi-core/components/computation-plugins/sinks/capture/README.md:14-16`.
+
+**Done when:** the listed changes have unit tests.
+
+<a id="cp-40"></a>
+
+#### Write the capture design and configuration documents (CP-40)
+
+**Kind:** Issue. **Priority:** High (release). **Effort:** Small.
+
+Capture has only a short README; its frame format, flush-not-fsync meaning,
+truncation and erase behaviour are not documented in the standard sink
+layout.
+
+**What remains:** add `DESIGN.md` and `CONFIGURATION.md` following
+`drasi-core/components/computation-plugins/sinks/NATIVE-SINK-GUIDE.md`.
+
+**Example:** n/a (documentation).
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/capture/README.md`.
+
+**Done when:** both documents exist and match the code.
+
+<a id="plugin-sink-profiler"></a>
+
+### Profiler sink
+
+`drasi-core/components/computation-plugins/sinks/profiler` provides
+`drasi.standard/profiler`, which keeps a sample window and logs latency
+statistics periodically. Its Pause, input handling, metric definitions, tests
+and documentation all need work.
+
+<a id="pf-01"></a>
+
+#### Stop reports while paused (PF-01, CW-96)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Small.
+
+Pause returns success while the report task keeps logging, which breaks the
+rule that a paused component does no work ([CW-96](#cw-96)).
+
+**What remains:** run the reporter on `ActivationScope` with a `PauseGate` (or
+return `lifecycle::unsupported`), honour `StopMode` and the deadline, and emit
+a final report on Drain.
+
+**Example:** with `reportIntervalSecs: 10`, pause the sink for a minute: six
+reports are still logged.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/profiler/src/component.rs:195-200,210-238`,
+`drasi-core/components/computation-plugin-sdk/src/lifecycle.rs:221-300`.
+
+**Done when:** a test shows no report while paused, reports after Resume and a
+final report on Drain.
+
+<a id="pf-02"></a>
+
+#### Accept input that is not query output (PF-02)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Small.
+
+The sink declares the generic graph-change input, but `handle` calls
+`QueryChangeCodec::metadata(...)?`, which returns an error for any envelope
+that is not current query output. Wiring a source or transformer directly to
+the profiler fails every input and stalls the pipe.
+
+**What remains:** skip and count envelopes without query profiling metadata
+instead of failing.
+
+**Example:** PostgreSQL source → profiler: the first input fails with
+`InvalidRow` and is retried indefinitely.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/profiler/src/component.rs:247-256`,
+`drasi-core/components/computation-contracts/src/query_codec.rs:725-729`,
+`drasi-core/components/computation-plugins/SINKS.md:1-8`.
+
+**Done when:** a source-only pipeline runs through the profiler without
+failures and the skips are counted.
+
+<a id="pf-03"></a>
+
+#### Define and correct the reported metrics (PF-03)
+
+**Kind:** Decision. **Priority:** Medium. **Effort:** Small.
+
+`reaction_receive_ns` and `reaction_complete_ns` are stamped back to back, so
+`reaction_processing` is always about zero. `total` starts at source receive,
+whereas legacy started at source send. Reports are in nanoseconds with no
+standard deviation or header, unlike legacy.
+
+**What remains:** decide the definitions (recommended: restore legacy ms,
+stddev and `source_send → reaction_complete`), stamp completion after
+processing, and document them. Whether to publish metrics instead of logging
+is [Sink D-13](#sink-d-13).
+
+**Example:** every report shows `reaction_processing: ... mean_ns=0`.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/profiler/src/component.rs:117-125,250-252`,
+`drasi-core/components/core-types/src/profiling.rs:102-106`,
+`drasi-core/components/reactions/profiler/src/profiler.rs:267-268,572,706`.
+
+**Done when:** the definitions are documented and tested against known
+timestamps.
+
+<a id="pf-04"></a>
+
+#### Bound window memory and report outside the lock (PF-04)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Small.
+
+`windowSize` has no maximum and its buffer is allocated in full at create.
+Each report sorts every metric while holding the mutex that `handle` needs,
+so large windows delay delivery.
+
+**What remains:** add a schema maximum and parse check, allocate lazily, and
+copy the samples out before computing statistics.
+
+**Example:** `windowSize: 100000000` allocates gigabytes at create.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/profiler/src/component.rs:31-38,72,88-92,223`.
+
+**Done when:** an oversized window is rejected and a test shows `handle` is
+not blocked during a report.
+
+<a id="pf-05"></a>
+
+#### Declare erase and update boundaries (PF-05)
+
+**Kind:** Issue. **Priority:** Low. **Effort:** Small.
+
+The profiler owns no external state but does not declare
+`erases_owned_state`, so removal with erase fails ([CW-98](#cw-98)), and it has
+no `Factory::assess`, so changing the interval needs a recreate.
+
+**What remains:** declare a no-op erase; classify `reportIntervalSecs` and
+`windowSize` as InPlace at Pause with a `NativeManagement` apply.
+
+**Example:** removing the profiler with erase fails with "native component
+does not support permanent state removal".
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/profiler/src/lib.rs:53`.
+
+**Done when:** erase succeeds twice and an assess/apply test covers both
+fields.
+
+<a id="pf-30"></a>
+<a id="pf-40"></a>
+
+#### Add tests and documentation (PF-30, PF-40)
+
+**Kind:** Qualification. **Priority:** High (release). **Effort:** Medium.
+
+The profiler has one unit test, no Host SDK test, no design or configuration
+document, and is missing from the per-sink table in `SINKS.md`.
+
+**What remains:** port the useful legacy statistics tests; add Host SDK tests
+for pause gating, source-only input and reports; add `DESIGN.md` (metric
+definitions, units, window) and `CONFIGURATION.md`; add a `SINKS.md` row.
+
+**Example:** n/a.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/profiler/src/component.rs:259-284`,
+`drasi-core/components/reactions/profiler/src/tests.rs`,
+`drasi-core/components/computation-plugins/SINKS.md:127-138`.
+
+**Done when:** the tests run in CI and both documents match the code.
+
+<a id="sink-d-13"></a>
+
+#### Decide the profiler metric format (Sink D-13)
+
+**Kind:** Decision. **Priority:** Low.
+
+The profiler sink logs nanosecond count/mean/percentile strings. It is
+undecided whether it should publish through the SDK metric facility instead.
+
+**Options:** (a) keep log output; (b) publish metrics once
+[the metrics entry](#source-x-07) exists. **Recommendation:** (b).
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/profiler/src/component.rs:118`.
+
+**Done when:** the format is chosen and documented.
+
+<a id="plugin-sink-storedproc-shared"></a>
+
+### Shared stored-procedure sink support
+
+The three stored-procedure sinks (`drasi.postgres/storedproc`,
+`drasi.mysql/storedproc`, `drasi.mssql/storedproc`) share their templates,
+lifecycle and configuration problems. Only PostgreSQL commits each effect
+together with a destination cursor. The items below apply to all three unless
+they say otherwise.
+
+<a id="sink-d-3"></a>
+
+#### Decide the delivery profile for MySQL and SQL Server stored procedures (Sink D-3)
+
+**Kind:** Decision. **Priority:** High.
+
+MySQL and SQL Server report `Handled` after running every command in an input,
+with no transaction and no destination cursor. A crash or failure partway
+through an input therefore repeats the commands that already ran.
+
+**Options:** (a) keep `Handled` at-least-once and document partial effects;
+(b) declare `ConsumerMode::External` and use only the host `DeliveryRunner`;
+(c) do (b) and also add a destination cursor table committed in the same
+destination transaction as the effect, as PostgreSQL does. The recommendation
+is (c). It restores per-command retry and matches PostgreSQL. Procedures that
+commit internally would still be at-least-once, and this must be documented.
+
+**Example:** an input carries 500 changes. The 300th `EXEC` fails on a
+deadlock. Under (a) the host replays all 500 and the first 299 run twice.
+Under (c) the replay resumes at operation 300.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-mysql/src/lib.rs:85,97`;
+`drasi-core/components/mysql-common/src/storedproc/runtime.rs:24-25,175-227`;
+`drasi-core/components/computation-plugins/sinks/storedproc-mssql/src/lib.rs:365-399`.
+
+**Done when:** the profile is chosen and recorded in each sink's `DESIGN.md`.
+[SP-01](#sp-01) implements it.
+
+<a id="sp-01"></a>
+
+#### Give MySQL and SQL Server a destination cursor (SP-01)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Large.
+
+This item implements [Sink D-3](#sink-d-3) option (c). MySQL and SQL Server
+are plain `Component::Sink` with `Handled` completion. The PostgreSQL consumer
+already shows the pattern to follow.
+
+**What remains:**
+
+- Declare `ConsumerMode::External` for MySQL and SQL Server, with a cursor
+  table modelled on `postgres-common/src/delivery.rs`. Run one destination
+  transaction per operation that commits the procedure effect and the cursor
+  advance together.
+- Factor the cursor protocol into a shared crate or one documented pattern, so
+  the three databases keep identical semantics: rollover, conflict and gap
+  rejection, and ownership (see [SPG-01](#spg-01)).
+- Classify retryable errors per database: MySQL deadlock and lock-wait errors,
+  and SQL Server 1205.
+
+**Example:** the commit reply is lost after MySQL commits operation 7. The
+runner retries operation 7. The cursor shows it is done, so the procedure does
+not run again.
+
+**Evidence:** `drasi-core/components/postgres-common/src/delivery.rs:67-187`
+(the reference); `drasi-core/components/mysql-common/src/storedproc/runtime.rs:175-227`;
+`drasi-core/components/computation-plugins/sinks/storedproc-mssql/src/lib.rs:384-397`.
+
+**Done when:** both sinks are External consumers with a destination cursor.
+A crash between the effect and the local progress commit does not repeat a
+committed operation, and tests prove it.
+
+<a id="sp-03"></a><a id="smy-02"></a><a id="sms-03"></a>
+
+#### Stop refusing all input after one interrupted command (SP-03, SMY-02, SMS-03)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+
+Each sink sets an `interrupted` flag before it executes. It clears the flag only
+on success (PostgreSQL also clears it on a retryable rollback). After a timeout,
+a non-retryable error or an unknown commit, every later `handle` is refused
+until the sink is stopped and restarted. One slow procedure call can therefore
+stop delivery for good.
+
+**What remains:**
+
+- Remove the latched refusal.
+- Classify each error. A confirmed rollback or a command that never ran is
+  retryable. An unknown outcome goes to the runner, which is safe once
+  [SP-01](#sp-01) and [SPG-03](#spg-03) are in place. A dead connection is
+  reconnected inside the activation.
+- SQL Server: a dropped `handle` future must not leave `Work` pending, so that
+  the next `handle` is not refused (see [SMS-07](#sms-07)).
+
+**Example:** `command_timeout_ms: 30000`, and one procedure call takes 31 s. The
+sink fails that input. Every retry then fails with "SQL Server sink is stopped
+or requires cleanup after interrupted work" until an operator restarts the
+reaction.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-postgres/src/component.rs:274-305`;
+`drasi-core/components/mysql-common/src/storedproc/runtime.rs:298-308`;
+`drasi-core/components/computation-plugins/sinks/storedproc-mssql/src/lib.rs:365-368,383-397`.
+
+**Done when:** a test times out, fails or interrupts one input, and the next
+retry of the same input succeeds without Stop/Start on all three sinks.
+
+<a id="sms-01"></a><a id="sp-05"></a>
+
+#### Enforce parameter-only templates in one shared validator (SMS-01, SP-05, Sink X-08)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Small.
+
+The SQL Server sink only checks that its templates compile. Its `{{json}}`
+helper writes raw text into the SQL. A template such as `EXEC p '{{json after}}'`
+therefore puts unescaped change data into the command, which is SQL injection.
+PostgreSQL (`ensure_param_only`) and MySQL (`validate_parameterized_template`)
+each have their own parameter-only check.
+
+**What remains:**
+
+- Write one shared validator and use it for all three sinks.
+- Reject bare `{{x}}` in SQL text, `{{{x}}}`, inline `{{json x}}`, partials and
+  decorators. Allow values only through `{{param …}}`.
+- Write the failing SQL Server test first.
+- Document the change for migrating legacy templates. The legacy SQL Server
+  reaction allowed inline `{{json}}`, so this is a deliberate tightening.
+
+**Example:** `added: "EXEC dbo.upsert '{{json after}}'"` with a property value
+`x'); DROP TABLE t;--` should be rejected when the sink is created, but it is
+accepted today.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-mssql/src/lib.rs:75`;
+`drasi-core/components/mssql-common/src/sql/template.rs:4-16,245-252`;
+`drasi-core/components/postgres-common/src/sql/template.rs:86`;
+`drasi-core/components/mysql-common/src/storedproc.rs:111`.
+
+**Done when:** one validator rejects every non-parameter interpolation for all
+three sinks, and a SQL Server test shows the injection template is refused.
+
+<a id="sp-02"></a>
+
+#### Honour the lifecycle contract in start, stop and dispose (SP-02, Sink X-01)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+
+Start and stop use configuration timeouts and ignore `ctx.deadline()`,
+`ctx.cancellation()` and `StopMode`. An `Abort` stop waits as long as a `Drain`
+stop, and a cancelled start keeps connecting. Dispose ignores `Erase`, and no
+sink declares `erases_owned_state`. Removing any of them with erase therefore
+fails before the plugin runs.
+
+**What remains:**
+
+- Bound start and stop by the context deadline and cancellation. `Abort`
+  cancels in-flight work. MySQL can use its session `KILL` path. For SQL
+  Server, document that Tiberius cannot send ATTENTION.
+- Declare `erases_owned_state` on all three factories. PostgreSQL deletes its
+  own cursor rows ([SPG-01](#spg-01)). MySQL and SQL Server erase their cursor
+  rows once [SP-01](#sp-01) lands; until then their erase is a documented no-op.
+  Make erase idempotent ([CW-98](#cw-98)).
+- Pause and resume stay no-ops, because the host stops calling `handle`
+  ([CW-96](#cw-96)).
+
+**Example:** `stop(Abort)` while a MySQL procedure is running should return
+within the stop deadline after it kills the session. Today it waits up to
+`shutdown_timeout_ms`.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-postgres/src/component.rs:192-269`;
+`drasi-core/components/computation-plugins/sinks/storedproc-mysql/src/component.rs:53-73`;
+`drasi-core/components/mysql-common/src/storedproc/runtime.rs:258-283`;
+`drasi-core/components/computation-plugins/sinks/storedproc-mssql/src/lib.rs:286-305,318-354`.
+
+**Done when:** the lifecycle conformance kit (Sink X-02) passes for all three
+sinks, including Abort within the deadline and erase run twice.
+
+<a id="sp-06"></a><a id="smy-03"></a><a id="sms-05"></a>
+
+#### Keep one connection per activation for MySQL and SQL Server (SP-06, SMY-03, SMS-05)
+
+**Kind:** Improvement. **Priority:** Medium. **Effort:** Medium.
+
+MySQL opens two new connections (control and procedure) for every input, plus
+two more at start. SQL Server opens a new TCP, TLS and login connection for
+every input and discards its start test connection. Throughput is therefore
+bounded by connection setup. The legacy reactions used a pool or a shared
+client.
+
+**What remains:** keep a persistent connection (for MySQL, a control and
+procedure pair) per activation, with bounded reconnect using the shared retry
+policy (Sink X-05).
+
+**Example:** 1,000 one-change inputs cost 2,000 MySQL connections today. After
+this change they should cost two.
+
+**Evidence:** `drasi-core/components/mysql-common/src/storedproc/runtime.rs:175-227,258-270`;
+`drasi-core/components/computation-plugins/sinks/storedproc-mssql/src/lib.rs:286-305,384-385`;
+legacy `drasi-core/components/reactions/storedproc-mysql/src/executor.rs:94` and
+`drasi-core/components/reactions/storedproc-mssql/src/executor.rs:115-119`.
+
+**Done when:** a test shows that the connection count stays constant across
+many inputs and that the sink reconnects after a database restart.
+
+<a id="sp-04"></a>
+
+#### Publish configuration defaults and mark only real secrets (SP-04, Sink X-09)
+
+**Kind:** Improvement. **Priority:** Medium. **Effort:** Small.
+
+Each factory marks the whole `settings` object as secret by hand. Templates,
+routes and hosts are therefore redacted, and none of the sinks publishes
+`configuration_details` with defaults. The SDK already provides
+`ConfigOption::secret()`.
+
+**What remains:**
+
+- Flatten the settings so that `password` and the TLS private keys are
+  top-level secret fields, and leave templates visible.
+- Publish `configuration_details` with defaults.
+- Restore per-field configuration values as the legacy `ConfigValue` fields
+  allowed.
+
+**Example:** the Server UI should show an operator `added: "CALL upsert({{param after.id}})"`
+and hide `password`. Today both are hidden.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-postgres/src/lib.rs:47-61`;
+`drasi-core/components/computation-plugins/sinks/storedproc-mysql/src/lib.rs:73-77`;
+`drasi-core/components/computation-plugins/sinks/storedproc-mssql/src/lib.rs:141-145`;
+`drasi-core/components/computation-plugin-sdk/src/configuration.rs:223`.
+
+**Done when:** each factory's metadata marks only credentials and keys secret,
+and publishes its defaults.
+
+<a id="sp-07"></a>
+
+#### Plan updates through `assess` and native management (SP-07, Sink X-10)
+
+**Kind:** Improvement. **Priority:** Low. **Effort:** Medium.
+
+None of the sinks implements `Factory::assess`, so every configuration change
+recreates the component.
+
+**What remains:** apply template, route and timeout changes in place. Restart
+for connection and credential changes. Recreate for output changes and for the
+cursor identity.
+
+**Example:** editing one `updated` template should not reconnect or reset the
+cursor.
+
+**Evidence:** none of the three factories implements `assess`
+(`drasi-core/components/computation-plugins/sinks/storedproc-postgres/src/lib.rs`,
+`.../storedproc-mysql/src/lib.rs`, `.../storedproc-mssql/src/lib.rs`).
+
+**Done when:** each factory returns InPlace, Restart or Recreate per field, and
+tests cover each class.
+
+<a id="sink-x-11-storedproc"></a>
+
+#### Add delivery logging and metrics (Sink X-11)
+
+**Kind:** Improvement. **Priority:** Medium. **Effort:** Small.
+
+The SQL Server and MySQL sink crates log nothing, and the PostgreSQL delivery
+path logs nothing. An operator cannot see retries, timeouts or the cursor
+position.
+
+**What remains:** add sanitized logs and sink metrics (deliveries, items,
+retries, failures, durations), following the network sinks.
+
+**Example:** a deadlock retry should produce a warning that names the output
+alias and the SQLSTATE or error number, and never the parameter values.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-mssql/` and
+`drasi-core/components/computation-plugins/sinks/storedproc-mysql/` contain no
+`log::` or `tracing::` calls. Neither does `drasi-core/components/postgres-common/src/delivery.rs`.
+
+**Done when:** each sink emits the shared sink metrics and logs retries and
+failures without logging data.
+
+<a id="sp-08"></a>
+
+#### Cover the failure paths with tests (SP-08, Sink X-02)
+
+**Kind:** Qualification. **Priority:** Medium. **Effort:** Medium.
+
+The tests prove the happy path and some PostgreSQL recovery cases. They do not
+cover the failures that the items above fix.
+
+**What remains:** for all three sinks, test:
+
+- pause, Abort, and erase run twice;
+- reconnect after a database restart;
+- inputs larger than the current caps;
+- rejection of template injection;
+- credential refresh;
+- recovery after a failure without Stop/Start;
+- a crash between the effect and the cursor commit.
+
+Use the sink conformance kit (Sink X-02) once it exists. The per-database live
+suites are [SPG-30](#spg-30), [SMY-30](#smy-30) and [SMS-30](#sms-30).
+
+**Example:** restart the database container during a 1,000-change input. The
+sink should finish without Stop/Start and with no duplicated committed
+operations.
+
+**Evidence:** see the per-database qualification items.
+
+**Done when:** every scenario listed runs in CI for each database that has a
+live environment.
+
+<a id="sp-09"></a>
+
+#### Write the legacy-to-native migration guide (SP-09)
+
+**Kind:** Improvement. **Priority:** Medium. **Effort:** Small.
+
+The legacy reactions rendered templates from the query-result context. The
+native sinks render from the graph-change context. A `PATCH` carries only the
+properties it sets, and a delete may carry no before image. Copied legacy
+templates can therefore bind missing values.
+
+**What remains:** document each legacy context field and its native
+equivalent, the `PATCH` `after` semantics, identity-only deletes and the
+template tightening ([SMS-01](#sms-01)). First check with a test how `after`
+renders for a patch.
+
+**Example:** a legacy `updated: "CALL upd({{param after.name}}, {{param after.price}})"`
+receives only `after.price` when a patch changes the price.
+
+**Evidence:** `drasi-core/components/computation-plugins/SINKS.md:79-117`.
+
+**Done when:** each sink's `CONFIGURATION.md` links a migration section with
+before/after templates for add, patch and delete.
+
+<a id="dx-7"></a>
+
+#### Teach database-writing sinks the mapping and delivery contract (DX-7)
+
+**Kind:** Improvement. **Priority:** Medium. **Effort:** Medium.
+
+A plugin author writing a database sink must handle full replacements,
+patches, removed properties and identity-only deletes. An absent before image
+is not null. The author must also choose between `Handled`, `ConsumerMode::External`
+and `NativeTransactionalConsumer`, which give different guarantees. The SDK
+explains each part separately, but no example shows them together. Authors
+copy legacy templates or assume every delete has `before.id`.
+
+**What remains:**
+
+- Add a database-writing sink example that decodes source and query envelopes
+  through `GraphChangeBatch` and handles patches and identity-only deletes.
+- Use `DeliveryItem::id` as the deduplication key, not projected values or
+  transport counters.
+- Demonstrate the lost-commit-response case, with destination-side
+  deduplication where the effect and a receipt commit together.
+- Add a table to `SINKS.md` and `NATIVE-SINK-GUIDE.md` stating whether each
+  profile's guarantee covers an operation, a batch or a source transaction.
+  `NativeTransactionalConsumer` does not enlist the vendor database.
+
+**Example:** a sink writes `DELETE FROM t WHERE id = $1` from `before.id`. It
+fails on an identity-only delete that has no before image. The example should
+use the element identity instead.
+
+**Evidence:** `drasi-core/components/computation-plugins/SINKS.md:10-38,79-117`;
+`drasi-core/components/computation-plugins/sinks/NATIVE-SINK-GUIDE.md:23-36`;
+`drasi-core/components/computation-contracts/src/graph_view.rs:583-626`;
+`drasi-core/components/computation-contracts/src/component_data.rs:21-31`;
+`drasi-core/components/computation-contracts/src/delivery.rs:77-87`;
+`drasi-core/components/computation-plugin-sdk/README.md:1092-1170`;
+`drasi-core/components/computation-plugins/sinks/storedproc-postgres/README.md:15-41`;
+`drasi-core/components/computation-plugins/sinks/storedproc-mysql/README.md:61-73`.
+
+**Done when:** a tested example sink exists that covers patch, identity-only
+delete and lost-commit replay, and the guides state the scope of each
+guarantee.
+
+<a id="plugin-sink-storedproc-postgres"></a>
+
+### PostgreSQL stored-procedure sink
+
+`drasi-core/components/computation-plugins/sinks/storedproc-postgres` is an
+External consumer. It commits each operation's procedure effect and its cursor
+in one transaction (`drasi-core/components/postgres-common/src/delivery.rs`).
+The shared items above also apply.
+
+<a id="spg-01"></a><a id="sink-d-10"></a>
+
+#### Scope the delivery table to its consumer and erase it (SPG-01, Sink D-10, CW-98 part)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+
+Every sink writes cursors to one hard-coded `public.drasi_delivery_stream_v1`
+table. The 4,096-stream cap counts rows across the whole database, and no row
+is ever deleted. Sinks that are added and removed over time therefore exhaust
+the database for every later sink. The factory does not declare
+`erases_owned_state`, so erase cannot clean up. The accepted direction (Sink
+D-10) is a configurable table, an owner column and per-consumer cleanup.
+
+**What remains:**
+
+- Make the schema and table configurable.
+- Add an owner column for the consumer scope.
+- Replace the database-wide limit with a per-consumer or configurable limit.
+- Declare `erases_owned_state`, and in `dispose(Erase)` delete only this
+  consumer's rows, idempotently.
+- Document the required grants.
+- Check whether a non-superuser can create the table in `public` on
+  PostgreSQL 15+ (see [SPG-04](#spg-04)).
+
+**Example:** adding and erasing 4,096 sinks against one database leaves 4,096
+rows. The next sink fails with "destination delivery stream capacity is
+exhausted".
+
+**Evidence:** `drasi-core/components/postgres-common/src/delivery.rs:11-20,67-88,151-158`;
+`drasi-core/components/computation-plugins/sinks/storedproc-postgres/src/component.rs:192-209`.
+
+**Done when:** each consumer's rows are owned and bounded per consumer. Erase
+removes them and is safe to repeat. A test runs erase twice and then adds a new
+sink.
+
+<a id="spg-03"></a>
+
+#### Reconnect after driver loss and retry unknown commits (SPG-03)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+
+The connection driver task only logs when it fails, so a lost connection stays
+lost. A connection error (08xxx) or `CommitUnknown` is then not retryable, and
+the wedge in [SP-03](#sp-03) refuses all later input. The cursor makes a retry
+after reconnect safe.
+
+**What remains:** reconnect within the activation, with bounded backoff
+(Sink X-05). Treat 08xxx and `CommitUnknown` as retry-after-reconnect.
+
+**Example:** a PostgreSQL failover drops the connection mid-commit. The sink
+should reconnect, retry, find the operation in the cursor and continue.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-postgres/src/component.rs:233-240,274-305`;
+`drasi-core/components/postgres-common/src/delivery.rs:226-231,257`.
+
+**Done when:** a live test restarts PostgreSQL during delivery, and the sink
+recovers with no duplicated effects and no Stop/Start.
+
+<a id="spg-02"></a>
+
+#### Support activation credentials (SPG-02, Sink X-09)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Small.
+
+The PostgreSQL sink accepts only a static password and PEM files. The legacy
+reaction used identity providers, including tokens and certificate mTLS, and
+the native MySQL and SQL Server sinks already support activation credentials.
+
+**What remains:**
+
+- Declare `supports_activation_credentials` for token and password providers.
+- Decide whether certificate providers need an SDK extension or stay static
+  PEM.
+
+**Example:** an Azure Database for PostgreSQL sink should use a refreshed Entra
+token instead of a stored password.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-postgres/src/lib.rs:47-61`
+(compare `drasi-core/components/computation-plugins/sinks/storedproc-mysql/src/lib.rs:47-61`);
+legacy `drasi-core/components/reactions/storedproc-postgres/src/executor.rs:51-72`.
+
+**Done when:** the sink connects with a refreshed provider token, and a test
+covers credential refresh.
+
+<a id="spg-04"></a>
+
+#### Expose consumer progress and create the table safely (SPG-04, Sink X-04)
+
+**Kind:** Improvement. **Priority:** Medium. **Effort:** Small.
+
+The sink does not expose `consumer_progress_reader`, so management cannot
+report delivery progress. The cursor table is created inside the delivery
+`initialize` path, so a missing `CREATE` privilege appears as a delivery
+failure.
+
+**What remains:**
+
+- Implement the progress reader.
+- Move table creation into a checked, retry-safe step that fails with a clear
+  privilege error.
+
+**Example:** a role without `CREATE` on `public` should fail at start with
+"grant CREATE on schema … or pre-create table …".
+
+**Evidence:** `drasi-core/components/postgres-common/src/delivery.rs:67-88`;
+`drasi-core/components/computation-plugins/sinks/storedproc-postgres/src/lib.rs:69-78`.
+
+**Done when:** progress is readable through management, and the privilege
+failure has a test with a clear error.
+
+<a id="spg-05"></a>
+
+#### Remove the double connect timeout and allow refusing plaintext (SPG-05)
+
+**Kind:** Improvement. **Priority:** Low. **Effort:** Small.
+
+Start applies the connect timeout twice, so it can wait twice as long as
+configured. A plaintext connection to a non-loopback host only logs a warning.
+
+**What remains:**
+
+- Apply the timeout once.
+- Add an option to refuse plaintext to non-loopback hosts.
+
+**Example:** `connect_timeout_ms: 5000` against an unreachable host should fail
+within 5 s, not 10 s.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-postgres/src/component.rs:135,171-176,219-224`.
+
+**Done when:** start honours one timeout, and the refusal option is tested.
+
+<a id="spg-30"></a>
+
+#### Qualify the PostgreSQL sink live (SPG-30, Sink X-15)
+
+**Kind:** Qualification. **Priority:** High. **Effort:** Medium.
+
+Live tests exist for partial-batch resume, deduplication, retryable rollback
+and cancellation. They are ignored by default because they need a
+Docker-compatible runtime, and they do not cover the cases the items above
+change.
+
+**What remains:**
+
+- Run the live suite in CI.
+- Add tests for stream-cap exhaustion, erase, reconnect, a PostgreSQL 15
+  non-superuser role and the [SP-08](#sp-08) scenarios.
+
+**Example:** `cargo test -p drasi-source-postgres --test native_transactions -- --ignored`
+should run in a CI job.
+
+**Evidence:** `drasi-core/components/sources/postgres/tests/native_transactions/libraries.rs:514-749`.
+
+**Done when:** the live suite, including the new cases, runs in CI.
+
+<a id="spg-40"></a>
+
+#### Write DESIGN.md and CONFIGURATION.md, and fix the ABI text (SPG-40, Sink X-14)
+
+**Kind:** Improvement. **Priority:** High. **Effort:** Small.
+
+The sink has only a README, and it states ABI `2.0.0`.
+
+**What remains:**
+
+- `DESIGN.md`: the cursor protocol, the exactly-once conditions and table
+  ownership.
+- `CONFIGURATION.md`: grants, procedure rules, TLS, credentials, the update
+  matrix, erase, and a runbook for the cursor table.
+- Correct the ABI text.
+
+**Example:** an operator who needs to know whether a procedure may `COMMIT`
+should find the answer in `CONFIGURATION.md`.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-postgres/README.md:5`.
+
+**Done when:** both documents exist and the README states the current ABI.
+
+<a id="plugin-sink-storedproc-mysql"></a>
+
+### MySQL stored-procedure sink
+
+`drasi-core/components/computation-plugins/sinks/storedproc-mysql` is a
+`Handled` sink. The runtime is in `drasi-core/components/mysql-common/src/storedproc/`.
+Its profile, wedge and connection work are [SP-01](#sp-01), [SMY-02](#smy-02)
+and [SMY-03](#smy-03).
+
+<a id="smy-01"></a><a id="sms-02"></a>
+
+#### Chunk large inputs instead of failing them forever (SMY-01, SMS-02, CW-44 part)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+
+MySQL refuses inputs with more than 4,096 changes or more than
+`max_protocol_bytes` in total. SQL Server refuses more than 100,000 commands
+and applies one `command_timeout_ms` to the whole input. The host retries a
+refused input forever, so one large source transaction stops the reaction. The
+legacy reactions had no cap.
+
+**What remains:**
+
+- Execute in chunks.
+- Bound the memory used for rendering.
+- Apply timeouts per command.
+- Enforce SQL Server's 2,100-parameter limit per command with a clear error.
+- This is the "SQL Server and MySQL sinks" row of [CW-44](#cw-44), which moves
+  here.
+
+**Example:** a bulk `UPDATE` of 10,000 source rows becomes one 10,000-change
+input. MySQL refuses it on every retry.
+
+**Evidence:** `drasi-core/components/mysql-common/src/storedproc/runtime.rs:95-98,123-131`;
+`drasi-core/components/computation-plugins/sinks/storedproc-mssql/src/lib.rs:375-378,394-396`.
+
+**Done when:** tests deliver more than 4,096 changes (MySQL) and more than
+100,000 commands (SQL Server). A command with more than 2,100 parameters fails
+with a clear error.
+
+<a id="smy-04"></a>
+
+#### Rename `retry_attempts` and stop reusing binlog fields (SMY-04)
+
+**Kind:** Improvement. **Priority:** Low. **Effort:** Small.
+
+`retry_attempts` retries only connection setup, unlike the legacy command
+retry. The sink's connection also reuses binlog settings (`server_id = 1`,
+heartbeat 1,000).
+
+**What remains:**
+
+- Rename the field to `connectRetryAttempts` (or apply it to commands after
+  [SP-01](#sp-01)).
+- Build the sink connection without the binlog fields.
+
+**Example:** an operator setting `retry_attempts: 5` expects a failed procedure
+to be retried. It is not.
+
+**Evidence:** `drasi-core/components/mysql-common/src/storedproc/config.rs:39-73,89-90`;
+`drasi-core/components/mysql-common/src/storedproc/runtime.rs:138-173`.
+
+**Done when:** the field name matches its behaviour, and the connection uses no
+replication settings.
+
+<a id="smy-30"></a>
+
+#### Qualify the MySQL sink live (SMY-30, Sink X-15)
+
+**Kind:** Qualification. **Priority:** High. **Effort:** Medium.
+
+Construction tests exist. The live procedure lifecycle tests are ignored and
+need Podman and rebuilt native libraries.
+
+**What remains:**
+
+- Run the live tests in CI.
+- Add tests for more than 4,096 changes, partial failure with replay,
+  reconnect and the [SP-08](#sp-08) scenarios.
+
+**Example:** stop MySQL during a 5,000-change input, then restart it. The sink
+should recover without Stop/Start.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-mysql/src/tests.rs`;
+`drasi-core/components/host-sdk/tests/native_mysql_components.rs:1317-1692`.
+
+**Done when:** the live MySQL suite runs in CI and covers these cases.
+
+<a id="smy-40"></a>
+
+#### Write DESIGN.md and CONFIGURATION.md (SMY-40, Sink X-14)
+
+**Kind:** Improvement. **Priority:** High. **Effort:** Small.
+
+The sink has only a README.
+
+**What remains:**
+
+- `DESIGN.md`: delivery profile, duplicate windows, session cleanup.
+- `CONFIGURATION.md`: grants, TLS, credentials, limits.
+- Document the current caps and the per-input connection cost until
+  [SMY-01](#smy-01) and [SMY-03](#smy-03) land.
+
+**Example:** an operator should learn from `CONFIGURATION.md` that one input
+cannot exceed 4,096 changes.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-mysql/README.md`.
+
+**Done when:** both documents exist.
+
+<a id="plugin-sink-storedproc-mssql"></a>
+
+### SQL Server stored-procedure sink
+
+`drasi-core/components/computation-plugins/sinks/storedproc-mssql` is a
+`Handled` sink, and all its code is in `src/lib.rs`. Its injection, large-input,
+profile, wedge and connection work are [SMS-01](#sms-01), [SMS-02](#sms-02),
+[SP-01](#sp-01), [SMS-03](#sms-03) and [SMS-05](#sms-05). Live qualification
+depends on [CW-78](#cw-78).
+
+<a id="sms-04"></a>
+
+#### Give the sink its own configuration struct (SMS-04)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Small.
+
+The sink embeds the source's `MsSqlSourceConfig`. That struct derives `Debug`
+including the password, has no `deny_unknown_fields`, accepts source-only
+fields (`tables`, `poll_interval_ms`, `table_keys`, `start_position`) and
+defaults `encryption` to `NotSupported`. The sink also accepts a configuration
+with no template. The PostgreSQL and MySQL sinks reject that.
+
+**What remains:**
+
+- Define a sink connection struct with a redacting `Debug` and
+  `deny_unknown_fields`.
+- Default encryption to `On`, or warn on plaintext.
+- Require at least one template.
+
+**Example:** `{"connection": {"host": "db", "tables": ["x"]}, "outputs": {}}`
+is accepted today. It should be rejected.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-mssql/src/lib.rs:33-49`;
+`drasi-core/components/mssql-common/src/config.rs:150-196`.
+
+**Done when:** unknown or source-only fields and template-less configurations
+are rejected, and `Debug` output contains no password.
+
+<a id="sms-06"></a><a id="sink-d-15"></a>
+
+#### Support Entra ID access tokens (SMS-06, Sink D-15)
+
+**Kind:** Decision and Issue. **Priority:** Medium. **Effort:** Small.
+
+The sink supports only SQL authentication. A token from an activation
+credential is collapsed into a SQL-auth username and password, so Azure SQL
+with Entra ID cannot be used. The recommendation (open Sink D-15) is to add
+Tiberius `AADToken` authentication through activation credentials, shared with
+source MS-12, rather than document the gap.
+
+**What remains:**
+
+- Decide (Sink D-15).
+- Pass access tokens as `AuthMethod::AADToken`.
+- Refresh tokens on reconnect.
+
+**Example:** an Azure SQL database that has SQL authentication disabled should
+accept the sink's managed-identity token.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-mssql/src/lib.rs:229-254`.
+
+**Done when:** a token credential authenticates as Entra ID, and a test covers
+it.
+
+<a id="sms-07"></a>
+
+#### Cancel pending work on drop and tidy the crate (SMS-07, Sink X-13)
+
+**Kind:** Investigation and Improvement. **Priority:** Low. **Effort:** Small.
+
+`Work` holds a spawned task's `JoinHandle` and has no `Drop`. Dropping the sink
+or timing out therefore detaches a running SQL task. Unverified: whether this
+leaves commands running after stop in practice. The crate also has an
+`unreachable!` on an input-reachable path, and a single 674-line `lib.rs`.
+
+**What remains:**
+
+- Reproduce the detach and add a drop guard that aborts pending work.
+- Replace `unreachable!` with an error.
+- Split into `config.rs`, `component.rs` and `lib.rs`, as PostgreSQL does.
+
+**Example:** drop the sink while a 60 s procedure runs. The procedure should be
+cancelled, not left running.
+
+**Evidence:** `drasi-core/components/mssql-common/src/native/work.rs:10-35`;
+`drasi-core/components/computation-plugins/sinks/storedproc-mssql/src/lib.rs:276`.
+
+**Done when:** a test shows that dropping the sink aborts pending work, and no
+`unreachable!` remains on input paths.
+
+<a id="sms-30"></a>
+
+#### Qualify the SQL Server sink live (SMS-30, Sink X-15)
+
+**Kind:** Qualification. **Priority:** High. **Effort:** Medium.
+
+The tests cover construction only. The live cases are ignored and need an
+isolated SQL Server fixture ([CW-78](#cw-78)).
+
+**What remains:** once the CW-78 environment exists, run the live cases and the
+[SP-08](#sp-08) scenarios.
+
+**Example:** the ignored live tests should run unattended in CI against a SQL
+Server container.
+
+**Evidence:** `drasi-core/components/host-sdk/tests/native_mssql_components.rs:335-351`;
+`drasi-core/components/computation-plugins/sinks/storedproc-mssql/src/lib.rs:405-674`.
+
+**Done when:** the SQL Server live suite runs in CI.
+
+<a id="sms-40"></a>
+
+#### Write DESIGN.md and CONFIGURATION.md, and fix the ABI text (SMS-40, Sink X-14)
+
+**Kind:** Improvement. **Priority:** High. **Effort:** Small.
+
+The README states "ABI 2.0.0 / wire 2", and there is no design or configuration
+document.
+
+**What remains:**
+
+- Add `DESIGN.md` and `CONFIGURATION.md`.
+- Correct the ABI text.
+- Keep and extend the capability table.
+
+**Example:** an operator should find out from `CONFIGURATION.md` that Tiberius
+cannot cancel a running command.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/storedproc-mssql/README.md:7,31-43`.
+
+**Done when:** both documents exist and the README is current.
+
+<a id="plugin-sink-bridge"></a>
+
+### Bridge sink
+
+`drasi-core/components/computation-plugins/sinks/bridge` (with
+`drasi-core/components/computation-plugins/common/bridge`) is hosted only by
+the instance host. It is still built on `drasi_lib::computation::v1`. Several
+items are shared with the bridge source (Source BR-xx).
+
+<a id="bs-10"></a><a id="sink-d-8"></a>
+
+#### Port the bridge sink to the native SDK (BS-10, Sink D-8)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Medium.
+
+The sink implements the `drasi-lib` computation traits and is registered
+statically in the instance host. It is not a native plugin. The native
+dependency check skips it because it has no `abi-family = "computation"`
+metadata. The accepted direction (Sink D-8, as for the bridge source) is to
+port it.
+
+**What remains:**
+
+- Implement `NativeSink` with `export_computation_plugin!` and no `drasi-lib`
+  dependency.
+- Add plugin metadata so the native dependency check covers it.
+- Consider using the consumer extension for the durable profile instead of the
+  private ledger.
+
+**Example:** the Server should be able to load the bridge sink as a native
+plugin like any other sink.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/bridge/src/component.rs:8-11`;
+`drasi-core/components/computation-plugins/sinks/bridge/Cargo.toml:13`;
+`drasi-core/components/computation-plugins/common/bridge/Cargo.toml:13`;
+`drasi-core/components/instance-host/src/host.rs:724-725`;
+`drasi-core/ci/check_native_dependencies.py:49`.
+
+**Done when:** the sink is a native plugin with no `drasi-lib` dependency, and
+the dependency check covers it.
+
+<a id="bs-01"></a>
+
+#### Bound retries with jitter and a time budget (BS-01, Sink X-05)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Small.
+
+The send loop retries `Busy`, `Closed`, `AcceptanceUnknown` and
+`StaleGeneration` with a fixed `retry_delay_ms` sleep, with no jitter and no
+time budget. The sleep does not observe stop or pause. A paused receiver
+exhausts the attempts and fails the input. Shared with Source BR-01 and BR-09.
+
+**What remains:**
+
+- Use the shared retry policy: exponential backoff with full jitter and a
+  total budget.
+- Treat receiver `Busy`/`Paused` as a cancellable wait.
+- Make sleeps observe stop.
+
+**Example:** with defaults (3 attempts, 50 ms), a receiver paused for 1 s fails
+every input. It should wait within the budget.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/bridge/src/component.rs:253-317`;
+`drasi-core/components/computation-plugins/common/bridge/src/config.rs:194-196,211-213`;
+`drasi-core/components/computation-plugins/common/bridge/src/error.rs:54-62`.
+
+**Done when:** tests cover retry exhaustion with attempts above 1, a receiver
+paused longer than the budget, and stop during a retry sleep.
+
+<a id="bs-02"></a><a id="bs-11"></a>
+
+#### Honour the lifecycle context in start and stop (BS-02, BS-11, Sink X-01)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+
+Start ignores its context. It also clears `failed_cleanup` before loading
+state, so a failed load leaves nothing to clean up. Stop ignores `StopMode`
+and the deadline. `Drain` and `Abort` behave the same, and a stop after a
+partial failure is not proven idempotent. Shared with Source BR-02.
+
+**What remains:**
+
+- `Drain` finishes the in-flight send and receipt within the deadline.
+- `Abort` cancels.
+- Start honours deadline and cancellation, and keeps `failed_cleanup` until
+  load succeeds.
+- Make stop idempotent.
+- Test that a cancelled durable `handle` resumes through the receipt lane.
+
+**Example:** `stop(Abort)` during a send should return immediately. On the next
+start, the receipt lane should resolve the outcome of the abandoned send.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/bridge/src/component.rs:147-211`.
+
+**Done when:** lifecycle tests cover Drain, Abort, a cancelled start and a
+repeated stop.
+
+<a id="bs-03"></a>
+
+#### Recover a volatile sender after a restart against a live receiver (BS-03)
+
+**Kind:** Investigation. **Priority:** High. **Effort:** Small to medium.
+
+On restart, a volatile sender has no mapping. A receiver that still has history
+returns non-retryable `StateLost` ("sender mapping is missing but receiver
+history exists"), so the link may stay dead until the receiver restarts.
+Unverified against a live receiver.
+
+**What remains:**
+
+- Reproduce the failure.
+- Define the semantics: either a fresh volatile session epoch, or a typed
+  recoverable error.
+- Test it.
+
+**Example:** restart only the sending instance of a volatile bridge. Today
+every send may fail with `StateLost`.
+
+**Evidence:** `drasi-core/components/computation-plugins/common/bridge/src/receiver.rs:401-405`;
+`drasi-core/components/computation-plugins/sinks/bridge/src/component.rs:107-134`.
+
+**Done when:** a test restarts a volatile sender against a running receiver and
+delivery resumes.
+
+<a id="bs-04"></a>
+
+#### Erase the durable mapping namespace (BS-04, CW-98 part)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Small.
+
+The sink owns a durable sender mapping but refuses `Erase`, so it cannot be
+removed with erase. Shared with Source BR-03 and Source D-12.
+
+**What remains:**
+
+- Declare `erases_owned_state`.
+- Delete the mapping namespace through its cleanup owner, idempotently.
+
+**Example:** removing a durable bridge sink with erase fails with "this
+component does not support permanent state removal".
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/bridge/src/component.rs:165,217-226`.
+
+**Done when:** erase removes the namespace, and a test runs erase twice.
+
+<a id="bs-05"></a>
+
+#### Keep local settings out of the wire contract (BS-05)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Small.
+
+`limits` (timeout, attempts, delay) is part of `LinkContract` and its
+fingerprint. The saved ledger refuses a changed fingerprint. Tuning a retry
+delay therefore breaks a durable link. Shared with Source BR-07.
+
+**What remains:** remove timeout, retry and queue settings from the contract
+and the fingerprint.
+
+**Example:** changing `retryDelayMs` from 50 to 100 on a durable sink fails
+start with "saved sender contract changed".
+
+**Evidence:** `drasi-core/components/computation-plugins/common/bridge/src/config.rs:346-373,398-400`;
+`drasi-core/components/computation-plugins/common/bridge/src/state.rs:172-177`.
+
+**Done when:** a limits-only change restarts the sink with its existing ledger,
+and a test covers it.
+
+<a id="bs-06"></a>
+
+#### Log and measure bridge delivery (BS-06, Sink X-11)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Small.
+
+The bridge crates have no log calls. Retries, session changes, exhaustion and
+seal are invisible. Shared with Source BR-04.
+
+**What remains:**
+
+- Trace each attempt, error code, session or generation change, exhaustion and
+  seal.
+- Surface egress status.
+
+**Example:** a link that retries `StaleGeneration` should leave a log line with
+the session and generation.
+
+**Evidence:** `drasi-core/components/computation-plugins/common/bridge/src/` has
+no `log::` or `tracing::` calls;
+`drasi-core/components/computation-plugins/sinks/bridge/src/component.rs:253-317`.
+
+**Done when:** every attempt and state change is logged without payload data,
+and egress status is visible to management.
+
+<a id="bs-07"></a>
+
+#### Correct the bridge documentation (BS-07, Sink X-14)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Small.
+
+The common README says wire version 1, but the protocol is version 2. The
+retry and worker descriptions are wrong for the sink. The sink README is 21
+lines, with no design or configuration document. Shared with Source BR-05 and
+BR-40.
+
+**What remains:**
+
+- Fix the wire-version text, the retry description and the worker claim (true
+  only for the receiver).
+- Add the sink's `DESIGN.md` and `CONFIGURATION.md`.
+
+**Example:** a reader of `common/bridge/README.md` is told wire 1, but the
+sender negotiates protocol 2.
+
+**Evidence:** `drasi-core/components/computation-plugins/common/bridge/README.md:24-27`;
+`drasi-core/components/computation-plugins/common/bridge/src/protocol.rs:16`;
+`drasi-core/components/computation-plugins/sinks/bridge/README.md`.
+
+**Done when:** the docs match the code, and both sink documents exist.
+
+<a id="bs-12"></a>
+
+#### Plan bridge updates and publish the full schema (BS-12, Sink X-10)
+
+**Kind:** Improvement. **Priority:** Medium. **Effort:** Small.
+
+The sink has no `assess`. Every change recreates it, even a local limit.
+
+**What remains:**
+
+- Apply local settings in place; recreate on contract changes.
+- Publish the full configuration schema.
+- Unverified: whether the factory duplicates `sender_endpoint`. Only one field
+  was found, at `factory.rs:30`. Check and remove any
+  duplicate.
+
+**Example:** raising `timeoutMs` should apply in place.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/bridge/src/factory.rs:30`.
+
+**Done when:** `assess` classifies every field, and tests cover InPlace and
+Recreate.
+
+<a id="bs-13"></a>
+
+#### Stop concurrent control calls from failing delivery (BS-13)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Small.
+
+`BridgeControl::request` uses `try_lock`. A concurrent `control().status()`
+call therefore makes delivery fail with `Busy`, and `invalidate` drops the
+caller's control socket. The `producer_status` error is swallowed.
+
+**What remains:**
+
+- Use a queued lock or one connection per caller.
+- Propagate the `producer_status` error.
+
+**Example:** polling bridge status from management during load produces
+spurious `Busy` delivery failures.
+
+**Evidence:** `drasi-core/components/computation-plugins/common/bridge/src/client.rs:39-41,141-146`.
+
+**Done when:** a concurrent-control test delivers with no `Busy`.
+
+<a id="bs-14"></a>
+
+#### Fix egress pending state and allow seal retry (BS-14)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Small.
+
+`handle` calls `begin`, which sets `pending`, before it validates the input.
+The operation guard's `Drop` clears only `in_flight`, so a rejected input
+leaves the sender "still owning an unresolved input". Seal marks the binding
+sealed before the remote cut, so a failed remote seal cannot be retried.
+
+**What remains:**
+
+- Set `pending` only after validation.
+- Allow a failed remote seal to be retried.
+
+**Example:** send an envelope on the wrong port, then seal. The seal fails with
+`AcceptanceUnknown`.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/bridge/src/component.rs:237-243`;
+`drasi-core/components/computation-plugins/common/bridge/src/boundary.rs:234-257,275-285,368-377`.
+
+**Done when:** tests cover a rejected input followed by a seal, and a retried
+seal after a remote failure.
+
+<a id="bs-20"></a>
+
+#### Remove `expect`s and type the errors (BS-20, Sink X-13)
+
+**Kind:** Improvement. **Priority:** Low. **Effort:** Small.
+
+Several input- and state-reachable paths `expect`. Errors are converted with
+`to_string`, and `wait_drained` polls every 5 ms.
+
+**What remains:**
+
+- Replace the `expect`s with errors.
+- Keep typed errors.
+- Name the constants.
+- Make `wait_drained` event-driven.
+
+**Example:** if a future change lets `handle` run with `started` set but no
+control epoch, `component.rs:239` panics across the plugin boundary instead of
+returning an error.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/bridge/src/component.rs:178,239,257,264,268`;
+`drasi-core/components/computation-plugins/common/bridge/src/config.rs:398-400`;
+`drasi-core/components/computation-plugins/common/bridge/src/endpoint_control.rs:137-152`.
+
+**Done when:** no `expect` remains on input or FFI-reachable paths.
+
+<a id="bs-21"></a>
+
+#### Align ALPN with the protocol and reduce round trips (BS-21)
+
+**Kind:** Improvement. **Priority:** Low. **Effort:** Medium.
+
+The ALPN is `drasi-bridge/1` but the protocol is version 2, and there is no
+version negotiation. Every `handle` makes an extra `producer_status` round
+trip. TLS pins cannot rotate. Shared with Source BR-11 and BR-12.
+
+**What remains:**
+
+- Align ALPN with the protocol and negotiate versions.
+- Remove the per-`handle` status round trip.
+- Support pin rotation.
+
+**Example:** a protocol-3 receiver cannot reject a protocol-2 sender during
+ALPN.
+
+**Evidence:** `drasi-core/components/computation-plugins/common/bridge/src/transport.rs:16`;
+`drasi-core/components/computation-plugins/common/bridge/src/protocol.rs:16`;
+`drasi-core/components/computation-plugins/common/bridge/src/receiver.rs:380-400`.
+
+**Done when:** versions are negotiated, and `handle` makes one round trip.
+
+<a id="bs-30"></a>
+
+#### Add bridge sink tests (BS-30, Sink X-02)
+
+**Kind:** Qualification. **Priority:** High. **Effort:** Medium.
+
+The sink crate has no tests of its own.
+
+**What remains:** add tests for:
+
+- retry exhaustion with attempts above 1;
+- a receiver paused beyond the budget;
+- a receiver restart mid-frame;
+- `AcceptanceUnknown` resolved through receipts;
+- a volatile restart;
+- stop during `handle`;
+- erase;
+- concurrent control;
+- a limits-only change.
+
+After [BS-10](#bs-10), run the conformance kit. Cover partition qualification
+with [CW-05](#cw-05) and [CW-91](#cw-91).
+
+**Example:** kill the receiver after it accepts a frame but before the receipt.
+The sender should resolve the outcome through the receipt lane.
+
+**Evidence:** `drasi-core/components/computation-plugins/sinks/bridge/` has no
+`tests/` directory and no `#[cfg(test)]` module.
+
+**Done when:** the listed scenarios run in CI.
+
+<a id="plugin-legacy-reactions"></a>
+
+### Legacy reactions without a native sink
+
+These ordinary reactions under `drasi-core/components/reactions/` have no
+native sink. [CW-44](#cw-44) requires every required reaction to exist
+natively with no omitted working functionality. Every port must meet the
+native sink standard
+(`drasi-core/components/computation-plugins/sinks/NATIVE-SINK-GUIDE.md`) and
+use the shared renderer and retry policy. Where the destination can confirm,
+it should use the `DeliveryRunner` with an idempotency key built from the
+delivery ID. The legacy file reaction is covered by the capture sink's
+[CP-03](#cp-03).
+
+<a id="sink-d-7"></a>
+
+#### Decide which legacy reactions become native sinks (Sink D-7)
+
+**Kind:** Decision. **Priority:** High.
+
+Each reaction below needs a decision: port it, extend an existing sink, keep it
+ordinary, or retire it. The recommendation:
+
+- Port aws-sqs, rabbitmq, loki, eventgrid, azure-storage, a2a, dashboard and
+  mcp.
+- Extend capture into a `file` sink.
+- Move application consumers to the existing native type.
+- Platform: the owner decides with the Drasi Platform roadmap, and it stays
+  ordinary meanwhile.
+- Retire snapshot-test with [CW-63](#cw-63).
+
+This replaces the "Legacy reactions" row of [CW-44](#cw-44).
+
+**Example:** if rabbitmq is not ported, a Server configuration that uses
+`kind: rabbitmq` stops working when ordinary plugins are removed
+([CW-63](#cw-63)).
+
+**Evidence:** `drasi-core/components/reactions/` has 18 reaction crates (plus
+`tests`). Only application, the network, log and stored-procedure reactions
+have native counterparts.
+
+**Done when:** each reaction has a recorded decision, and the LR items below
+match it.
+
+<a id="lr-01"></a>
+
+#### application: move consumers and retire the ordinary type (LR-01)
+
+**Kind:** Issue. **Priority:** High. **Effort:** Small.
+
+`NativeApplicationReaction` already exists. It is in-process and
+acceptance-only. Examples still use the ordinary `ApplicationReaction`, which
+blocks [CW-63](#cw-63). This is the "Application components" row of
+[CW-44](#cw-44).
+
+**What remains:**
+
+- Move these examples to the native type:
+  `drasi-core/examples/lib/{application-identity-provider,ris-live-getting-started,here-traffic-getting-started,gtfs-rt-getting-started}/main.rs`
+  and `drasi-core/lib/examples/{stockroom,stockroom_persistent,fast_path,core_workload,computation_runtime}.rs`.
+  Test consumers are in [CW-41](#cw-41) and [CW-77](#cw-77).
+- Retire the ordinary type.
+- Confirm that pause is host-driven. It uses the passive lifecycle macro.
+
+**Example:** `examples/lib/ris-live-getting-started` still builds an ordinary
+`ApplicationReaction`.
+
+**Evidence:** `drasi-core/components/reactions/application/src/lib.rs:46`;
+`drasi-core/components/reactions/application/src/native.rs:254-256`.
+
+**Done when:** no example or consumer uses the ordinary type, and it is
+removed.
+
+<a id="lr-02"></a>
+
+#### aws-sqs: native sink with stable deduplication IDs (LR-02)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Medium.
+
+The legacy reaction sets `MessageDeduplicationId` to a random UUIDv4. A
+retried send therefore defeats FIFO deduplication.
+
+**What remains:**
+
+- Build a Consumer External sink.
+- Derive the deduplication ID from the delivery ID.
+- Optionally use `SendMessageBatch` with per-entry results.
+- Template the body, attributes and `message_group_id`.
+- Use activation credentials.
+
+**Example:** a retry after a lost `SendMessage` response creates a second FIFO
+message today.
+
+**Evidence:** `drasi-core/components/reactions/aws-sqs/src/reaction.rs:280`.
+
+**Done when:** a native sink exists, and a retry of the same item is
+deduplicated by SQS.
+
+<a id="lr-03"></a>
+
+#### rabbitmq: native sink with publisher confirms (LR-03)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Medium.
+
+The legacy reaction publishes without publisher confirms, so its checkpoint
+does not prove broker acceptance.
+
+**What remains:**
+
+- Build a Consumer External sink with confirms.
+- Set AMQP `message_id` from the delivery ID.
+- Support TLS.
+- Reconnect through the shared retry policy.
+
+**Example:** a broker crash after `basic_publish` returns loses the message,
+and the checkpoint has already advanced.
+
+**Evidence:** `drasi-core/components/reactions/rabbitmq/src/rabbitmq.rs:345`
+(no `confirm_select` in the crate).
+
+**Done when:** completion waits for a broker confirm, and tests cover a broker
+restart.
+
+<a id="lr-04"></a>
+
+#### loki: thin native sink (LR-04)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Small.
+
+Loki needs label templates, a tenant header, bearer or basic authentication,
+and deterministic timestamps for Loki deduplication. The http-sink cannot
+express these without new helpers.
+
+**What remains:**
+
+- Build a sink on the `DeliveryRunner` with these features.
+- Derive timestamps from the delivery identity.
+
+**Example:** `tenant_id: team-a` must send `X-Scope-OrgID: team-a`, and a
+replayed push must not duplicate log lines.
+
+**Evidence:** `drasi-core/components/reactions/loki/src/config.rs:38-40`;
+`drasi-core/components/reactions/loki/src/descriptor.rs:81-93`.
+
+**Done when:** a native Loki sink exists, and a replay produces no duplicate
+entries.
+
+<a id="lr-05"></a>
+
+#### eventgrid: native sink with deterministic event IDs (LR-05)
+
+**Kind:** Issue. **Priority:** Low. **Effort:** Small to medium.
+
+The legacy reaction derives a UUIDv5 event ID from the reaction, query,
+sequence, operation and index. A native sink must keep IDs stable, seeded from
+the delivery identity.
+
+**What remains:**
+
+- Build a Consumer External sink.
+- Support the CloudEvents and EventGrid schemas.
+- Support access key or Entra ID authentication.
+
+**Example:** a retried publish must carry the same event `id`.
+
+**Evidence:** `drasi-core/components/reactions/eventgrid/src/event.rs:43,70-78`.
+
+**Done when:** a native sink exists, and a retry carries the same event ID.
+
+<a id="lr-06"></a>
+
+#### azure-storage: native sink on a current SDK (LR-06)
+
+**Kind:** Issue. **Priority:** Low. **Effort:** Medium to large.
+
+The legacy reaction writes to Blob, Queue and Table storage on the 0.21 Azure
+SDK ([CW-66](#cw-66)).
+
+**What remains:**
+
+- Port all three targets.
+- Make blob and table writes idempotent on keys derived from the delivery ID.
+- Document queue delivery as at-least-once.
+- Move to the current SDK.
+
+**Example:** a replayed table write should upsert the same row key.
+
+**Evidence:** `drasi-core/components/reactions/azure-storage/Cargo.toml:48-52`.
+
+**Done when:** a native sink on the current SDK exists, and blob and table
+replays are idempotent.
+
+<a id="lr-07"></a>
+
+#### a2a: native sink with task-activation state (LR-07)
+
+**Kind:** Decision and Issue. **Priority:** Low. **Effort:** Medium to large.
+
+The legacy reaction keeps per-key task-activation state and sends A2A
+messages. A port needs a decision on where that state lives: in the
+destination or in host state.
+
+**What remains:**
+
+- Decide where the state lives.
+- Build a Consumer External sink using a deterministic message ID as the
+  idempotency key.
+
+**Example:** a one-shot activation that is retried must reuse its
+`message_id`.
+
+**Evidence:** `drasi-core/components/reactions/a2a/src/activation.rs:83,133`;
+`drasi-core/components/reactions/a2a/src/process.rs`.
+
+**Done when:** a native sink exists, and its state ownership is documented.
+
+<a id="lr-08"></a>
+
+#### dashboard: server-style sink or rebuild on SSE (LR-08)
+
+**Kind:** Decision and Issue. **Priority:** Low. **Effort:** Large.
+
+The legacy dashboard is an HTTP and WebSocket server with its own persisted
+dashboards. A native version needs server-style exposure (Sink X-12), the
+output-snapshot reader and a native state resource. The alternative is to
+rebuild the UI on the SSE sink.
+
+**What remains:** choose an approach and implement it.
+
+**Example:** saved dashboards must survive a restart.
+
+**Evidence:** `drasi-core/components/reactions/dashboard/src/storage.rs`;
+`drasi-core/components/reactions/dashboard/src/api.rs`.
+
+**Done when:** a native dashboard serves live and saved dashboards.
+
+<a id="lr-10"></a>
+
+#### mcp: server-style native sink (LR-10)
+
+**Kind:** Issue. **Priority:** Low. **Effort:** Medium to large.
+
+The legacy reaction is an MCP server with resource subscribe, unsubscribe and
+list. A native version needs Streamable HTTP per Sink X-12, `resources/read`
+from output snapshots, bearer authentication and a session cap.
+
+**What remains:** build the sink.
+
+**Example:** an MCP client subscribes to a query resource and receives
+updates.
+
+**Evidence:** `drasi-core/components/reactions/mcp/src/mcp.rs:1220-1321`.
+
+**Done when:** a native MCP sink serves subscribe and read with authentication.
+
+<a id="lr-11"></a>
+
+#### platform: owner decision (LR-11)
+
+**Kind:** Decision. **Priority:** Low. **Effort:** Medium if ported.
+
+The platform reaction is not published. Its `export_plugin!` is gated on a
+`dynamic-plugin` feature that `Cargo.toml` does not define. The owner decides
+with the Drasi Platform roadmap ([Sink D-7](#sink-d-7)). If it is ported, it
+becomes a consumer using a Redis pipeline with control-event mapping.
+
+**What remains:** record the decision, then port it or keep it ordinary.
+
+**Example:** `cargo build -p drasi-reaction-platform --features dynamic-plugin`
+fails because the feature does not exist.
+
+**Evidence:** `drasi-core/components/reactions/platform/src/lib.rs:216-217`;
+`drasi-core/components/reactions/platform/Cargo.toml`.
+
+**Done when:** the decision is recorded, and the crate is either ported or
+explicitly kept.
+
+<a id="lr-12"></a>
+
+#### snapshot-test: retire with the ordinary ABI (LR-12)
+
+**Kind:** Issue. **Priority:** Low. **Effort:** Small.
+
+This test-only reaction exists for ordinary-ABI snapshot and
+initialization-failure tests.
+
+**What remains:**
+
+- Confirm that native fixtures cover the snapshot-reader and
+  initialization-failure paths.
+- Remove the crate with [CW-63](#cw-63).
+
+**Example:** removing the crate should not reduce test coverage of
+initialization failure.
+
+**Evidence:** `drasi-core/components/reactions/snapshot-test/src/`.
+
+**Done when:** the crate is removed and the native fixtures cover both paths.
+
 ## Testing and qualification
 
-**Keep useful coverage; do not optimize for a smaller test count.** Recovery,
-wire-format, shared semantic, real-browser and clean-package tests protect
-different contracts. Backend, Tokio-flavor and static/loaded permutations are
-not automatically redundant. The first improvements are stronger production-path
-oracles, honest runners, explicit CI selection and removal of proven repeated
-execution, followed by measured build/fixture improvements.
-
-This section consolidates the full substantive test-suite review and existing
-test/qualification work. The review was read-only across all four repositories;
-it used source, checked-in CI and existing logs, not new executions or mutation
-testing. Counts and scope are recorded under [audit evidence](#testing-audit-evidence)
-and [CW-78](#cw-78). Passing execution is not proof of assertion quality.
-Source citations identify repository-root-relative files; evidence log names
-refer to the recorded `correctness-baseline-final/...` session artifacts, not
-checked-in source files.
+The work below improves what the existing tests prove and makes sure they
+actually run, rather than adding test count. Recovery, wire-format, shared
+semantic, browser and packaging tests protect different contracts, and backend,
+Tokio-flavor and static/loaded permutations are not automatically redundant. A
+passing run is not proof that a test asserts the right thing.
 
 ### Priorities and work ownership
 
-| Priority | Consolidated work | Benefit | Effort | Confidence / risk |
-|---|---|---|---|---|
-| 1 | [Production-path credential tests](#cw-83) | Protect currently untested production request/error paths | Medium | High confidence; low risk with test-only injection and retained URL validation |
-| 1 | [Honest test runners and smoke checks](#cw-84) | Stop false or misleading "all tests" results | Small-medium | High confidence; retain an actual stock-binary check |
-| 1 | [Explicit execution of existing suites](#cw-85) | More meaningful coverage without inventing tests | Medium | High confidence in selection gaps; fixtures/features/platforms need care |
-| 2 | [Proven duplicate execution](#cw-86) | Simpler selection and less repeated work | Small-medium | High confidence; verify surviving discovery and obligations |
-| 2 | [Semantic/backend wiring](#cw-89), [native deltas](#cw-77), [tutorial result oracles](#cw-90) | Better output and storage regressions | Medium | High confidence in stated gaps; preserve unsupported boundaries |
-| 2 | [Build and database-fixture cost](#cw-87), [asynchronous reliability](#cw-37) | Potentially largest speed benefit | Medium-large | Measure first; unsafe sharing can mask cleanup/restart defects |
-| 3 | [Behavior-based evidence ledgers](#cw-88) | Lower maintenance without losing migration obligations | Small-medium | High confidence; name removal alone must not count as preserved coverage |
+| Priority | Work | Benefit | Effort |
+|---|---|---|---|
+| 1 | [Production-path credential tests](#cw-83) | Covers Key Vault/Azure identity request and error paths that no test exercises today | Medium |
+| 1 | [Run existing suites in CI](#cw-85) | More real coverage without writing new tests | Medium |
+| 1 | [Honest Server test runners](../../../drasi-server/docs/remaining-work.md#sw-22) (Server) | Stops misleading "all tests passed" results | Small-medium |
+| 2 | [Remove proven repeated execution](#cw-86) | Less repeated container work | Small |
+| 2 | [Shared scenario backend wiring](#cw-89), [native delta assertions](#cw-77), [tutorial result oracles](../../../drasi-server/docs/remaining-work.md#sw-23) (Server) | Catches output and storage regressions | Medium |
+| 2 | [Build and fixture cost](#cw-87), [asynchronous reliability](#cw-37) | Potentially the largest speed gain | Medium-large; measure first |
 
-**First implementation batch:** replace copied Key Vault test paths, establish
-one honest Server runner, relocate the two duplicated helper self-test groups,
-bind already-existing cheap suites to CI, and strengthen the current
-getting-started result assertions. Make each independently reviewable. Measure
-build/database phases before pooling fixtures or changing serialization. These
-are planned changes, not work completed by the audit.
+Keep each change independently reviewable. Measure build and database phases
+before pooling fixtures or relaxing test serialization.
 
 ### Test quality, selection and evidence
 
@@ -1647,190 +5382,135 @@ are planned changes, not work completed by the audit.
 
 #### Test real credential-provider behavior instead of copied implementations (CW-83)
 
-**Kind:** Confirmed test-quality defect. **Area:** Core identity and secret stores.
-**Priority:** High. **Effort:** Medium. **Confidence:** High; candidate bodies inspected.
+**Kind:** Test-quality defect. **Area:** Core identity and secret stores.
+**Priority:** High. **Effort:** Medium.
 
-Production `AzureKeyVaultSecretStoreProvider::get_secret` obtains a token and
-performs the HTTP request. Six tests instead call a separate
-`TestableProvider::get_secret` that copies URL, request, status and JSON logic:
-`test_get_secret_success`, `test_get_secret_404_not_found`,
-`test_get_secret_403_forbidden`, `test_get_secret_null_value`,
-`test_get_secret_malformed_json`, and `test_url_encoding_prevents_path_traversal`.
-They do not protect changes to the corresponding production path. The ignored
-live-provider test checks only that a secret is nonempty.
+The Azure Key Vault secret store's unit tests do not test the production code.
+They exercise a test-only `TestableProvider` that re-implements the URL
+building, request, status handling and JSON parsing of
+`AzureKeyVaultSecretStoreProvider::get_secret`. A bug introduced in the real
+`get_secret` (for example, dropping `urlencoding::encode` or treating a 403 as
+success) would not fail any test.
 
-The URL-encoding test is weaker still: it expects a 404 and checks the error
-text, but does not require its mock route to match. Wiremock also returns 404
-for an unmatched request, so the intended escaped path need not be observed.
+**What remains:**
 
-**Work:** Keep the scenarios but construct the actual provider in its test
-module with a fake `TokenCredential` and controlled HTTP client/endpoint. Assert
-the requested scope, bearer token, exact path/query, matched request count,
-returned value and appropriate error/cause. Keep production URL validation
-separately tested; do not relax it to accommodate the fixture. Delete
-`TestableProvider` only once these replacements protect the real path.
+- Rewrite the six wiremock tests (`test_get_secret_success`,
+  `test_get_secret_404_not_found`, `test_get_secret_403_forbidden`,
+  `test_get_secret_null_value`, `test_get_secret_malformed_json`,
+  `test_url_encoding_prevents_path_traversal`) to construct the real
+  `AzureKeyVaultSecretStoreProvider` with a fake `TokenCredential` and the mock
+  server's URL. This needs a test-only (`#[cfg(test)]`) constructor, because
+  `validate_vault_url` correctly rejects non-HTTPS, non-Azure hosts. Keep the
+  existing URL-validation tests and do not relax the validation.
+- Assert what the provider sends: the requested token scope, the
+  `Authorization: Bearer <token>` header, the exact path and `api-version`
+  query, and that the mock was matched exactly once (`.expect(1)`).
+- Fix the path-traversal test. It mounts a 404 response for the escaped path
+  and then checks the error mentions "404", but wiremock also returns 404 for
+  an unmatched request, so the test passes even if the escaped path is never
+  requested. Example: `get_secret("../certificates/cert")` must be observed as
+  `GET /secrets/..%2Fcertificates%2Fcert?api-version=7.4`, with the mock
+  verified as matched.
+- Delete `TestableProvider` once the replacements pass.
+- In the Azure identity provider, `test_with_workload_identity_creates_provider`
+  discards the constructor result (`let _result = ...`) and proves only that it
+  does not panic. Make it assert the expected `Ok`/`Err` for a controlled
+  environment. The scope tests check only the stored `scope` field; add a test
+  with a fake credential showing that `get_credentials` requests the
+  `CredentialContext` `scope` override (or the default) and returns the
+  expected username and token. Keep the existing Send/Sync and trait-object
+  compile checks.
 
-Also repair `test_with_workload_identity_creates_provider`, which discards the
-constructor's `Result` and therefore proves only "does not panic." Make its
-environment dependency explicit. Existing Azure identity tests check stored
-scope fields, not the actual `CredentialContext` override used by
-`get_credentials`; add a fake-credential assertion of the requested scope and
-returned username/token. Preserve legitimate Send/Sync and trait-object compile
-contracts.
+**Evidence:** production path
+`drasi-core/components/secret_stores/azure-keyvault/src/lib.rs:184-226`;
+`TestableProvider` at `:285-333`; copied-path tests at `:458-569`; live test
+(checks only a nonempty value) at `:570-593`. Identity:
+`drasi-core/components/identity/azure/src/provider.rs:134-150` (scope
+override), `:194-199` (discarded result), `:238-260` (field-only scope tests).
 
-**Finish when:** A targeted mutation of production request/path/status handling
-breaks the replacements, exact requests are observed, and no copied provider
-implementation remains as the behavioral oracle.
-
-**Evidence:** `drasi-core/components/secret_stores/azure-keyvault/src/lib.rs:182-225,280-333,458-607`;
-`drasi-core/components/identity/azure/src/provider.rs:133-154,189-194,230-304`.
-
-<a id="cw-84"></a>
-
-#### Make test entrypoints and smoke results honest (CW-84)
-
-**Kind:** Confirmed runner defects. **Area:** Server, Learning and performance tooling.
-**Priority:** High. **Effort:** Small-medium. **Confidence:** High, except the conditional performance-launcher consolidation.
-
-| Existing entrypoint | Confirmed problem | Required change |
-|---|---|---|
-| `drasi-server/tests/run_all.sh:53-91` | All four scripts it conditionally seeks are absent; `FAILED=0` can print "All tests passed" after zero execution. | Retire it or forward to one owned, documented entrypoint with nonempty selection and execution checks. |
-| `drasi-server/tests/run_all_cargo_tests.sh:6,25-67` | Under `set -e`, the first successful `((PASSED++))` returns a failing status. It names absent `api`, `api_create_query_joins` and `library_integration` targets, then repeats selected work with broad `cargo test`. | Replace the obsolete target list/aggregator rather than preserve misleading success/count logic. |
-| `drasi-server/tests/plugin_smoke_test.sh:124-160,176-201,281-315,370-397` | Generated config uses removed root `id/sources/queries/reactions`; `make build-dynamic` is absent; `--skip-build` maps static/dynamic labels to the same binary; arbitrary non-2xx creation responses become skips. | Use current `instances` configuration, one identified artifact set, explicit required plugins and failure on unexpected HTTP responses. Keep genuine external-prerequisite outcomes distinct. |
-| `drasi-server/Makefile:191-211` and `CLAUDE.md:44-51,381-385` | `make test-all` calls that smoke script and promises VS Code execution it does not perform; the guidance names absent `tests/run_working_tests.sh`. | Align commands, documentation and actual selected suites. The successful Cargo baseline is not proof that this aggregate command works. |
-| `learning-drasi-server/tutorials/trading/app/package.json:30` | `npm test` is a successful `echo 'No tests configured yet'`. | Remove the success-shaped no-op or replace it with real assertions; do not attribute the separate Server Trading suite to this app. |
-
-Preserve an actual stock-binary test rather than substituting only Router tests.
-`single_runtime_test::native_binary_loads_plugins_and_processes_http_events`
-already loads independent HTTP/log libraries and checks exact query rows and
-reaction output (`drasi-server/tests/single_runtime_test.rs:658-827`). Its
-"native" label identifies the graph runtime, not the HTTP/log plugin ABI family.
-Current `DrasiServerConfig` rejects unknown root fields
-(`drasi-server/src/config/types.rs:92-164`).
-
-**Conditional candidate:** `drasi-core/query-perf/run_perf_tests` is a legacy
-diagnostic launcher, not a qualification gate. It invokes development-profile
-`cargo run` 12 times; the program discards output correctness, and an unknown
-scenario exits successfully (`query-perf/src/main.rs:49-59,187-212`).
-Do not delete it until [CW-40](#cw-40) maps and preserves its four scenarios and
-memory/RocksDB/Redis distinctions. Confidence in consolidation benefit is
-medium; measure first.
-
-**Finish when:** Each advertised runner executes its declared scope, fails on
-empty/unexpected selection and real regressions, and reports unavailable
-prerequisites separately. Obsolete paths are removed or intentionally forwarded,
-with their useful coverage preserved.
+**Done when:** each scenario runs through the production `get_secret` and
+`get_credentials`; a deliberate change to the production request path, header
+or status handling fails a test; and no copied provider implementation remains.
 
 <a id="cw-85"></a>
 
-#### Bind existing suites to explicit CI and release gates (CW-85)
+#### Bind existing suites to explicit CI gates (CW-85)
 
-**Kind:** Confirmed checked-in selection gaps and build qualification.
-**Area:** Core, Server, Learning, test-infra and CI.
-**Priority:** High. **Effort:** Medium. **Confidence:** High for checked-in selection; remote branch protection was not inspected.
+**Kind:** CI selection gaps. **Area:** Core, Learning, test-infra and CI.
+**Priority:** High. **Effort:** Medium.
 
-| Surface | Existing gap and evidence |
-|---|---|
-| Core Host SDK | Selection repaired: `make test` runs all Host SDK targets with `test-support,registry,fetcher,watcher`, after shared plugin preparation. Passing selection is not a claim that existing identity/lifecycle defects are fixed. |
-| Native MySQL and PostgreSQL/HTTP | Discovery repaired: the existing integration matrix follows `#[path]` modules and recognizes Podman/native-library fixtures. CI provisions the CLI and matched plugins. Explicit SQL Server credentials and prepared cross-OS peers remain outside automatically provisioned jobs. |
-| Server and UI | Primary Rust CI runs `cargo test --locked`, not ignored stock-binary/E2E cases or `make test-all`. The separate React workflow does not select every control-UI, VS Code, GPU/Move-a-wall workspace or connector qualification suite. See `drasi-server/.github/workflows/test.yml:1-13`, `.github/workflows/react-package.yml:1-45,175-238` and the respective package scripts. |
-| Learning | Deterministic tutorial unit/CLI tests are not explicit CI jobs. Scheduled/same-repository PR evaluation selects getting-started only and accepts an agent-written `## STATUS: SUCCESS`; fork PRs cannot run that secret-dependent job. Keep exploratory evaluation, but not as the only oracle. See `learning-drasi-server/.github/workflows/tutorial-evaluation-scheduled.yml:17-40,64-96,180-218`. |
-| Test infrastructure | PR jobs build images and lint; no general `cargo test` PR job was found. The manual completed-recovery workflow runs Python completion-checker tests, not all framework units. See `test-infra/.github/workflows/build.yml:17-31,40-87`, `.github/workflows/lint.yml:17-28`, `.github/workflows/e2e-building-comfort-completion.yml:3-13,55-59`. |
+Several existing test suites are never run by any pull-request workflow, so they
+can break silently. Core's main Rust selection is in good shape: `make test`
+(called from `drasi-core/.github/workflows/test.yml`) runs the whole workspace
+plus every Host SDK target with `test-support,registry,fetcher,watcher`; a
+features job covers `--no-default-features` middleware/backend combinations and
+`parallel_solver`; `test-integration.yml` discovers container-backed ignored
+tests; `test-ffi.yml` runs the Host SDK on Linux, macOS and Windows; and the
+developer book check runs in `test.yml`. The gaps are elsewhere.
 
-**Work:** Bind useful existing tests before adding more. Give cheap
-protocol/metadata/SQLite/secret-store Host tests and optional-feature units
-owned jobs; put real database tests in declared environment jobs. Add existing
-control-UI, tutorial and test-infrastructure units to path-appropriate PR gates.
-Fix discovery with a small explicit exception/target list or manifest/path-aware
-discovery, not a replacement framework. "Not selected" and "not available" must
-not become passing outcomes.
+**What remains:**
 
-For [CW-61](#cw-61), execute the declared minimum Rust version and supported
-feature combinations; a Clippy setting is not build evidence. For
-[CW-69](#cw-69) and [CW-73](#cw-73), bind downstream compilation, API/semver,
-docs.rs/package builds, publication/dependency metadata and documented commands.
-Keep the developer book's existing 40 illustration and 23 exact-excerpt checks,
-including compilation of a copied starter
-(`drasi-core/lib/docs/developer-guide/check_book.py:23-48,87-131`).
-Actual release installation/library availability remains a prerequisite, not
-something local source compilation proves.
-
-**Proposed schedule using existing selectors:** This is the intended policy,
-not a claim that every row is already wired into CI. Prepare matching plugins
-and declared environments once; never run crash workers independently.
-
-| Gate | Existing selectors | Selection rule |
+| Repository | Suite not run in CI | Evidence |
 |---|---|---|
-| Fast PR: engine/data | `cargo test -p drasi-core-types -p drasi-core -p drasi-query-cypher -p drasi-query-gql -p drasi-computation-contracts`; `cargo test -p shared-tests in_memory::` | Literal semantics and shared memory conformance; add `drasi-core --features parallel_solver` for solver changes. |
-| Fast PR: graph/query/SDK | `cargo test --locked -p drasi-lib --lib --tests`; `make build-test-plugins` then focused `cargo test --locked -p drasi-host-sdk --test native_query_plugin <filter>` | Directly affected tests, not overlapping wrapper groups. Linked reference tests are not loaded-plugin proof. |
-| PR: ABI/loaded artifacts | `cargo test -p drasi-host-sdk --features test-support --test native_query_plugin`; pipeline/loopback/wire and explicitly selected additional Host targets | Preserve both runtimes and static/loaded permutations; give registry/fetcher/watcher units a feature job and keep cross-platform FFI distinct. |
-| PR: Server | `make test-tooling`; `cargo test --locked`; explicit ignored stock-binary case in `single_runtime_test` with `DRASI_NATIVE_TEST_PLUGINS` | Repair [CW-84](#cw-84)'s aggregate claims; use the documented complete Cargo invocation on an environment-qualified broader job. |
-| PR: JavaScript/UI | Existing React/Trading packed/browser commands; `npm --prefix ui test`; VS Code `npm test`; affected GPU/Move-a-wall package/workspace tests | Bind currently unselected tests. Keep live-server and deterministic fake-transport evidence separate; parallelize heavy browser jobs rather than hide failures with retries. |
-| PR: tutorials/test-infra | Per-directory `python3 -m unittest discover -s <tutorial>/scripts -p 'test_*.py'`; root `scripts` tests; CLI with `DRASI_SSE_CLI`; `cargo test --manifest-path e2e-test-framework/Cargo.toml`; standalone data-tools manifests; comparator/checker Python tests | Tutorial directories need separate processes where module names collide. Agent-written tutorial success is supplementary. |
-| Broader/nightly | Explicit feature commands in `test.yml`; discovered ignored-container targets; Building Comfort completion workflow; `verify_demo.py --exercise` | Full capability/backend/fault and bootstrap/live/restart evidence, with only proven identical execution removed under [CW-86](#cw-86). |
-| Release/platform | `make test-ffi-layout-mismatch` on actual nightly/Linux; explicitly configured real SQL Server and cross-OS peers; independently built ABI fixtures | Missing prerequisites remain unqualified. Controlled long-running hosts for performance/soaks, not contention beside the main PR gate. |
+| Core | Python tests for CI tooling: `ci/test_native_dependencies.py`, `ci/test_install_protoc.py`. Node test `xtask/src/runtime_architecture/report.test.cjs`. | No workflow or Makefile target references them (`grep` of `drasi-core/.github/workflows`, `Makefile`). |
+| Core | `make test-ffi-layout-mismatch` (nightly-toolchain layout-randomization regression for issue #602). | `drasi-core/Makefile:116-134`; not referenced by any workflow. |
+| Core | Native SQL Server tests and cross-OS network peers. They need explicit credentials or prebuilt peers, so the integration-matrix discovery deliberately skips files that read `DRASI_MSSQL_TEST_MODE` or `DRASI_NETWORK_CONTAINER`. | `drasi-core/xtask/src/integration_matrix.rs:59-70`; `make test-native-mssql` at `drasi-core/Makefile:90-92`. Needs a declared environment job (scheduled or manual) that reports "not run" rather than passing. |
+| Learning | Deterministic tutorial tests: `tutorials/*/scripts/test_demo.py` (6 tutorials), `tutorials/sse-cli/tests/test_{build,cli}.py`, `scripts/test_local_build.py`. The only PR workflow is the agent-driven getting-started evaluation, which passes when the agent writes `## STATUS: SUCCESS`, and is skipped for fork PRs because it needs secrets. | `learning-drasi-server/.github/workflows/tutorial-evaluation-scheduled.yml:17-40,93,135,176`. |
+| test-infra | Rust unit tests for `e2e-test-framework` and `data-tools/arn`. PR workflows only build images (`build.yml`) and run clippy/fmt (`lint.yml`). The recovery-comparison Python tests run only in the manual `e2e-building-comfort-completion.yml`. | `test-infra/.github/workflows/build.yml:17-31,85-87`, `lint.yml:17-28`, `e2e-building-comfort-completion.yml:3-4,55-59`. |
 
-Changed transaction/ownership code still needs targeted deterministic fault and
-crash parents on the PR; do not move all recovery coverage to nightly. Conversely,
-workspace tests and overlapping focused selections must not be chained
-as if each adds wholly new coverage.
+Example of the gap: a change that breaks
+`learning-drasi-server/tutorials/building-comfort/scripts/verify_demo.py`'s
+arithmetic is caught by its `test_demo.py`, but no workflow runs that file, so
+the PR stays green.
 
-**Finish when:** Each required suite has an explicit owner, selector, feature/
-platform requirement and CI schedule, and recorded execution distinguishes
-selected, passed, blocked and omitted work. Preserve [CW-78](#cw-78)'s
-environment boundaries and [CW-88](#cw-88)'s evidence semantics.
+Notes for implementation:
+
+- Run each tutorial's tests in its own process (`python3 -m unittest discover
+  -s tutorials/<name>/scripts -p 'test_*.py'`); the directories reuse module
+  names.
+- Keep the agent evaluation as supplementary evidence, not the only tutorial
+  gate.
+- Release-level checks for [CW-69](#cw-69) and
+  [CW-73](#cw-73) (downstream compilation, package/docs builds, publication
+  metadata) are owned by those entries. The nightly `release-plz` dry run
+  (`drasi-core/.github/workflows/nightly.yml:42-60`) already performs semver
+  checks.
+- Changed recovery/ownership code still needs its deterministic fault and
+  crash-parent tests on the PR; do not move all recovery coverage to nightly.
+
+**Done when:** each suite above has an owning workflow with an explicit
+selector, its environment prerequisites are declared, and a skipped or
+unavailable prerequisite is reported as not run rather than as a pass.
 
 <a id="cw-86"></a>
 
 #### Consolidate proven repeated test execution (CW-86)
 
-**Kind:** Confirmed redundancy, not blanket test deletion.
-**Area:** Core, Server and test selection. **Priority:** Medium.
-**Effort:** Small-medium. **Confidence:** High for the inspected candidates.
+**Kind:** Confirmed redundancy. **Area:** Core MySQL stored-procedure reaction.
+**Priority:** Medium. **Effort:** Small.
 
-| Candidate | Consolidation and surviving coverage | Loss/risk and required proof |
-|---|---|---|
-| Five Server fixture tests | `test_create_test_solution_template`, `test_template_with_variables_has_variables`, `test_scriptfile_bootstrap_template`, `test_multi_source_join_template_has_joins`, `test_create_jsonl_file` are included in 18 binaries: 90 executions. Move the self-tests to one target and retain all actual API/dataflow consumers. Prefer parsed YAML/JSONL to string-presence assertions. | Removes 85 repeated executions without losing the five assertions. Verify one discovered copy of each. Evidence: `drasi-server/tests/test_support/solution_helpers.rs:557-609`, `test_support/mod.rs:17-22`, and final `server-rust.log`. |
-| Four MySQL helper tests | `test_setup_mysql`, `test_create_stored_procedure`, `test_stored_procedure_operations`, `test_clear_procedure_log` run in the standalone helper target and both storedproc/routing targets: 12 executions of four bodies. Move self-tests out of the imported module and run once. | Removes eight duplicate executions; retain the SQL behaviors and distinct reaction/routing checks. Do not share mutable SQL state merely to reduce count. Evidence: `drasi-core/components/reactions/storedproc-mysql/tests/mysql_helpers.rs:378-482`; final `workspace.log:5869-5923`. |
-| Identical `default` / `no-default-features` batch | `drasi-lib` currently has `default = []`; both final listings contain the same 74 executable paths/hashes and 1,826 discovered addresses. Execute one identical complete batch while retaining an explicit minimal-feature policy/check. | Avoids repeating 1,819 passes and seven permitted ignores. Expand the matrix again when defaults differ. This does not justify removing `extra-capabilities`, `parallel_solver`, backend or Tokio-flavor coverage. Evidence: `drasi-core/lib/Cargo.toml:35-40` and final default/no-default discovery logs. |
+The four self-tests of the MySQL test helper run three times per `cargo test`,
+each starting its own MySQL container. `mysql_helpers.rs` sits directly in
+`tests/`, so Cargo builds it as its own test binary, and both
+`mysql_storedproc_tests.rs` and `mysql_storedproc_routing_tests.rs` also include
+it with `mod mysql_helpers;`. Its `#[cfg(test)] mod tests` block (with
+`test_setup_mysql`, `test_create_stored_procedure`,
+`test_stored_procedure_operations`, `test_clear_procedure_log`) is therefore
+compiled into all three binaries: 12 container-backed executions of four tests.
 
-Copied provider tests are replaced under [CW-83](#cw-83); no-op and obsolete
-runners under [CW-84](#cw-84). They are not separate removal tasks here.
-Parameter tables, shared scenarios, compile contracts and static/loaded
-boundaries must be assessed by the failures they detect, not their size.
+**What remains:** move the helper to `tests/common/mysql_helpers.rs` (or
+`tests/mysql_helpers/mod.rs`) so it is no longer a standalone target, and move
+its four self-tests into a single test file so they run once. Do not share
+mutable database state between tests just to reduce the count.
 
-**Finish when:** Discovery proves the useful assertions still run once in the
-intended scope, preserved consumers remain selected, and supported permutations
-have not been mistaken for duplication. A count reduction alone is not success.
+**Evidence:**
+`drasi-core/components/reactions/storedproc-mysql/tests/mysql_helpers.rs:378-482`;
+`mysql_storedproc_tests.rs:23` and `mysql_storedproc_routing_tests.rs:22` in the
+same directory.
 
-<a id="cw-88"></a>
-
-#### Keep evidence tied to behavior rather than permanent test-name floors (CW-88)
-
-**Kind:** Test-maintenance and evidence-policy improvement.
-**Area:** Core, Server, test-infra and CI. **Priority:** Medium.
-**Effort:** Small-medium. **Confidence:** High; protect migration obligations.
-
-The custom original-name inventories, mappings, qualification checkers and
-calendar-based exception gates have been removed. Cargo now discovers the
-workspace and Host SDK tests directly; supported feature and service jobs are
-visible in the ordinary workflows.
-
-**Work:** Review the asserted outcome, construction, backend and failure
-boundary when renaming or consolidating tests. Keep crash parent drivers and
-explicit service prerequisites. Do not replace the removed machinery with
-another permanent test-count floor or profile-list framework.
-
-Keep successful execution and broad replacement qualification distinct;
-[CW-36](#cw-36) owns proof of completed processing/delivery and
-[CW-78](#cw-78) owns the recorded execution baseline.
-
-**Execution:** See `Makefile`, `.github/workflows/test.yml` and the
-[testing guide](../../docs/contributing/contributing-code/contributing-code-tests/).
-
-**Finish when:** Important behaviors remain traceably enforced while obsolete
-names/wrappers can be consolidated safely. Coverage declarations cannot be
-satisfied merely by a passing nearby test or a larger count.
+**Done when:** `cargo test -p drasi-reaction-storedproc-mysql -- --list` shows
+each of the four helper tests exactly once, and the stored-procedure and routing
+tests still pass.
 
 ### Test reliability and execution cost
 
@@ -1838,121 +5518,95 @@ satisfied merely by a passing nearby test or a larger count.
 
 #### Make asynchronous tests reliable (CW-37)
 
-**Kind:** Test-infrastructure improvement. **Area:** Core, Server, Learning, CI.
+**Kind:** Test-infrastructure improvement. **Area:** Core and CI.
 **Priority:** Medium. **Effort:** Medium to large.
-**Review:** M34; test-organization findings.
 
-**Work:** Replace timing guesses with actual completion signals where tests
-depend on them. Replace calendar-date assumptions with controlled clocks.
-Isolate shared test state and reproduce the Server Trading
-`dialogAccessibility.test.tsx` failure under parallel execution. Preserve
-separate checks for valid deferred construction and genuinely invalid topology;
-do not exclude failing cases from a claimed full-suite pass.
+Core runs its whole test suite single-threaded (`--test-threads=1` in
+`make test`, the features job and the FFI job) because some tests share ports,
+files or global state, and many tests wait with fixed sleeps rather than on
+completion signals. This makes CI slow, hides which tests actually conflict,
+and lets timing-dependent tests pass or fail depending on machine load.
 
-**Already fixed:** The stale empty-graph and missing-dependency lifecycle
-expectations, real subscription-count/cleanup checks, public doctests and the
-Server telemetry fixture's assumed immediate query readiness. Preserve the
-intentional child-worker ignores: the parent tests execute them with the required
-state and watchdogs.
+**What remains:**
 
-**Implemented timer slice:** The future-notification deduplication regression
-uses the existing `QueryTestControl`, fixed logical input times and explicit
-before-due, due and stale-wake checks on both Tokio runtimes. Actual reaction
-observations fence input processing and downstream receipt separately. This
-removes wall-clock waiting from that regression, not every timing assumption
-or the workspace-wide serialization policy.
+- Identify the tests that genuinely need isolation (shared ports, files,
+  process-global plugin callbacks, crash workers, resource probes) and isolate
+  them with `serial_test` or a dedicated target. Then add a normal parallel CI
+  run, keeping serialized execution only where it is still needed. This is the
+  deferred
+  [PR #988 parallel-testing follow-up](https://github.com/drasi-project/drasi-core/pull/988#pullrequestreview-5591575864).
+- Replace fixed sleeps that stand in for "processing finished" with explicit
+  completion signals. The existing `QueryTestControl`
+  (`drasi-core/lib/src/test_support.rs`) and its use in
+  `drasi-core/lib-integration-tests/tests/future_notification_dedup.rs` show the
+  pattern: fixed logical input times and explicit before-due/due checks instead
+  of wall-clock waits. Negative observation windows ("nothing arrives within N
+  ms") and external watchdogs are legitimate and must not be removed blindly.
+- Unverified: replace any remaining tests that depend on the real calendar date
+  with a controlled clock. None were re-identified during this review.
 
-Replace the workspace-wide `--test-threads=1` workaround only after identifying
-and isolating the tests that actually share ports, files or global state. Add a
-normal parallel CI run without dropping serialized coverage where it is still
-needed. This is the deferred
-[PR #988 parallel-testing follow-up](https://github.com/drasi-project/drasi-core/pull/988#pullrequestreview-5591575864).
+Example: `grep -rn "tokio::time::sleep\|thread::sleep"` over
+`drasi-core/lib/tests`, `drasi-core/lib-integration-tests` and
+`drasi-core/components/host-sdk/tests` finds 134 call sites; each needs to be
+classified as either a completion wait (replace) or a deliberate negative
+window/watchdog (keep).
 
-Concrete fixture consolidation and unnecessary test-binary build/startup
-overhead are owned by [CW-86](#cw-86) and [CW-87](#cw-87), which record the
-concrete duplication/cost findings. Preserve required process isolation,
-especially global plugin callbacks, crash workers and resource probes.
+**Evidence:** `drasi-core/Makefile:66-70`;
+`drasi-core/.github/workflows/test.yml:40-55`;
+`drasi-core/.github/workflows/test-ffi.yml:85`.
 
-The SSE restart fixture now checks a new client/new listener, complete old-stream
-cleanup, route bounds and listener release. It does not prove that a
-pre-restart pooled HTTP client reconnects transparently; retain or add that as a
-separately specified client/transport contract if required. Negative observation
-windows and external watchdogs are not interchangeable with avoidable sleeps.
-
-**Finish when:** Selected tests reliably prove the intended behavior under load
-and on both supported runtime styles, without weakened assertions or inflated timeouts.
-
-**SSE evidence:** `drasi-core/components/host-sdk/tests/native_network/sse.rs:138-214`.
+**Done when:** a parallel CI run passes reliably on both Tokio runtime flavors,
+serialized execution is limited to tests with a documented shared resource, and
+no assertion was weakened or timeout inflated to get there. Fixture cost and
+duplicate execution are tracked in [CW-87](#cw-87) and [CW-86](#cw-86).
 
 <a id="cw-87"></a>
 
 #### Measure and reduce build churn and fixture overhead (CW-87)
 
-**Kind:** Measured testing-cost improvement. **Area:** Core, Server and CI.
-**Priority:** Medium; potentially the largest speed benefit. **Effort:** Medium-large.
-**Confidence:** High in recorded costs; proposed speedups need measurement.
+**Kind:** Testing-cost improvement. **Area:** Core and CI.
+**Priority:** Medium. **Effort:** Medium-large.
 
-The recorded local run used a shared target, serial builds, no incremental/debug
-information, real fixtures and changing feature graphs. The test-time column
-sums libtest target wall time, including fixture setup/cleanup but excluding
-prior Cargo compilation. These are not individual-test CPU times or universal
-CI performance figures.
+Most of the time in a full local Core test run goes into repeated compilation
+and per-test database containers, not test bodies. Reducing that needs
+measurement first; unsafe fixture sharing can hide cleanup and restart defects.
 
-| Recorded phase | Cargo-reported build time | Summed target test time |
+A recorded local run (shared target directory, serial builds) gave these
+figures. Unverified: the logs are not checked in, so the numbers cannot be
+re-derived from the repository.
+
+| Phase | Cargo build time | Summed test-target time |
 |---|---:|---:|
-| Core workspace | 464 s | 793.66 s |
-| Runtime matrix discovery | 2,861.92 s | Discovery only |
-| Runtime matrix execution | 52.06 s | 2,221.05 s |
-| Complete Host run before fixture follow-up | 226 s | 1,331.55 s |
-| Complete Server Rust run | 220 s | 104.14 s |
-| Library/Host documentation | 179 s | 29.47 s |
-| Corrected complete network target | 1.57 s | 51.68 s |
+| Core workspace | 464 s | 794 s |
+| Runtime-matrix discovery (listing only) | 2,862 s | — |
+| Runtime-matrix execution | 52 s | 2,221 s |
+| Host SDK complete run | 226 s | 1,332 s |
 
-The network log also contains a separate 110-second development check, not
-110 seconds of tests. Fixture builds were separate: `fixtures.log:63-144`
-records repeated 82-86-second builds and later 141/118-second builds. Cache
-repair is not normal test execution. Sources are the `Finished` and
-`test result` lines in the final baseline logs and all 36 listing/execution logs.
+In that run, discovery compiled `drasi-lib` and `drasi-plugin-sdk` 22 times
+each because successive package/feature selections changed the build graph.
+`native_mysql_components` took about 1,021 s for 31 tests, and the MySQL
+source lifecycle tests about 744 s.
 
-**Work, in order:**
+**What remains, in order:**
 
-1. Stabilize build graphs before micro-optimizing bodies. Runtime discovery
-   compiled `drasi-lib` and `drasi-plugin-sdk` 22 times each. Listing is not
-   intrinsically slow; successive package/feature selections trigger compilation.
-   Group compatible builds, keep feature choices stable and separate incompatible
-   host/plugin/qualification targets. Preserve artifact provenance; indiscriminate
-   cache deletion is not an optimization.
-2. Measure database start, readiness, assertions and cleanup separately.
-   `native_mysql_components` took 1,020.87 seconds for 31 reported cases.
-   `mysql-lifecycle` took 743.70 seconds: 586.13 in its 98-case library target and
-   157.57 in its ten-case integration target. Existing logs cannot attribute a
-   percentage to startup or justify an invented speedup.
-3. Implement [CW-86](#cw-86)'s proven repeated-execution removals first.
-   Identical no-default execution consumed 37.34 seconds of target time; the
-   independent MySQL helper target took 33.01 seconds. Per-helper times in the
-   other targets were not recorded, so do not extrapolate a saving.
-4. Trial an owned shared service plus independent per-test databases only for
-   non-restart cases. Garnet already uses a process-level Redis fixture with
-   UUID scopes and fresh connections. Keep dedicated containers/volumes for
-   restart, binlog retention, corruption, credentials and ownership. Verify
-   shuffled/concurrent execution and cleanup before removing serialization.
+1. Stabilize build graphs: group compatible package/feature selections so one
+   build serves several test runs, and keep incompatible host/plugin targets
+   separate. Do not count cache deletion as an optimization.
+2. Measure database start, readiness, assertions and cleanup separately for the
+   MySQL native and lifecycle suites before choosing a fix.
+3. Apply [CW-86](#cw-86)'s duplicate removal.
+4. Trial one shared database service with a fresh database per test for
+   non-restart cases. The Garnet scenario tests already do this with a
+   process-wide Redis container and per-test UUID scopes
+   (`drasi-core/components/indexes/garnet/tests/scenario_tests.rs:37-64`). Keep
+   dedicated containers for restart, binlog retention, corruption, credential
+   and ownership tests. Verify shuffled/concurrent execution and cleanup before
+   relaxing serialization ([CW-37](#cw-37)).
 
-Record per-test/fixture timings, cold/warm caches and stable feature-group
-comparisons. Coordinate clock/isolation work with [CW-37](#cw-37). Unnecessary
-getting-started sleeps are addressed in [CW-90](#cw-90); negative blocking
-windows and watchdogs must not be shortened indiscriminately.
-
-**Evidence:** Final `host-sdk.log:3535`,
-`runtime/mysql-lifecycle.log:1039-1055`;
-`drasi-core/components/indexes/garnet/tests/scenario_tests.rs:36-64,92-128`.
-Preserve output-equivalence checks before throughput comparisons, as already
-tested in
-`test-infra/e2e-test-framework/examples/building_comfort/local/native_comparison/test_run_comparison.py:99-124`.
-
-**Finish when:** Matched measurements show shorter feedback cycles without
-lost coverage, weaker isolation, hidden cleanup failures or changed result
-oracles. Application performance qualification remains [CW-40](#cw-40) and
-[CW-79](#cw-79), not this test-runner cost item.
+**Done when:** matched before/after measurements (cold and warm cache, same
+feature groups) show shorter feedback without lost coverage, weaker isolation,
+hidden cleanup failures or changed result oracles. Application performance is
+[CW-40](#cw-40) and [CW-79](#cw-79), not this item.
 
 ### Semantic, application and API coverage
 
@@ -1960,39 +5614,38 @@ oracles. Application performance qualification remains [CW-40](#cw-40) and
 
 #### Restore shared semantic and backend conformance wiring (CW-89)
 
-**Kind:** Confirmed coverage wiring gaps and semantic-oracle qualification.
-**Area:** Core evaluator, shared tests, indexes and stateful view transforms.
-**Priority:** Medium-high. **Effort:** Medium. **Confidence:** High for named gaps.
+**Kind:** Coverage wiring gap. **Area:** Core shared tests and indexes.
+**Priority:** Medium-high. **Effort:** Medium.
 
-`truefor_grouped_sum` and `sliding_window_avg_grouped` are wired in memory but
-absent from both persistent scenario consumers. `prev_unique_with_match` is
-present in RocksDB but absent in Garnet. This violates the existing "wire all
-three" convention; add supported cases or record an actual unsupported contract,
-not a raw count comparison.
+Shared query scenarios in `drasi-core/shared-tests` are meant to run against all
+three index backends: in-memory, RocksDB and Garnet. Nothing enforces this
+(`drasi-core/shared-tests/AGENTS.md:5-6`), and many scenarios run only in
+memory. A storage bug in, say, future-queue handling on RocksDB would not be
+caught by those scenarios.
 
-**Evidence:** `drasi-core/shared-tests/AGENTS.md:5-9`,
-`shared-tests/src/in_memory/mod.rs:599-653`,
-`components/indexes/rocksdb/tests/scenario_tests.rs:460-476`,
-`components/indexes/garnet/tests/scenario_tests.rs:513-521` (all paths in Core).
+**What remains:** for each scenario below, wire it into the missing consumer(s)
+or record why the backend does not apply (for example, a middleware-only test
+that never touches the index).
 
-Keep the shared scenarios and real backend distinctions. The duplicate-named
-curbside scenario uses a new vehicle identity with a reused license plate and
-is not a duplicate body
-(`drasi-core/shared-tests/src/use_cases/curbside_pickup/mod.rs:296-460`).
-The Garnet fixture runs Redis 7 for backend protocol conformance
-(`drasi-core/shared-tests/src/redis_helpers.rs:52-70`); it does not by itself
-qualify a different service's durability.
+| Missing from | Scenarios |
+|---|---|
+| RocksDB and Garnet (index-dependent: temporal, future-queue, aggregation or operators) | `crosses_above_a_threshold` (both variants), `crosses_above_and_stays_above`, `crosses_above_three_times_in_an_hour`, `decrease_by_ten` (both), `rolling_average_decrease_by_ten`, `exceeds_one_standard_deviation`, `future_aggregations::{truefor_sum, truefor_grouped_sum, truelater_max}`, `windows::{sliding_window_max, sliding_window_avg_grouped}`, `sensor_heartbeat::not_reported_with_true_now_or_later`, `logical_conditions`, `string_operators::{contains_op, starts_with, ends_with}` |
+| RocksDB only | `steps_happen_in_any_order` |
+| Garnet only | `prev_distinct::prev_unique_with_match` |
+| RocksDB and Garnet (likely backend-independent; confirm and record) | `document`, `unwind` (3), `remap` (3), `decoder`, `parse_json_test`, `promote_test`, `relabel`, `dapr_state_store::run_tests` |
 
-For [CW-68](#cw-68)'s implemented view component, use an independently recomputed
-view oracle after patches (removed properties and explicit nulls), replacement,
-filtering, relationship changes and one-to-many identity changes. Preserve
-stateless map/jq behavior; [CW-39](#cw-39) owns its failure/restart matrix.
-Native-query emitted-delta gaps are consolidated in [CW-77](#cw-77), not cloned
-as new shared-scenario copies.
+Example: `shared-tests/src/in_memory/mod.rs:627-629` runs
+`future_aggregations::truefor_grouped_sum` against memory; neither
+`components/indexes/rocksdb/tests/scenario_tests.rs` nor
+`components/indexes/garnet/tests/scenario_tests.rs` calls it.
 
-**Finish when:** Each supported shared scenario is selected for every applicable
-consumer/backend, unsupported cases are explicit, and literal/independent
-oracles catch semantic errors rather than reproduce the implementation.
+**Evidence:** the scenario lists above come from comparing the scenario calls in
+`drasi-core/shared-tests/src/in_memory/mod.rs` with the two backend
+`scenario_tests.rs` files. Native-query delta assertions are tracked in
+[CW-77](#cw-77), not here.
+
+**Done when:** every index-dependent scenario runs on all three backends, or the
+backend's exclusion is stated next to the wiring with its reason.
 
 <a id="cw-77"></a>
 
@@ -2000,262 +5653,161 @@ oracles catch semantic errors rather than reproduce the implementation.
 
 **Kind:** Behavioral-parity qualification. **Area:** Core, Host SDK, test fixtures.
 **Priority:** High before claiming complete native behavioral parity.
-**Effort:** Medium to large, split by behavior. **Origin:** CW-43 follow-up.
+**Effort:** Medium to large, split by behavior.
 
-**Status:** Native correctness baseline established; exhaustive behavioral
-parity remains a qualification item.
+Shared semantic cases run the same query scenarios through the linked reference
+query and through the native query plugin (statically linked and loaded), on
+memory and RocksDB, on both Tokio flavors. Each step can assert both the
+resulting rows (`rows`) and the emitted change set (`changes`). Only
+`canonical_replacement` and `ordered_batch` set `changes`; the other six cases
+(`disconnected` for Cypher and GQL, `optional_list`, `assignment_maps`,
+`numeric_count`, `optional_join`) check rows only. A plugin that produced the
+correct final rows but emitted a wrong or extra delta (for example, an
+`update` where an `add` plus `delete` is expected) would pass those six.
 
-**Historical coverage:** The native-query Rust target distinguishes linked and
-loaded construction modes. The previously recorded plugin suite passed 176
-cases; six additional entries are subprocess fixtures exercised by their
-required parents, not ordinary standalone tests.
+**What remains:**
 
-Eight semantic scenarios now share exact assertions between the retained
-reference tests and static/loaded native query construction on memory/RocksDB
-and both Tokio flavors. These are 64 native scenario executions inside two
-Rust test cases, not 64 additional independently discovered tests. They cover
-optional/disconnected contexts, lists/maps, numeric comparisons, optional joins,
-canonical replacement and ordered mutations.
+- Add expected `changes` to every step of the six row-only cases, including the
+  optional/disconnected transitions and the aggregate transitions in
+  `numeric_count`.
+- Extend native coverage to other supported behaviors not yet exercised through
+  the loaded plugin, one behavior at a time, without inferring completeness
+  from test names or counts.
+- Native Garnet is not qualified: the current Garnet provider lacks an explicit
+  restart-durability guarantee and the bounded reads the native query needs.
+  `native_query_rejects_unqualified_garnet_without_touching_storage` proves the
+  native query refuses it without writing; the
+  `garnet_native_and_standard_adapters_..._reset_markers` test uses the linked
+  transformer and does not count as native evidence. Qualify Garnet natively or
+  keep the refusal explicit.
 
-**Confirmed oracle gap:** Six of the eight language/scenario variants check
-their per-step snapshots but not emitted deltas; canonical replacement and
-ordered batch already check both. Extend the existing shared `Step` expectations
-for optional/disconnected and aggregation transitions rather than duplicate the
-scenarios. Selecting a persistent provider here is not a restart test.
-Evidence: `drasi-core/lib/tests/fixtures/query_semantics.rs:76-145,246-435` and
-`drasi-core/components/host-sdk/tests/native_query_plugin/semantics.rs:10-99`.
+**Evidence:** `Step { rows, changes }` and the change assertion in
+`drasi-core/lib/tests/fixtures/query_semantics.rs:49-67,137-160`; cases at
+`:216-435` (`changes` set only at `:385` and `:454`); native runner
+`drasi-core/components/host-sdk/tests/native_query_plugin/semantics.rs:10-99`;
+Garnet `drasi-core/lib-integration-tests/tests/computation_garnet_recovery.rs:148-219`.
 
-Named native cases also cover ordinary creation/read/subscription APIs, retained
-evaluation, bootstrap and reset, independent non-atomic writers, durable delivery
-and shared journals, scheduling, archives, middleware and large paged reads.
-Native/composite bootstrap ownership now accepts the actual native query
-factory while preserving role, owner, slot and progress checks. Strict bootstrap
-refusal retains its typed cause, and managed startup joins the actual lifecycle
-owner without duplicate activation.
-
-The library semantics, recovery, timer and ordinary API tests that register the
-explicit linked reference remain reference evidence. Connector tests that register that factory are also reference
-evidence. Keep useful low-level Core unit tests; migrate the hosted behavior,
-not every evaluator unit test into an FFI test.
-
-**Remaining:** Fill the delta gap above and additional supported-behavior gaps
-without inferring completeness from names/counts. [CW-89](#cw-89) owns shared
-engine/backend wiring; [CW-85](#cw-85) owns CI selection of existing native cases.
-Native Garnet is not positively qualified: its current
-provider lacks an explicit restart-durability guarantee and the bounded reads
-required by the native query. A real native refusal/no-write test passes;
-linked Garnet reconstruction does not substitute for native functionality.
-In particular, `garnet_native_and_standard_adapters_recover_primary_output_and_separate_reset_markers`
-constructs the linked transformer; the actual-native case
-`native_query_rejects_unqualified_garnet_without_touching_storage` proves refusal
-without writes. Evidence:
-`drasi-core/lib-integration-tests/tests/computation_garnet_recovery.rs:87-158,164-219`.
-
-**Finish when:** Each supported behavior has a passing, identified native case
-for its applicable middleware/storage/runtime combinations.
-Include actual Garnet/RocksDB capabilities, non-atomic independent writers and
-shared-journal restrictions; unsupported or unavailable profiles stay explicit.
-Fix reproduced discrepancies without weaker assertions or new skips. Merely
-rerunning existing suites belongs to [CW-78](#cw-78).
-
-<a id="cw-90"></a>
-
-#### Strengthen live example and tutorial acceptance (CW-90)
-
-**Kind:** Confirmed weak assertions and application qualification.
-**Area:** Server, Learning, Core examples and test-infra.
-**Priority:** High for required examples. **Effort:** Medium-large.
-**Depends on:** Only the missing implementations in [CW-47](#cw-47).
-
-The real Server getting-started CI script leaves bootstrap and aggregation
-correctness unchecked: `test_query_results` waits five seconds and reads query
-configuration, and `test_aggregation_results` checks only query ID/success.
-The data assertion inserts Alice, sleeps five seconds and greps for "Alice."
-Because the initial seed contains different people, that is a real but shallow
-CDC smoke, not an automatically vacuous assertion.
-
-**Work:** Strengthen that existing test with literal seeded filtered rows and
-histogram, a uniquely identified insert, exact update/delete/count transitions,
-bounded result polling/readiness, HTTP status and parsed JSON. Remove its
-unconditional sleeps without weakening diagnostics. Evidence:
-`drasi-server/tests/integration/getting-started/run-integration-test.sh:156-220`,
-`setup-postgres.sh:81-93`, `config.yaml:57-83` in the same directory, and
-`drasi-server/.github/workflows/integration-test-getting-started.yml:52-64`.
-
-Retain the seven migrated tutorials' existing scenario checks and automate
-uncovered walkthrough/CI cases with exact rows, effects and visible updates,
-bounded waits and repeatable reset. The Learning getting-started evaluator
-already has expected-output scenarios; that is distinct from the weak Server
-shell assertions above. Reuse existing tools rather than introduce another
-tutorial framework. Building Comfort's verifier already derives an independent
-source-data arithmetic oracle and checks all six query/dashboard snapshots
-(`learning-drasi-server/tutorials/building-comfort/scripts/verify_demo.py:34-130`).
-
-**Recorded Learning acceptance:** All seven tutorials have matching local-build
-evidence. Getting Started covers real source changes, joins, aggregates, timers
-and full Server restart; SSE CLI exercises the real stream and its binary-dependent
-checks. Building Comfort and Curbside cover exact query/dashboard data, real
-database changes and rendered live panels, including alert retraction and
-timer-only changes. High-risk Containers uses actual Kubernetes Pods and
-PostgreSQL risk rows. OTel uses the real Collector/store services for rollouts,
-SLO cycles, absent-exporter timing and dependency expiry/recovery. Trading covers
-all eleven queries, fifty prices, eight holdings, query-chain snapshot/live
-updates, real UI CRUD, SSE stop/restart with an offline change and reload without
-reprovisioning. Building Comfort's open browser also resynchronizes after a full
-Server restart. Owned disposable infrastructure is cleaned up.
-
-This is local macOS/Podman evidence, not a Linux CI/devcontainer run, optional
-external Discord delivery or a new proof of every recovery profile. The weak
-Server shell assertions above and broader application/platform qualification
-remain separate work. Runnable Stockroom book variants and native network
-lessons are also checked against the current local dependency lockfile.
-
-Move-a-Wall, the embedded GPU Lab and tutorial migrations have earlier live
-evidence. Re-run affected acceptance against the current bundle, including
-snapshot/restart; do not reopen completed migrations or label old evidence as
-a current run. Preserve GPU's real handover/atomic paired-value/SIGKILL/slot/
-missing-history checks and Trading's real provisioning/CRUD/live/reconnect
-tests. In-process projection/UI units cannot substitute for them.
-
-The agentic tutorial workflow is supplementary, not an independent sole gate.
-The six SSE CLI subprocess methods require `DRASI_SSE_CLI`; all skip without it
-(`learning-drasi-server/tutorials/sse-cli/tests/test_cli.py:1-20,86-195`).
-[CW-85](#cw-85) owns CI selection and explicit environment jobs.
-
-**Finish when:** Required examples build and run normally with observable
-readiness, exact data/effects, safe reset/shutdown/recovery and recorded
-current-source provenance. Compilation alone, a success marker or a request
-returning 200 does not establish this.
-
-<a id="cw-46"></a>
-
-#### Complete the Server workflow and recovery checks (CW-46)
-
-**Kind:** Qualification. **Area:** Server, Core, test-infra.
-**Priority:** High. **Effort:** Large. **Origins:** CG-20/26; cleanup stage 9.
-**Depends on:** CW-36 and only the affected CW-44/45 capabilities.
-
-**Work:** Cover the remaining combinations of delayed or failed startup, saved
-configuration, reconstruction, reconnecting clients, old readers, native providers
-and interrupted delivery. Include unavailable secrets/provider recipes, rejected
-versions, lost acceptance replies, concurrent snapshot/configuration changes,
-slow observers and reconnect after a result-history gap. A client must obtain
-an authoritative replacement snapshot or explicit failure, not retain stale rows.
-Record the actual Server and plugin versions used.
-
-Include [CW-45](#cw-45)'s stale previews, rejected acceptance, delayed/failed
-realization, receipt lookup after lost replies and two instances created from
-the same template. For [CW-70](#cw-70)'s reconstructible recipes, cover missing
-factories, incompatible versions, unavailable secrets, failed construction and
-cancelled restoration, with truthful retryable declarations and no orphaned
-resources.
-
-**Completed boundary:** Configured and API-created ordinary queries use explicit
-native registration without a linked fallback. [CW-78](#cw-78) owns current and
-historical execution totals, including the query-progress OTLP, plugin-dependent
-E2E and crash-parent cases. Resolver reconstruction is not automatically
-packaged-server/network crash coverage. Keep the actual stock-binary check
-identified in [CW-84](#cw-84), and live tutorial acceptance in [CW-90](#cw-90).
-
-**Finish when:** The selected current-version workflows have trustworthy
-end-to-end results, including failure and restart, rather than only matching
-intermediate captures.
+**Done when:** every shared semantic step asserts both rows and changes, each
+supported behavior has an identified native case for its applicable
+storage/runtime combinations, and unsupported profiles (including Garnet unless
+qualified) are explicit. Shared backend wiring is [CW-89](#cw-89); CI selection
+is [CW-85](#cw-85).
 
 <a id="cw-10"></a>
 
 #### Finish public status and result consistency checks (CW-10)
 
-**Kind:** Issue and qualification. **Area:** Core, Server.
-**Priority:** High. **Effort:** Medium to large. **Origin:** review's inspection findings.
+**Kind:** Qualification. **Area:** Core, Server.
+**Priority:** High. **Effort:** Medium to large.
 
-**Work:** Check remaining public outcomes for partial startup/shutdown, missing
-or duplicate components, replaced query readers, missing result history and
-initial-result/live-update races. Define the compatibility view's legacy
-projection versus full native inspection explicitly: generic native
-transformers must not be silently presented as a complete graph when omitted.
-Preserve the repaired `Reconfiguring` status and initialized, generation-fenced
-snapshot/history reads during quiescence.
+Library callers, the Server REST API, logs and the UI should report the same
+state for a component or query. Edge cases (partial startup or shutdown,
+replacement, restart, failure) are where these views are most likely to
+disagree, and they are not systematically tested.
 
-**Consolidated conformance obligations:**
+**What remains:**
 
-- For [CW-22](#cw-22), assert consistent public classifications, retained typed
-  causes, actual operation context and user-visible outcomes across library,
-  REST, logs and UI. A correct reset refusal alone does not prove that every
-  plugin-owned cause remains inspectable.
-- For [CW-23](#cw-23), exercise snapshot/changed acknowledgement, coalesced
-  readiness/failure, late callbacks, slow subscribers, disconnect/reconnect and
-  replacement. Check that clients consume the snapshot rather than busy-loop,
-  and that coalesced status is not presented as a complete event history.
-- For [CW-34](#cw-34) and [CW-69](#cw-69), generate/property-test streams, roles,
-  references, cycles and unused bindings through equivalent entrypoints at the
-  same validation phase. Missing prerequisites remain valid waiting states.
-- For [CW-72](#cw-72), compare wrapped/unwrapped advertised capabilities through
-  failure, batching, progress, retirement, cancellation and scoped deletion.
-  Unsupported combinations must reject rather than report successful cleanup.
-- For [CW-26](#cw-26), assert exact counts, units and timing boundaries across
-  normal work, retries, batching and failure; use [CW-36](#cw-36) for actual
-  end-to-end completion rather than infer effects from counters alone.
+- Test public outcomes for: partial startup/shutdown, missing or duplicate
+  components, replaced query readers, missing result history, and races between
+  the initial result snapshot and live updates.
+- Define what the compatibility graph view (`DrasiLib::get_graph`) shows versus
+  full native inspection. `ComponentKind` has only Instance, Source, Query,
+  Reaction, BootstrapProvider and IdentityProvider, so a generic native
+  transformer (for example a `drasi.standard/view` component) has no node kind.
+  Either represent it or mark the snapshot as a partial projection so it is not
+  presented as the complete graph. Unverified: whether native transformers are
+  currently mapped to some other node kind or simply omitted.
+- Cover these cross-entry conformance obligations:
+  - [CW-22](#cw-22): the same classification, typed cause and operation context
+    across library, REST, logs and UI.
+  - [CW-23](#cw-23): snapshot/changed acknowledgement, coalesced readiness and
+    failure, late callbacks, slow subscribers, reconnect and replacement;
+    clients consume the snapshot rather than busy-loop, and coalesced status is
+    not presented as a full event history.
+  - [CW-34](#cw-34) and [CW-69](#cw-69): generated/property tests of streams,
+    roles, references, cycles and unused bindings through equivalent entry
+    points at the same validation phase; missing prerequisites remain a valid
+    waiting state.
+  - [CW-72](#cw-72): wrapped and unwrapped components advertise the same
+    capabilities through failure, batching, progress, retirement, cancellation
+    and scoped deletion; unsupported combinations reject rather than report
+    successful cleanup.
+  - [CW-26](#cw-26): exact metric counts, units and timing boundaries across
+    normal work, retries, batching and failure. End-to-end completion is
+    [CW-36](#cw-36).
 
-**Implemented:** The instance root in both `get_graph` and retained read-only
-views follows the existing library running flag instead of a constant. It is
-Stopped before startup and after stop, and Running while a partial startup still
-owns active work. This is not an aggregate component-readiness or cleanup-success
-claim; individual failures remain visible separately.
+**Evidence:** `drasi-core/lib/src/component_graph/node.rs:32-45,154-161`;
+`drasi-core/lib/src/lib_core_ops/graph_ops.rs:55-57`.
 
-Native query output generation now remains observable after stop without
-reopening ordinary reads. Canonical metrics, coherent paged reads, retained
-recovery, replacement fencing and no-op/replay progress have focused coverage.
-Do not reopen those implementations; extend native parity under
-[CW-77](#cw-77) and keep broader public inspection outcomes in this item.
-
-**Finish when:** Supported library and Server operations report the same truthful
-state and results through replacement, restart and failure.
+**Done when:** for each scenario above, the library and Server report the same
+truthful state and results through replacement, restart and failure, with a
+test asserting each.
 
 <a id="cw-13"></a>
 
 #### Verify remaining query matching reports (CW-13)
 
-**Kind:** Investigation. **Area:** Core evaluator/parsers.
+**Kind:** Investigation and fixes. **Area:** Core evaluator and parsers.
 **Priority:** Conditional on reproduction. **Effort:** Medium to large.
 
-**Work:** Reproduce optional-match filters, outer-variable references, list membership and
-relationship-end reports, including changes and removals.
+Seven open issues report wrong results or runtime errors for queries that parse
+and start successfully. Users get silently wrong rows or a query that stops
+producing results.
 
-**Implemented:** The shared query builder rejects quantified relationship
-patterns with a typed unsupported-feature error before evaluator construction.
-Both Cypher and GQL are covered, including quantified single-hop spellings and
-later Cypher query parts. Ordinary unquantified edges and fixed chains remain
-supported. Full variable-length execution was not added.
+**What remains:** reproduce each issue on the current branch, including changes
+and removals, then fix it with a test or close it with evidence that it no
+longer reproduces.
 
-**Finish when:** Each remaining report has a tested fix or evidence that it does
-not reproduce.
+| Issue | Report | Open fix PR |
+|---|---|---|
+| [#795](https://github.com/drasi-project/drasi-core/issues/795) | `WHERE` on `OPTIONAL MATCH` drops the unmatched parent row | — |
+| [#796](https://github.com/drasi-project/drasi-core/issues/796) | Outer variable in a node property map fails with `UnknownIdentifier` | — |
+| [#797](https://github.com/drasi-project/drasi-core/issues/797) | Optional variable introduced after an aggregation fails with `UnknownIdentifier` | — |
+| [#798](https://github.com/drasi-project/drasi-core/issues/798) | `IN` inside a list-comprehension filter gives the wrong result | — |
+| [#807](https://github.com/drasi-project/drasi-core/issues/807) | Cyclic `MATCH` paths can count one relationship twice | [#912](https://github.com/drasi-project/drasi-core/pull/912) |
+| [#808](https://github.com/drasi-project/drasi-core/issues/808) | `OPTIONAL MATCH` can lose or duplicate a row when partial paths cannot complete | [#915](https://github.com/drasi-project/drasi-core/pull/915) |
+| [#812](https://github.com/drasi-project/drasi-core/issues/812) | Nested aggregation drops a grouping-key switch when the inner aggregate is unchanged | — |
 
-**Reports:** [#795](https://github.com/drasi-project/drasi-core/issues/795),
-[#796](https://github.com/drasi-project/drasi-core/issues/796),
-[#797](https://github.com/drasi-project/drasi-core/issues/797),
-[#798](https://github.com/drasi-project/drasi-core/issues/798),
-[#807](https://github.com/drasi-project/drasi-core/issues/807),
-[#808](https://github.com/drasi-project/drasi-core/issues/808),
-[#812](https://github.com/drasi-project/drasi-core/issues/812).
+Example (#795): with only `Team {id:'engineering'}` inserted,
+
+```cypher
+MATCH (team:Team)
+OPTIONAL MATCH (person:Person)
+WHERE person.teamId = team.id
+WITH team, collect(person.id) AS personIds
+RETURN team.id AS team, personIds
+```
+
+returns no rows; it should return `{team: 'engineering', personIds: []}`.
+
+Quantified relationship patterns (variable-length paths) are rejected with a
+typed unsupported-feature error and are not part of this item.
+
+**Done when:** each issue has a merged fix with a regression test covering add,
+update and delete, or is closed with evidence that it does not reproduce.
 
 <a id="cw-12"></a>
 
 #### Investigate reported errors in grouped results (CW-12)
 
-**Kind:** Investigation. **Area:** Core evaluator and indexes.
+**Kind:** Investigation and fixes. **Area:** Core evaluator and indexes.
 **Priority:** Conditional on reproduction. **Effort:** Unknown until reproduced.
 
-**Work:** Reproduce the reported missing first results, incorrect removal of
-groups, zero-valued groups and averages containing null values. Check changes,
-restart and cleanup of old group records.
+Four open issues report wrong or leaked state for grouped aggregations,
+including one restart crash.
 
-**Finish when:** Each report is either closed with evidence or fixed with exact
-result and recovery checks.
+**What remains:**
 
-**Reports:** [#384](https://github.com/drasi-project/drasi-core/issues/384),
-[#498](https://github.com/drasi-project/drasi-core/issues/498),
-[#806](https://github.com/drasi-project/drasi-core/issues/806),
-[#411](https://github.com/drasi-project/drasi-core/issues/411).
+| Issue | Report | Current state |
+|---|---|---|
+| [#384](https://github.com/drasi-project/drasi-core/issues/384) | A group whose aggregate returns to its identity value stays in the result set. Example: `MATCH (a) RETURN a.Name AS key, sum(a.Value1) AS my_sum`; insert `{Name:'foo', Value1:5}` then delete it; the result is `[{key:'foo', my_sum:0.0}]` instead of `[]`. | Open PR [#409](https://github.com/drasi-project/drasi-core/pull/409) ("Emit Removing when aggregating groups empty out") is not merged; `core/src/evaluation/parts/mod.rs` still uses the `default_after` path. |
+| [#498](https://github.com/drasi-project/drasi-core/issues/498) | `avg()` fails with `InvalidArgument(0)` after a restart with RocksDB persistence when a contributing value is `null`. | Still present: `Avg::snapshot` falls through to `InvalidArgument(0)` for `VariableValue::Null` (`drasi-core/core/src/evaluation/functions/aggregation/avg.rs:268-283`), while `apply`/`revert` handle it. |
+| [#806](https://github.com/drasi-project/drasi-core/issues/806) | A second aggregation can drop a valid zero-count row. | Open fix PR [#907](https://github.com/drasi-project/drasi-core/pull/907). |
+| [#411](https://github.com/drasi-project/drasi-core/issues/411) | `PartCurrent` result-owner entries are never cleared, so persistent backends accumulate one entry per distinct group key ever seen. | Applies once #409 lands; re-check then. |
+
+**Done when:** each issue has a fix with exact result and restart/recovery
+checks (including old group-record cleanup on RocksDB and Garnet), or is closed
+with evidence that it does not reproduce.
 
 ### Recovery, lifecycle and failure qualification
 
@@ -2263,71 +5815,105 @@ result and recovery checks.
 
 #### Extend native-input recovery qualification (CW-14)
 
-**Kind:** Qualification. **Area:** Core, Server, test-infra.
-**Priority:** Medium for broader coverage; high before claiming an unqualified
-deployment profile. **Effort:** Large across additional providers/connectors.
-**Origins:** CG-01/22/24; reliability W2/W5.
+**Kind:** Qualification. **Area:** Core, test-infra.
+**Priority:** Medium for broader coverage; high before claiming crash recovery
+for a deployment profile that is not listed below. **Effort:** Large.
 
-**Qualified:** The
-[native-input crash matrix](../../lib-integration-tests/tests/native_input_crash_recovery.rs)
-passes 28 real SIGKILL cases: admission QoS (12), retained inputs (8), and shared
-journals (8), with eager/paged storage and both Tokio runtimes. Fresh processes
-reconstruct accepted input beyond the committed consumer cursor before/after
-query commit and after an admission commit whose reply was lost. Checks compare
-exact receipts, producer identities, payloads, checkpoints, outbox, projection,
-outputs and cleanup. This closes the previously unproved RocksDB
-process-restart boundary; no production recovery defect was reproduced.
+When a process is killed, input that a source has already accepted but the query
+has not yet committed must be reconstructed by the next process: nothing lost,
+nothing invented, no duplicate committed output. This is proven for a few
+source/storage combinations; most connectors and the loaded query plugin's
+admission path are not yet covered by a real process-kill test.
 
-**Remaining work:** Extend this evidence to the remaining connector/provider and
-initial-loading combinations. It is not power-loss qualification, a guarantee for
-memory-only queries, or proof that an external effect happens exactly once.
-The recorded 28-case run predates the query-plugin cutover. Its hosted-query
-construction must be identified and rerun under [CW-77](#cw-77) and
-[CW-78](#cw-78) before citing it as current loaded-query evidence.
+**Currently proven (real SIGKILL, fresh process, RocksDB, both Tokio runtimes):**
 
-**Implemented repair:** Ordinary HTTP/gRPC WAL cleanup waits for the actual
-startup subscription batch, protects replay registration against pruning, and
-retains submitted cleanup through cancellation. Missing retained history fails
-explicitly. This closes the discovered fast-subscriber/slow-subscriber startup
-race; it does not qualify every connector-specific restart profile.
-The ordinary source-WAL case is verified in [CW-36](#cw-36); it is no longer an
-unproved blanket requirement.
+| Test | Covers |
+|---|---|
+| `drasi-core/lib-integration-tests/tests/native_input_crash_recovery.rs:1228-1325` | 28 cases: lossless admission QoS (including a lost admission reply), standalone retained input and a shared journal; eager and paged storage; kill before and after query commit. Compares outputs, identities, payloads and progress with an uninterrupted oracle run. |
+| `drasi-core/components/host-sdk/tests/native_network/durable.rs:352-626` | Native HTTP and gRPC sources recover accepted input after process exit when the client never received its receipt. |
+| `drasi-core/components/host-sdk/tests/native_query_plugin/durable_shared.rs:487-561`, `durable_bootstrap_crash.rs:54-152` | Loaded query plugin: shared-journal exit before/after commit; SQLite bootstrap exit while partial and after completion. |
+| `drasi-core/components/sources/{http,grpc}/tests/wal_integration.rs` | Ordinary HTTP/gRPC source WAL crash/replay. WAL pruning waits for the initial subscriptions (`drasi-core/lib/src/sources/base.rs:589-640`). |
 
-**Finish when:** A fresh process restores exact outstanding frames and stable
-retry identities without losing accepted work, inventing progress or deleting
-unhandled messages. Exclude duplicate effects only where the destination's
-declared deduplication/transaction contract guarantees that; report permitted
-at-least-once repeats rather than promising universal exactly-once effects.
+**What remains:**
+
+1. The 28-case matrix builds the query with the linked reference
+   `ContinuousQueryTransformer::new` (`native_input_crash_recovery.rs:511-528`),
+   not the loaded `drasi-computation-transformer-query` plugin. Run the same
+   admission/retained/shared boundaries, including the lost-admission-reply case,
+   through the loaded plugin (coordinate with [CW-77](#cw-77) and
+   [CW-78](#cw-78)).
+2. Add process-kill cases for the remaining durable connectors and initial-load
+   paths, starting with the native PostgreSQL source and the ordinary sources
+   that advertise durable input. Unverified: no process-kill test was found for
+   the native PostgreSQL source.
+
+**Example gap:** A producer admits 100 events through lossless QoS into a loaded
+query plugin; the query has committed 60 when the process is SIGKILLed and the
+admission reply for event 100 is lost. No test currently proves that a new
+process emits exactly outputs 61-100 with the original identities and accepts the
+producer's retry of event 100 as a duplicate rather than new work.
+
+**Out of scope:** power-loss durability, memory-only queries, and exactly-once
+external effects.
+
+**Done when:** For each selected connector/storage profile, a fresh process after
+SIGKILL restores outstanding input and stable retry identities without losing
+accepted work, inventing progress or deleting unhandled messages. Duplicate
+external effects are excluded only where the destination's declared
+deduplication/transaction contract guarantees it; otherwise the test reports the
+permitted at-least-once repeats.
 
 <a id="cw-36"></a>
 
 #### Make passing recovery checks prove completion (CW-36)
 
-**Kind:** Qualification. **Area:** Core, test-infra, Server.
-**Priority:** High. **Effort:** Medium to large. **Origins:** CG-01/26.
+**Kind:** Qualification. **Area:** test-infra, Core.
+**Priority:** High. **Effort:** Medium to large.
 
-**Work:** Extend proof-bearing completion checks to the remaining required
-transport/deployment profiles. Keep older snapshot-only or advisory workflows
-clearly separate from tests that prove processing and delivery completed.
-Update the requirement checklist as those additional profiles are qualified.
+An end-to-end recovery test should pass only when every input was processed and
+every output delivered exactly once, not merely when a final snapshot looks
+right. test-infra has one such strict check (Building Comfort over ordinary gRPC
+with a SIGKILL), but it does not run against the current Server, and every
+other transport/deployment profile still relies on snapshot-only checks.
 
-**Verified standard-gRPC profile:** The
-[strict workflow](https://github.com/drasi-project/test-infra/blob/13c24c57f5c0f4bd4fb56ae493d0bd9359e9cd57/.github/workflows/e2e-building-comfort-completion.yml)
-builds matching components and requires a completed reference and SIGKILL
-recovery. Both queries reached input 100,000; all 99,981 room outputs and 49,860
-aggregate outputs matched with no duplicates or reordering. Final state matched
-an independent source replay: 12 room rows and 3 floor rows. The incomplete v1
-reference and the failed pre-fix recovery remain separately identified evidence.
-The executed run used macOS, Rust 1.95.0 debug builds, freshly built ordinary
-gRPC source/reaction adapters and a 100,000-entry outbox per query. It does not
-qualify native gRPC factories, every transport or every lost-reply window.
-The manual workflow recipe is present; a successful Linux CI execution is not
-claimed. The older scheduled multi-transport snapshot gate remains distinct.
-This run also predates the native query-factory cutover; it is not an acceptance
-run of the current query plugin.
+**Current state:**
 
-**Finish when:** Incomplete captures cannot pass, and each required behavior has
-an exact expected result and a matching recorded run.
+- `test-infra/.github/workflows/e2e-building-comfort-completion.yml` (manual
+  `workflow_dispatch` only) captures a completed 100,000-input reference, then
+  requires exact SIGKILL recovery using
+  `test-infra/e2e-test-framework/examples/recovery_comparison/qualify_building_comfort.py`
+  and the `recovery-compare` tool (duplicates or reordering fail).
+- A recorded macOS debug run (test-infra `13c24c5`) passed: all 99,981 room
+  outputs and 49,860 aggregate outputs matched with no duplicates or reordering,
+  and final state matched an independent replay. No Linux CI run of this
+  workflow is recorded.
+- `test-infra/.github/workflows/e2e-building-comfort-recovery.yml` (nightly) is
+  still a snapshot/golden-equality gate, not a completion proof.
+
+**What remains:**
+
+1. Make the strict workflow work with the current Server. Server now refuses
+   ordinary queries unless the native query plugin is loaded
+   (`drasi-server/src/query_plugin.rs:11-19`), but the workflow builds only
+   `drasi-source-grpc` and `drasi-reaction-grpc`
+   (`e2e-building-comfort-completion.yml:60-72`) and the script copies only those
+   two libraries (`qualify_building_comfort.py:313-321`). Build and ship
+   `drasi-computation-transformer-query` with `dynamic-plugin`, then record a
+   passing Linux run.
+2. Apply the same completion check to the other required profiles: HTTP
+   standard/adaptive, gRPC adaptive, the native HTTP/gRPC sources, and additional
+   lost-reply windows.
+3. Keep snapshot-only workflows labelled as such so they are not cited as
+   completion evidence.
+
+**Example gap:** Dispatching the completion workflow against current Server
+`main` should fail at query creation with "The native query transformer plugin is
+not loaded", so the only strict recovery proof cannot currently be reproduced.
+Unverified: not executed.
+
+**Done when:** Each required profile has a completion workflow in which an
+incomplete capture cannot pass, with an exact expected result and a recorded
+passing run against current code.
 
 <a id="cw-20"></a>
 
@@ -2336,24 +5922,47 @@ an exact expected result and a matching recorded run.
 **Kind:** Qualification. **Area:** Core and persistent providers.
 **Priority:** High. **Effort:** Large, mainly failure testing.
 
-**Work:** Exercise process failure during query reset and removal with the
-remaining supported storage providers and their optional operations. Exercise
-failure before/after reset markers, partial state deletion, cancelled submitted
-I/O, reopen and repeated deprovisioning. Use real reopen for every provider
-advertising persistence; a memory provider is not crash-durable evidence.
+Resetting or removing a query deletes its saved rows, progress and output in
+several steps. If the process dies partway through, the next start must either
+finish the reset or refuse to start; it must never reopen half-deleted state as
+healthy. This is proven for RocksDB only.
 
-**Completed query slice:** Native atomic and independent-writer non-atomic
-profiles have actual publication/reset process-exit coverage. Identified
-missing/corrupt rows and output, Strict refusal, AutoReset, foreign ownership,
-nonzero reset baselines and handled consumer progress have loaded-query cases.
-The Host grants baseline initialization once, only inside an authorized
-bootstrap reset. RocksDB and Garnet staged checkpoint clearing is implemented;
-the executed Garnet clear/reopen case is not a full native-query crash matrix.
-Remaining native query/provider combinations are recorded in [CW-77](#cw-77);
-this item retains broader provider reset/removal qualification.
+**Currently proven:**
 
-**Finish when:** Partly cleared state cannot reopen as healthy, and explicit
-recovery restores correct rows, progress and output identity.
+- RocksDB, linked query: child killed after reset intent, before/after the wipe,
+  and the same three points for deprovision
+  (`drasi-core/lib/tests/computation_query_recovery/processes.rs:422-431`,
+  current-thread runtime only).
+- Loaded query plugin, non-atomic profile: process exits preserve publication and
+  reset intent (`drasi-core/components/host-sdk/tests/native_query_plugin/non_atomic.rs:392-401`).
+- Loaded query plugin, corrupt rows/output with AutoReset
+  (`native_query_plugin/corrupt_recovery.rs:327-338`).
+- RocksDB and Garnet checkpoint clear followed by in-process reopen
+  (`drasi-core/components/indexes/rocksdb/tests/computation_result_transactions.rs:1688`,
+  `drasi-core/components/indexes/garnet/tests/computation_resources.rs:301`); no
+  process kill.
+
+**What remains:**
+
+1. Process-kill reset/deprovision cases for the other persistent providers:
+   Garnet (linked path; the loaded plugin refuses Garnet, see
+   `drasi-core/lib-integration-tests/tests/computation_garnet_recovery.rs:169`),
+   the redb state store and the redb WAL.
+2. The same kill points for the loaded query plugin's atomic profile, and on the
+   multi-thread runtime.
+3. Kill while a submitted storage delete is still in flight (cancelled caller),
+   and repeated deprovision after a partial one.
+
+A memory provider is not crash-durability evidence.
+
+**Example gap:** A Garnet-backed query is reset; the process is killed after the
+reset marker is written but before all index keys are deleted. No test shows that
+the next start finishes the wipe or refuses, rather than serving the surviving
+rows.
+
+**Done when:** For each provider that advertises persistence, partly cleared
+state cannot reopen as healthy, and explicit recovery restores correct rows,
+progress and output identity.
 
 <a id="cw-05"></a>
 
@@ -2362,35 +5971,76 @@ recovery restores correct rows, progress and output identity.
 **Kind:** Qualification. **Area:** Core, shared resources and hosted instances.
 **Priority:** High. **Effort:** Medium to large.
 
-**Work:** Exercise graceful stop and explicit forced interruption with remaining
-providers and component-private shared resources. Verify who owns unfinished
-work when a stop times out or its caller stops waiting. Include multi-stage
-required fan-out, a disconnected consumer, shared transaction domains and
-bidirectional instance links whose shutdown must preserve required return paths.
+Stopping a component must not drop work it already accepted, and if a stop times
+out the caller must be told who still owns the unfinished work. Single-component
+graceful stop and a few shared paths are tested; several shared-resource
+topologies are not.
 
-**Finish when:** No supported stop path abandons accepted work, hides incomplete
-cleanup or interrupts an unreported shared owner.
+**Existing coverage:** graceful drain and deadline refusal
+(`drasi-core/lib/tests/computation_graceful_stop.rs:235-252`), source admission
+feedback shutdown (`drasi-core/lib/tests/source_admission_feedback_shutdown.rs:543-559`),
+native network source stop with in-flight commits
+(`drasi-core/components/host-sdk/tests/native_network/durable.rs:310-348`), and
+bidirectional native data draining before process exit
+(`drasi-core/components/instance-host/tests/processes.rs:946`).
+
+**What remains:** graceful and forced stop tests for:
+
+- multi-stage required fan-out (one producer, several required consumers, one
+  of them slow);
+- a disconnected consumer that still has unacknowledged required work;
+- components sharing one transaction domain or a component-private shared
+  resource;
+- a stop whose caller is cancelled or times out, verifying the resource stays
+  owned and reported until the real stop finishes;
+- the remaining storage providers (Garnet, redb).
+
+**Example gap:** Source → transformer → two required sinks; sink B is slow. A
+graceful stop with a 1 s deadline times out. No test checks that the undelivered
+items for sink B stay owned and visible in status rather than being dropped when
+the stop caller gives up.
+
+**Done when:** No supported stop path abandons accepted work, hides incomplete
+cleanup or interrupts a shared owner that was not reported.
 
 <a id="cw-07"></a>
 
 #### Verify overlapping application changes (CW-07)
 
-**Kind:** Qualification. **Area:** Core, Server management.
+**Kind:** Qualification. **Area:** Core management.
 **Priority:** High. **Effort:** Large, mainly testing.
 
-**Work:** Combine saved configuration changes with conflicting start, stop,
-replacement and removal requests. Include failed construction and cancelled
-callers while unrelated operations continue. Preserve stale-preview rejection,
-isolated start groups and control/peer/resource completion servicing already
-fixed by the review repairs; extend adversarial schedules rather than replacing
-those contracts with all-or-nothing deployment rollback.
-Include [CW-71](#cw-71)'s retention versus concurrent snapshot changes, expired
-request replay, namespace isolation and key rotation/unavailability. Coordinate
-persistent restart schedules with [CW-39](#cw-39), not a duplicate housekeeping
-test matrix.
+Saved configuration changes and start/stop/replace/remove requests can arrive at
+the same time. The result must keep each accepted change owned, keep conflicting
+changes ordered, and report exactly which changes applied and which failed.
+Individual conflicts are tested; adversarial interleavings are not.
 
-**Finish when:** Accepted changes remain owned, conflicting changes stay ordered,
-and the reported result accurately distinguishes applied changes from failures.
+**Existing coverage:** concurrent revision writers
+(`drasi-core/lib-integration-tests/tests/computation_management.rs:1203`),
+concurrent add/rename (`drasi-core/lib/tests/computation_component_identity.rs:386`),
+conflicting batch bindings (`drasi-core/lib/tests/configuration_batch_identity.rs:810`),
+and stale-owner shutdown (`drasi-core/lib-integration-tests/tests/computation_managed_resources.rs:1075`).
+
+**What remains:** schedule-controlled tests that interleave:
+
+- a saved configuration change with start, stop, replacement and removal of
+  the same and of unrelated components;
+- failed construction and cancelled callers while unrelated operations continue;
+- [CW-71](#cw-71) retention against a concurrent snapshot change, replay of an
+  expired request (`RequestExpired`, `drasi-core/lib/src/management/store.rs:136-138`),
+  namespace isolation, and key rotation or an unavailable key.
+
+Keep the existing contracts (stale-preview rejection, isolated start groups);
+do not replace them with all-or-nothing deployment rollback. Persistent restart
+schedules belong to [CW-39](#cw-39).
+
+**Example gap:** Client A saves a configuration that replaces query Q while
+client B issues `stop Q` and client C removes Q's source. No test pins down the
+final topology and the per-request results for every ordering of these three.
+
+**Done when:** Accepted changes remain owned, conflicting changes stay ordered,
+and reported results distinguish applied changes from failures for each tested
+interleaving.
 
 <a id="cw-08"></a>
 
@@ -2399,65 +6049,104 @@ and the reported result accurately distinguishes applied changes from failures.
 **Kind:** Qualification. **Area:** Core, providers, SDK/Host.
 **Priority:** High. **Effort:** Large, mainly testing.
 
-**Work:** Extend combined cleanup checks to the remaining native component,
-storage and plugin combinations. Verify that failed or cancelled cleanup retains
-the resources and errors needed for a later retry.
-For [CW-17](#cw-17), account for tasks, threads, connections, already-submitted
-blocking storage and rejected construction results. Measure retained
-failed-cleanup owners separately from actual leaks. Rust allocation/task/FD
-checks do not qualify all foreign allocations or whole-process RSS.
+When a component is stopped or removed, its tasks, threads, connections and
+storage handles must be released, or, if cleanup fails or is cancelled, kept
+and reported so a later retry can finish. The loaded query plugin has this
+coverage; other native components and storage providers do not.
 
-**Completed query slice:** Retained recovery reads wait for actual Host cleanup
-even after plugin STOP succeeds. Cancelled cleanup blocks restart, uncertain
-query state stays unreadable, and deletion retires old readers. Stop also releases
-an abandoned read transfer when no follow lease exists. These repairs and their
-focused cases are complete; other provider/component combinations remain open.
+**Existing coverage (query plugin):**
+`drasi-core/components/host-sdk/tests/native_query_plugin/retained_recovery.rs:396-451`
+(retained reads wait for Host cleanup after plugin stop; failed queries do not
+expose uncertain state).
 
-**Finish when:** Each selected combination releases its actual resources or
-reports unfinished ownership truthfully, including after repeated cleanup attempts.
+**What remains:**
+
+1. Combined cleanup tests for the other native components (sources, sinks,
+   view/scheduling transformers) on each storage provider they support.
+2. Failed and cancelled cleanup that is retried: the resources and the original
+   error must survive until a retry succeeds.
+3. Count tasks, threads, connections, already-submitted blocking storage work and
+   rejected construction results ([CW-17](#cw-17)). Report retained
+   failed-cleanup owners separately from actual leaks. Rust task/FD checks do not
+   cover foreign allocations or whole-process RSS.
+
+**Example gap:** A native HTTP source's `stop` fails because its listener close
+times out. No test checks that the port stays owned and reported, and that a
+second `stop` releases it.
+
+**Done when:** Each selected combination releases its actual resources or
+reports unfinished ownership truthfully, including after repeated cleanup
+attempts.
 
 <a id="cw-39"></a>
 
 #### Test the remaining combinations of failures (CW-39)
 
 **Kind:** Qualification. **Area:** Core, providers, connectors and test-infra.
-**Priority:** High. **Effort:** Large. **Origins:** CG-20/22/23/24; reliability W4-W6.
+**Priority:** High. **Effort:** Large.
 
-**Work:** Cover lost history with storage failures, clock changes with restart,
-held late input across crashes, disconnected consumers with damaged history,
-and lost destination replies with failed completion writes. Add direct proof
-that a failed configuration read cannot cause saved state to be deleted.
-Include concurrent live changes during bootstrap, independently failing/slow
-multi-source snapshots, unavailable source positions, repeated timer bursts and
-reconstruction after each transaction participant boundary. Compare rows,
-progress, scheduled work and external effects with an independent oracle.
-Apply the same failure matrix to newly implemented capabilities rather than
-duplicating it under their implementation entries: [CW-68](#cw-68)'s view
-snapshot/lifecycle behavior (replay only if a future profile advertises it),
-[CW-71](#cw-71)'s persistent housekeeping and key
-recovery, [CW-27](#cw-27)'s slow monitoring destinations, and [CW-29](#cw-29) /
-[CW-74](#cw-74)'s capacity and rate/window bounds. Use controlled clocks for
-rate/burst/window checks through cancellation, slow consumers, failed replies
-and restart; preserve ordering and contiguous completion.
-The specific query/non-query scheduled-work chain formerly called F0 is tracked
-in [CW-82](#cw-82), rather than duplicated as another query-plugin completion gate.
+Most recovery tests inject one failure at a time. Real incidents combine them
+(for example a crash while a destination reply is lost and a storage write
+fails). This item adds tests for selected combinations, compared against an
+independent oracle.
 
-**Finish when:** Each selected combination has exact expected data, progress,
+**What remains:** combination tests, each checking rows, progress, scheduled work
+and external effects against an oracle:
+
+- lost retained history together with a storage failure;
+- wall-clock change together with restart;
+- held late input across a crash;
+- a disconnected consumer with damaged history;
+- a lost destination reply together with a failed completion write;
+- live changes arriving during bootstrap; multi-source snapshots where one source
+  fails or is slow; an unavailable source position;
+- repeated timer bursts; reconstruction after each transaction-participant
+  boundary.
+
+Apply the same matrix to newer capabilities instead of duplicating it under their
+own entries: view-transform snapshots and lifecycle, [CW-71](#cw-71) persistent
+housekeeping and key recovery, [CW-27](#cw-27) slow monitoring destinations, and
+[CW-29](#cw-29)/[CW-74](#cw-74) capacity and rate/window bounds (with controlled
+clocks through cancellation, slow consumers, failed replies and restart). The
+mixed query/non-query scheduling chain is [CW-82](#cw-82).
+
+A failed configuration read already fails start without wiping state for the
+linked query path (`drasi-core/lib/src/queries/checkpoint_tests.rs:3049`).
+Unverified: no equivalent test was found for the loaded query plugin; add one.
+
+**Example gap:** A reaction's destination applies a batch but the reply is lost;
+while the sink retries, the checkpoint write fails and the process is killed. No
+test asserts the exact delivered set and checkpoint after restart.
+
+**Done when:** Each selected combination has exact expected data, progress,
 effects and cleanup outcomes rather than an inference from single-failure tests.
 
 <a id="cw-03"></a>
 
 #### Check remaining extension failure boundaries (CW-03)
 
-**Kind:** Qualification/hardening. **Area:** Core, providers and plugin boundaries.
+**Kind:** Investigation/hardening. **Area:** Core, providers and plugin boundaries.
 **Priority:** High. **Effort:** Medium to large.
 
-**Work:** Audit uncovered factory, provider, data-validation and destruction
-callbacks for catchable Rust failures. Add protection only where a concrete
-unprotected path is found.
+A panic inside a factory, provider, validation or destructor callback must not
+take down unrelated components or leave a damaged object in use. Core runs
+component callbacks through panic-catching wrappers
+(`drasi-core/lib/src/computation/v1/graph/execution.rs:89-261`) and the plugin
+SDK/Host wrap FFI callbacks, but no audit has confirmed that every callback path
+is covered.
 
-**Finish when:** The selected callback failures leave useful diagnostics, prevent
-reuse of damaged objects and allow unrelated healthy work to continue.
+**What remains:** List factory `create`, provider (index, state store, WAL),
+data-validation and drop/destroy callbacks reachable from Core and Host, and
+mark which run inside a catch. For each uncovered path, write a test that panics
+there; add protection only where the test shows a real unprotected failure.
+
+**Example check:** an index provider whose `create_indexes` panics during query
+construction should produce a failed component with a diagnostic, while other
+components in the graph keep running.
+
+**Done when:** Each audited callback has a test or a documented reason it is
+safe; failures produce useful diagnostics, damaged objects are not reused, and
+unrelated healthy work continues.
 
 <a id="cw-21"></a>
 
@@ -2466,72 +6155,132 @@ reuse of damaged objects and allow unrelated healthy work to continue.
 **Kind:** Investigation. **Area:** Core merge, admission and delivery recovery.
 **Priority:** Conditional on reproduction. **Effort:** Unknown until reproduced.
 
-**Work:** Check clock changes during time-based merging, retries without an
-original timestamp, content checks on output confirmation, expired replay
-records and incorrect uncertainty reported for writes never attempted.
+These are open questions about whether retries and completion confirmations are
+classified correctly. Each needs a reproduction or an evidence-backed closure.
 
-**Finish when:** Each concern has a clear result distinguishing rejected, saved
+**Questions:**
+
+1. **Delivery confirmation content (linked query path).** The loaded query plugin
+   passes the pending envelope to `validate_delivery`, so a confirmation whose
+   operations differ from the pending output is rejected
+   (`drasi-core/components/computation-plugins/transformers/query/src/durable.rs:1084`,
+   `drasi-core/components/query-common/src/query_state.rs:409-417`). The linked
+   query path passes `None` (`drasi-core/lib/src/computation/v1/query_delivery.rs:383-389`),
+   so only identity, generation and sequence are checked. Decide whether to add
+   the content check or accept the gap until [CW-80](#cw-80) retires that path.
+2. **Retries without an original timestamp.** Unverified which component this
+   applies to; confirm whether a retried admission/replay that lacks the
+   original source timestamp can be reordered or treated as late by the
+   time-based merge.
+3. **Clock changes during time-based merging.** The merge's grace deadlines use
+   the monotonic `tokio::time::Instant` and restart from activation
+   (`drasi-core/lib/src/computation/v1/time_merge.rs:21,265,736`), so wall-clock
+   jumps should not affect them. Confirm with a test or close with that rationale.
+4. **Uncertainty for writes never attempted.** Check whether a storage commit that
+   was rejected before submission (for example cancelled while waiting for the
+   mailbox) is reported as "uncertain" rather than "rejected"
+   (`drasi-core/lib/src/computation/v1/qos_pipe/ingress.rs:739`,
+   `admission.rs:407`).
+
+Expired replay/request identities already reject explicitly in QoS admission,
+delivery, time merge and the management store, so they are not listed here.
+
+**Done when:** Each question has a clear result distinguishing rejected, saved
 and genuinely uncertain work, with a fix where a failure is reproduced.
 
 <a id="cw-35"></a>
 
 #### Resolve the remaining ownership and limit findings (CW-35)
 
-**Kind:** Investigation, not confirmed defects. **Area:** Core lifecycle and storage.
-**Priority:** Conditional on reproduction. **Effort:** Unknown until reproduced.
-**Review:** M8 and remaining ownership/limit findings.
+**Kind:** Investigation (two items confirmed by code reading). **Area:** Core
+lifecycle and storage. **Priority:** Conditional; low practical impact for item 1.
+**Effort:** Small for items 1-2; unknown for the rest.
 
-**Work:** Resolve the specific review concerns about shared-resource ownership,
-lock ordering, numeric limits and expired references. The bounded questions are:
+These are specific review questions about lifecycle state, removal policy and
+ownership at failure boundaries. Two are visible in the code; the others need a
+reproduction before any change.
 
-- Can a transient control failure leave a component blocked after its
-  prerequisite recovers, without a usable retry/reconciliation path?
-- Does `open_run` mutate `Starting` before epoch-exhaustion validation in a way
-  that prevents a safe retry? Treat this as a numeric-boundary case, not a normal
-  startup failure.
-- What should `Unbind` with `RemovalPolicy::Reject` reject, and do the public
-  contract and behavior agree for connected and already-waiting consumers?
-- Can rejected additions/resources or the reaction adapter's competing
-  deprovision paths release a claim too early or retain an unreported owner?
-- Does timeout/cancellation during `SourceTransactions` preserve the submitted
-  storage operation's owner and uncertainty through actual completion?
+**Confirmed by code reading:**
 
-Reproduce an observable failure before changing these paths. Missing prerequisites
-and retained/fenced cleanup ownership are not themselves failures.
+1. **`open_run` sets `Starting` before validating the epoch.**
+   `drasi-core/lib/src/computation/v1/graph.rs:2113-2123` replaces the state
+   with `GraphState::Starting` and then increments the `u64` `run_epoch` with
+   `checked_add`. On overflow it returns an error but leaves the graph in
+   `Starting`, and later `open_run` calls reject that state. Overflow of a `u64`
+   counter is practically unreachable; fix by validating before mutating and add
+   a unit test.
+2. **`Unbind` ignores `RemovalPolicy::Reject`.** The reference documentation says
+   Reject refuses "a change that breaks required dependencies"
+   (`drasi-core/lib/docs/computation-graph-reference.md:432`;
+   `drasi-core/lib/docs/developer-guide/README.md:5732`), and component removal
+   honours it (`drasi-core/lib/src/computation/v1/graph/reconcile.rs:465-480`).
+   `DesiredMutation::Unbind` with `Reject` removes the relationship
+   unconditionally (`reconcile.rs:696-726`), even if it is
+   `required_for_binding`. Decide what Reject means for Unbind (for example,
+   refuse when the consumer still requires the edge or has waiting work), then
+   align code, docs and tests.
 
-**Finish when:** Each named concern has a protected fix or an evidence-backed
-closure, rather than remaining an open-ended code-cleanup task.
+**Needs reproduction:**
+
+3. Can a transient control failure leave a component blocked after its
+   prerequisite recovers, with no retry or reconciliation path?
+4. Can a rejected addition/resource, or competing reaction deprovision paths,
+   release a claim too early or keep an unreported owner? Unverified: the graph
+   reaction adapter does not own deprovision
+   (`drasi-core/lib/src/computation/v1/legacy_reaction.rs:28-30`); the question
+   may now apply only to the ordinary reaction manager.
+5. Does a timeout or cancellation during a query source-transaction storage
+   operation keep the submitted operation owned, and its outcome reported as
+   uncertain, until it actually completes?
+
+Missing prerequisites and retained/fenced cleanup ownership are expected
+behaviour, not failures.
+
+**Done when:** Each item has a fix with a test or an evidence-backed closure.
 
 <a id="cw-82"></a>
 
 #### Prove a mixed query and non-query scheduled pipeline (CW-82)
 
 **Kind:** Optional cross-component qualification. **Area:** Core, native fixtures.
-**Priority:** Required before advertising CW-81's combined profile.
-**Effort:** Medium. **Origin:** Former query-design F0 proof. **Depends on:** CW-81.
+**Priority:** Required before advertising a combined query + non-query scheduling
+profile. **Effort:** Medium.
 
-**Work:** Compose the existing native SQLite source/bootstrap provider, one
-stateful non-query transformer, the loaded query and a handled capture consumer.
-Use real persistent storage and the common scheduling contract, with no new
-connector, evaluator or graph owner.
+Scheduled (timer-driven) work is qualified separately for queries and for a
+standalone non-query transformer
+(`drasi-core/components/host-sdk/tests/native_scheduling.rs`, which states it is
+not this profile). No test runs both in one persistent application, so it is
+unproven that their checkpoints, pending work and outputs recover consistently
+together.
 
-[CW-81](#cw-81)'s standalone atomic-persistent scheduling contract is qualified:
-controlled clocks, rollback, replacement/cancellation, completion and real
-process-restart cases pass. That proof does not establish this mixed application
-or qualify additional storage profiles.
+**What remains:** one test application built from existing parts, with no new
+connector, evaluator or graph owner:
 
-Bootstrap while live input continues and compare exact transformed rows and
-gap-free handover. Cancel initialization and verify retained ownership and
-awaited cleanup. Schedule, replace and cancel work with component-state changes;
-rollback must leak neither state nor timers. Advance the physical clock without
-new source input and verify both owners' due output and provenance.
+- native SQLite source with bootstrap
+  (`drasi-core/components/host-sdk/tests/fixtures/native_sqlite`);
+- the stateful non-query scheduling transformer
+  (`drasi-core/components/host-sdk/tests/fixtures/native_scheduling.rs`);
+- the loaded query plugin;
+- a handled capture sink;
+- real persistent (RocksDB) storage.
 
-**Finish when:** Both runtimes pass real subprocess exits around bootstrap
+Scenarios: bootstrap while live input continues (exact rows, gap-free handover);
+cancel initialization (ownership retained, cleanup awaited); schedule, replace and
+cancel work alongside state changes (rollback leaks neither state nor timers);
+advance the clock with no new input and check both components' due output and
+provenance.
+
+**Example:** The SQLite source bootstraps 1,000 rows; the scheduling transformer
+delays each by 5 s; the query aggregates the delayed rows. The process is killed
+after the transformer commits a scheduling request but before the query commits
+the resulting output. After restart, the due item must be emitted once and the
+aggregate must match an uninterrupted run.
+
+**Done when:** Both Tokio runtimes pass real subprocess exits around bootstrap
 completion, scheduling-request commit and due-work/output commit. Fresh processes
-recover the exact checkpoints, pending work, rows and output identities without
-duplicate committed completion or abandoned cleanup. This qualifies the new
-combined scheduling profile, not the already completed query implementation.
-Other multi-failure scenarios remain [CW-39](#cw-39).
+recover exact checkpoints, pending work, rows and output identities without
+duplicate committed completion or abandoned cleanup. Other multi-failure
+scenarios remain in [CW-39](#cw-39).
 
 ### Native boundaries, platforms and execution qualification
 
@@ -2540,71 +6289,72 @@ Other multi-failure scenarios remain [CW-39](#cw-39).
 #### Complete checks using real plugin libraries (CW-41)
 
 **Kind:** Safety audit/qualification. **Area:** ABI, SDK/Host, instance-host and contracts.
-**Priority:** High. **Effort:** Large. **Review:** M41. **Origins:** CG-05/06/25.
+**Priority:** High. **Effort:** Large.
 
-**Work:** Extend malformed-data, version-rejection, cancellation, delayed-callback
-and replacement tests using independently built libraries. Measure per-instance
-resource release through repeated use; distinguish it from libraries intentionally
-kept loaded for the process lifetime.
+Most boundary tests construct plugins from linked Rust definitions, so they do
+not prove that a separately built `cdylib` loaded through the C ABI rejects bad
+input, honours cancellation and releases its resources. The unsafe FFI code in
+the ABI, SDK, Host and instance-host has also not had a complete safety review,
+and there is no fuzzing of the binary decoders.
 
-**Connector and format obligations moved from implementation entries:**
+**What remains:**
 
-- For [CW-44](#cw-44), compare required working legacy behavior against real
-  native sources, initial-data providers and sinks, using static and freshly
-  built dynamic libraries, both Tokio flavors and actual Server consumers.
-  Include failure/cancellation/cleanup, bounded CDC paging, streamed snapshots,
-  credentials, source schema catalogs and procedure effects. Restart ownership
-  is shared with [CW-14](#cw-14); unavailable SQL Server remains [CW-78](#cw-78).
-  Move applicable old-interface test consumers to actual native construction
-  while retaining their useful assertions and explicitly identified reference
-  comparisons.
-- Authenticate/rate-limit rejection on ordinary HTTP single-event, batch and
-  producer-session routes must produce no graph changes. The plugin tests check
-  the rejection status codes (401 with `WWW-Authenticate`, 429, and gRPC
-  `UNAUTHENTICATED`/`RESOURCE_EXHAUSTED`) and TLS/mTLS listeners in-process.
-  They do not yet assert, through the loaded library, that a rejected request
-  produces no graph changes. gRPC TLS is now implemented and can be qualified.
-  Run the SDK source conformance kit (`drasi_computation_plugin_sdk::testing`)
-  through freshly built dynamic libraries as well as the linked definitions.
-  Webhook-only authentication or REST bootstrap does not establish stronger
-  ingress/snapshot guarantees.
-- For [CW-18](#cw-18), keep fixed byte/identity fixtures for envelopes, graph
-  definitions, QoS/delivery metadata and query state. Check version/header
-  dispatch before payload decoding and refusal without resetting valid state.
-- For [CW-19](#cw-19), cover excessive size/depth and error/cancellation-path
-  destruction. For [CW-76](#cw-76), cover boundary-size and malformed fragments
-  across snapshot/replay/recovery/follow without partial results, lost
-  acknowledgements, unbounded allocations or leaked provider retention.
+1. **Loaded-library contract matrix.** Using independently built dynamic
+   libraries, test malformed data, ABI/version rejection, cancellation, delayed
+   callbacks arriving after a replacement instance has started, and repeated
+   create/dispose cycles. Measure per-instance resource release and distinguish
+   it from libraries deliberately kept loaded for the process lifetime.
+2. **Conformance kit through loaded libraries.** `SourceConformance` and
+   `SinkConformance` (`drasi-core/components/computation-plugin-sdk/src/testing.rs:162,464`)
+   are only run against linked definitions (the HTTP, gRPC, SSE and log plugin
+   `tests.rs` files). Run them through freshly built dynamic libraries too.
+3. **Ingress rejection has no graph effect.** HTTP and gRPC source tests check
+   401 + `WWW-Authenticate`, 429 and gRPC `UNAUTHENTICATED`/`RESOURCE_EXHAUSTED`
+   plus TLS/mTLS listeners in-process
+   (`drasi-core/components/computation-plugins/sources/http/src/tests.rs`,
+   `.../sources/grpc/src/tests.rs`). Add loaded-library tests asserting that a
+   rejected single-event, batch or producer-session request produces no graph change.
+4. **Connector parity ([CW-44](#cw-44)).** Compare required legacy behaviour
+   against real native sources, initial-data providers and sinks, static and
+   dynamic, on both Tokio flavours and with actual Server consumers: failure,
+   cancellation and cleanup, bounded CDC paging, streamed snapshots,
+   credentials, schema catalogs and procedure effects. Move old-interface test
+   consumers to native construction, keeping their useful assertions. Restart
+   ownership is shared with [CW-14](#cw-14).
+5. **Format fixtures ([CW-18](#cw-18), [CW-19](#cw-19), [CW-76](#cw-76)).**
+   Keep fixed byte fixtures for envelopes, graph definitions, QoS/delivery
+   metadata and query state; check version/header dispatch happens before payload
+   decoding and that refusal does not reset valid state. Cover oversize/over-deep
+   input and drop on error/cancellation paths, and boundary-size or malformed
+   fragments across snapshot, replay, recovery and follow without partial results,
+   lost acknowledgements, unbounded allocation or leaked provider retention.
+6. **Unsafe-code review** requested in the
+   [PR #988 native FFI safety review](https://github.com/drasi-project/drasi-core/pull/988#pullrequestreview-5591475780):
+   inventory unsafe operations in the ABI, SDK, Host and instance-host; check
+   each pointer's lifetime, callback/release order and cross-thread
+   `Send`/`Sync` use against the opaque-handle contracts; add a failing test for
+   every uncovered contract. A `SAFETY` comment is not proof of review, and an
+   unsafe count or a missing defensive null check is not a finding without a
+   reproduction through a supported call.
+7. **Fuzzing and model checking.** No fuzz, proptest/quickcheck, loom or Miri
+   setup exists in the workspace (custom seeded/model tests do). Fuzz
+   envelope, binary, graph-change, query and wire decoding including error-path
+   drop and bounded allocation; use Miri for applicable unsafe helpers and loom
+   (or equivalent) for acknowledgement/journal/pipe interleavings. Add tooling
+   only where it covers a named missing boundary.
 
-The query round added real-library processing, paged-read, retained-recovery,
-malformed-observation and reset-baseline cases. These are scoped evidence, not
-completion of the unsafe-code audit or fuzzing below. Query-specific missing
-behavior coverage belongs to [CW-77](#cw-77).
+Query-specific behaviour coverage belongs to [CW-77](#cw-77).
 
-Complete the separately requested
-[PR #988 native FFI safety review](https://github.com/drasi-project/drasi-core/pull/988#pullrequestreview-5591475780):
-inventory unsafe operations in the ABI, SDK, Host and instance-host paths;
-check each pointer's lifetime, callback/release order and cross-thread use;
-and add failing cases for any uncovered contract. A `SAFETY` comment or a
-validated function-pointer assertion is not itself proof that the complete
-boundary was reviewed. The broader audit is deferred, not reported as passed.
+**Example:** load a source `cdylib`, start instance A, replace it with B, then
+let A's delayed callback fire. Today no test proves the Host drops A's callback
+rather than applying it to B's graph.
 
-Fuzz envelope/binary/graph-change/query/wire decoding, including error-path drop
-and bounded allocation. Use Miri for applicable unsafe helpers and loom or
-equivalent models for acknowledgement/journal/pipe interleavings. Justify
-cross-thread `Send`/`Sync` and release/callback ordering against the actual opaque
-handle contracts. Unsafe-code counts or missing defensive null checks alone
-are not findings; any reported defect needs a supported-call reproduction.
-No conventional libFuzzer/honggfuzz or proptest/quickcheck harness was found in
-the audit, but custom seeded/model tests already exist. Choose additional
-tooling for a concrete missing boundary, not because a framework name is absent.
-
-**Finish when:** The selected libraries reject invalid calls and release instance
-resources without letting old callbacks act on replacements.
-
-Include fixture disposal in the evidence: normal, repeated and failed-start
-runs must remove only their owned containers and volumes. An environment failure
-or a skipped database case is not a successful plugin run.
+**Done when:** The selected loaded libraries reject invalid calls, release
+per-instance resources, and never let an old instance's callbacks act on its
+replacement; the unsafe inventory is complete with tests for each contract; and
+the decoders have fuzz targets. Fixture runs (normal, repeated, failed-start)
+remove only the containers and volumes they own. An environment failure or a
+skipped database case does not count as a passing run.
 
 <a id="cw-67"></a>
 
@@ -2613,56 +6363,75 @@ or a skipped database case is not a successful plugin run.
 **Kind:** CI qualification. **Area:** Core native/coverage workflows.
 **Priority:** Medium. **Effort:** Small to medium.
 
-**Work:** Run the updated native FFI/build/wire matrix and both coverage jobs on
-their actual supported runners. Verify the pinned compiler and resulting
-HTTP/gRPC libraries on Linux x86_64, macOS ARM64 and Windows x86_64.
+CI now installs a pinned, checksum-verified `protoc`, but the setup has only been
+exercised locally (macOS and Linux ARM64). It has not run on GitHub-hosted
+runners, and never on Windows, so it is unknown whether the FFI and coverage
+workflows actually build with it.
 
-**Implemented:** A [shared setup action](../../.github/actions/setup-protoc/action.yml)
-uses the [pinned installer](../../ci/install_protoc.py) for protoc 36.2, matching
-the locally used compiler. Official archive SHA-256 values are fixed per
-platform; extraction, executable version and standard includes are checked
-before publishing `PROTOC`, `PROTOC_INCLUDE` and `PATH`. Target-cache keys include
-the installer pin and runner architecture. Corrupt archives, unsupported
-platforms, wrong versions and existing installation directories fail explicitly.
+**Current setup:** `drasi-core/.github/actions/setup-protoc/action.yml` first runs
+`ci/test_install_protoc.py` (corrupt archive, wrong version, unsupported platform,
+existing directory) and then `ci/install_protoc.py`, which installs protoc 36.2
+(`ci/install_protoc.py:19`) with per-platform SHA-256 pins and exports
+`PROTOC`, `PROTOC_INCLUDE` and `PATH`. It is used by `test-ffi.yml`
+(Linux x86_64, macOS arm64, Windows x86_64 matrix at `:28-41`),
+`coverage.yaml` (both jobs) and `test-integration.yml`.
 
-Installer tests and real macOS/Linux ARM64 execution pass locally. All 12
-checked-in schemas compile in their actual protocol groups, producing identical
-descriptors with the pinned macOS/Linux tools and the existing local compiler.
-This does not replace the full CI matrix or establish Windows execution.
-The remaining qualification follows
-[PR #988's CI supply-chain review](https://github.com/drasi-project/drasi-core/pull/988#pullrequestreview-5591475780).
+**What remains:** Run those workflows on their real runners and fix any failures.
+`test-ffi.yml` runs on pull requests to `main`, `feature/*` and `release/*` or on
+`workflow_dispatch`; this branch has no recorded workflow runs. Remaining CI
+supply-chain points from the
+[PR #988 review](https://github.com/drasi-project/drasi-core/pull/988#pullrequestreview-5591475780)
+should be checked against the result.
 
-**Finish when:** CI records the expected compiler version, rejects an unexpected
-artifact, and the existing cross-platform native build/wire checks pass.
+**Example:** `gh workflow run test-ffi.yml --ref <branch>` should show
+`libprotoc 36.2` in the setup step on all three runners and a green FFI build.
+
+**Done when:** CI logs record the expected compiler version on Linux, macOS and
+Windows, the installer's negative tests pass in CI, and the cross-platform
+native build/wire checks pass.
 
 <a id="cw-91"></a>
 
 #### Qualify isolated hosts and prepared-peer deployment profiles (CW-91)
 
-**Kind:** Platform/network qualification extracted from [CW-75](#cw-75).
-**Area:** instance-host, bridge, Server and CI.
+**Kind:** Platform/network qualification. **Area:** instance-host, bridge, Server and CI.
 **Priority:** Required before advertising an additional profile. **Effort:** Large.
-**Depends on:** The selected platform/containment capabilities in CW-75.
+**Depends on:** The selected platform/containment capabilities in [CW-75](#cw-75).
 
-Qualify prepared-peer links across real partitions and prolonged disconnects,
-beyond local/VM tests. Existing process-host evidence is Unix; Windows cannot
-be inferred from compilation or another platform's run.
+Running graph instances in child processes or on prepared remote peers is only
+tested on Unix and on local/VM networks. Any other platform or network profile
+must not be advertised until it is tested; Windows cannot be inferred from
+compilation or from a Unix run.
 
-For each advertised platform/provider, prove parent/child/grandchild ownership,
-parent death, child graph failure while its PID survives, version/authentication
-rejection, lost admission receipts, stale connections, namespaced persistent
-reopen and interrupted reset. Measure resources across the entire process tree.
-Report a partition as unknown remote state, not a stopped peer or permission to
-launch an unfenced duplicate.
+**Current state:** The process host is Unix-only
+(`drasi-core/components/instance-host/src/lib.rs:8-17` are `#[cfg(unix)]`).
+Process tests are in `components/instance-host/tests/processes.rs`; the cross-host
+network test requires a prepared Podman peer named by `DRASI_NETWORK_CONTAINER`
+(`components/instance-host/tests/network/mod.rs:397`, setup in
+`components/instance-host/README.md:376-385`).
 
-Keep the existing kernel-containment, in-process unwind and native-abort
-boundaries explicit. This qualification adds no remote component-method
-executor, distributed transaction promise or automatic remote provisioning.
-[CW-67](#cw-67) owns pinned compiler/build-wire verification;
-[CW-41](#cw-41) owns the independent-library contract matrix.
+**What remains:** For each platform/provider to be advertised, prove:
 
-**Finish when:** Current-source evidence supports each advertised hosting and
-network profile, with unavailable environments recorded under [CW-78](#cw-78)
+- parent/child/grandchild ownership and cleanup on parent death;
+- child graph failure while its PID survives;
+- version and authentication rejection, lost admission receipts and stale connections;
+- namespaced persistent reopen and interrupted reset;
+- resource use measured across the whole process tree;
+- prepared-peer links across real network partitions and prolonged disconnects,
+  with a partition reported as unknown remote state — not as a stopped peer and
+  not as permission to launch an unfenced duplicate.
+
+Keep kernel-containment, in-process unwind and native-abort boundaries explicit.
+This adds no remote method executor, distributed transactions or automatic remote
+provisioning. Compiler/build-wire checks are [CW-67](#cw-67); the loaded-library
+contract matrix is [CW-41](#cw-41).
+
+**Example:** kill the parent Server while a child instance host is mid-commit
+over a partitioned link; the peer must report unknown state and the restarted
+parent must not start a second writer for the same namespace.
+
+**Done when:** Current-source evidence supports each advertised hosting and
+network profile; unavailable environments are listed under [CW-78](#cw-78)
 rather than counted as passes.
 
 <a id="cw-78"></a>
@@ -2671,121 +6440,39 @@ rather than counted as passes.
 
 **Kind:** Execution/CI qualification gap. **Area:** Core, Server, CI.
 **Priority:** High before declaring the current code fully tested.
-**Effort:** Medium plus any reproduced failures. **Origin:** CW-43 follow-up.
+**Effort:** Medium plus any reproduced failures.
 
-**Status:** Locally available execution baseline completed. Environment-bound
-checks below remain open; this is not an unconditional all-platform pass.
+The existing Core and Server suites have been run locally, but several required
+cases need environments that were not available, so the code cannot yet be
+called fully tested on all supported platforms. These cases are skipped or
+gated today and must not be counted as passes.
 
-The historical workspace command, the now-removed runtime runner,
-complete Host SDK targets and Server suites were executed against frozen
-production source and freshly rebuilt matching libraries. Exact commands,
-per-target outcomes and source/lock hashes are retained in the
-`correctness-baseline-final` session evidence set. Its inputs identify Core
-`09c43c2d` and Server `ef3d7b45` plus the uncommitted correctness repairs.
-Those source changes were subsequently committed as Core `a764d26d` and Server
-`2d0f5e7`; the original frozen-source evidence remains identified separately.
+**What remains:** Run the following in their required environments, fix any
+failures, and record results against the current revision:
 
-| Executed scope | Result |
-|---|---|
-| Workspace outside separately covered library, Host SDK and integration packages | 4,982 passed; 233 existing ignored entries |
-| Runtime runner: all 36 test batches | 9,098 passing executions; 50 explicitly permitted ignored entries |
-| Complete Host SDK with registry/fetcher/watcher/test-support | 812 passing cases after the isolated network-fixture follow-up; eight parent workers and ten unavailable environment cases excluded from direct execution |
-| Library and Host SDK documentation tests | 135 passed |
-| Server unit, binary and integration targets, including available ignored/E2E cases | 1,013 passed; two crash workers and two unavailable SQL Server cases excluded from direct execution |
-| Server documentation and tooling | Four doctests passed, one ignored documentation example; 70 Python tests passed |
-| Standalone Core query examples | All 19 compiled offline against current source |
+| Gated cases | Location | Requirement |
+|---|---|---|
+| Real SQL Server source/sink (static and dynamic, both runtimes) | `drasi-core/components/host-sdk/tests/native_mssql_components.rs:335-351` (ignored); `drasi-server/tests/native_mssql_test.rs` (needs `DRASI_MSSQL_*` settings) | User-approved isolated SQL Server environment |
+| SQL Server connector integration tests | `drasi-core/components/sources/mssql/tests/integration_test.rs` (e.g. `:1989`) | `#[ignore]` and also compiled out on `aarch64` by `#[cfg(not(target_arch = "aarch64"))]`, so on ARM they do not even appear in ignore totals; needs an x86_64 run with SQL Server |
+| FFI layout-mismatch tests | `drasi-core/components/host-sdk/tests/ffi_layout_mismatch_test.rs:78,184` | Nightly `-Zlayout-seed` + `MALLOC_CHECK_` via `make test-ffi-layout-mismatch` (`Makefile:116`); not in any workflow |
+| Cross-OS instance-host network case | `drasi-core/components/instance-host/tests/network/mod.rs:397` | `DRASI_NETWORK_CONTAINER` Podman peer |
+| Live credential/OS integrations | e.g. keyring missing-key case `drasi-core/components/secret_stores/keyring/src/lib.rs:135-182` | Real OS keychain / cloud credentials |
 
-These scopes overlap: repeated feature/runtime executions are not unique tests
-and must not be summed into a unique-test total. Parent-driven workers remain
-required through their drivers. The 36 batches have 5,496 distinct
-`(package, binary, test-name)` addresses, still merging feature variants and not
-counting inner scenarios. Documentation totals include compile-only examples.
-The 19 standalone examples use generated, gitignored lockfiles; their normal
-offline refresh changed no package versions and is not behavioral acceptance.
-The Host run initially reported one SSE
-fixture failure caused by reusing a client keep-alive pool after listener
-restart. The test now creates a new client for the new listener, retaining its
-route-limit and cleanup assertions; the exact case and its complete 34-case
-network target pass. Original failed logs remain preserved. No production code
-changed after the frozen run.
-Specifically, `host-sdk.log` / `host-sdk.exit-code` retain 811 passes, one
-failure and 18 filtered entries. `sse-restart-focused.log`,
-`sse-restart-fixed.log` and `network-followup.log` record reproduction, the exact
-repair and target rerun. This is not a fresh complete Host rerun.
+Native Garnet currently refuses restart; that refusal test is not positive
+restart qualification. The full suites should also be re-run on Linux x86_64
+and Windows, not only on the local macOS/ARM machine.
 
-The same evidence set retains `workspace.log` / `workspace.exit-code`,
-`runtime/*.list.log`, `runtime/*.discovered.tsv`, `runtime/*.executed.tsv`,
-`runtime/*.log` and `runtime/matrix.exit-code`, plus
-`library-host-docs.log`, `server-rust.log` / `server-rust.exit-code`,
-`server-docs.log` / `server-docs.exit-code`, and
-`server-tooling.log` / `server-tooling.exit-code`. Standalone compile evidence
-is in `correctness-query-examples/*-normal.log`; none of those build logs
-establishes a behavioral pass.
+**Example:** on an Apple Silicon machine,
+`cargo test -p drasi-source-mssql --test integration_test` reports success while
+running none of the SQL Server integration cases, even with `--ignored`.
 
-**Historical implementation evidence retained from [CW-43](#cw-43):** Runs
-preceding Core
-[`09c43c2d`](https://github.com/drasi-project/drasi-core/commit/09c43c2d8c5f5236589700006b0fedc281fc388f)
-and Server
-[`ef3d7b45`](https://github.com/drasi-project/drasi-server/commit/ef3d7b45d1dc31d66414549887c705964de261a8)
-had 174 loaded-query cases, 1,235 no-default library unit cases, 400 Server
-units (including both-runtime query-progress OTLP cases), four shared-query units
-and 40 linked-reference fault/recovery/source-transaction cases. Five library
-ignores and parent-driven native/recovery workers were retained. These earlier
-runs are not substitutes for the current-code matrix above.
-
-The repairs also corrected missing explicit factory registration, transparent
-storage-capability forwarding, native checkpoint/binary-codec inspection, an
-unpolled QoS publisher and a phantom MySQL output binding. The runner rejects
-missing native coverage and does not count captured child failure diagnostics
-as independent test executions. Changed Core/Host/Server code passes its lint
-checks; changed Rust files pass formatting checks.
-
-**Remaining environment gates:** Eight Host and two Server real SQL Server
-cases require the user-approved supported environment; two FFI layout-seed
-cases require their actual nightly/Linux allocator setup; the cross-OS
-instance-host case requires `DRASI_NETWORK_CONTAINER`. None is counted as a
-pass. Other live credential/OS integrations can be explicitly ignored, and some
-connector cases are compiled out on ARM rather than appearing in ignore totals
-(for example `drasi-core/components/sources/mssql/tests/integration_test.rs:1968-1973`).
-Native Garnet refusal is not positive restart qualification. Pre-existing format drift in unchanged files remains separate
-[lint/release work](#cw-61). The broader requirement ledger remains
-`replacement_qualified=false` (32 of 60 requirements satisfied); successful
-execution does not close its other partial/unqualified requirements or prove
-that every test is useful.
-
-**Finish when:** Existing required suites pass with traceable current-revision
-results. Until then, failures and unavailable environments remain named blockers,
-not exemptions from a full-pass claim. Preserve parent-driven subprocess fixtures and real backend
-cleanup. Selection policy is [CW-85](#cw-85) and evidence semantics [CW-88](#cw-88).
-Add new native assertions under [CW-77](#cw-77), Server failure scenarios under
-[CW-46](#cw-46), and live example acceptance under [CW-90](#cw-90); do not turn
-this run into a replacement test framework.
-
-<a id="cw-99"></a>
-
-#### Investigate MySQL multi-thread timeouts (CW-99)
-
-**Kind:** Investigation. **Area:** Core, MySQL and Postgres sources.
-**Priority:** Medium. **Effort:** Small to medium.
-
-**Current boundary:**
-
-- **MySQL:** three `shared::` graph tests in
-  `cargo test -p drasi-source-mysql --lib --locked -- --ignored native:: --test-threads=1`
-  fail with "deadline has elapsed" in their `multi_thread` variants. One still
-  fails when run alone. Their `current_thread` variants pass. No baseline run
-  from before the ABI 4 lifecycle change exists, so it is unknown whether this
-  is a regression.
-- **Postgres (resolved 2026-11-15):** the two `tls::` tests asserted the TLS
-  error's type on the outermost error only; the certificate error was further
-  down the chain. They now search the chain. The abrupt-exit test ran its
-  helper subprocess without `--ignored`, so the helper was skipped; it now
-  passes `--ignored`. The full suite (60 tests) passes on macOS.
-
-**Work:**
-
-- **MySQL:** compare against a run on the prior commit, then fix the
-  multi-thread deadline.
+**Done when:** All existing required suites pass with traceable current-revision
+results; anything still unavailable is named as a blocker, not an exemption.
+Preserve parent-driven subprocess fixtures and real backend cleanup. Test
+selection policy is [CW-85](#cw-85). New
+native assertions belong to [CW-77](#cw-77), Server failure scenarios to
+[SW-21](../../../drasi-server/docs/remaining-work.md#sw-21), and live example
+acceptance to [SW-23](../../../drasi-server/docs/remaining-work.md#sw-23).
 
 ### Application and native-query performance qualification
 
@@ -2794,41 +6481,43 @@ this run into a replacement test framework.
 #### Measure larger and longer-running applications (CW-40)
 
 **Kind:** Performance qualification. **Area:** Core, Server, test-infra.
-**Priority:** High for release claims. **Effort:** Large. **Review:** M39.
-**Origins:** CG-13/27; execution-plan performance qualification.
+**Priority:** High for release claims. **Effort:** Large.
 
-**Work:** Measure growing application sizes, busy and slow branches, large
-messages, shared storage, outages and prolonged operation. Set acceptable limits
-for response time, processing cost, memory and disk use before declaring success.
+There is no reproducible performance comparison between this branch and `main`,
+and no agreed limits for latency, CPU, memory or disk at realistic application
+sizes. Without them, no release can make performance or scalability claims.
 
-Produce a reproducible **comparison against main**, pinning both revisions,
-toolchain, features, input/result oracle, providers and storage guarantees.
-Measure throughput, end-to-end and control tail latency, CPU, allocations,
-memory/disk growth and cancellation responsiveness. Cover one/many queries,
-small/large payloads, fast/slow fan-out, disabled/enabled recovery and both runtime
-flavors. Existing branch-only measurements and old percentages are not this
-comparison. Preserve the [CPU-scaling reference](computation-graph-maintainers-guide.md#measure-the-path-actually-changed)
-as a separate, bounded acceptance workload rather than a universal speedup claim.
-The narrower native-query versus linked-reference comparison is
-[CW-79](#cw-79). It feeds this larger application benchmark effort without
-repeating the same measurement work or implying a universal speedup.
+**What remains:**
 
-**Retained scoped evidence from [CW-31](#cw-31):** Synthetic 128-publication
-runs at 4,096 nodes fell from about 256 ms to 0.33 ms. Native allocation
-samples show substantially less retained publication memory, with live
-controller/notification measurements on both runtimes. This is reporting
-overhead, not equivalent query-throughput improvement.
+1. Agree acceptable limits (response time, processing cost, memory, disk) per
+   selected deployment profile before measuring.
+2. Build a reproducible comparison against `main`, pinning both revisions,
+   toolchain, features, input and expected-result oracle, providers and storage
+   guarantees. Check output equivalence before comparing throughput.
+3. Measure throughput, end-to-end and control tail latency, CPU, allocations,
+   memory/disk growth and cancellation responsiveness, covering: one vs many
+   queries, small vs large payloads, fast vs slow fan-out, recovery disabled vs
+   enabled, both Tokio runtime flavours, shared storage, outages and prolonged
+   operation.
 
-The legacy `query-perf/run_perf_tests` launcher is a conditional consolidation
-candidate, not a current correctness gate; [CW-84](#cw-84) records its defects.
-Preserve its four scenarios and memory/RocksDB/Redis distinctions before any
-replacement. Existing release workloads and resource soaks are valuable:
-output equivalence precedes throughput comparison, and live Rust allocations,
-tasks and descriptors do not measure every foreign allocation/RSS. Test-runner
-build/fixture cost is [CW-87](#cw-87), not application performance.
+**Existing tools to reuse:** `drasi-core/lib/tests/measure-core-workloads.py`
+(release workloads) and `drasi-core/lib/examples/core_resource_soak.rs` (resource
+soak; measures live Rust allocations, tasks and descriptors, not foreign
+allocations or RSS). The CPU-scaling reference in the
+[maintainers guide](computation-graph-maintainers-guide.md#measure-the-path-actually-changed)
+is a separate bounded acceptance workload, not a general speedup claim. The
+legacy `drasi-core/query-perf/run_perf_tests` launcher (four scenarios ×
+memory/RocksDB/Redis) is not a correctness gate; its defects are in
+[SW-22](../../../drasi-server/docs/remaining-work.md#sw-22) — keep its scenarios
+and backend distinctions if it is replaced. Test-runner build cost is
+[CW-87](#cw-87); native-query vs linked-query overhead is [CW-79](#cw-79).
 
-**Finish when:** The selected deployment profiles have repeatable measurements,
-exact result checks and explicit operating limits.
+**Example:** 50 continuous queries over one source at 5,000 changes/s for 24
+hours on RocksDB with recovery enabled, run on both this branch and `main`,
+reporting p99 end-to-end latency, RSS and disk growth against agreed limits.
+
+**Done when:** Each selected deployment profile has repeatable measurements,
+exact result checks and documented operating limits.
 
 <a id="cw-79"></a>
 
@@ -2836,97 +6525,57 @@ exact result checks and explicit operating limits.
 
 **Kind:** Performance qualification and measured fixes. **Area:** Core, Host SDK.
 **Priority:** High before claiming performance parity. **Effort:** Medium.
-**Origin:** CW-43 follow-up.
 
-**Work:** Compare graph-driven projection, joins/aggregates, scheduled output,
-large reads and slow-consumer/backpressure workloads with equivalent inputs,
-providers, persistence guarantees and expected results. Pin source revisions,
-toolchain and features. Use the retained pre-plugin revision where needed and
-keep an explicit linked reference available for matched comparisons; a different
-recovery or storage profile is not a fair baseline.
+Running queries as native plugins adds ABI, codec and service-boundary costs
+that have not been measured against an equivalent in-process (linked) query.
+Until they are, performance parity with the linked implementation cannot be claimed.
 
-Measure throughput, end-to-end/control tail latency, CPU, allocations, memory,
-evaluator setup count and codec/service-boundary cost on both runtimes. Separate
-static native-ABI overhead from dynamic loading. Establish workload-specific
-acceptable bounds before signoff and fix material regressions using Core/shared
-helpers, not another evaluator, cached row mirror or weakened recovery.
+**What remains:**
 
-**Finish when:** Reproducible matched runs meet the agreed bounds with exact
-results and bounded ownership. Unacceptable overhead remains named, reproduced
-work; a measurement report alone is not performance parity. Earlier
-root-only/diagnostic measurements do not close this item. Larger deployment
-and long-duration comparisons against main remain [CW-40](#cw-40).
+1. Run matched workloads — graph-driven projection, joins/aggregates, scheduled
+   output, large reads and slow-consumer/backpressure — with identical inputs,
+   providers, persistence guarantees and expected results. Pin revisions,
+   toolchain and features; use the pre-plugin revision where a linked baseline is
+   needed. A different recovery or storage profile is not a fair baseline.
+2. Measure throughput, end-to-end/control tail latency, CPU, allocations, memory,
+   evaluator setup count and codec/service-boundary cost on both runtimes.
+   Separate static native-ABI overhead from dynamic-loading overhead.
+3. Agree workload-specific bounds, then fix material regressions in Core/shared
+   helpers — not by adding another evaluator, a cached row mirror or weaker recovery.
+
+Existing starting points: `drasi-core/components/host-sdk/examples/native_fast_path.rs`
+(recovery-disabled native arithmetic through the cdylib ABI) and
+`drasi-core/lib/examples/fast_path.rs`. Unverified: whether a linked query can
+still be constructed on the current revision for a same-revision comparison,
+or whether the pre-plugin revision must be used.
+
+**Example:** a two-hop join with `count()` aggregation over 1M changes, run as a
+loaded native query and as the linked query with the same RocksDB recovery
+settings, comparing p99 latency and allocations per change.
+
+**Done when:** Reproducible matched runs meet the agreed bounds with exact
+results. Overhead outside the bounds stays recorded as reproduced work; a report
+alone is not parity. Larger deployments and long-duration comparisons against
+`main` are [CW-40](#cw-40).
 
 <a id="testing-audit-evidence"></a>
 
-### Audit evidence, retained value and limitations
+### Known testing limitations
 
-The audit included tracked and non-ignored untracked source in all four existing
-working copies, including the native semantic and SSE fixture changes. Its
-companion session artifact, `test-suite-inventory.tsv`, has **3,678 records**
-covering files/helpers, Cargo packages/targets, documentation, scripts,
-workflows, scenarios, fixtures and execution evidence. Records contain
-fingerprints, count method, entrypoints, construction/runtime markers, CI
-selection, review depth and caveats; they are not 3,678 unique executable tests.
+These limits apply to the current test suites and should be kept in mind when
+citing test results:
 
-| Repository | Inspected base HEAD, plus then-uncommitted changes | Files scanned, excluding caches |
-|---|---|---:|
-| drasi-core | `09c43c2d8c5f` | 2,581 |
-| drasi-server | `ef3d7b45d1dc` | 1,008 |
-| learning-drasi-server | `ae4b8aa9865c` | 264 |
-| test-infra | `5b775d19391b` | 488 |
-
-HEAD alone did not identify that snapshot. Rust declaration counting excluded
-comments/string literals and distinguished macro templates, shared scenarios,
-rustdoc, integration targets and examples; Python used AST declarations and
-JavaScript declaration sites. Parameter tables, loops, macro expansion and
-browser projects were not guessed into unique-test totals. Ignored source-like
-files were checked outside dependency/build/cache trees; additional compiled
-VS Code JavaScript was mapped to its TypeScript source, not counted again.
-Candidate bodies/fixtures were inspected; other bodies were inventoried or
-sampled. Checked-in runner/workflow selection and existing logs were reviewed;
-no new tests, builds, containers or network operations ran for the audit.
-
-**Retained value by family:** These assessments explain what to preserve while
-executing the work above. They are not a second list of test tasks.
-
-| Family | Assessment and evidence boundary |
-|---|---|
-| Core values, Cypher/GQL, scalar/aggregate functions | Mostly useful small deterministic tests. Expected ASTs protect grouping/parsing; literal null/error/numeric results are valuable despite short bodies. Prefer modest shared setup, not opaque giant matrices. Examples: `drasi-core/query-cypher/src/tests.rs:38-158`; `core/src/evaluation/functions/numeric/tests/round_tests.rs:36-171` in Core. |
-| Shared engine/index scenarios | Reused behavioral oracles across memory, RocksDB transactions/archive and Redis-backed Garnet/cache are distinct coverage, not duplicate implementations. Preserve their permutations; repair the concrete wiring gaps in [CW-89](#cw-89). |
-| Graph lifecycle, pipes, QoS, transactions, redb/WAL | Strong fault, cancellation, ownership, replay and real-reopen coverage. The QoS model has an independent accepted-event/cursor ledger across 128 seeds and 1,024 actions per seed inside one test (`drasi-core/lib-integration-tests/tests/computation_qos.rs:756-940`). Preserve it rather than infer absent property testing from absent framework names. |
-| Crash parents/workers | Keep the external process boundaries and exact state/identity checks. Native input qualification kills after a proven boundary, reopens in a different PID and compares against a no-fault run (`drasi-core/lib-integration-tests/tests/native_input_crash_recovery.rs:1118-1229`). Differential recovery complements literal semantic oracles; ignored workers are not missing functionality. |
-| Reference versus native query execution | Construction determines the evidence. The native target checks actual loaded factories and literal ADD/UPDATE/DELETE (`components/host-sdk/tests/native_query_plugin.rs` in Core). A graph/index test named native may still use the linked query. |
-| Shared native semantic cases | Good literal per-step snapshots across static/loaded, memory/RocksDB and both runtimes. Preserve the shared assertions; [CW-77](#cw-77) owns the missing emitted-delta checks. Persistent selection alone is not restart evidence. |
-| Codecs, native/legacy SDK and FFI | Handwritten golden MessagePack bytes are stronger than roundtrips alone (`drasi-core/components/computation-contracts/src/graph_codec/tests.rs:31-74`). Independently mismatched-layout libraries protect a boundary matching-build loopbacks cannot (`components/host-sdk/tests/ffi_layout_mismatch_test.rs:15-42` in Core). Retain packaging/platform permutations. |
-| Sources, bootstrap and common protocols | Distinguish pure mapping/configuration, controlled transport, and real CDC/snapshot/handover fixtures. Constructor validation is not live handover proof (`drasi-core/components/bootstrappers/mysql/src/tests.rs:1-68`). Retain real process/volume ownership for restart/retention. |
-| Middleware | Expected-event/identity tests are useful: unwind checks cardinality and concrete derived nodes/relationships (`drasi-core/middleware/src/unwind/tests.rs:30-185`). Pure transforms and optional/native integration protect different boundaries. |
-| Reactions and destination completion | Actual SDK/loopback/service-emulator checks add value beyond config. SQS gates the HTTP reply and checks payload, incomplete stop, restart ownership and FIFO metadata (`drasi-core/components/reactions/aws-sqs/src/lifecycle_tests.rs:26-152`). Enqueue/Accepted completion is not remote exactly-once proof. |
-| Identity and secret stores | Retain configuration/capability/schema and meaningful compile contracts. Repair copied provider oracles in [CW-83](#cw-83). Live credential/OS behavior remains limited; the keyring missing-key case is explicitly environment-ignored (`drasi-core/components/secret_stores/keyring/src/lib.rs:135-182`). |
-| Server API/config/persistence/native resources | Strong real-Router isolation, refusal, preservation and replay cases. Reconstruction checks exact changes, query identity, journal UUID, no new append and sink cursor (`drasi-server/tests/native_computation_test/shared_storage.rs:498-590`). This is not automatically packaged-server/network-crash evidence. |
-| Plugin/build/CI Python tooling | Valuable negative controls reject success-shaped installer output without binaries, preserve existing artifacts and reject changed pins (`drasi-server/tests/test_plugin_setup.py:66-143`). Runtime execution is not the only useful test boundary. |
-| React package/public contracts | Strong ownership/cancellation/protocol tests with intentional fake transports, complemented by browsers and clean tarballs. Material config changes cancel old work/reject stale events (`drasi-server/dev-tools/react/test/DrasiLifecycle.test.tsx:107-185`); `packed-consumer.mjs:18-70` forbids source/link rescue and checks lock identities. Keep both levels. |
-| Trading browser/live/visual | Preserve deterministic multi-engine clock/accessibility/visual cases separately from real provisioning/CRUD/live/reconnect. Live assertions use literal rows/counts and restricted endpoint translation (`drasi-server/examples/trading/app/test/live/trading.live.spec.ts:43-157`). Real Trading is Chromium-only; fixture-driven Trading and package examples cover other engines (`app/playwright.config.ts:32-37`, `app/test/live/playwright.config.ts:12-27` under Trading; `drasi-server/dev-tools/react/examples/playwright.config.ts:27-31`). Keep fixed visual environments and no automatic retries. |
-| Control UI and VS Code | Useful malformed-stream, initial snapshot, reconnect and stale-disposal tests (`drasi-server/ui/tests/query-results-stream.test.mjs:35-103`; `dev-tools/vscode/drasi-server/src/test/suite/query-watcher.test.ts:1-104` in Server). The extension's isolated Electron boundary is distinct. CI selection, not assertion value, is the main stated gap. |
-| GPU Lab and Move-a-wall | Preserve standalone Rust projections/epochs, UI record contracts and real native-input qualification. GPU writes during handover and checks paired atomic values, SIGKILL/restart, slot ownership and fail-closed missing history (`drasi-server/examples/gpu-cluster-lab/embedded/ops/check-native-input.py:85-181`). Root Cargo does not execute this standalone workspace. Move-a-wall's identity/malformed-record checks are useful (`examples/move-a-wall/ui/src/records.test.ts:5-35` in Server). |
-| Learning tutorials/SSE CLI | Units protect ownership/configuration/no-overwrite/error propagation, not walkthrough completion. Retain the independent Building Comfort oracle and real CLI subprocess boundary described in [CW-90](#cw-90); missing CLI selection must remain visible. |
-| Test-infra framework/E2E/data tools | Comparator negatives protect missing/duplicate/conflicting/reordered events, identity, incomplete captures and snapshot multiplicity (`test-infra/e2e-test-framework/test-run-host/src/recovery_comparison.rs:376-594`). Completion checkers reject stale ownership/counters without recorded batches. Standalone GDELT/Wikidata generated-file tests are outside the E2E Cargo workspace; keep them explicitly selected. |
-| Documentation, examples, performance and soaks | Rustdoc/no-run protects compilation, not behavior. Preserve the copied-starter/book checks in [CW-85](#cw-85). Release workloads validate output/provenance; resource soaks measure live Rust allocations/tasks/FDs, not every foreign allocation or RSS (`drasi-core/lib/tests/measure-core-workloads.py:33-53,112-148`; `lib/examples/core_resource_soak.rs:22-153` in Core). |
-
-**Review limits:** This is not mutation testing, a fresh coverage/flakiness study
-or a fresh all-language execution. Most bodies were inventoried, not manually
-reviewed assertion by assertion. Existing evidence is strongest for the specified
-Rust/runtime/tooling runs; current JavaScript, tutorial, GPU, Move-a-wall,
-cloud-provider and test-infra E2E behavior was not requalified by new audit runs.
-No conventional Criterion harness was found, but custom release workloads and
-soaks exist. Missing framework names are not evidence that their testing style
-is absent.
-
-Remote reusable workflow bodies, branch-protection settings, remote run history
-and credentials were not fetched. Build/cache outputs are not independent tests;
-generated VS Code tests map to source. [CW-78](#cw-78) retains the unavailable
-SQL Server, allocator/layout, cross-OS, live cloud/OS and native Garnet limits.
-Some substantive Server/test-infra evidence remains outside the global ledger:
-`H01/H02/H04` do not mean "no implementation/no tests," and a nearby passing
-suite does not make them covered. Refusal tests and fixture-only fixes remain
-scoped evidence, not stronger production guarantees.
+- No mutation testing, coverage-gap study or flakiness study has been done;
+  passing tests are not proof of assertion quality.
+- No fuzz, property-testing or Criterion harnesses exist; custom seeded/model
+  tests and release workloads exist instead (see [CW-41](#cw-41), [CW-40](#cw-40)).
+- JavaScript, tutorial, GPU Lab, Move-a-wall, cloud-provider and test-infra E2E
+  behaviour has not been re-run against the current revision.
+- Environment-gated cases (SQL Server, FFI layout seed, cross-OS network,
+  live credential/OS, native Garnet restart) are listed in [CW-78](#cw-78).
+- Some tests named "native" still use the linked query; only targets such as
+  `drasi-core/components/host-sdk/tests/native_query_plugin.rs` load actual
+  factories. Check construction before citing a test as native-path evidence.
+- Standalone GDELT/Wikidata generated-file tests in `test-infra` and the
+  standalone GPU Lab workspace are outside their parent Cargo workspaces and run
+  only when explicitly selected.

@@ -42,6 +42,7 @@ impl Driver {
         );
         let mut local_records = Vec::new();
         let mut local_binding_owners = Vec::new();
+        let mut bound_reaction_objects = BTreeSet::new();
         let mut cleanup = BTreeSet::new();
         let mut updated_helpers = BTreeSet::new();
         let (input, native, request_digest) = match operation {
@@ -248,6 +249,12 @@ impl Driver {
                         control.check_new_component(&id, &definition.name, requested.is_none())
                     {
                         rejection.get_or_insert_with(|| error.into());
+                    }
+                    if matches!(
+                        definition.constructor,
+                        crate::computation::runtime::LocalConstructor::ReactionObject(_)
+                    ) {
+                        bound_reaction_objects.insert(id.clone());
                     }
                     let (record, batch) = self.runtime.prepare_local(id, definition)?;
                     if let Some(error) = &batch.bindings.validation_error {
@@ -495,7 +502,27 @@ impl Driver {
             Ok(())
         }
         .await;
-        let prepared = checked.and_then(|()| self.normalize_desired(desired));
+        let prepared = checked
+            .and_then(|()| self.normalize_desired(desired))
+            .and_then(|desired| {
+                // Reaction objects carry fixed query inputs and cannot wait for a
+                // named query to appear, so every input must resolve on acceptance.
+                for record in desired
+                    .ordinary
+                    .iter()
+                    .filter(|record| bound_reaction_objects.contains(&record.id))
+                {
+                    for input in record.references()? {
+                        if let Some(name) = input.as_name() {
+                            anyhow::bail!(
+                                "reaction '{}' input '{name}' does not name an existing query",
+                                record.name
+                            );
+                        }
+                    }
+                }
+                Ok(desired)
+            });
         let desired = match prepared {
             Ok(desired) => desired,
             Err(error) => {

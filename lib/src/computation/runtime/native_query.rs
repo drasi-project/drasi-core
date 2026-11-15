@@ -466,7 +466,12 @@ impl Runtime {
         );
         let original_config: QueryConfig = match original.configuration.get("query_config") {
             Some(ConfigurationValue::Literal(value)) => serde_json::from_value(value.clone())?,
-            _ => anyhow::bail!("query '{id}' has explicit graph inputs; update its factory configuration and connections through the computation API"),
+            _ => {
+                return Err(crate::DrasiError::invalid_state(format!(
+                    "query '{id}' has explicit graph inputs; update its factory configuration and connections through the computation desired state"
+                ))
+                .into())
+            }
         };
         let waiting_declaration = original_config.inputs.iter().all(|input| {
             input.component.as_id().is_some_and(|source| {

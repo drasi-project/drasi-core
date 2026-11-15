@@ -212,14 +212,33 @@ impl DrasiLib {
                 "an update cannot change the component UUID",
             ));
         }
-        map_component_error(
-            self.computation_runtime
-                .update_query(id, config.with_assigned_id(assigned))
-                .await,
-            "query",
-            id,
-            "update",
-        )
+        let Err(error) = self
+            .computation_runtime
+            .update_query(id, config.with_assigned_id(assigned))
+            .await
+        else {
+            return Ok(());
+        };
+        // Unsupported or invalid requests keep their category instead of
+        // being reported as an operation failure.
+        let request_error = error.chain().find_map(|cause| {
+            match cause.downcast_ref::<crate::DrasiError>()?.classification() {
+                crate::DrasiError::InvalidState { message } => {
+                    Some(crate::DrasiError::invalid_state(message.clone()))
+                }
+                crate::DrasiError::InvalidConfig { message } => {
+                    Some(crate::DrasiError::invalid_config(message.clone()))
+                }
+                crate::DrasiError::Validation { message } => {
+                    Some(crate::DrasiError::validation(message.clone()))
+                }
+                _ => None,
+            }
+        });
+        match request_error {
+            Some(request_error) => Err(request_error.with_cause(error)),
+            None => map_component_error(Err(error), "query", id, "update"),
+        }
     }
 
     /// List all queries with their current status
