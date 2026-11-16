@@ -51,6 +51,14 @@ To modify or create agentic workflows, you'll need to:
 
 ## Standard Workflows
 
+### [cargo-audit.yml](cargo-audit.yml)
+- **Purpose**: Audits the committed root `Cargo.lock` against RustSec advisories using the shared organization workflow.
+- **Triggers**: Pull requests to `main` and weekly on Monday.
+- **Remediation**: Update affected dependencies and commit the lockfile; do not regenerate it wholesale or suppress findings that have compatible patches. Major upgrades may require updating direct dependencies together, such as the AWS SDK family or both SQLite plugins.
+- **Dependency tracing**: Use `cargo tree --workspace --locked --all-features --target all --invert <crate>@<version>` so optional backends are included. The lockfile audit also covers dependencies outside the default build.
+- **Exceptions**: The workflow documents the accepted legacy Azure/XML and optional Tiberius TLS risks. Tiberius 0.12.3 still requires rustls 0.21 for the opt-in `drasi-reaction-storedproc-mssql/rustls` backend; default MSSQL builds use native-tls. Remove its exceptions when an upstream upgrade or driver migration eliminates the old stack.
+- **Shared advisory IDs**: Ignores apply to every version of a crate. In particular, the Tiberius exception for `RUSTSEC-2026-0382` must not replace keeping modern `rustls-webpki` patched (at least 0.103.16).
+
 ### [architecture.yml](architecture.yml)
 - **Purpose**: Runs `cargo bylaw check` directly against the initial FFI, embedded-runtime, AST, and parser dependency rules in `bylaw.toml`. There is no separate dependency checker.
 - **Triggers**: All pull requests, including drafts, and manual dispatch. No path filters.

@@ -11,9 +11,17 @@ jobs:
   audit:
     uses: drasi-project/.github/.github/workflows/cargo-audit.yaml@main
     with:
-      # rustls-webpki 0.101.7 vulns — aws-smithy-http-client 1.1.13 bundles both
-      # rustls 0.21 and 0.23 backends; workspace feature unification activates both.
-      # Cannot resolve without upstream AWS SDK dropping the old rustls-0-21 backend.
+      # Tiberius 0.12.3's optional rustls backend (exposed by
+      # drasi-reaction-storedproc-mssql/rustls) pins tokio-rustls 0.24, rustls
+      # 0.21.12, and rustls-webpki 0.101.7. No patched Tiberius release is
+      # available; the default MSSQL backend uses native-tls instead.
+      # RUSTSEC-2026-0098/0099/0104 cover this legacy TLS stack.
+      # RUSTSEC-2026-0346: TLS secrets exposed by client-session Debug impls.
+      # RUSTSEC-2026-0349: ServerHello can downgrade later key exchanges.
+      # RUSTSEC-2026-0382: acceptance of distrusted intermediate certificates.
+      # These exceptions also cover opt-in builds; do not enable that backend
+      # for untrusted endpoints pending an upstream TLS upgrade or driver migration.
+      # 0382 also affects modern webpki; keep its locked version >= 0.103.16.
       #
       # quick-xml < 0.41 DoS advisories:
       #   RUSTSEC-2026-0194 (quadratic duplicate-attribute-name check)
@@ -39,5 +47,7 @@ jobs:
         --ignore RUSTSEC-2026-0104
         --ignore RUSTSEC-2026-0194
         --ignore RUSTSEC-2026-0195
-        --ignore RUSTSEC-2026-0235
         --ignore RUSTSEC-2026-0275
+        --ignore RUSTSEC-2026-0346
+        --ignore RUSTSEC-2026-0349
+        --ignore RUSTSEC-2026-0382
