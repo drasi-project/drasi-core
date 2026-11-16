@@ -138,3 +138,17 @@ Integration test uses testcontainers:
 ```bash
 cargo test -p drasi-source-mysql -- --ignored --nocapture
 ```
+
+The bootstrap/CDC type-consistency test covers BIT widths and BLOB/VARBINARY
+ASCII, non-UTF-8, empty, and NULL values alongside numeric, temporal, ENUM, SET,
+and JSON values. Binary cases check parity under the existing lossy UTF-8 string
+representation, not lossless binary storage.
+
+Run just this test with a running Docker daemon:
+
+```bash
+cargo test --locked -p drasi-source-mysql --test integration_test test_type_mapping_consistency_between_bootstrap_and_cdc -- --exact --ignored --nocapture
+```
+
+The Integration Tests CI workflow runs these ignored container tests on non-draft
+pull requests.
