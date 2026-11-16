@@ -1510,31 +1510,12 @@ impl ExpressionEvaluator {
                             }
                         };
 
-                        let start_bound = match list_range.start {
-                            RangeBound::Index(index) => {
-                                if index < 0 {
-                                    index.abs() + 1
-                                } else if index > list.len() as i64 {
-                                    list.len() as i64
-                                } else {
-                                    index
-                                }
-                            }
-                            RangeBound::Unbounded => 0,
-                        };
-                        let end_bound = match list_range.end {
-                            RangeBound::Index(index) => {
-                                if index > list.len() as i64 {
-                                    list.len() as i64
-                                } else if index < 0 {
-                                    list.len() as i64 + index
-                                } else {
-                                    index
-                                }
-                            }
-                            RangeBound::Unbounded => list.len() as i64,
-                        };
-                        let result = list[start_bound as usize..end_bound as usize].to_vec();
+                        let start = resolve_slice_bound(&list_range.start, list.len(), 0);
+                        let end = resolve_slice_bound(&list_range.end, list.len(), list.len());
+                        // A reversed range gives an empty list, as in openCypher.
+                        let result = list
+                            .get(start..end)
+                            .map_or_else(Vec::new, <[VariableValue]>::to_vec);
                         return Ok(VariableValue::List(result));
                     }
                     VariableValue::Integer(index) => {
@@ -1967,6 +1948,20 @@ impl ExpressionEvaluator {
             None => ResultKey::InputHash(context.get_input_grouping_hash()),
         };
         Ok(result_key)
+    }
+}
+
+/// Resolves a list slice bound to an index in `0..=len`.
+///
+/// A negative bound counts back from the end of the list, and a bound
+/// outside the list is clamped to it.
+fn resolve_slice_bound(bound: &RangeBound, len: usize, unbounded: usize) -> usize {
+    match *bound {
+        RangeBound::Unbounded => unbounded,
+        RangeBound::Index(index) if index < 0 => {
+            usize::try_from(index.unsigned_abs()).map_or(0, |from_end| len.saturating_sub(from_end))
+        }
+        RangeBound::Index(index) => usize::try_from(index).map_or(len, |index| index.min(len)),
     }
 }
 
