@@ -40,6 +40,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: release-plz update
 
+      - name: Check release dev-dependency availability
+        run: cargo run --locked -p xtask -- check-publish-dependencies
+
       - name: Freeze prepared source and lockfile
         id: freeze
         run: python3 .github/scripts/release-candidate.py freeze --output "$RUNNER_TEMP/candidate"

@@ -276,6 +276,10 @@ the gRPC tests independently check the wire requests and authentication.
 Rendered-field tests reject invalid IDs/names before any operation in an emission
 is sent.
 
+Run these tests from the workspace. The redb state store is a path-only
+dev-dependency so its next release does not need to be on crates.io before this
+reaction can be published.
+
 The [plugin coverage job](../../../.github/workflows/coverage.yaml) includes
 `drasi-reaction-durable-task`. Its exclusion from the separate core coverage job
 avoids counting it twice; coverage jobs skip draft PRs. The .NET/Docker suite below

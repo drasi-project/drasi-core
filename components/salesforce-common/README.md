@@ -87,11 +87,18 @@ The crate includes:
 - local HTTP REST protocol harness test
 - typed `TopicUnavailable` transport regression
 - metadata/catalog + graph delta regressions
-- continuous-query executable behavior gate for relation-before-target,
-  target delete/reinsert, reparent/null, owner deletion, and sparse property removal
 
 Run:
 
 ```bash
 cargo test -p drasi-salesforce-common
+```
+
+The continuous-query behavior gate for relation-before-target, target
+delete/reinsert, reparent/null, owner deletion, and sparse property removal lives
+in the non-published `lib-integration-tests` crate so application test dependencies
+do not constrain this crate's publish order:
+
+```bash
+cargo test -p lib-integration-tests --test salesforce_graph_query_contract
 ```

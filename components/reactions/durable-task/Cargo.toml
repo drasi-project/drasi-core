@@ -47,5 +47,5 @@ tonic-prost-build = "0.14"
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "net", "test-util"] }
 tokio-stream = { version = "0.1", features = ["net"] }
-drasi-state-store-redb.workspace = true
+drasi-state-store-redb = { path = "../../state_stores/redb" }
 tempfile = "3"

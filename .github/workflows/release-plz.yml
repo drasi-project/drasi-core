@@ -76,6 +76,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # On release PR merge OR force_publish: Publish crates to crates.io and create git tags
+      - name: Check release dev-dependency availability
+        if: ${{ (steps.check_release.outputs.is_release == 'true' || inputs.force_publish == true) && inputs.dry_run != true }}
+        run: cargo run --locked -p xtask -- check-publish-dependencies
+
       - name: Freeze release source and committed dependency lock
         id: freeze
         if: ${{ (steps.check_release.outputs.is_release == 'true' || inputs.force_publish == true) && inputs.dry_run != true }}
@@ -126,6 +130,7 @@ jobs:
           echo "=== Preview: Version bumps and changelog updates ==="
           echo ""
           release-plz update
+          cargo run --locked -p xtask -- check-publish-dependencies
           echo ""
           echo "=== Dry run complete ==="
           echo "The above shows what versions would be bumped and changelog entries created."
