@@ -54,7 +54,24 @@ generation only through a new request after successful startup.
 The optional `rest` feature supplies the shared HTTP routes and parameterized SQL
 generation through `SqliteRestClient`. Legacy clients and the native SQL handle
 implement that interface; REST does not select another connection or convert
-native events into legacy Source callbacks.
+native events into legacy Source callbacks. `run_rest_api` keeps the legacy
+route set (unauthenticated, unpaged). `rest_api::router` builds the same routes
+with `RestOptions`: bearer authentication, a body limit, a request deadline, a
+pause gate (503 with `Retry-After`), paging and the optional `/api/sql` route.
+
+`SqliteRuntime` lifecycle: `pause` asks the worker to park at its next
+transaction boundary and waits for its acknowledgement (writes are refused with
+the typed `SqlitePaused`, output and journal replay are held, reads continue);
+`resume` reopens. `stop(mode, deadline)` runs in two phases: REST stops
+accepting requests and the worker drains (serving accepted requests without
+ever waiting for output), then the worker refuses queued commands
+(`SqliteStopping`) and exits. Expiry keeps the workers owned for a retried
+stop; undelivered volatile output is reported in `StopOutcome`.
+`drain_open_transactions` chooses whether Drain lets an open transaction scope
+finish (native plugin) or rolls it back (host-linked source).
+`SqliteConnectionOptions` carries `initSql` and WAL mode for every connection
+the source opens, including snapshot connections. `journal::erase_owned` drops
+a source's own journal tables in one transaction, idempotently.
 
 The native features use `drasi-computation-contracts` and the caller's Tokio
 runtime. They do not create a Drasi graph or depend on `drasi-lib`, the query

@@ -136,6 +136,8 @@ async fn next(receiver: &mut mpsc::Receiver<ChangeEnvelope>) -> Result<ChangeEnv
         .context("real query output")
 }
 
+/// Secret store for the managed definitions: only the top-level `password`
+/// fields are secret references; everything else is literal.
 struct Settings {
     source: Value,
     sink: Value,
@@ -144,7 +146,7 @@ struct Settings {
 impl ConfigurationResolver for Settings {
     fn validate_reference(&self, key: &str) -> Result<()> {
         anyhow::ensure!(
-            matches!(key, "source" | "sink" | "sink-password"),
+            matches!(key, "source-password" | "sink-password"),
             "unknown MySQL settings"
         );
         Ok(())
@@ -152,11 +154,72 @@ impl ConfigurationResolver for Settings {
     async fn resolve(&self, key: &str) -> Result<Value> {
         self.validate_reference(key)?;
         Ok(match key {
-            "source" => self.source.clone(),
-            "sink-password" => self.sink["password"].clone(),
-            _ => self.sink.clone(),
+            "source-password" => self.source["password"].clone(),
+            _ => self.sink["password"].clone(),
         })
     }
+}
+
+/// The flat source configuration: the shared settings plus the factory's
+/// mode fields (`stream`, and `persistent` where supported).
+fn source_configuration(settings: &Value, mode: Value) -> Value {
+    let mut configuration = settings.clone();
+    let object = configuration
+        .as_object_mut()
+        .expect("source settings object");
+    for (name, value) in mode.as_object().expect("source mode object") {
+        object.insert(name.clone(), value.clone());
+    }
+    configuration
+}
+
+/// The managed source definition: literal fields, the password as a secret
+/// reference to `source-password`.
+fn source_specification(
+    factory: &computation::NativeFactory,
+    settings: &Value,
+    mode: Value,
+) -> Result<ComponentSpecification> {
+    let mut literal = source_configuration(settings, mode);
+    literal
+        .as_object_mut()
+        .context("source settings object")?
+        .remove("password");
+    let mut source = factory.specification(id("source"), literal)?;
+    source.configuration.insert(
+        "password".into(),
+        ConfigurationValue::Reference {
+            resource: resource("settings"),
+            key: "source-password".into(),
+            secret: true,
+        },
+    );
+    Ok(source)
+}
+
+/// The bootstrap configuration paired with the source `source` on stream
+/// `changes`: the same flat settings plus the source's component ID.
+fn bootstrap_configuration(settings: &Value) -> Value {
+    source_configuration(
+        settings,
+        json!({"source": id("source").as_str(), "stream": "changes"}),
+    )
+}
+
+fn source_limits(settings: &Value) -> Result<SourceTransactionLimits> {
+    Ok(serde_json::from_value(json!({
+        "max_changes": settings["maxTransactionChanges"],
+        "max_bytes": settings["maxTransactionBytes"],
+        "max_duration_ms": settings["maxTransactionDurationMs"],
+    }))?)
+}
+
+fn name(value: &str) -> drasi_lib::computation::v1::ComponentName {
+    drasi_lib::computation::v1::ComponentName::try_new(value).expect("fixture component name")
+}
+
+fn source_key() -> SourceProgressKey {
+    SourceProgressKey::Source(id("source"))
 }
 
 fn libraries(dynamic: bool) -> Result<Vec<Arc<NativePlugin>>> {
@@ -246,15 +309,17 @@ async fn family(dynamic: bool) -> Result<()> {
         id("source"),
         owners.iter().cloned(),
     )?);
-    let source_configuration =
-        json!({"stream":"changes","settings":database.source_settings(),"persistent":false});
+    let source_settings = source_configuration(
+        &database.source_settings(),
+        json!({"stream":"changes","persistent":false}),
+    );
     assert!(source_factory
-        .create_component(id("source"), source_configuration.clone())
+        .create_component(id("source"), source_settings.clone())
         .is_err());
     assert!(source_factory
         .create_component_with_consumer_progress(
             id("different-source"),
-            source_configuration.clone(),
+            source_settings.clone(),
             scope(),
             consumers.clone(),
         )
@@ -264,25 +329,29 @@ async fn family(dynamic: bool) -> Result<()> {
     assert!(source_factory
         .create_component_with_consumer_progress(
             id("source"),
-            source_configuration.clone(),
+            source_settings.clone(),
             wrong_graph,
             consumers.clone(),
         )
         .is_err());
     let mut unready = source_factory.create_component_with_consumer_progress(
         id("source"),
-        source_configuration,
+        source_settings,
         scope(),
         consumers.clone(),
     )?;
+    // The lifecycle requires Initialize before Start; Start then waits for
+    // the actual consumer owners.
+    unready.initialize(&crate::hooks::initialize_ctx()).await?;
+    let fenced = tokio::time::timeout(
+        Duration::from_millis(100),
+        unready.start(&crate::hooks::start_ctx()),
+    )
+    .await;
     assert!(
-        tokio::time::timeout(
-            Duration::from_millis(100),
-            unready.start(&crate::hooks::start_ctx())
-        )
-        .await
-        .is_err(),
-        "uninitialized real owners must fence startup"
+        fenced.is_err(),
+        "uninitialized real owners must fence startup: {:?}",
+        fenced.map(|result| result.map_err(|error| format!("{error:#}")))
     );
     tokio::time::timeout(
         Duration::from_secs(5),
@@ -294,20 +363,14 @@ async fn family(dynamic: bool) -> Result<()> {
         "0",
         "waiting for actual owners must not open replication"
     );
-    let bootstrap_configuration =
-        json!({"source":"source","stream":"changes","settings":database.source_settings()});
+    let bootstrap_settings = bootstrap_configuration(&database.source_settings());
     assert!(bootstrap
-        .create_provider(
-            id("left"),
-            bootstrap_configuration.clone(),
-            Some(scope()),
-            None
-        )
+        .create_provider(id("left"), bootstrap_settings.clone(), Some(scope()), None)
         .is_err());
     assert!(bootstrap
         .create_provider(
             id("right"),
-            bootstrap_configuration.clone(),
+            bootstrap_settings.clone(),
             Some(scope()),
             Some(owners[0].clone()),
         )
@@ -318,7 +381,7 @@ async fn family(dynamic: bool) -> Result<()> {
     )?);
     let substitute_provider = bootstrap.create_provider(
         id("left"),
-        bootstrap_configuration,
+        bootstrap_settings,
         Some(scope()),
         Some(substitute),
     )?;
@@ -368,18 +431,11 @@ async fn family(dynamic: bool) -> Result<()> {
             })?
             .provide_resource(resource(name), handle)?;
     }
-    let reference = |key: &str| ConfigurationValue::Reference {
-        resource: resource("settings"),
-        key: key.into(),
-        secret: true,
-    };
-    let mut source = source_factory.specification(
-        id("source"),
-        json!({"stream":"changes","settings":{},"persistent":false}),
+    let mut source = source_specification(
+        &source_factory,
+        &database.source_settings(),
+        json!({"stream":"changes","persistent":false}),
     )?;
-    source
-        .configuration
-        .insert("settings".into(), reference("source"));
     source
         .dependencies
         .insert("consumer_progress".into(), vec![resource("consumers")]);
@@ -394,32 +450,21 @@ async fn family(dynamic: bool) -> Result<()> {
         ),
     ));
     builder = builder
-        .component(
-            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1")
-                .expect("fixture component name"),
-            source,
-            source_factory,
-        )
-        .component(
-            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-2")
-                .expect("fixture component name"),
-            sink,
-            sink_factory.clone(),
-        )
+        .component(name("source"), source, source_factory)
+        .component(name("procedures"), sink, sink_factory.clone())
         .bind_stream(endpoint("source", "out"), stream("changes"));
     let mut results = Vec::new();
     let mut outputs = Vec::new();
     let gate = Arc::new(Semaphore::new(1));
-    for owner in &owners {
-        let name = owner.component_id().as_str();
+    for (label, owner) in ["left", "right"].into_iter().zip(&owners) {
         let provider = bootstrap.create_provider(
             owner.component_id().clone(),
-            json!({"source":"source","stream":"changes","settings":database.source_settings()}),
+            bootstrap_configuration(&database.source_settings()),
             Some(scope()),
             Some(owner.clone()),
         )?;
         let query = ContinuousQueryTransformer::new_configured(
-            query_definition(name),
+            query_definition(label),
             indexes.clone(),
             QueryOptions::default(),
             QueryExecutionSettings::default(),
@@ -430,48 +475,19 @@ async fn family(dynamic: bool) -> Result<()> {
         .with_recovery_scope(INSTANCE)?
         .with_bootstrap(provider);
         results.push(query.results());
-        let capture = format!("{name}-capture");
         let (sender, receiver) = mpsc::channel(32);
         outputs.push(receiver);
-        builder = builder
-            .transformer(
-                drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-1")
-                    .expect("fixture component name"),
-                Box::new(query),
-            )
-            .sink(
-                drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
-                    .expect("fixture component name"),
-                Box::new(Capture {
-                    descriptor: ComponentDescriptor::try_new(
-                        id(&capture),
-                        vec![PortDescriptor::new(
-                            PortId::try_new("in")?,
-                            PortDirection::Input,
-                            QueryChangeCodec::schema().descriptor().clone(),
-                            PipeRequirements::default(),
-                        )],
-                    )?,
-                    sender,
-                }),
-            )
-            .bind_stream(endpoint(name, "out"), stream(&format!("{name}/out")))
-            .connect(
-                EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in")),
-                if name == "right" {
-                    Box::new(GateProvider(gate.clone())) as Box<dyn PipeProvider>
-                } else {
-                    Box::new(BoundedPipeConfig { capacity: 8 })
-                },
-            )
-            .connect(
-                EdgeDefinition::new(endpoint(name, "out"), endpoint("procedures", "in")),
-                Box::new(BoundedPipeConfig { capacity: 8 }),
-            )
-            .connect(
-                EdgeDefinition::new(endpoint(name, "out"), endpoint(&capture, "in")),
-                Box::new(BoundedPipeConfig { capacity: 8 }),
-            );
+        builder = query_branch(
+            builder,
+            label,
+            query,
+            sender,
+            if label == "right" {
+                Box::new(GateProvider(gate.clone())) as Box<dyn PipeProvider>
+            } else {
+                Box::new(BoundedPipeConfig { capacity: 8 })
+            },
+        )?;
     }
     let core = DrasiLib::builder()
         .with_query_factory(
@@ -487,13 +503,14 @@ async fn family(dynamic: bool) -> Result<()> {
                 .clone(),
         )
         .with_id(INSTANCE)
+        .with_allow_external_component_ids(true)
         .with_components(builder.build()?)
         .build()
         .await?;
     let proof = async {
         tokio::time::timeout(Duration::from_secs(30),core.start()).await??;
         for query in &results { assert_eq!(rows(query)?,[json!({"id":1,"value":"initial"})]); }
-        let schema = tokio::time::timeout(Duration::from_secs(1),core.get_source_schema_by_name(&drasi_core_types::ComponentName::try_new("source").expect("fixture component name")))
+        let schema = tokio::time::timeout(Duration::from_secs(1),core.get_source_schema_by_name(&name("source")))
             .await??.context("actual native MySQL catalog schema")?;
         assert_eq!(schema.nodes.len(),1);
         assert_eq!(schema.nodes[0].label,"items");
@@ -511,13 +528,13 @@ async fn family(dynamic: bool) -> Result<()> {
             if input.changes().operations().len() == 1 { actual_input = Some(input); }
         }
         next(&mut outputs[1]).await?;
-        let key = SourceProgressKey::Source(drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d").expect("fixture UUID"));
+        let key = source_key();
         let partial = position(&owners[1], &key)?;
         assert_eq!(partial["offset"], 0);
         assert_eq!(partial["count"], 4);
         let previous = owners[0].snapshot().checkpoints[&key].sequence;
-        tokio::time::timeout(Duration::from_secs(10), core.component_by_name(&drasi_core_types::ComponentName::try_new("source").expect("fixture component name"))?.stop()).await??;
-        tokio::time::timeout(Duration::from_secs(10), core.component_by_name(&drasi_core_types::ComponentName::try_new("source").expect("fixture component name"))?.start()).await??;
+        tokio::time::timeout(Duration::from_secs(10), core.component_by_name(&name("source"))?.stop()).await??;
+        tokio::time::timeout(Duration::from_secs(10), core.component_by_name(&name("source"))?.start()).await??;
         gate.add_permits(128);
         for _ in 0..3 { next(&mut outputs[1]).await?; }
         for output in &mut outputs {
@@ -555,8 +572,15 @@ async fn family(dynamic: bool) -> Result<()> {
         core.stop().await?;
         database.sql("UPDATE items SET value='offline' WHERE id=1").await?;
         tokio::time::timeout(Duration::from_secs(30),core.start()).await??;
+        // The query indexes are RocksDB, so the owners' checkpoints are
+        // persistent: the restart resumes at the committed position and
+        // replays the offline update instead of taking a new snapshot.
+        for output in &mut outputs { next(output).await?; }
         for query in &results { assert!(rows(query)?.contains(&json!({"id":1,"value":"offline"}))); }
-        for owner in &owners { assert!(owner.snapshot().bootstrap_complete && !owner.snapshot().persistent); }
+        for owner in &owners {
+            let state = owner.snapshot();
+            assert!(state.bootstrap_complete && state.persistent && state.recovered);
+        }
         Result::<()>::Ok(())
     }.await;
     gate.close();
@@ -582,15 +606,63 @@ async fn family(dynamic: bool) -> Result<()> {
     }
 }
 
-fn query_definition(name: &str) -> ContinuousQueryDefinition {
+fn query_definition(label: &str) -> ContinuousQueryDefinition {
     ContinuousQueryDefinition {
         graph_id: ComponentBatch::GRAPH_ID.into(),
-        id: id(name),
+        id: id(label),
         query: "MATCH (n:items) RETURN n.id AS id,n.value AS value".into(),
         language: ComputationQueryLanguage::Cypher,
-        output_stream: stream(&format!("{name}/out")),
+        output_stream: output_stream(label),
         outbox_capacity: NonZeroUsize::new(32).expect("outbox"),
     }
+}
+
+/// A query's output stream, `<component ID>/out`, as the procedure sink's
+/// producer identities expect.
+fn output_stream(label: &str) -> StreamId {
+    stream(&format!("{}/out", id(label)))
+}
+
+/// Adds one query (named by its label), its capture sink and its edges from
+/// `source`, to `procedures` and to the capture.
+fn query_branch(
+    builder: ComponentBatchBuilder,
+    label: &str,
+    query: ContinuousQueryTransformer,
+    sender: mpsc::Sender<ChangeEnvelope>,
+    input: Box<dyn PipeProvider>,
+) -> Result<ComponentBatchBuilder> {
+    let capture = format!("{label}-capture");
+    Ok(builder
+        .transformer(name(label), Box::new(query))
+        .sink(
+            name(&capture),
+            Box::new(Capture {
+                descriptor: ComponentDescriptor::try_new(
+                    id(&capture),
+                    vec![PortDescriptor::new(
+                        PortId::try_new("in")?,
+                        PortDirection::Input,
+                        QueryChangeCodec::schema().descriptor().clone(),
+                        PipeRequirements::default(),
+                    )],
+                )?,
+                sender,
+            }),
+        )
+        .bind_stream(endpoint(label, "out"), output_stream(label))
+        .connect(
+            EdgeDefinition::new(endpoint("source", "out"), endpoint(label, "in")),
+            input,
+        )
+        .connect(
+            EdgeDefinition::new(endpoint(label, "out"), endpoint("procedures", "in")),
+            Box::new(BoundedPipeConfig { capacity: 8 }),
+        )
+        .connect(
+            EdgeDefinition::new(endpoint(label, "out"), endpoint(&capture, "in")),
+            Box::new(BoundedPipeConfig { capacity: 8 }),
+        ))
 }
 
 fn position(owner: &QuerySourceProgress, key: &SourceProgressKey) -> Result<Value> {
@@ -669,13 +741,12 @@ async fn tracked_graph(
         .context("native transaction result sink")?
         .clone();
     let mut settings = database.source_settings();
-    settings["output"] = json!(if rows { "changes" } else { "transactions" });
-    settings["replay"] = json!("until_processed");
+    settings["retention"] = json!("untilProcessed");
     if positional {
-        settings["start"] = json!({"mode":"start"});
-        settings["table_keys"] = json!([{"table":"items","key_columns":["@0"]}]);
+        settings["startFrom"] = json!("beginning");
+        settings["tableKeys"] = json!([{"table":"items","keyColumns":["@0"]}]);
     }
-    let limits: SourceTransactionLimits = serde_json::from_value(settings["transactions"].clone())?;
+    let limits = source_limits(&settings)?;
     let names = if shared {
         &["left", "right"][..]
     } else {
@@ -741,19 +812,11 @@ async fn tracked_graph(
             })?
             .provide_resource(resource(name), handle)?;
     }
-    let reference = |key: &str| ConfigurationValue::Reference {
-        resource: resource("settings"),
-        key: key.into(),
-        secret: true,
-    };
-    let mut configuration = json!({"stream":"changes","settings":{}});
+    let mut mode_fields = json!({"stream":"changes"});
     if rows {
-        configuration["persistent"] = json!(true);
+        mode_fields["persistent"] = json!(true);
     }
-    let mut source = source_factory.specification(id("source"), configuration)?;
-    source
-        .configuration
-        .insert("settings".into(), reference("source"));
+    let mut source = source_specification(&source_factory, &settings, mode_fields)?;
     source.dependencies.insert(
         if shared {
             "consumer_progress"
@@ -769,18 +832,8 @@ async fn tracked_graph(
         &PathBuf::from(format!("{}-delivery", path.display())),
     )?;
     builder = builder
-        .component(
-            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-3")
-                .expect("fixture component name"),
-            source,
-            source_factory,
-        )
-        .component(
-            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-4")
-                .expect("fixture component name"),
-            sink,
-            sink_factory,
-        )
+        .component(name("source"), source, source_factory)
+        .component(name("procedures"), sink, sink_factory)
         .bind_stream(endpoint("source", "out"), stream("changes"));
     let indexes: Arc<dyn ComputationIndexProvider> = Arc::new(RocksDbComputationProvider::new(
         path,
@@ -792,9 +845,8 @@ async fn tracked_graph(
     ));
     let mut results = Vec::new();
     let mut outputs = Vec::new();
-    for owner in &owners {
-        let name = owner.component_id().as_str();
-        let mut definition = query_definition(name);
+    for (label, owner) in names.iter().copied().zip(&owners) {
+        let mut definition = query_definition(label);
         if positional {
             definition.query = "MATCH (n:items) RETURN n.`@0` AS id,n.`@1` AS value".into();
         }
@@ -817,54 +869,25 @@ async fn tracked_graph(
         if !positional {
             query = query.with_bootstrap(bootstrap.create_provider(
                 owner.component_id().clone(),
-                json!({"source":"source","stream":"changes","settings":settings}),
+                bootstrap_configuration(&settings),
                 Some(scope()),
                 Some(owner.clone()),
             )?);
         }
         results.push(query.results());
-        let capture = format!("{name}-capture");
         let (sender, receiver) = mpsc::channel(32);
         outputs.push(receiver);
-        builder = builder
-            .transformer(
-                drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-2")
-                    .expect("fixture component name"),
-                Box::new(query),
-            )
-            .sink(
-                drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-2")
-                    .expect("fixture component name"),
-                Box::new(Capture {
-                    descriptor: ComponentDescriptor::try_new(
-                        id(&capture),
-                        vec![PortDescriptor::new(
-                            PortId::try_new("in")?,
-                            PortDirection::Input,
-                            QueryChangeCodec::schema().descriptor().clone(),
-                            PipeRequirements::default(),
-                        )],
-                    )?,
-                    sender,
-                }),
-            )
-            .bind_stream(endpoint(name, "out"), stream(&format!("{name}/out")))
-            .connect(
-                EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in")),
-                if name == "right" {
-                    Box::new(GateProvider(gate.clone())) as Box<dyn PipeProvider>
-                } else {
-                    Box::new(BoundedPipeConfig { capacity: 8 })
-                },
-            )
-            .connect(
-                EdgeDefinition::new(endpoint(name, "out"), endpoint("procedures", "in")),
-                Box::new(BoundedPipeConfig { capacity: 8 }),
-            )
-            .connect(
-                EdgeDefinition::new(endpoint(name, "out"), endpoint(&capture, "in")),
-                Box::new(BoundedPipeConfig { capacity: 8 }),
-            );
+        builder = query_branch(
+            builder,
+            label,
+            query,
+            sender,
+            if label == "right" {
+                Box::new(GateProvider(gate.clone())) as Box<dyn PipeProvider>
+            } else {
+                Box::new(BoundedPipeConfig { capacity: 8 })
+            },
+        )?;
     }
     let core = DrasiLib::builder()
         .with_query_factory(
@@ -880,6 +903,7 @@ async fn tracked_graph(
                 .clone(),
         )
         .with_id(INSTANCE)
+        .with_allow_external_component_ids(true)
         .with_components(builder.build()?)
         .build()
         .await?;
@@ -965,10 +989,7 @@ async fn transactions(dynamic: bool, shared: bool) -> Result<()> {
         );
         assert_eq!(graph.results[0].snapshot()?.as_of_sequence, heads[0] + 1);
         if shared {
-            let key = SourceProgressKey::Source(
-                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
-                    .expect("fixture UUID"),
-            );
+            let key = source_key();
             assert_eq!(position(&graph.owners[0], &key)?["version"], 1);
             assert_eq!(
                 position(&graph.owners[1], &key)?["version"],
@@ -977,18 +998,12 @@ async fn transactions(dynamic: bool, shared: bool) -> Result<()> {
             );
             graph
                 .core
-                .component_by_name(
-                    &drasi_core_types::ComponentName::try_new("source")
-                        .expect("fixture component name"),
-                )?
+                .component_by_name(&name("source"))?
                 .stop()
                 .await?;
             graph
                 .core
-                .component_by_name(
-                    &drasi_core_types::ComponentName::try_new("source")
-                        .expect("fixture component name"),
-                )?
+                .component_by_name(&name("source"))?
                 .start()
                 .await?;
             graph.gate.add_permits(64);
@@ -1139,26 +1154,17 @@ async fn persistent_rows_profile(dynamic: bool, positional: bool) -> Result<()> 
             );
         }
         next(&mut graph.outputs[1]).await?;
-        let key = SourceProgressKey::Source(
-            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
-                .expect("fixture UUID"),
-        );
+        let key = source_key();
         assert_eq!(position(&graph.owners[1], &key)?["offset"], 0);
         assert_eq!(position(&graph.owners[0], &key)?["offset"], 3);
         graph
             .core
-            .component_by_name(
-                &drasi_core_types::ComponentName::try_new("source")
-                    .expect("fixture component name"),
-            )?
+            .component_by_name(&name("source"))?
             .stop()
             .await?;
         graph
             .core
-            .component_by_name(
-                &drasi_core_types::ComponentName::try_new("source")
-                    .expect("fixture component name"),
-            )?
+            .component_by_name(&name("source"))?
             .start()
             .await?;
         graph.gate.add_permits(64);
@@ -1300,8 +1306,10 @@ async fn strict_history(dynamic: bool, schema_change: bool) -> Result<()> {
         [proof, cleanup],
     )?;
     if schema_change {
+        // A selected key type change is incompatible with the committed
+        // cursor's binding (non-key column changes are not).
         database
-            .sql("ALTER TABLE items ADD COLUMN added INT NULL")
+            .sql("ALTER TABLE items MODIFY id BIGINT NOT NULL")
             .await?;
     } else {
         database.sql("FLUSH BINARY LOGS").await?;
@@ -1333,7 +1341,7 @@ async fn strict_history(dynamic: bool, schema_change: bool) -> Result<()> {
         let error = started?.expect_err("changed native history must not silently resume");
         let message = format!("{error:#}");
         let expected = if schema_change {
-            "binding or sequence mismatch"
+            "source schema changed incompatibly"
         } else {
             "position is unavailable"
         };
@@ -1398,27 +1406,14 @@ async fn untracked(dynamic: bool, transactions: bool) -> Result<()> {
         .context("native untracked output sink")?
         .clone();
     let mut settings = database.source_settings();
-    settings["output"] = json!(if transactions {
-        "transactions"
-    } else {
-        "changes"
-    });
-    settings["replay"] = Value::Null;
-    settings["start"] = json!({"mode":"end"});
+    let settings_object = settings.as_object_mut().context("source settings")?;
+    settings_object.remove("retention");
+    settings["startFrom"] = json!("end");
     if !transactions {
         settings["tables"] = json!(["items", "tx"]);
     }
-    let limits: SourceTransactionLimits = serde_json::from_value(settings["transactions"].clone())?;
-    let mut source =
-        source_factory.specification(id("source"), json!({"stream":"changes","settings":{}}))?;
-    let reference = |key: &str| ConfigurationValue::Reference {
-        resource: resource("settings"),
-        key: key.into(),
-        secret: true,
-    };
-    source
-        .configuration
-        .insert("settings".into(), reference("source"));
+    let limits = source_limits(&settings)?;
+    let source = source_specification(&source_factory, &settings, json!({"stream":"changes"}))?;
     let path = tempfile::tempdir()?;
     let sink = storedproc::sink_specification(&sink_factory, &database.sink_settings())?;
     let mut builder =
@@ -1439,18 +1434,8 @@ async fn untracked(dynamic: bool, transactions: bool) -> Result<()> {
                     }))),
                 ),
             )?
-            .component(
-                drasi_lib::computation::v1::ComponentName::try_new("fixture-component-5")
-                    .expect("fixture component name"),
-                source,
-                source_factory,
-            )
-            .component(
-                drasi_lib::computation::v1::ComponentName::try_new("fixture-component-6")
-                    .expect("fixture component name"),
-                sink,
-                sink_factory.clone(),
-            )
+            .component(name("source"), source, source_factory)
+            .component(name("procedures"), sink, sink_factory.clone())
             .bind_stream(endpoint("source", "out"), stream("changes"));
     // The consumer sink requires persistent producer identities.
     let indexes: Arc<dyn ComputationIndexProvider> = Arc::new(RocksDbComputationProvider::new(
@@ -1463,8 +1448,8 @@ async fn untracked(dynamic: bool, transactions: bool) -> Result<()> {
     ));
     let mut results = Vec::new();
     let mut outputs = Vec::new();
-    for name in ["left", "right"] {
-        let mut definition = query_definition(name);
+    for label in ["left", "right"] {
+        let mut definition = query_definition(label);
         definition.query = "MATCH (n) RETURN n.id AS id,n.value AS value".into();
         let query = ContinuousQueryTransformer::new_configured(
             definition,
@@ -1479,44 +1464,15 @@ async fn untracked(dynamic: bool, transactions: bool) -> Result<()> {
         .await?
         .with_recovery_scope(INSTANCE)?;
         results.push(query.results());
-        let capture = format!("{name}-capture");
         let (sender, receiver) = mpsc::channel(32);
         outputs.push(receiver);
-        builder = builder
-            .transformer(
-                drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-3")
-                    .expect("fixture component name"),
-                Box::new(query),
-            )
-            .sink(
-                drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-3")
-                    .expect("fixture component name"),
-                Box::new(Capture {
-                    descriptor: ComponentDescriptor::try_new(
-                        id(&capture),
-                        vec![PortDescriptor::new(
-                            PortId::try_new("in")?,
-                            PortDirection::Input,
-                            QueryChangeCodec::schema().descriptor().clone(),
-                            PipeRequirements::default(),
-                        )],
-                    )?,
-                    sender,
-                }),
-            )
-            .bind_stream(endpoint(name, "out"), stream(&format!("{name}/out")))
-            .connect(
-                EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in")),
-                Box::new(BoundedPipeConfig { capacity: 8 }),
-            )
-            .connect(
-                EdgeDefinition::new(endpoint(name, "out"), endpoint("procedures", "in")),
-                Box::new(BoundedPipeConfig { capacity: 8 }),
-            )
-            .connect(
-                EdgeDefinition::new(endpoint(name, "out"), endpoint(&capture, "in")),
-                Box::new(BoundedPipeConfig { capacity: 8 }),
-            );
+        builder = query_branch(
+            builder,
+            label,
+            query,
+            sender,
+            Box::new(BoundedPipeConfig { capacity: 8 }),
+        )?;
     }
     let core = DrasiLib::builder()
         .with_query_factory(
@@ -1532,6 +1488,7 @@ async fn untracked(dynamic: bool, transactions: bool) -> Result<()> {
                 .clone(),
         )
         .with_id(INSTANCE)
+        .with_allow_external_component_ids(true)
         .with_components(builder.build()?)
         .build()
         .await?;

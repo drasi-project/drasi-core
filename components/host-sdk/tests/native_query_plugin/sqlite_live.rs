@@ -122,9 +122,15 @@ pub(super) fn source(path: &Path, rest_port: u16) -> Result<ComponentAddition> {
     let specification = factory.specification(
         ComponentId::try_new("a112a85e-ae22-5dd7-a624-6080d73fbb5e")?,
         json!({
-            "stream": "sqlite/out",
-            "settings": settings,
-            "rest_api": {"host": "127.0.0.1", "port": rest_port}
+            "stream": "sqlite/out", "path": settings.path, "tables": settings.tables,
+            "maxTransactionChanges": settings.transactions.max_changes,
+            "maxTransactionBytes": settings.transactions.max_bytes,
+            "maxTransactionDurationMs": settings.transactions.max_duration_ms,
+            "maxSqlBytes": settings.max_sql_bytes, "commandCapacity": settings.command_capacity,
+            "outputCapacity": settings.output_capacity,
+            "shutdownTimeoutMs": settings.shutdown_timeout_ms,
+            "pageSize": settings.transactions.max_changes,
+            "restApi": true, "restPort": rest_port
         }),
     )?;
     Ok(ComponentAddition::from_specification(

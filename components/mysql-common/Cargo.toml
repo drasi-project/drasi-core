@@ -30,13 +30,18 @@ workspace = true
 [features]
 # Enables serde/OpenAPI DTOs (e.g. SslModeDto) for plugin descriptors. Only the
 # descriptor crates need this, so utoipa stays optional.
-api = ["dep:utoipa"]
+api = ["dep:utoipa", "client"]
+# The mysql_async connection helper (`connect`) used by the legacy source,
+# bootstrapper and stored-procedure crates. Native plugins built with only
+# `native` use the owned connection layer and its native-tls stack instead.
+client = ["dep:mysql_async"]
 native = [
     "dep:drasi-computation-contracts", "dep:async-trait", "dep:bytes", "dep:encoding_rs",
     "dep:futures-util", "dep:mysql_common", "dep:native-tls",
     "dep:tokio", "dep:tokio-native-tls", "dep:rsa", "dep:sha1", "dep:sha2",
 ]
 storedproc = [
+    "client",
     "dep:handlebars",
     "dep:drasi-computation-contracts",
     "dep:drasi-reaction-common",
@@ -49,10 +54,10 @@ drasi-computation-contracts = { workspace = true, optional = true }
 drasi-reaction-common = { workspace = true, optional = true }
 anyhow = "1.0"
 log = "0.4"
-# A rustls TLS backend (+ ring crypto provider) is always compiled in so every
-# SslMode works in shipped plugins (which are built without extra features).
-# rustls is pure Rust, so this needs no system OpenSSL.
-mysql_async = { version = "0.37", features = ["rustls-tls", "ring", "tls12"] }
+# A rustls TLS backend (+ ring crypto provider) is compiled in with `client` so
+# every SslMode works in the legacy plugins. rustls is pure Rust, so this needs
+# no system OpenSSL.
+mysql_async = { version = "0.37", features = ["rustls-tls", "ring", "tls12"], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

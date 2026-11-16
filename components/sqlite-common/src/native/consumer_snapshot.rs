@@ -3,7 +3,7 @@
 
 use super::{
     journal::{self, GroupHandover},
-    worker, SqliteConfig,
+    worker, SqliteConfig, SqliteConnectionOptions,
 };
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -44,6 +44,7 @@ struct Shared {
     source: ComponentId,
     stream: StreamId,
     config: SqliteConfig,
+    options: SqliteConnectionOptions,
     consumers: ConsumerProgressView,
     members: BTreeMap<ComponentId, Arc<Member>>,
     gate: Arc<tokio::sync::Mutex<()>>,
@@ -132,7 +133,28 @@ impl SqliteConsumerSnapshots {
         consumers: ConsumerProgressView,
         owners: BTreeMap<ComponentId, SourceProgressView>,
     ) -> Result<Self> {
+        Self::new_with_options(
+            source,
+            stream,
+            config,
+            SqliteConnectionOptions::default(),
+            consumers,
+            owners,
+        )
+    }
+
+    /// As [`Self::new`], applying the source's connection options (such as
+    /// `initSql`) to every snapshot connection.
+    pub fn new_with_options(
+        source: ComponentId,
+        stream: StreamId,
+        config: SqliteConfig,
+        options: SqliteConnectionOptions,
+        consumers: ConsumerProgressView,
+        owners: BTreeMap<ComponentId, SourceProgressView>,
+    ) -> Result<Self> {
         config.validate()?;
+        options.validate(&config)?;
         anyhow::ensure!(
             config.path.is_some()
                 && config.replay.is_some()
@@ -168,6 +190,7 @@ impl SqliteConsumerSnapshots {
                 source,
                 stream,
                 config,
+                options,
                 consumers,
                 members,
                 gate: Arc::new(tokio::sync::Mutex::new(())),
@@ -495,6 +518,7 @@ impl SqliteConsumerSnapshot {
             source: self.shared.source.clone(),
             stream: self.shared.stream.clone(),
             config: self.shared.config.clone(),
+            options: self.shared.options.clone(),
             consumers: self.shared.consumers.clone(),
             member: self.member.owner.clone(),
             generation: self.member.owner.snapshot()?.reset_generation,

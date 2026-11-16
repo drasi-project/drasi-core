@@ -911,3 +911,138 @@ async fn native_consumer_weakened_restart_retains_rejected_storage_for_cleanup(
         .await?;
     Ok(())
 }
+
+/// One live output of an in-memory query run: no persistent progress, a
+/// per-run incarnation in its recovery identity.
+fn volatile_batch(incarnation: &str) -> anyhow::Result<InputEnvelope> {
+    use drasi_core_types::evaluation::{
+        context::QueryPartEvaluationContext, variable_value::VariableValue,
+    };
+    let query = id(78);
+    let mut envelope = QueryChangeCodec::encode_evaluation(
+        None,
+        &query,
+        SystemMetadata::new(StreamId::try_new("query/out")?, 1),
+        &ResultNodeProjector::try_new("test/native-consumer-volatile/out", None)?,
+        &(0..3)
+            .map(|index| QueryPartEvaluationContext::Adding {
+                after: [("value".into(), VariableValue::Integer(index.into()))].into(),
+                row_signature: index as u64 + 1,
+            })
+            .collect::<Vec<_>>(),
+        QueryOutputMetadata {
+            query_id: query.clone(),
+            input_origin: None,
+            timestamp: chrono::DateTime::from_timestamp(1_700_000_000, 0)
+                .ok_or_else(|| anyhow::anyhow!("timestamp"))?,
+            metadata: Default::default(),
+            profiling: None,
+        },
+    )?
+    .ok_or_else(|| anyhow::anyhow!("volatile output"))?;
+    let identity: QueryRecoveryIdentity = serde_json::from_value(json!({
+        "construction_scope": GRAPH, "graph_id": GRAPH, "query_id": query.as_str(),
+        "configuration_hash": 7, "incarnation": incarnation
+    }))?;
+    identity.annotate(&mut envelope, &query)?;
+    Ok(InputEnvelope {
+        port: PortId::try_new("in")?,
+        envelope,
+    })
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_consumer_delivers_volatile_queries_only_at_least_once_by_opt_in(
+) -> anyhow::Result<()> {
+    const RUN: &str = "0b7f6f0e-8a33-4b1e-9d0c-6c3f2a1e5d01";
+    let directory = tempfile::tempdir()?;
+    let plugin = plugin()?;
+    let factory = factory(plugin.as_ref(), sdk::ConsumerMode::External);
+    let destination = directory.path().join("effects.db");
+    // Without opt-in the plugin refuses the volatile identity permanently;
+    // the refused begin leaves no cleanup requirement.
+    let mut strict = initialized_consumer(
+        factory.as_ref(),
+        id(431),
+        json!({"path": destination}),
+        scope(),
+        provider(&directory.path().join("strict"))?,
+        options(),
+    )
+    .await?;
+    strict
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
+    let error = strict
+        .handle(volatile_batch(RUN)?)
+        .await
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("the volatile input must be refused"))?;
+    assert!(
+        format!("{error:#}").contains("set deliveryGuarantee to atLeastOnce"),
+        "{error:#}"
+    );
+    strict.handle(batch()?).await?;
+    strict
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
+    assert_eq!(
+        effects(&destination)?,
+        (3, 3, 3),
+        "only the persistent batch ran"
+    );
+
+    // With opt-in it is delivered without the host ledger, in order.
+    let opted_destination = directory.path().join("opted.db");
+    let mut opted = initialized_consumer(
+        factory.as_ref(),
+        id(432),
+        json!({"path": opted_destination, "deliveryGuarantee": "atLeastOnce"}),
+        scope(),
+        provider(&directory.path().join("opted"))?,
+        options(),
+    )
+    .await?;
+    opted
+        .start(&crate::computation::test_hooks::start_ctx())
+        .await?;
+    opted.handle(volatile_batch(RUN)?).await?;
+    opted.handle(volatile_batch(RUN)?).await?;
+    assert!(opted.progress().await?.is_empty(), "no host-local ledger");
+    // Persistent producers still use the exactly-once runner.
+    opted.handle(batch()?).await?;
+    assert_eq!(opted.progress().await?.len(), 1);
+    opted
+        .stop(&crate::computation::test_hooks::stop_ctx())
+        .await?;
+    // At least once: the retry reached the plugin with the same per-run
+    // operation identities (9 attempts, 6 distinct effects).
+    assert_eq!(effects(&opted_destination)?, (6, 9, 6));
+    Ok(())
+}
+
+#[test]
+fn native_consumer_factories_declare_their_producer_requirement() -> anyhow::Result<()> {
+    use drasi_lib::computation::v1::ComponentFactory;
+    let plugin = plugin()?;
+    let external = factory(plugin.as_ref(), sdk::ConsumerMode::External);
+    let transactional = factory(plugin.as_ref(), sdk::ConsumerMode::Transactional);
+    let specification = |factory: &NativeFactory, configuration: serde_json::Value| {
+        factory.specification(id(433), configuration)
+    };
+    for (configuration, required) in [
+        (json!({}), true),
+        (json!({"deliveryGuarantee": "exactlyOnce"}), true),
+        (json!({"deliveryGuarantee": "atLeastOnce"}), false),
+    ] {
+        assert_eq!(
+            external
+                .requires_persistent_producers(&specification(&external, configuration.clone())?)?,
+            required,
+            "{configuration}"
+        );
+        assert!(transactional
+            .requires_persistent_producers(&specification(&transactional, configuration)?)?);
+    }
+    Ok(())
+}

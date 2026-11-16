@@ -6,7 +6,7 @@
 //! every other field are inspectable.
 
 use anyhow::{ensure, Context, Result};
-use drasi_computation_contracts::{OutputAliases, SinkOutputs};
+use drasi_computation_contracts::{DeliveryGuarantee, OutputAliases, SinkOutputs};
 use drasi_postgres_common::{
     delivery::progress::{
         ProgressTable, DEFAULT_MAX_STREAMS, DEFAULT_PROGRESS_TABLE, MAX_STREAMS_LIMIT,
@@ -149,6 +149,10 @@ pub struct PostgresStoredProcConfig {
     pub progress_table: String,
     #[serde(default = "default_max_streams")]
     pub max_streams: u32,
+    /// `exactlyOnce` (default) accepts only producers with persistent
+    /// progress; `atLeastOnce` also accepts in-memory queries.
+    #[serde(default)]
+    pub delivery_guarantee: DeliveryGuarantee,
     #[serde(default = "default_command_timeout_ms")]
     pub command_timeout_ms: u64,
     #[serde(default = "default_connect_timeout_ms")]
@@ -169,6 +173,7 @@ impl std::fmt::Debug for PostgresStoredProcConfig {
             .field("password", &"[REDACTED]")
             .field("ssl_mode", &self.ssl_mode)
             .field("progress_table", &self.progress_table)
+            .field("delivery_guarantee", &self.delivery_guarantee)
             .finish_non_exhaustive()
     }
 }
@@ -209,6 +214,7 @@ impl PostgresStoredProcConfig {
             Field::new("defaultTemplate", Object, false, "Commands used when no route supplies the operation: {added?, updated?, deleted?: {template}}.").constraint(Constraint::try_new(command_schema()).expect("constant command schema")),
             Field::new("progressTable", String, false, "Schema-qualified destination cursor table (lowercase identifiers). Shared by several consumers; each owns only its rows.").default(DEFAULT_PROGRESS_TABLE),
             Field::new("maxStreams", Integer, false, "Destination cursor rows (producer streams) this consumer may own.").default(DEFAULT_MAX_STREAMS).minimum(1).maximum(MAX_STREAMS_LIMIT as u64),
+            Field::new("deliveryGuarantee", String, false, "exactlyOnce accepts only producers with persistent progress (persistent queries). atLeastOnce also accepts in-memory queries: their outputs are delivered at least once, deduplicated within one producer run, and not resumed across a process restart.").default(json!(DeliveryGuarantee::ExactlyOnce)).allowed([json!(DeliveryGuarantee::ExactlyOnce), json!(DeliveryGuarantee::AtLeastOnce)]),
             Field::new("commandTimeoutMs", Integer, false, "Server statement_timeout for each command; the client waits this long plus a 5 second grace before discarding the connection.").default(DEFAULT_COMMAND_TIMEOUT_MS).minimum(1).maximum(MAX_COMMAND_TIMEOUT_MS),
             Field::new("connectTimeoutMs", Integer, false, "Deadline for one connection attempt (TCP, TLS and authentication).").default(DEFAULT_CONNECT_TIMEOUT_MS).minimum(1).maximum(MAX_DURATION_MS),
             Field::new("reconnectBudgetMs", Integer, false, "Total time one operation may spend reconnecting and retrying transient failures with jittered exponential backoff; 0 makes a single attempt.").default(DEFAULT_RECONNECT_BUDGET_MS).minimum(0).maximum(MAX_DURATION_MS),

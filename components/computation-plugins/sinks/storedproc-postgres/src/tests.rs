@@ -146,6 +146,7 @@ fn factory_metadata_declares_consumer_management_erase_and_secrets() -> Result<(
         "progressTable",
         "tlsCaPem",
         "tlsClientCertificatePem",
+        "deliveryGuarantee",
     ] {
         assert!(!fields[public].secret, "{public}");
     }
@@ -185,6 +186,15 @@ fn configuration_round_trips_with_published_defaults() -> Result<()> {
     assert_eq!(exposed["sslMode"], "require");
     assert_eq!(exposed["progressTable"], DEFAULT_PROGRESS_TABLE);
     assert_eq!(exposed["commandTimeoutMs"], 30_000);
+    assert_eq!(exposed["deliveryGuarantee"], "exactlyOnce");
+    let opted = sink(with(config(), "deliveryGuarantee", json!("atLeastOnce")))?;
+    assert_eq!(opted.configuration()?["deliveryGuarantee"], "atLeastOnce");
+    assert!(PostgresStoredProcConfig::parse(with(
+        config(),
+        "deliveryGuarantee",
+        json!("at_least_once")
+    ))
+    .is_err());
     // Debug output never reveals the password.
     let parsed = PostgresStoredProcConfig::parse(config())?;
     assert!(!format!("{parsed:?}").contains("secret"));
@@ -523,6 +533,11 @@ fn assess_matrix_classifies_every_field() {
         (
             "connectTimeoutMs",
             with(full_config(), "connectTimeoutMs", json!(500)),
+            Some(Stop),
+        ),
+        (
+            "deliveryGuarantee",
+            with(full_config(), "deliveryGuarantee", json!("atLeastOnce")),
             Some(Stop),
         ),
         (

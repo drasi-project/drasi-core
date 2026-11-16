@@ -35,6 +35,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 chrono = "0.4"
+log = "0.4"
+
+[dev-dependencies]
+drasi-computation-plugin-sdk = { workspace = true, features = ["test-support"] }
+drasi-mssql-common = { workspace = true, features = ["native", "test-support"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "test-util"] }
 
 [lints]
 workspace = true

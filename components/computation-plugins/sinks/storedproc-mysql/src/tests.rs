@@ -81,7 +81,14 @@ fn factory_is_an_external_consumer_with_flat_published_configuration() -> Result
     assert_eq!(metadata.ports[0].id().as_str(), "in");
     let fields = &metadata.configuration.fields;
     assert!(fields["password"].secret);
-    for field in ["routes", "defaultTemplate", "user", "hostname", "tlsCaPem"] {
+    for field in [
+        "routes",
+        "defaultTemplate",
+        "user",
+        "hostname",
+        "tlsCaPem",
+        "deliveryGuarantee",
+    ] {
         assert!(!fields[field].secret, "{field}");
     }
     assert!(!fields.contains_key("settings"));
@@ -248,6 +255,7 @@ fn assess_classifies_every_field() -> Result<()> {
             Some(Stop),
         ),
         (with("maxProtocolBytes", json!(1 << 20)), Some(Stop)),
+        (with("deliveryGuarantee", json!("atLeastOnce")), Some(Stop)),
         (
             with(
                 "outputs",

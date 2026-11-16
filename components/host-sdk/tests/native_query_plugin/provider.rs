@@ -34,15 +34,13 @@ pub(crate) fn provider_configuration(path: &Path) -> serde_json::Value {
     json!({
         "source": "ba51bf8f-7ec0-52a4-a2ff-37a49d49c710",
         "stream": "sqlite/out",
-        "settings": {
-            "path": path,
-            "tables": ["items"],
-            "max_tables": 4,
-            "max_bytes": 65536,
-            "max_duration_ms": 5000,
-            "output_capacity": 1,
-            "shutdown_timeout_ms": 5000
-        }
+        "path": path,
+        "tables": ["items"],
+        "maxTables": 4,
+        "maxBytes": 65536,
+        "maxDurationMs": 5000,
+        "outputCapacity": 1,
+        "shutdownTimeoutMs": 5000
     })
 }
 

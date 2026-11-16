@@ -479,6 +479,10 @@ impl DeliveryHandler for PostgresStoredProcSink {
         retryable(error)
     }
 
+    fn delivery_guarantee(&self) -> drasi_computation_contracts::DeliveryGuarantee {
+        self.config.delivery_guarantee
+    }
+
     /// Delivers one operation. Transient failures (rolled back, connection
     /// lost, commit outcome unknown) are retried within `reconnectBudgetMs`,
     /// reconnecting as needed; the destination cursor makes every retry
@@ -488,6 +492,9 @@ impl DeliveryHandler for PostgresStoredProcSink {
             item.port.as_str() == "in",
             "unknown PostgreSQL sink input port"
         );
+        if item.position.epoch().is_some() && !self.config.delivery_guarantee.is_at_least_once() {
+            return Err(drasi_computation_contracts::VolatileProducerRefused.into());
+        }
         let login = self.login();
         let Self {
             config,

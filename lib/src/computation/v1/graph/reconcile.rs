@@ -1800,6 +1800,52 @@ fn validate_output_bindings(graph: &ComputationGraph, prepared: &Prepared) -> Gr
     Ok(())
 }
 
+/// Refuse to bind an exactly-once consumer input to a volatile producer, at
+/// configuration time. Only edges this reconciliation binds or whose endpoint
+/// it creates, replaces or updates are checked, so an unrelated change never
+/// fails on an existing pairing. Waiting edges are not yet bound and stay
+/// waits; the refusal fires when the edge becomes bindable.
+fn validate_producer_persistence(
+    plan: &ReconciliationPreview,
+    factories: &BTreeMap<ImplementationIdentity, Arc<dyn ComponentFactory>>,
+    resources: &BTreeMap<ResourceId, ResourceHandle>,
+) -> GraphResult<()> {
+    let changed = |id: &ComponentId| {
+        plan.create.contains(id) || plan.replace.contains(id) || plan.update.contains(id)
+    };
+    let nodes: BTreeMap<_, _> = plan
+        .desired
+        .components
+        .iter()
+        .map(|node| (node.descriptor.id(), node))
+        .collect();
+    for relationship in &plan.desired.relationships {
+        let edge = &relationship.definition;
+        if !plan.rebind.contains(edge)
+            && !changed(&edge.from.component)
+            && !changed(&edge.to.component)
+        {
+            continue;
+        }
+        let specification = |id: &ComponentId| match nodes.get(id).map(|node| &node.construction) {
+            Some(ComponentConstruction::Factory(spec)) => Some(spec),
+            _ => None,
+        };
+        let consumer = specification(&edge.to.component).and_then(|spec| {
+            factories
+                .get(&spec.implementation)
+                .map(|factory| (spec, factory.as_ref()))
+        });
+        super::super::validate_producer_persistence(
+            edge,
+            specification(&edge.from.component),
+            consumer,
+            resources,
+        )?;
+    }
+    Ok(())
+}
+
 fn prepare(
     graph: &PreparationSnapshot,
     plan: &ReconciliationPreview,
@@ -1906,6 +1952,7 @@ fn prepare(
         &plan.desired.resource_dependencies,
         &resources,
     )?;
+    validate_producer_persistence(plan, &factories, &resources)?;
     let mut components = BTreeMap::new();
     for node in &plan.desired.components {
         let id = node.descriptor.id();

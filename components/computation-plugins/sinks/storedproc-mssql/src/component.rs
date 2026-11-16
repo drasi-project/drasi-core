@@ -216,24 +216,9 @@ impl MsSqlStoredProcSink {
     }
 
     fn warn_about_transport(&self) {
-        if self.config.plaintext() {
-            log::warn!(
-                "Native SQL Server sink uses encryption={:?}: query data{} travel in plaintext. \
-                 Use encryption=required.",
-                self.config.encryption,
-                if self.config.encryption == crate::config::Encryption::Disabled {
-                    " and credentials"
-                } else {
-                    ""
-                }
-            );
-        }
-        if self.config.trust_server_certificate {
-            log::warn!(
-                "Native SQL Server sink does not validate the server certificate \
-                 (trustServerCertificate=true); use trustedCaPem instead outside tests."
-            );
-        }
+        self.config
+            .connection_settings()
+            .warn_about_transport("Native SQL Server sink");
     }
 
     async fn start_activation(&mut self, ctx: &mut StartContext) -> LifecycleResult {
@@ -410,11 +395,18 @@ impl DeliveryHandler for MsSqlStoredProcSink {
         classify(error).is_retryable()
     }
 
+    fn delivery_guarantee(&self) -> drasi_computation_contracts::DeliveryGuarantee {
+        self.config.delivery_guarantee
+    }
+
     async fn handle(&mut self, item: DeliveryItem<'_>) -> Result<()> {
         ensure!(
             item.port.as_str() == "in",
             "unknown SQL Server sink input port"
         );
+        if item.position.epoch().is_some() && !self.config.delivery_guarantee.is_at_least_once() {
+            return Err(drasi_computation_contracts::VolatileProducerRefused.into());
+        }
         let position = Position::from_item(&item)?;
         let Self {
             config,

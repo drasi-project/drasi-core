@@ -212,6 +212,9 @@ impl DeliveryHandler for MySqlStoredProcSink {
     fn retryable(&self, error: &anyhow::Error) -> bool {
         self.runtime.retryable(error)
     }
+    fn delivery_guarantee(&self) -> drasi_computation_contracts::DeliveryGuarantee {
+        self.runtime.delivery_guarantee()
+    }
     async fn handle(&mut self, item: DeliveryItem<'_>) -> Result<()> {
         self.runtime.handle(item).await
     }

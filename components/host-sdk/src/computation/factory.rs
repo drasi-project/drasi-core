@@ -1294,6 +1294,31 @@ impl ComponentFactory for NativeFactory {
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }
+    /// Native consumers deliver through identity derived from persistent
+    /// producer progress. A Transactional consumer always requires it; an
+    /// External consumer requires it unless its literal `deliveryGuarantee`
+    /// configuration is `atLeastOnce` (the shared consumer convention). An
+    /// unresolved reference is not evidence either way.
+    fn requires_persistent_producers(
+        &self,
+        specification: &ComponentSpecification,
+    ) -> anyhow::Result<bool> {
+        use drasi_computation_plugin_sdk::ConsumerMode;
+        Ok(match self.consumer_mode() {
+            None => false,
+            Some(ConsumerMode::Transactional) => true,
+            Some(ConsumerMode::External) => {
+                match specification.configuration.get("deliveryGuarantee") {
+                    None => true,
+                    Some(ConfigurationValue::Literal(value)) => !matches!(
+                        serde_json::from_value(value.clone()),
+                        Ok(drasi_computation_contracts::DeliveryGuarantee::AtLeastOnce)
+                    ),
+                    Some(ConfigurationValue::Reference { .. }) => false,
+                }
+            }
+        })
+    }
     fn port_formats(&self) -> Option<&PortFormatCatalogue> {
         self.port_formats.as_ref()
     }

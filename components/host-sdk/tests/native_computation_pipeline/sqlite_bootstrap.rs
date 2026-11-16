@@ -29,16 +29,14 @@ fn configuration(path: &Path) -> Value {
     json!({
         "source": id("source"),
         "stream": "source/out",
-        "settings": {
-            "path": path,
-            "tables": ["items"],
-            "table_keys": [{"table":"items","key_columns":["code"]}],
-            "max_tables": 16,
-            "max_bytes": 65536,
-            "max_duration_ms": 5000,
-            "output_capacity": 1,
-            "shutdown_timeout_ms": 5000
-        }
+        "path": path,
+        "tables": ["items"],
+        "tableKeys": [{"table":"items","keyColumns":["code"]}],
+        "maxTables": 16,
+        "maxBytes": 65536,
+        "maxDurationMs": 5000,
+        "outputCapacity": 1,
+        "shutdownTimeoutMs": 5000
     })
 }
 

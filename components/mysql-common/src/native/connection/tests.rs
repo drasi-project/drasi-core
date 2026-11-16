@@ -324,10 +324,14 @@ fn binary_cursor_rows_reject_unsupported_types_and_invalid_temporal_encodings() 
         MYSQL_TYPE_TIMESTAMP2,
         MYSQL_TYPE_TIME2,
         MYSQL_TYPE_DATETIME2,
-        MYSQL_TYPE_GEOMETRY,
-        MYSQL_TYPE_VECTOR,
     ] {
         assert!(binary_row(&[0, 4], &[Column::new(kind)]).is_err());
+    }
+    for kind in [MYSQL_TYPE_GEOMETRY, MYSQL_TYPE_VECTOR] {
+        assert_eq!(
+            binary_row(&[0, 0, 4, 1, 2, 3, 4], &[Column::new(kind)])?,
+            vec![mysql_common::Value::Bytes(vec![1, 2, 3, 4])]
+        );
     }
     for (kind, body) in [
         (MYSQL_TYPE_DATE, vec![1, 0]),
@@ -507,6 +511,8 @@ async fn owned_mysql_connections_authenticate_query_and_close_without_driver_tas
         password: "root".into(),
         ssl_mode: MySqlTlsMode::Disabled,
         tls_ca_pem: None,
+        tls_client_cert_pem: None,
+        tls_client_key_pem: None,
         server_id: NonZeroU32::new(456).context("server ID")?,
         heartbeat_interval_ms: NonZeroU64::new(1000).context("heartbeat")?,
     };

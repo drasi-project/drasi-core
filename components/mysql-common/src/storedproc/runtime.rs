@@ -20,9 +20,9 @@ use crate::storedproc;
 use anyhow::{Context, Result};
 use drasi_computation_contracts::{
     lifecycle::{CancellationToken, StopMode},
-    ChangeRoute, ComponentDescriptor, ComponentId, DeliveryBatch, DeliveryItem, DeliveryScope,
-    EnvelopeCodec, GraphChangeBatch, GraphChangeCodec, InputBinding, InputEnvelope,
-    PipeRequirements, PortDescriptor, PortDirection, PortId, SinkOutputs,
+    ChangeRoute, ComponentDescriptor, ComponentId, DeliveryBatch, DeliveryGuarantee, DeliveryItem,
+    DeliveryScope, EnvelopeCodec, GraphChangeBatch, GraphChangeCodec, InputBinding, InputEnvelope,
+    PipeRequirements, PortDescriptor, PortDirection, PortId, SinkOutputs, VolatileProducerRefused,
 };
 use drasi_reaction_common::OperationType;
 use std::{num::NonZeroUsize, sync::Arc, time::Duration};
@@ -356,6 +356,11 @@ impl MySqlStoredProcSink {
         delivery::retryable(error)
     }
 
+    /// The configured guarantee; only `AtLeastOnce` accepts in-memory queries.
+    pub fn delivery_guarantee(&self) -> DeliveryGuarantee {
+        self.config.delivery_guarantee
+    }
+
     /// The rendered command for one operation; `None` when no template is
     /// configured or a condition excluded the command.
     fn effect(&self, item: &DeliveryItem<'_>) -> Result<Option<Effect>> {
@@ -444,6 +449,9 @@ impl MySqlStoredProcSink {
     pub async fn handle(&mut self, item: DeliveryItem<'_>) -> Result<()> {
         anyhow::ensure!(self.started, "MySQL sink is not running");
         anyhow::ensure!(item.port.as_str() == "in", "unknown MySQL sink input port");
+        if item.position.epoch().is_some() && !self.delivery_guarantee().is_at_least_once() {
+            return Err(VolatileProducerRefused.into());
+        }
         let effect = self.effect(&item)?;
         if self.sessions.live.as_ref().is_some_and(|live| live.busy) {
             self.sessions.retire_live();
@@ -574,7 +582,12 @@ impl MySqlStoredProcSink {
         let mut codec =
             EnvelopeCodec::new(NonZeroUsize::new(MAX_MESSAGE_BYTES).context("message bound")?);
         codec.register_schema(GraphChangeCodec::schema())?;
-        let batch = DeliveryBatch::new(self.scope.clone(), input, &codec)?;
+        let batch = DeliveryBatch::new_with_guarantee(
+            self.scope.clone(),
+            input,
+            &codec,
+            self.delivery_guarantee(),
+        )?;
         for index in 0..operations {
             self.handle(batch.item(index)?).await?;
         }

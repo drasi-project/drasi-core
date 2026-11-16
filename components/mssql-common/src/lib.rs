@@ -30,6 +30,9 @@ pub mod keys;
 pub mod lsn;
 pub mod types;
 
+#[cfg(any(feature = "native", feature = "sql"))]
+pub mod client;
+
 #[cfg(feature = "sql")]
 pub mod sql;
 

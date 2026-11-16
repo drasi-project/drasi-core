@@ -25,7 +25,7 @@ impl sdk::Factory for Factory {
             role: ComponentRole::Sink,
             configuration_version: 1,
             configuration: sdk::ConfigSchema {
-                fields: ["path", "mode", "signal"]
+                fields: ["path", "mode", "signal", "deliveryGuarantee"]
                     .into_iter()
                     .map(|name| {
                         (
@@ -197,6 +197,9 @@ impl std::error::Error for Retry {}
 impl DeliveryHandler for Handler {
     fn retryable(&self, error: &anyhow::Error) -> bool {
         error.is::<Retry>()
+    }
+    fn delivery_guarantee(&self) -> drasi_computation_contracts::DeliveryGuarantee {
+        serde_json::from_value(self.configuration["deliveryGuarantee"].clone()).unwrap_or_default()
     }
     async fn handle(&mut self, item: DeliveryItem<'_>) -> anyhow::Result<()> {
         self.injected_failure(item.position.operation()).await?;

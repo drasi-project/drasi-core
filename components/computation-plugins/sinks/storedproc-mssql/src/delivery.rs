@@ -12,13 +12,22 @@
 //! skipped, a gap or an older batch is refused, and the table holds at most
 //! one row per stream instead of one per operation.
 //!
+//! Format 3 adds `epoch`: empty for exactly-once streams, otherwise the
+//! at-least-once producer epoch of the item. An item whose epoch differs from
+//! the row's treats the row as absent and overwrites it (a new producer run
+//! starts a fresh cursor); the same epoch deduplicates as before. Exactly-once
+//! items never match an at-least-once row, nor the reverse.
+//!
 //! The protocol runs against the [`Session`] trait, so its decisions and its
 //! reconnect/retry behaviour are tested without SQL Server. `session.rs`
 //! implements `Session` over Tiberius.
 
 use anyhow::Result;
 use async_trait::async_trait;
-use drasi_computation_contracts::DeliveryItem;
+use drasi_computation_contracts::{
+    delivery::{cursor_epoch, valid_cursor_epoch, CursorEpoch},
+    DeliveryItem,
+};
 use drasi_mssql_common::sql::RenderedCommand;
 use sha2::{Digest, Sha256};
 use std::{
@@ -29,7 +38,7 @@ use tokio::time::Instant;
 
 /// The shared cursor-table format (identical across the stored-procedure
 /// sinks).
-pub const PROGRESS_FORMAT_VERSION: i16 = 2;
+pub const PROGRESS_FORMAT_VERSION: i16 = 3;
 /// Domain separator of the owner digest.
 pub const OWNER_DOMAIN: &[u8] = b"drasi.storedproc/owner/v1\0";
 
@@ -60,7 +69,9 @@ pub enum DeliveryError {
     OperationGap { expected: i64, actual: i64 },
     /// A stream's first delivery does not start at operation 0.
     MissingFirstOperation,
-    /// The stored cursor row is not a valid format-2 row.
+    /// An exactly-once item met an at-least-once row, or the reverse.
+    GuaranteeMismatch,
+    /// The stored cursor row is not a valid format-3 row.
     InvalidProgress(&'static str),
     /// This sink already holds `maxStreams` streams.
     StreamCapacity { max: u32 },
@@ -104,6 +115,10 @@ impl std::fmt::Display for DeliveryError {
             Self::MissingFirstOperation => {
                 f.write_str("destination delivery is missing its first operation")
             }
+            Self::GuaranteeMismatch => f.write_str(
+                "destination delivery cursor belongs to a stream with a different delivery \
+                 guarantee",
+            ),
             Self::InvalidProgress(detail) => {
                 write!(f, "invalid destination delivery progress: {detail}")
             }
@@ -147,6 +162,8 @@ pub struct CursorRow {
     pub digest: Vec<u8>,
     pub operations: i64,
     pub completed: i64,
+    /// Empty for exactly-once streams.
+    pub epoch: String,
 }
 
 struct Cursor {
@@ -173,9 +190,10 @@ impl CursorRow {
             || self.operations <= 0
             || self.completed < 0
             || self.completed > self.operations
+            || !valid_cursor_epoch(&self.epoch)
         {
             return Err(DeliveryError::InvalidProgress(
-                "digest, operations or completed out of range",
+                "digest, operations, completed or epoch out of range",
             ));
         }
         Ok(Cursor {
@@ -195,6 +213,8 @@ pub struct Position {
     pub operation: i64,
     pub operations: i64,
     pub digest: [u8; 32],
+    /// Empty for exactly-once delivery; otherwise the producer epoch.
+    pub epoch: String,
 }
 
 impl Position {
@@ -206,6 +226,7 @@ impl Position {
             operation: i64::try_from(item.position.operation())?,
             operations: i64::try_from(item.position.operations())?,
             digest: item.content_digest,
+            epoch: item.position.epoch().unwrap_or_default().to_owned(),
         })
     }
 }
@@ -226,7 +247,8 @@ pub enum CursorWrite {
     Keep,
     /// The stream's first batch: insert a row.
     Insert,
-    /// A new batch after a completed one: replace the batch.
+    /// A new batch after a completed one, or the first batch of a new
+    /// producer epoch: replace the batch (and its epoch).
     Rollover,
 }
 
@@ -245,6 +267,20 @@ pub fn decide(
         });
     };
     let cursor = previous.parse()?;
+    match cursor_epoch(&previous.epoch, &position.epoch) {
+        Err(_) => return Err(DeliveryError::GuaranteeMismatch),
+        Ok(CursorEpoch::New) => {
+            // A new producer run: the previous epoch's row is absent for it.
+            if position.operation != 0 {
+                return Err(DeliveryError::MissingFirstOperation);
+            }
+            return Ok(Decision::Apply {
+                completed: 0,
+                write: CursorWrite::Rollover,
+            });
+        }
+        Ok(CursorEpoch::Same) => {}
+    }
     if position.sequence < cursor.sequence {
         return Err(DeliveryError::ReceiptExpired {
             sequence: position.sequence,
@@ -392,42 +428,10 @@ pub async fn apply_operation<S: Session + ?Sized>(
     }
 }
 
-/// How a failure is handled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FailureClass {
-    /// The same operation may succeed later. `reconnect` drops the
-    /// connection first (it is broken or its state is unknown).
-    Retryable { reconnect: bool },
-    /// Retrying gives the same answer.
-    Permanent,
-}
-
-impl FailureClass {
-    pub fn is_retryable(self) -> bool {
-        matches!(self, Self::Retryable { .. })
-    }
-}
-
-/// SQL Server errors after which the transaction was rolled back but the
-/// connection stays usable.
-const TRANSIENT_SERVER_ERRORS: [u32; 8] = [
-    1205,  // deadlock victim
-    1222,  // lock request timeout
-    3960,  // snapshot isolation update conflict
-    3961,  // snapshot isolation: object changed by DDL
-    41301, // in-memory OLTP dependency failure
-    41302, // in-memory OLTP update conflict
-    41305, // in-memory OLTP repeatable-read validation
-    41325, // in-memory OLTP serializable validation
-];
-
-/// SQL Server and Azure SQL errors after which the connection is closed or
-/// should be replaced (failover, throttling, service busy, network).
-const TRANSIENT_CONNECTION_ERRORS: [u32; 12] = [
-    233, 64, 4221, 10053, 10054, 10060, 10928, 10929, 40197, 40501, 40613, 49918,
-];
+pub use drasi_mssql_common::client::{ConnectTimeout, FailureClass};
 
 /// Classifies by type, SQL Server error number or I/O kind, never by text.
+/// Delivery errors decide first; the rest follow the shared SQL Server rules.
 pub fn classify(error: &anyhow::Error) -> FailureClass {
     for cause in error.chain() {
         if let Some(error) = cause.downcast_ref::<DeliveryError>() {
@@ -438,60 +442,31 @@ pub fn classify(error: &anyhow::Error) -> FailureClass {
                 _ => FailureClass::Permanent,
             };
         }
-        if let Some(error) = cause.downcast_ref::<tiberius::error::Error>() {
-            return classify_tiberius(error);
-        }
-        if cause.downcast_ref::<std::io::Error>().is_some()
-            || cause
-                .downcast_ref::<tokio::time::error::Elapsed>()
-                .is_some()
+        if let Some(server) = cause
+            .downcast_ref::<tiberius::error::Error>()
+            .and_then(|error| match error {
+                tiberius::error::Error::Server(token) => Some(token.code()),
+                _ => None,
+            })
         {
-            return FailureClass::Retryable { reconnect: true };
+            return classify_server_code(server);
         }
-        if cause.downcast_ref::<ConnectTimeout>().is_some() {
-            return FailureClass::Retryable { reconnect: true };
+        if let Some(class) = drasi_mssql_common::client::classify_cause(cause) {
+            return class;
         }
     }
     FailureClass::Permanent
 }
 
-fn classify_tiberius(error: &tiberius::error::Error) -> FailureClass {
-    use tiberius::error::Error;
-    match error {
-        Error::Server(token) => classify_server_code(token.code()),
-        // A broken or desynchronised connection: the server rolls back the
-        // open transaction when it closes, so a retry after reconnect is safe.
-        Error::Io { .. } | Error::Protocol(_) | Error::Routing { .. } => {
-            FailureClass::Retryable { reconnect: true }
-        }
-        _ => FailureClass::Permanent,
-    }
-}
-
-/// Classifies a SQL Server error number. Everything not listed (procedure
-/// `THROW`/`RAISERROR`, constraint violations, permissions, login failures,
-/// syntax) is permanent.
+/// Classifies a SQL Server error number: the shared rules, plus this sink's
+/// admission-lock error, which is retryable on the same connection.
 pub fn classify_server_code(code: u32) -> FailureClass {
-    if TRANSIENT_SERVER_ERRORS.contains(&code) || code == crate::session::ADMISSION_LOCK_ERROR {
+    if code == crate::session::ADMISSION_LOCK_ERROR {
         FailureClass::Retryable { reconnect: false }
-    } else if TRANSIENT_CONNECTION_ERRORS.contains(&code) || (49919..=49920).contains(&code) {
-        FailureClass::Retryable { reconnect: true }
     } else {
-        FailureClass::Permanent
+        drasi_mssql_common::client::classify_server_code(code)
     }
 }
-
-/// A connection attempt exceeded `connectTimeoutMs`.
-#[derive(Debug)]
-pub struct ConnectTimeout(pub Duration);
-
-impl std::fmt::Display for ConnectTimeout {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SQL Server connection timed out after {:?}", self.0)
-    }
-}
-
-impl std::error::Error for ConnectTimeout {}
 
 /// First backoff ceiling; doubles per attempt up to [`MAX_BACKOFF`].
 pub const BASE_BACKOFF: Duration = Duration::from_millis(100);

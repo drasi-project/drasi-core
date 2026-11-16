@@ -16,7 +16,7 @@ native-runtime = [
     "dep:log", "dep:tokio", "dep:uuid", "rusqlite/column_decltype",
     "rusqlite/preupdate_hook", "rusqlite/limits",
 ]
-rest = ["dep:async-trait", "dep:axum", "dep:tokio", "tokio/net"]
+rest = ["dep:async-trait", "dep:axum", "dep:log", "dep:tokio", "tokio/net"]
 
 [dependencies]
 drasi-core-types.workspace = true

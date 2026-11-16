@@ -39,7 +39,7 @@ async fn graph_mode(
     query_text: &str,
     positional: bool,
 ) -> Result<Graph> {
-    let tracked = !source_settings["replay"].is_null();
+    let tracked = source_settings.get("retention").is_some();
     let source_name = match (tracked, positional) {
         (true, false) => drasi_computation_source_mysql::MYSQL_SHARED_CHANGES,
         (false, false) => drasi_computation_source_mysql::MYSQL_CHANGES,
@@ -61,18 +61,13 @@ async fn graph_mode(
         })
         .context("native procedure factory")?
         .clone();
-    let mut source =
-        source_factory.specification(id("source"), json!({"stream":"changes","settings":{}}))?;
+    let mut source = source_specification(
+        &source_factory,
+        &source_settings,
+        json!({"stream":"changes"}),
+    )?;
     let directory = tempfile::tempdir()?;
     let sink = super::storedproc::sink_specification(&sink_factory, &database.sink_settings())?;
-    let reference = |key: &str| ConfigurationValue::Reference {
-        resource: resource("settings"),
-        key: key.into(),
-        secret: true,
-    };
-    source
-        .configuration
-        .insert("settings".into(), reference("source"));
     let owners = ["left", "right"]
         .iter()
         .map(|name| {
@@ -107,18 +102,8 @@ async fn graph_mode(
             }))),
         ),
     )?
-    .component(
-        drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1")
-            .expect("fixture component name"),
-        source,
-        source_factory,
-    )
-    .component(
-        drasi_lib::computation::v1::ComponentName::try_new("fixture-component-2")
-            .expect("fixture component name"),
-        sink,
-        sink_factory,
-    )
+    .component(name("source"), source, source_factory)
+    .component(name("procedures"), sink, sink_factory)
     .bind_stream(endpoint("source", "out"), stream("changes"));
     if tracked {
         builder = builder
@@ -151,9 +136,8 @@ async fn graph_mode(
     ));
     let mut rows = Vec::new();
     let mut outputs = Vec::new();
-    for owner in &owners {
-        let name = owner.component_id().as_str();
-        let mut definition = query_definition(name);
+    for (label, owner) in ["left", "right"].into_iter().zip(&owners) {
+        let mut definition = query_definition(label);
         definition.query = query_text.into();
         let mut query = ContinuousQueryTransformer::new_configured(
             definition,
@@ -178,8 +162,7 @@ async fn graph_mode(
                         }
                 })
                 .context("native standalone snapshot")?;
-            let mut configuration =
-                json!({"source":"source","stream":"changes","settings":settings});
+            let mut configuration = bootstrap_configuration(settings);
             if !labels.is_empty() {
                 anyhow::ensure!(
                     !tracked,
@@ -188,7 +171,7 @@ async fn graph_mode(
                 configuration["labels"] = json!(labels);
             }
             query = query.with_bootstrap(factory.create_provider(
-                id(name),
+                id(label),
                 configuration,
                 Some(scope()),
                 tracked.then(|| owner.clone()),
@@ -197,42 +180,13 @@ async fn graph_mode(
         rows.push(query.results());
         let (sender, receiver) = mpsc::channel(32);
         outputs.push(receiver);
-        let capture = format!("{name}-capture");
-        builder = builder
-            .transformer(
-                drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-1")
-                    .expect("fixture component name"),
-                Box::new(query),
-            )
-            .sink(
-                drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
-                    .expect("fixture component name"),
-                Box::new(Capture {
-                    descriptor: ComponentDescriptor::try_new(
-                        id(&capture),
-                        vec![PortDescriptor::new(
-                            PortId::try_new("in")?,
-                            PortDirection::Input,
-                            QueryChangeCodec::schema().descriptor().clone(),
-                            PipeRequirements::default(),
-                        )],
-                    )?,
-                    sender,
-                }),
-            )
-            .bind_stream(endpoint(name, "out"), stream(&format!("{name}/out")))
-            .connect(
-                EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in")),
-                Box::new(BoundedPipeConfig { capacity: 8 }),
-            )
-            .connect(
-                EdgeDefinition::new(endpoint(name, "out"), endpoint("procedures", "in")),
-                Box::new(BoundedPipeConfig { capacity: 8 }),
-            )
-            .connect(
-                EdgeDefinition::new(endpoint(name, "out"), endpoint(&capture, "in")),
-                Box::new(BoundedPipeConfig { capacity: 8 }),
-            );
+        builder = query_branch(
+            builder,
+            label,
+            query,
+            sender,
+            Box::new(BoundedPipeConfig { capacity: 8 }),
+        )?;
     }
     let core = DrasiLib::builder()
         .with_query_factory(
@@ -248,6 +202,7 @@ async fn graph_mode(
                 .clone(),
         )
         .with_id(INSTANCE)
+        .with_allow_external_component_ids(true)
         .with_components(builder.build()?)
         .build()
         .await?;
@@ -258,6 +213,14 @@ async fn graph_mode(
         rows,
         outputs,
     })
+}
+
+/// Untracked factories and the standalone snapshot reject `retention`.
+fn untracked(settings: &mut Value) {
+    settings
+        .as_object_mut()
+        .expect("source settings object")
+        .remove("retention");
 }
 
 async fn finish(graph: Graph, database: &mut Database, proof: Result<()>) -> Result<()> {
@@ -281,13 +244,14 @@ async fn positional_live(dynamic: bool, gtid: bool) -> Result<()> {
         .await?;
     let plugins = libraries(dynamic)?;
     let mut settings = database.source_settings();
-    settings["replay"] = Value::Null;
-    settings["start"] = if gtid {
-        json!({"mode":"gtid","set":database.sql("SELECT @@global.gtid_executed").await?})
+    untracked(&mut settings);
+    if gtid {
+        settings["startFrom"] = json!("gtid");
+        settings["startGtidSet"] = json!(database.sql("SELECT @@global.gtid_executed").await?);
     } else {
-        json!({"mode":"end"})
-    };
-    settings["table_keys"] = json!([{"table":"items","key_columns":["@0"]}]);
+        settings["startFrom"] = json!("end");
+    }
+    settings["tableKeys"] = json!([{"table":"items","keyColumns":["@0"]}]);
     let mut graph = graph_mode(
         &database,
         &plugins,
@@ -301,10 +265,7 @@ async fn positional_live(dynamic: bool, gtid: bool) -> Result<()> {
         tokio::time::timeout(Duration::from_secs(30), graph.core.start()).await??;
         let schema = graph
             .core
-            .get_source_schema_by_name(
-                &drasi_core_types::ComponentName::try_new("source")
-                    .expect("fixture component name"),
-            )
+            .get_source_schema_by_name(&name("source"))
             .await?
             .context("positional catalog schema")?;
         assert_eq!(
@@ -415,9 +376,11 @@ async fn positional_historical_catalog_fence(dynamic: bool) -> Result<()> {
         .await?;
     let plugins = libraries(dynamic)?;
     let mut settings = database.source_settings();
-    settings["replay"] = Value::Null;
-    settings["start"] = json!({"mode":"position","file":file,"position":offset});
-    settings["table_keys"] = json!([{"table":"items","key_columns":["@0"]}]);
+    untracked(&mut settings);
+    settings["startFrom"] = json!("position");
+    settings["startBinlogFile"] = json!(file);
+    settings["startBinlogPosition"] = json!(offset);
+    settings["tableKeys"] = json!([{"table":"items","keyColumns":["@0"]}]);
     let mut rejected = graph_mode(
         &database,
         &plugins,
@@ -459,7 +422,10 @@ async fn positional_historical_catalog_fence(dynamic: bool) -> Result<()> {
         "positional historical charset/signedness/name fence",
         [proof, cleanup],
     )?;
-    settings["start"] = json!({"mode":"end"});
+    let object = settings.as_object_mut().context("source settings")?;
+    object.remove("startBinlogFile");
+    object.remove("startBinlogPosition");
+    settings["startFrom"] = json!("end");
     let mut matching = graph_mode(
         &database,
         &plugins,
@@ -499,10 +465,7 @@ async fn positional_checkpoint_catalog_fence(dynamic: bool) -> Result<()> {
         Arc::new(Semaphore::new(64)),
     )
     .await?;
-    let key = SourceProgressKey::Source(
-        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
-            .expect("fixture UUID"),
-    );
+    let key = source_key();
     let mut checkpoints = Vec::new();
     let proof = async {
         graph.core.start().await?;
@@ -596,13 +559,13 @@ async fn legacy_sql_roles(dynamic: bool) -> Result<()> {
         .await?;
     let plugins = libraries(dynamic)?;
     let standalone = |mut settings: Value| {
-        settings["replay"] = Value::Null;
-        settings["start"] = json!({"mode":"end"});
+        untracked(&mut settings);
+        settings["startFrom"] = json!("end");
         settings
     };
     let mut snapshot = standalone(legacy.source_settings());
-    snapshot["connection"]["user"] = json!("snapshot_reader");
-    snapshot["connection"]["password"] = json!("snapshot-only");
+    snapshot["user"] = json!("snapshot_reader");
+    snapshot["password"] = json!("snapshot-only");
     let mut graph = graph(
         &legacy,
         &plugins,
@@ -690,12 +653,13 @@ async fn configured_start(dynamic: bool, gtid: bool) -> Result<()> {
     database.initialize().await?;
     let plugins = libraries(dynamic)?;
     let mut settings = database.source_settings();
-    settings["replay"] = Value::Null;
-    settings["start"] = if gtid {
-        json!({"mode":"gtid","set":database.sql("SELECT @@global.gtid_executed").await?})
+    untracked(&mut settings);
+    if gtid {
+        settings["startFrom"] = json!("gtid");
+        settings["startGtidSet"] = json!(database.sql("SELECT @@global.gtid_executed").await?);
     } else {
-        json!({"mode":"start"})
-    };
+        settings["startFrom"] = json!("beginning");
+    }
     database
         .sql("INSERT INTO items VALUES(2,'replayed')")
         .await?;
@@ -760,17 +724,18 @@ async fn manual_keys(dynamic: bool, coordinated: bool) -> Result<()> {
         GRANT SELECT ON test.items TO snapshot_reader@'%';").await?;
     let plugins = libraries(dynamic)?;
     let mut settings = database.source_settings();
-    settings["replay"] = Value::Null;
-    settings["start"] = json!({"mode":"end"});
-    settings["table_keys"] = json!([{"table":"items","key_columns":["tenant","code"]}]);
+    untracked(&mut settings);
+    settings["startFrom"] = json!("end");
+    settings["tableKeys"] = json!([{"table":"items","keyColumns":["tenant","code"]}]);
     if coordinated {
-        settings["replay"] = json!("server");
-        settings["start"] = json!({"mode":"snapshot","lock_timeout_ms":5000});
+        settings["retention"] = json!("server");
+        settings["startFrom"] = json!("snapshot");
+        settings["snapshotLockTimeoutMs"] = json!(5000);
     }
     let mut snapshot = settings.clone();
     if !coordinated {
-        snapshot["connection"]["user"] = json!("snapshot_reader");
-        snapshot["connection"]["password"] = json!("snapshot-only");
+        snapshot["user"] = json!("snapshot_reader");
+        snapshot["password"] = json!("snapshot-only");
     }
     let mut graph = graph(
         &database,
@@ -803,10 +768,7 @@ async fn manual_keys(dynamic: bool, coordinated: bool) -> Result<()> {
         }
         let schema = graph
             .core
-            .get_source_schema_by_name(
-                &drasi_core_types::ComponentName::try_new("source")
-                    .expect("fixture component name"),
-            )
+            .get_source_schema_by_name(&name("source"))
             .await?
             .context("captured catalog")?;
         assert_eq!(schema.nodes[0].properties.len(), 3);
@@ -837,10 +799,39 @@ async fn manual_keys(dynamic: bool, coordinated: bool) -> Result<()> {
             .sql("UPDATE items SET value='offline' WHERE code=3")
             .await?;
         tokio::time::timeout(Duration::from_secs(30), graph.core.start()).await??;
+        // The query indexes are RocksDB (the consumer sink needs persistent
+        // producers), so a restart restores the queries instead of taking a
+        // new snapshot. The coordinated source resumes at its committed
+        // position and replays the offline update; the untracked source
+        // restarts at the end of the binary log, so the restored rows stay
+        // as they were and only later changes arrive.
+        if coordinated {
+            for output in &mut graph.outputs {
+                next(output).await?;
+            }
+        }
+        let offline = json!({"id":3,"tenant":1,"value":"offline"});
         for result in &graph.rows {
             anyhow::ensure!(
-                rows(result)?.contains(&json!({"id":3,"tenant":1,"value":"offline"})),
-                "memory restart did not refresh the standalone/coordinated snapshot"
+                rows(result)?.contains(&offline) == coordinated,
+                "restart did not resume as its retention requires: {:?}",
+                rows(result)?
+            );
+        }
+        for owner in &graph.owners {
+            let state = owner.snapshot();
+            anyhow::ensure!(state.bootstrap_complete && state.persistent && state.recovered);
+        }
+        database
+            .sql("UPDATE items SET value='restarted' WHERE code=3")
+            .await?;
+        for output in &mut graph.outputs {
+            next(output).await?;
+        }
+        for result in &graph.rows {
+            anyhow::ensure!(
+                rows(result)?.contains(&json!({"id":3,"tenant":1,"value":"restarted"})),
+                "restarted source did not stream"
             );
         }
         Ok(())
@@ -854,12 +845,12 @@ async fn database_wide(dynamic: bool) -> Result<()> {
     database.initialize().await?;
     let plugins = libraries(dynamic)?;
     let mut settings = database.source_settings();
-    settings["replay"] = Value::Null;
-    settings["start"] = json!({"mode":"end"});
+    untracked(&mut settings);
+    settings["startFrom"] = json!("end");
     settings["tables"] = json!([]);
-    settings["table_keys"] = json!([
-        {"table":"audit","key_columns":["query_id","operation","id"]},
-        {"table":"fresh","key_columns":["code"]}
+    settings["tableKeys"] = json!([
+        {"table":"audit","keyColumns":["query_id","operation","id"]},
+        {"table":"fresh","keyColumns":["code"]}
     ]);
     let mut graph = graph(
         &database,
@@ -873,10 +864,7 @@ async fn database_wide(dynamic: bool) -> Result<()> {
         tokio::time::timeout(Duration::from_secs(30), graph.core.start()).await??;
         let before = graph
             .core
-            .get_source_schema_by_name(
-                &drasi_core_types::ComponentName::try_new("source")
-                    .expect("fixture component name"),
-            )
+            .get_source_schema_by_name(&name("source"))
             .await?
             .context("startup catalog")?;
         assert!(!before.nodes.iter().any(|node| node.label == "fresh"));
@@ -897,10 +885,7 @@ async fn database_wide(dynamic: bool) -> Result<()> {
             .await?;
         let schema = graph
             .core
-            .get_source_schema_by_name(
-                &drasi_core_types::ComponentName::try_new("source")
-                    .expect("fixture component name"),
-            )
+            .get_source_schema_by_name(&name("source"))
             .await?
             .context("live catalog")?;
         let node = schema
@@ -945,12 +930,12 @@ async fn readonly_view(dynamic: bool) -> Result<()> {
         .await?;
     let plugins = libraries(dynamic)?;
     let mut settings = database.source_settings();
-    settings["replay"] = Value::Null;
-    settings["start"] = json!({"mode":"end"});
+    untracked(&mut settings);
+    settings["startFrom"] = json!("end");
     let mut snapshot = settings.clone();
     snapshot["tables"] = json!(["items_view", "missing_allowed"]);
-    snapshot["connection"]["user"] = json!("snapshot_reader");
-    snapshot["connection"]["password"] = json!("snapshot-only");
+    snapshot["user"] = json!("snapshot_reader");
+    snapshot["password"] = json!("snapshot-only");
     let graph = graph(
         &database,
         &plugins,
@@ -984,9 +969,9 @@ async fn snapshot_cleanup(dynamic: bool) -> Result<()> {
         .await?;
     let plugins = libraries(dynamic)?;
     let mut settings = database.source_settings();
-    settings["replay"] = Value::Null;
-    settings["start"] = json!({"mode":"end"});
-    settings["io_timeout_ms"] = json!(500);
+    untracked(&mut settings);
+    settings["startFrom"] = json!("end");
+    settings["ioTimeoutMs"] = json!(500);
     let factory = plugins[1]
         .bootstrap_factories()
         .iter()
@@ -997,7 +982,7 @@ async fn snapshot_cleanup(dynamic: bool) -> Result<()> {
         .context("standalone factory")?;
     let provider = factory.create_provider(
         id("snapshot-owner"),
-        json!({"source":"source","stream":"changes","settings":settings}),
+        bootstrap_configuration(&settings),
         Some(scope()),
         None,
     )?;

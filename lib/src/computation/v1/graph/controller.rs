@@ -3275,13 +3275,25 @@ impl Operations {
         result
     }
 
+    /// Whether a lifecycle group or retirement reserves any of `selected`.
+    ///
+    /// A start group reserves only members it has yet to settle or whose
+    /// `Start` is still running. Settled members (blocked, not created, already
+    /// running) wait for their own later activation, so an unfinished sibling's
+    /// Start, possibly waiting on those members, must not keep them reserved.
     fn conflicts(&self, selected: &BTreeSet<usize>, starts: bool) -> bool {
         !selected.is_disjoint(&self.retiring)
             || (starts
-                && self
-                    .starting
-                    .iter()
-                    .any(|group| !group.selected.is_disjoint(selected)))
+                && self.starting.iter().any(|group| {
+                    selected.iter().any(|index| {
+                        group.pending.contains(index)
+                            || group.selected.contains(index)
+                                && self
+                                    .active
+                                    .get(index)
+                                    .is_some_and(|active| active.operation == Operation::Start)
+                    })
+                }))
             || self
                 .stopping
                 .iter()

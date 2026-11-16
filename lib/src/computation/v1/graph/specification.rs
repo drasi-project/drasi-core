@@ -649,6 +649,18 @@ pub trait ComponentFactory: Send + Sync {
     fn binds_inputs(&self) -> bool {
         false
     }
+    /// Whether this specification's inputs require producers with persistent
+    /// progress (an exactly-once consumer). Pure metadata over the
+    /// specification: no construction or I/O. The graph refuses, when an edge
+    /// becomes bindable or either endpoint is created, replaced or updated, to
+    /// connect such an input to a producer known to lack persistent progress
+    /// (a query on an in-memory index provider).
+    fn requires_persistent_producers(
+        &self,
+        _specification: &ComponentSpecification,
+    ) -> anyhow::Result<bool> {
+        Ok(false)
+    }
     /// Additional pure definition validation, after generic schema/dependency checks.
     fn validate(&self, specification: &ComponentSpecification) -> anyhow::Result<()>;
     fn validate_resources(

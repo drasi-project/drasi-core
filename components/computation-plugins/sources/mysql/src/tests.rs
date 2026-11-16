@@ -2,34 +2,81 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
-use drasi_computation_contracts::{ComponentId, PortDirection};
-use drasi_computation_plugin_sdk::ExportedPlugin;
-use serde_json::json;
+use drasi_computation_contracts::{
+    lifecycle::{CancellationToken, DisposeReason, OperationScope, StateIntent, StopMode},
+    ComponentId, PortDirection,
+};
+use drasi_computation_plugin_sdk::{
+    lifecycle::{
+        DisposeContext, InitializeContext, PauseContext, ResumeContext, StartContext, StopContext,
+    },
+    ExportedPlugin, NativeComponent,
+};
+use serde_json::{json, Value};
+use std::time::Duration;
 
-#[test]
-fn positional_factories_are_explicit_and_do_not_claim_coordinated_loading() -> Result<()> {
-    let factory = MySqlPositionalChangesFactory;
-    let mut request = CreateRequest {
+fn request(factory: &dyn Factory, configuration: Value) -> Result<CreateRequest> {
+    Ok(CreateRequest {
         inputs: Vec::new(),
         id: ComponentId::try_new("8b637385-6167-54c4-9589-3dda2fcd1d21")?,
         implementation: factory.metadata().implementation,
         configuration_version: 1,
-        configuration: json!({
-            "stream":"changes",
-            "settings":{
-                "connection":{"host":"no-io-at-construction","port":3306,"database":"test",
-                    "user":"user","password":"secret","ssl_mode":"disabled","tls_ca_pem":null,
-                    "server_id":1,"heartbeat_interval_ms":100},
-                "tables":["items"],"table_keys":[{"table":"items","key_columns":["@0"]}],
-                "output":"changes","replay":null,"start":{"mode":"end"},
-                "transactions":{"max_changes":16,"max_bytes":1048576,"max_duration_ms":1000},
-                "max_protocol_bytes":1048576,"io_timeout_ms":1000
-            }
-        }),
+        configuration,
         scope: None,
         activation_credentials_bound: false,
         update_directive: None,
-    };
+    })
+}
+
+/// A source configuration whose server refuses connections at once.
+fn unreachable(extra: Value) -> Value {
+    let mut value = json!({
+        "stream": "changes",
+        "host": "127.0.0.1",
+        "port": 1,
+        "database": "test",
+        "user": "user",
+        "password": "secret",
+        "sslMode": "disabled",
+        "ioTimeoutMs": 2000,
+        "reconnectBudgetMs": 0
+    });
+    for (key, field) in extra.as_object().into_iter().flatten() {
+        value[key] = field.clone();
+    }
+    value
+}
+
+fn scope(deadline: Option<tokio::time::Instant>, token: CancellationToken) -> OperationScope {
+    OperationScope::new(
+        "operation",
+        "8b637385-6167-54c4-9589-3dda2fcd1d21",
+        1,
+        deadline,
+        token,
+    )
+}
+
+fn source(factory: &dyn Factory, configuration: Value) -> Result<Box<dyn NativeSourceObject>> {
+    let created = factory.create(&request(factory, configuration)?, ControlSender::default())?;
+    match created.component {
+        Component::Source(source) => Ok(source),
+        _ => anyhow::bail!("not a source"),
+    }
+}
+
+use drasi_computation_plugin_sdk::NativeSource as NativeSourceObject;
+
+#[test]
+fn positional_factories_are_explicit_and_do_not_claim_coordinated_loading() -> Result<()> {
+    let factory = MySqlPositionalChangesFactory;
+    let mut request = request(
+        &factory,
+        unreachable(json!({
+            "tables": ["items"],
+            "tableKeys": [{"table": "items", "keyColumns": ["@0"]}]
+        })),
+    )?;
     factory.create(&request, ControlSender::default())?;
     assert!(!factory.supports_consumer_progress());
     assert!(MySqlSharedPositionalChangesFactory.supports_consumer_progress());
@@ -38,11 +85,11 @@ fn positional_factories_are_explicit_and_do_not_claim_coordinated_loading() -> R
         MySqlChangesFactory.metadata().implementation
     );
     for keys in [json!([]), json!(["id"]), json!(["@00"]), json!(["@4096"])] {
-        request.configuration["settings"]["table_keys"][0]["key_columns"] = keys;
+        request.configuration["tableKeys"][0]["keyColumns"] = keys;
         assert!(factory.create(&request, ControlSender::default()).is_err());
     }
-    request.configuration["settings"]["table_keys"][0]["key_columns"] = json!(["@0"]);
-    request.configuration["settings"]["start"] = json!({"mode":"snapshot","lock_timeout_ms":1000});
+    request.configuration["tableKeys"][0]["keyColumns"] = json!(["@0"]);
+    request.configuration["startFrom"] = json!("snapshot");
     assert!(factory.create(&request, ControlSender::default()).is_err());
     Ok(())
 }
@@ -52,43 +99,41 @@ fn factory_metadata_constructs_without_database_io() -> Result<()> {
     ExportedPlugin::new(plugin()?)?;
     #[cfg(feature = "dynamic-plugin")]
     assert!(!drasi_computation_plugin_metadata().is_null());
-    for (name, metadata, output) in [
-        (
-            MYSQL_CHANGES,
-            MySqlChangesFactory.metadata(),
-            MySqlOutput::Changes,
-        ),
+    let factories: [(&str, &dyn Factory, MySqlOutput); 7] = [
+        (MYSQL_CHANGES, &MySqlChangesFactory, MySqlOutput::Changes),
         (
             MYSQL_UNTRACKED_TRANSACTIONS,
-            MySqlUntrackedTransactionsFactory.metadata(),
+            &MySqlUntrackedTransactionsFactory,
             MySqlOutput::Transactions,
         ),
         (
             MYSQL_TRANSACTIONS,
-            MySqlTransactionsFactory.metadata(),
+            &MySqlTransactionsFactory,
             MySqlOutput::Transactions,
         ),
         (
             MYSQL_SHARED_TRANSACTIONS,
-            MySqlSharedTransactionsFactory.metadata(),
+            &MySqlSharedTransactionsFactory,
             MySqlOutput::Transactions,
         ),
         (
             MYSQL_SHARED_CHANGES,
-            MySqlSharedChangesFactory.metadata(),
+            &MySqlSharedChangesFactory,
             MySqlOutput::Changes,
         ),
         (
             MYSQL_POSITIONAL_CHANGES,
-            MySqlPositionalChangesFactory.metadata(),
+            &MySqlPositionalChangesFactory,
             MySqlOutput::Changes,
         ),
         (
             MYSQL_SHARED_POSITIONAL_CHANGES,
-            MySqlSharedPositionalChangesFactory.metadata(),
+            &MySqlSharedPositionalChangesFactory,
             MySqlOutput::Changes,
         ),
-    ] {
+    ];
+    for (name, factory, output) in factories {
+        let metadata = factory.metadata();
         assert_eq!(
             metadata.implementation,
             ImplementationIdentity::try_new(name, "1")?
@@ -103,21 +148,19 @@ fn factory_metadata_constructs_without_database_io() -> Result<()> {
             metadata.ports[0].schema(),
             GraphChangeCodec::schema().descriptor()
         );
-        assert!(metadata.configuration.fields["settings"].secret);
+        assert!(metadata.configuration.fields["password"].secret);
+        assert!(metadata.configuration.fields["tlsClientKeyPem"].secret);
+        assert!(!metadata.configuration.fields.contains_key("settings"));
+        assert!(metadata.capabilities.management && metadata.capabilities.erases_owned_state);
+        assert!(factory.supports_update_planning());
+        assert!(factory.supports_activation_credentials());
+        let details = factory.configuration_details().context("details")?;
+        details.validate_schema(&metadata.configuration)?;
         let id = ComponentId::generate();
         let descriptor = MySqlSource::describe(id.clone(), output)?;
         assert_eq!(descriptor.id(), &id);
         assert_eq!(descriptor.ports(), metadata.ports.as_slice());
     }
-    let changes = MySqlChangesFactory.metadata();
-    let rows = MySqlSharedChangesFactory.metadata();
-    let transactions = MySqlTransactionsFactory.metadata();
-    let shared = MySqlSharedTransactionsFactory.metadata();
-    assert_eq!(changes.ports, rows.ports);
-    assert_eq!(transactions.ports, shared.ports);
-    // Both modes publish standard graph data; the mode is the implementation, not a schema.
-    assert_eq!(changes.ports, transactions.ports);
-    assert_ne!(changes.implementation, transactions.implementation);
     assert!(!MySqlChangesFactory.supports_source_progress());
     assert!(!MySqlChangesFactory.supports_consumer_progress());
     assert!(MySqlTransactionsFactory.supports_source_progress());
@@ -125,7 +168,164 @@ fn factory_metadata_constructs_without_database_io() -> Result<()> {
     assert!(MySqlSharedTransactionsFactory.supports_consumer_progress());
     assert!(MySqlSharedChangesFactory.supports_consumer_progress());
     assert!(!MySqlSharedChangesFactory.supports_source_progress());
-    assert!(rows.configuration.fields.contains_key("persistent"));
-    assert_ne!(rows.implementation, shared.implementation);
+    assert!(MySqlSharedChangesFactory
+        .metadata()
+        .configuration
+        .fields
+        .contains_key("persistent"));
+    Ok(())
+}
+
+#[test]
+fn configuration_round_trips_through_untracked_factories() -> Result<()> {
+    for (factory, extra) in [
+        (&MySqlChangesFactory as &dyn Factory, json!({})),
+        (&MySqlUntrackedTransactionsFactory, json!({})),
+        (
+            &MySqlPositionalChangesFactory,
+            json!({"tables": ["items"], "tableKeys": [{"table": "items", "keyColumns": ["@0"]}]}),
+        ),
+    ] {
+        let configuration = unreachable(extra);
+        let created = source(factory, configuration.clone())?;
+        let reported = created.configuration()?;
+        assert_eq!(reported["password"], json!("secret"));
+        assert_eq!(reported["serverId"], Value::Null, "serverId stays derived");
+        for (key, value) in configuration.as_object().into_iter().flatten() {
+            assert_eq!(&reported[key], value, "{key}");
+        }
+        let again = source(factory, reported.clone())?;
+        assert_eq!(again.configuration()?, reported);
+    }
+    Ok(())
+}
+
+#[test]
+fn credential_context_names_the_configured_endpoint() -> Result<()> {
+    let factory = MySqlChangesFactory;
+    let context =
+        factory.activation_credential_context(&request(&factory, unreachable(json!({})))?)?;
+    assert_eq!(context.hostname, "127.0.0.1");
+    assert_eq!(context.port, 1);
+    Ok(())
+}
+
+async fn lifecycle_without_a_server() -> Result<()> {
+    let mut source = source(&MySqlChangesFactory, unreachable(json!({})))?;
+    source
+        .initialize(&InitializeContext::new(scope(
+            None,
+            CancellationToken::new(),
+        )))
+        .await?;
+    // Pause and resume of a source that is not running settle at once.
+    source
+        .pause(&PauseContext::new(scope(None, CancellationToken::new())))
+        .await?;
+    source
+        .resume(&ResumeContext::new(scope(None, CancellationToken::new())))
+        .await?;
+    // A failed start (connection refused) keeps the cleanup guard.
+    let failed = source
+        .start(&mut StartContext::new(
+            scope(None, CancellationToken::new()),
+            None,
+        ))
+        .await;
+    assert!(failed.is_err());
+    assert!(source
+        .start(&mut StartContext::new(
+            scope(None, CancellationToken::new()),
+            None
+        ))
+        .await
+        .is_err_and(|error| format!("{error:#}").contains("cleanup")));
+    source
+        .stop(&StopContext::new(
+            scope(None, CancellationToken::new()),
+            StopMode::Abort,
+        ))
+        .await?;
+    // A pre-cancelled start returns promptly and leaves nothing running.
+    let token = CancellationToken::new();
+    token.cancel();
+    let started = tokio::time::Instant::now();
+    assert!(source
+        .start(&mut StartContext::new(scope(None, token), None))
+        .await
+        .is_err());
+    assert!(started.elapsed() < Duration::from_secs(1));
+    source
+        .stop(&StopContext::new(
+            scope(None, CancellationToken::new()),
+            StopMode::Drain,
+        ))
+        .await?;
+    // An expired deadline bounds the start.
+    assert!(source
+        .start(&mut StartContext::new(
+            scope(Some(tokio::time::Instant::now()), CancellationToken::new()),
+            None
+        ))
+        .await
+        .is_err());
+    source
+        .stop(&StopContext::new(
+            scope(None, CancellationToken::new()),
+            StopMode::Drain,
+        ))
+        .await?;
+    // Erase owns nothing and succeeds twice.
+    for attempt in 1..=2 {
+        source
+            .dispose(&DisposeContext::new(
+                scope(None, CancellationToken::new()),
+                DisposeReason::Removal,
+                StateIntent::Erase,
+                attempt,
+            )?)
+            .await?;
+    }
+    assert!(source
+        .source_schema_reader()
+        .context("schema reader")?
+        .describe_schema()
+        .await
+        .is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn lifecycle_without_a_server_current_thread() -> Result<()> {
+    lifecycle_without_a_server().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lifecycle_without_a_server_multi_thread() -> Result<()> {
+    lifecycle_without_a_server().await
+}
+
+#[test]
+fn factory_assessment_classifies_requests() -> Result<()> {
+    let factory = MySqlChangesFactory;
+    let current = request(&factory, unreachable(json!({})))?;
+    let mut proposed = current.clone();
+    proposed.configuration["password"] = json!("rotated");
+    let assessment = factory.assess(&UpdateRequest {
+        current: current.clone(),
+        proposed: proposed.clone(),
+    })?;
+    assert!(matches!(
+        assessment,
+        Assessment::Supported {
+            boundary: drasi_computation_plugin_sdk::lifecycle::UpdateBoundary::Stop,
+            ..
+        }
+    ));
+    proposed.configuration["database"] = json!("other");
+    assert!(matches!(
+        factory.assess(&UpdateRequest { current, proposed })?,
+        Assessment::Unsupported { .. }
+    ));
     Ok(())
 }

@@ -53,6 +53,7 @@ fn every_field_has_a_classified_boundary() -> Result<()> {
         ("hostNameInCertificate", json!("sql.example")),
         ("progressTable", json!("dbo.other_progress")),
         ("maxStreams", json!(8)),
+        ("deliveryGuarantee", json!("atLeastOnce")),
         (
             "outputs",
             json!({"renamed": {"component": OUTPUT_ID, "port": "out"}}),

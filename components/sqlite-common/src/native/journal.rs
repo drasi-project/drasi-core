@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use drasi_computation_contracts::{
-    ComponentId, ConsumerProgressView, InputPositionComparator, InputPositionPolicy,
+    ComponentId, ConsumerProgressView, InputPositionComparator, InputPositionPolicy, SourceFailure,
     SourceProgressKey, SourceProgressSnapshot, SourceProgressView, SourceTransaction,
     SourceTransactionCodec, SourceTransactionLimits, StreamId, MAX_CONSUMER_PROGRESS_MEMBERS,
 };
@@ -421,10 +421,13 @@ impl Journal {
             [],
             |row| row.get(0),
         )?;
-        anyhow::ensure!(
-            schema == recorded_schema,
-            "native SQLite schema changed outside its transaction owner"
-        );
+        if schema != recorded_schema {
+            return Err(anyhow::Error::new(SourceFailure::SchemaChanged(
+                "the SQLite schema changed outside the source (external DDL on the database file); \
+                 remove the source with erase and add it again"
+                    .into(),
+            )));
+        }
         anyhow::ensure!(retired <= head, "native SQLite journal progress is damaged");
         let (count, total, low, high): (u64, u64, Option<u64>, Option<u64>) = transaction.query_row(
             "SELECT count(*),coalesce(sum(length(payload)),0),min(sequence),max(sequence) FROM __drasi_native_outbox_v1", [],
@@ -766,5 +769,184 @@ impl Journal {
             .context("invalid native SQLite journal timestamp")?;
         self.sent = sequence;
         Ok(Some((sequence, timestamp, transaction)))
+    }
+}
+
+/// The four journal tables a persistent native SQLite source owns.
+pub const OWNED_TABLES: [&str; 4] = [
+    "__drasi_native_outbox_v1",
+    "__drasi_native_consumers_v1",
+    "__drasi_native_bootstrap_v1",
+    "__drasi_native_state_v1",
+];
+
+/// The source identifier recorded in a stored journal binding, if any.
+fn binding_source(binding: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(binding).ok()?;
+    let items = value.as_array()?;
+    match items.first()? {
+        serde_json::Value::String(tag) if tag == "coordinated-v1" || tag == "keys-v1" => {
+            binding_source(items.get(1)?.as_str()?)
+        }
+        serde_json::Value::String(tag) if tag == "consumer-group-v1" => {
+            Some(items.get(1)?.as_str()?.to_owned())
+        }
+        serde_json::Value::Number(version) if version.as_u64() == Some(1) => {
+            Some(items.get(1)?.as_str()?.to_owned())
+        }
+        _ => None,
+    }
+}
+
+/// What [`erase_owned`] removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Erased {
+    /// The journal tables of this source were dropped.
+    Dropped,
+    /// Nothing to remove: no database file or no journal.
+    Absent,
+    /// The journal belongs to another source; it was left untouched.
+    NotOwned,
+}
+
+/// Drops this source's journal tables (`__drasi_native_{outbox,consumers,
+/// bootstrap,state}_v1`) in one transaction, never user tables.
+///
+/// Idempotent: a missing file or journal is success. Retry-safe: the tables
+/// are dropped together or not at all, so a locked database (`SQLITE_BUSY`
+/// after `busy_timeout`) leaves everything in place for a retry. A journal
+/// whose binding names another source is left untouched.
+pub fn erase_owned(
+    path: &std::path::Path,
+    source: &ComponentId,
+    busy_timeout: std::time::Duration,
+) -> Result<Erased> {
+    if !path.try_exists()? {
+        return Ok(Erased::Absent);
+    }
+    let connection = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .context("native SQLite erase could not open the database file")?;
+    connection.busy_timeout(busy_timeout)?;
+    let transaction =
+        rusqlite::Transaction::new_unchecked(&connection, rusqlite::TransactionBehavior::Immediate)
+            .context("native SQLite erase could not lock the database; retry")?;
+    let state: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='__drasi_native_state_v1')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !state {
+        return Ok(Erased::Absent);
+    }
+    let binding: Option<String> = transaction
+        .query_row(
+            "SELECT binding FROM __drasi_native_state_v1 WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if binding.as_deref().and_then(binding_source).as_deref() != Some(source.as_str()) {
+        return Ok(Erased::NotOwned);
+    }
+    for table in OWNED_TABLES {
+        transaction.execute_batch(&format!("DROP TABLE IF EXISTS \"{table}\""))?;
+    }
+    transaction
+        .commit()
+        .context("native SQLite erase could not commit; retry")?;
+    Ok(Erased::Dropped)
+}
+
+#[cfg(test)]
+mod erase_tests {
+    use super::*;
+
+    const SOURCE: &str = "00000000-0000-0000-0000-00000000004d";
+
+    fn journal(path: &std::path::Path, source: &str) -> Result<()> {
+        let connection = Connection::open(path)?;
+        let binding = serde_json::to_string(&(
+            "coordinated-v1",
+            serde_json::to_string(&(1u32, source, "out", "graph", "query", Vec::<String>::new()))?,
+        ))?;
+        connection.execute_batch(
+            "CREATE TABLE items(id INTEGER PRIMARY KEY);
+             CREATE TABLE __drasi_native_state_v1(singleton INTEGER PRIMARY KEY, binding TEXT NOT NULL);
+             CREATE TABLE __drasi_native_outbox_v1(sequence INTEGER PRIMARY KEY);
+             CREATE TABLE __drasi_native_bootstrap_v1(singleton INTEGER PRIMARY KEY);",
+        )?;
+        connection.execute(
+            "INSERT INTO __drasi_native_state_v1 VALUES(1,?1)",
+            [binding],
+        )?;
+        Ok(())
+    }
+
+    fn tables(path: &std::path::Path) -> Result<Vec<String>> {
+        let connection = Connection::open(path)?;
+        let mut statement = connection
+            .prepare("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name")?;
+        let names = statement
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(names)
+    }
+
+    #[test]
+    fn erase_drops_only_owned_journal_tables_and_is_idempotent() -> Result<()> {
+        let directory = std::env::temp_dir().join(format!("drasi-erase-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join("app.db");
+        let source = ComponentId::try_new(SOURCE)?;
+        let timeout = std::time::Duration::from_secs(1);
+        assert_eq!(erase_owned(&path, &source, timeout)?, Erased::Absent);
+        assert!(!path.exists(), "erase must not create a database file");
+        journal(&path, SOURCE)?;
+        assert_eq!(erase_owned(&path, &source, timeout)?, Erased::Dropped);
+        assert_eq!(tables(&path)?, ["items"]);
+        assert_eq!(erase_owned(&path, &source, timeout)?, Erased::Absent);
+
+        let other = directory.join("other.db");
+        journal(&other, "00000000-0000-0000-0000-000000000099")?;
+        assert_eq!(erase_owned(&other, &source, timeout)?, Erased::NotOwned);
+        assert_eq!(tables(&other)?.len(), 4);
+
+        let locked = directory.join("locked.db");
+        journal(&locked, SOURCE)?;
+        let holder = Connection::open(&locked)?;
+        holder.execute_batch("BEGIN EXCLUSIVE")?;
+        assert!(erase_owned(&locked, &source, std::time::Duration::from_millis(50)).is_err());
+        holder.execute_batch("ROLLBACK")?;
+        drop(holder);
+        assert_eq!(tables(&locked)?.len(), 4, "a locked erase changes nothing");
+        assert_eq!(erase_owned(&locked, &source, timeout)?, Erased::Dropped);
+        std::fs::remove_dir_all(&directory)?;
+        Ok(())
+    }
+
+    #[test]
+    fn binding_source_reads_every_binding_shape() {
+        let inner = serde_json::to_string(&(1u32, SOURCE, "out", "g", "q", Vec::<String>::new()))
+            .expect("binding");
+        assert_eq!(binding_source(&inner).as_deref(), Some(SOURCE));
+        let keyed =
+            serde_json::to_string(&("keys-v1", &inner, Vec::<String>::new())).expect("keys");
+        assert_eq!(binding_source(&keyed).as_deref(), Some(SOURCE));
+        let coordinated = serde_json::to_string(&("coordinated-v1", &keyed)).expect("coordinated");
+        assert_eq!(binding_source(&coordinated).as_deref(), Some(SOURCE));
+        let group = serde_json::to_string(&(
+            "consumer-group-v1",
+            SOURCE,
+            "out",
+            "g",
+            "p",
+            Vec::<String>::new(),
+        ))
+        .expect("group");
+        assert_eq!(binding_source(&group).as_deref(), Some(SOURCE));
+        assert_eq!(binding_source("not json"), None);
     }
 }

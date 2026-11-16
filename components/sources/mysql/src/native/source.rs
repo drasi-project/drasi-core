@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use drasi_lib::computation::v1::*;
 use drasi_mysql_common::native::{
     progress::ConsumerBinding,
-    source::{MySqlSource as Source, SourceError as NativeSourceError},
+    source::{Activation, MySqlSource as Source, SourceError as NativeSourceError},
 };
 use std::sync::Arc;
 
@@ -235,26 +235,53 @@ impl ComputationComponent for MySqlSource {
             contract
         }
     }
-    async fn start(&mut self, _context: &drasi_lib::computation::v1::StartContext) -> Result<()> {
-        self.inner.start().await.map_err(source_error)
+    /// Waits for progress readiness within the host deadline and
+    /// cancellation, then opens replication.
+    async fn start(&mut self, context: &drasi_lib::computation::v1::StartContext) -> Result<()> {
+        let scope = context.scope();
+        self.inner
+            .start_with(Activation {
+                cancellation: Some(scope.cancellation()),
+                deadline: scope.deadline(),
+                credentials: None,
+            })
+            .await
+            .map_err(source_error)
     }
-    async fn stop(&mut self, _context: &drasi_lib::computation::v1::StopContext) -> Result<()> {
-        self.inner.stop().await.map_err(source_error)
+    /// `Drain` closes replication gracefully; `Abort` cancels the worker.
+    async fn stop(&mut self, context: &drasi_lib::computation::v1::StopContext) -> Result<()> {
+        self.inner
+            .stop_with(context.mode(), context.scope().deadline())
+            .await
+            .map_err(source_error)
     }
-
-    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
-    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
-    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
-
+    /// The engine validates its configuration at construction and opens no
+    /// connection before start.
+    async fn initialize(
+        &mut self,
+        _context: &drasi_lib::computation::v1::InitializeContext,
+    ) -> Result<()> {
+        Ok(())
+    }
+    /// The native source pauses at a transaction boundary while the
+    /// replication connection stays open.
+    async fn pause(&mut self, context: &drasi_lib::computation::v1::PauseContext) -> Result<()> {
+        let scope = context.scope();
+        self.inner
+            .pause(scope.deadline(), Some(scope.cancellation()))
+            .await
+    }
+    async fn resume(&mut self, _context: &drasi_lib::computation::v1::ResumeContext) -> Result<()> {
+        self.inner.resume();
+        Ok(())
+    }
+    /// The source owns no server-side state, so erasing disposal has
+    /// nothing to remove; dispose retires the schema reader.
     async fn dispose(
         &mut self,
-        context: &drasi_lib::computation::v1::DisposeContext,
+        _context: &drasi_lib::computation::v1::DisposeContext,
     ) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            !context.erases_owned_state(),
-            "this component does not support permanent state removal"
-        );
-        Ok(())
+        self.inner.dispose()
     }
 }
 #[async_trait]

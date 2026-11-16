@@ -8,8 +8,9 @@
 //!   session before the next command), `reconnectBudgetMs`,
 //!   `shutdownTimeoutMs`.
 //! * Stop (restart): the connection: `host`, `port`, `database`, `user`,
-//!   `password`, `sslMode`, `allowRemotePlaintext`, the TLS material and
-//!   `connectTimeoutMs`.
+//!   `password`, `sslMode`, `allowRemotePlaintext`, the TLS material,
+//!   `connectTimeoutMs` and `deliveryGuarantee` (which producers the sink
+//!   accepts is fixed for one activation).
 //! * Replace (recreate, data preserved): `outputs` and the incoming edges.
 //! * Unsupported: `progressTable` and the graph identity. They change the
 //!   destination cursor's identity, so committed operations would no longer
@@ -66,6 +67,11 @@ pub fn plan(
     planner.field(
         "connectTimeoutMs",
         c.connect_timeout_ms != p.connect_timeout_ms,
+        Stop,
+    );
+    planner.field(
+        "deliveryGuarantee",
+        c.delivery_guarantee != p.delivery_guarantee,
         Stop,
     );
     planner.field("routes", c.routes != p.routes, Pause);

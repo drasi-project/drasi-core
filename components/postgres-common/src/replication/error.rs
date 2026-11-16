@@ -2,47 +2,13 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! Typed failures for native PostgreSQL CDC. Each is permanent: retrying the
-//! same activation cannot succeed, so reconnection never retries them.
+//! same activation cannot succeed, so reconnection never retries them. The
+//! type is the shared [`drasi_computation_contracts::SourceFailure`].
 
-use std::fmt;
-
-/// A permanent native PostgreSQL CDC failure.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PostgresCdcError {
-    /// A selected table, its key, its replica identity or the publication
-    /// changed incompatibly with the committed cursor's binding. Remove the
-    /// source (with erase) and add it again to rebuild from a new snapshot.
-    SchemaChanged(String),
-    /// The committed cursor is no longer retained by the server: the slot is
-    /// missing or invalidated, or its WAL was removed.
-    PositionUnavailable(String),
-    /// The server or publication cannot be used by this source.
-    Unsupported(String),
-    /// A slot that must be idle is in use by another connection.
-    SlotActive(String),
-}
-
-impl fmt::Display for PostgresCdcError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::SchemaChanged(detail) => write!(
-                f,
-                "PostgreSQL schema changed incompatibly ({detail}); remove the source with erase and add it again to rebuild"
-            ),
-            Self::PositionUnavailable(detail) => write!(
-                f,
-                "PostgreSQL position is no longer available ({detail}); explicit recovery is required"
-            ),
-            Self::Unsupported(detail) => write!(f, "unsupported PostgreSQL configuration: {detail}"),
-            Self::SlotActive(slot) => write!(
-                f,
-                "PostgreSQL replication slot {slot} is in use by another connection"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for PostgresCdcError {}
+/// The shared typed source failure, under its PostgreSQL name. Variants:
+/// `SchemaChanged`, `PositionUnavailable`, `Unsupported` and `StateInUse`
+/// (an owned replication slot is active).
+pub use drasi_computation_contracts::SourceFailure as PostgresCdcError;
 
 /// Whether `error` is, or wraps, a permanent [`PostgresCdcError`].
 pub fn is_permanent(error: &anyhow::Error) -> bool {

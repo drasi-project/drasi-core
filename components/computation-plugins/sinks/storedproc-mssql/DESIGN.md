@@ -132,7 +132,7 @@ at-least-once.**
 * A stream whose cursor row is erased (Erase, manual deletion) starts again:
   an in-flight batch then fails with a permanent error rather than repeating.
 
-### Cursor table (shared format 2)
+### Cursor table (shared format 3)
 
 The table is identical across the three stored-procedure sinks:
 
@@ -140,11 +140,12 @@ The table is identical across the three stored-procedure sinks:
 |---|---|---|
 | `owner` | `NVARCHAR(64)` | Lowercase hex SHA-256 of `"drasi.storedproc/owner/v1\0" + graph_id + "\0" + component_id` |
 | `stream_key` | `NVARCHAR(128)` | The host's ordered delivery stream (`drasi-delivery-stream-v1-…`) |
-| `version` | `SMALLINT` | Always 2 |
+| `version` | `SMALLINT` | Always 3 |
 | `sequence` | `NVARCHAR(20)` | Decimal producer sequence of the batch in progress |
 | `digest` | `VARBINARY(32)` | Content digest of that batch |
 | `operations` | `BIGINT` | Operations in that batch |
 | `completed` | `BIGINT` | Completed operation prefix |
+| `epoch` | `NVARCHAR(64)` | Empty for exactly-once streams; otherwise the at-least-once producer epoch |
 
 The primary key is `(owner, stream_key)`. Text columns are `NVARCHAR` so that
 the bound string parameters seek the key without implicit conversion. The
@@ -251,8 +252,37 @@ nothing. The factory declares `erases_owned_state`.
   validated to letters, digits and underscores and is bracket-quoted.
 * Errors and logs never include credentials or parameter values.
 
+## Delivery guarantee and producer epochs
+
+`deliveryGuarantee: exactlyOnce` (the default) accepts only producers with
+persistent progress. The graph refuses, at configuration time, to bind this
+sink's input to a query on an in-memory index provider (the host's native
+factory reports the requirement through
+`ComponentFactory::requires_persistent_producers`); a volatile input that
+still arrives is refused permanently at the first delivery, in the plugin's
+own identity derivation, with "use a persistent query or set
+deliveryGuarantee to atLeastOnce".
+
+`deliveryGuarantee: atLeastOnce` additionally accepts an in-memory query.
+Its output has no persistent progress, so the host derives a weaker identity
+(`Candidate::new_volatile`): the stream key excludes the producer's per-run
+incarnation, and the item's `DeliveryPosition` (version 2) carries an
+`epoch`, a SHA-256 of the incarnation, query generation and configuration
+hash. The host delivers such a batch without its `DeliveryRunner` ledger
+(nothing can resume across a restart), calling the plugin per operation and
+stopping at the first failure. The cursor applies one extra rule: an item
+whose epoch differs from the row's treats the row as absent and overwrites
+it, so a new producer run starts a fresh cursor on the same row; the same
+epoch deduplicates exactly as before. Exactly-once items (empty epoch) never
+match an at-least-once row, nor the reverse (a permanent receipt conflict).
+
+Format 2 tables are refused at Start, not migrated.
+
 ## Known limitations
 
+* In-memory (volatile) queries are accepted only with
+  `deliveryGuarantee: atLeastOnce` (at least once, no resume across a
+  restart); without opt-in the pairing is refused at configuration time.
 * Live SQL Server qualification is deferred (CW-78).
 * Identity bindings for external consumers need a Host change (see above).
 * A statement cannot be cancelled in place (no ATTENTION); see above.

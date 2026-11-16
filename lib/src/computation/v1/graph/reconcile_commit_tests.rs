@@ -2459,3 +2459,306 @@ async fn reconciliation_wires_retained_inflight_constructor_current_thread() {
 async fn reconciliation_wires_retained_inflight_constructor_multi_thread() {
     reconciliation_wires_retained_inflight_constructor().await;
 }
+
+mod producer_persistence {
+    use super::*;
+    use crate::computation::v1::ComputationGraphBuilder;
+    use crate::computation::v1::{
+        PortId, QueryIndexProviderResource, ResourceHandle, ResourceOwnership, ResourceRequirement,
+        ResourceSpecification, StreamId,
+    };
+    use drasi_computation_contracts::VolatileProducerRefused;
+    use drasi_core_types::interface::IndexError;
+
+    /// A sink that requires persistent producers unless configured
+    /// `deliveryGuarantee: atLeastOnce`, like the native consumers.
+    struct ConsumerFactory(FactoryDescriptor);
+
+    #[async_trait]
+    impl ComponentFactory for ConsumerFactory {
+        fn descriptor(&self) -> &FactoryDescriptor {
+            &self.0
+        }
+        fn requires_persistent_producers(
+            &self,
+            specification: &ComponentSpecification,
+        ) -> anyhow::Result<bool> {
+            Ok(!matches!(
+                specification.configuration.get("deliveryGuarantee"),
+                Some(crate::computation::v1::ConfigurationValue::Literal(value))
+                    if value == "atLeastOnce"
+            ))
+        }
+        fn validate(&self, _: &ComponentSpecification) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn plan_update(
+            &self,
+            _: &ComponentSpecification,
+            _: &ComponentSpecification,
+        ) -> anyhow::Result<ComponentUpdatePlan> {
+            Ok(ComponentUpdatePlan {
+                mode: ComponentUpdateMode::Recreate,
+                data: ComponentUpdateData::Preserve,
+            })
+        }
+        async fn create(
+            &self,
+            context: ConstructionContext,
+        ) -> std::result::Result<ConstructedComponent, ComponentCreationError> {
+            Ok(ConstructedComponent::sink(Box::new(Sink(
+                context.specification.descriptor.clone(),
+            ))))
+        }
+    }
+
+    /// A query-like producer whose `indexes` dependency is its actual provider.
+    struct ProducerFactory(FactoryDescriptor);
+
+    #[async_trait]
+    impl ComponentFactory for ProducerFactory {
+        fn descriptor(&self) -> &FactoryDescriptor {
+            &self.0
+        }
+        fn validate(&self, _: &ComponentSpecification) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn create(
+            &self,
+            context: ConstructionContext,
+        ) -> std::result::Result<ConstructedComponent, ComponentCreationError> {
+            Ok(ConstructedComponent::source(Box::new(Source(
+                context.specification.descriptor.clone(),
+            ))))
+        }
+    }
+
+    struct Durable;
+
+    #[async_trait]
+    impl drasi_core::computation::ComputationIndexProvider for Durable {
+        async fn create_indexes(
+            &self,
+            _: &str,
+            _: &ComponentId,
+        ) -> std::result::Result<drasi_core::computation::ComputationIndexes, IndexError> {
+            Err(IndexError::NotSupported)
+        }
+        fn is_volatile(&self) -> bool {
+            false
+        }
+    }
+
+    fn edge() -> EdgeDefinition {
+        EdgeDefinition::new(
+            Endpoint::new(id(1), PortId::try_new("out").unwrap()),
+            Endpoint::new(id(2), PortId::try_new("in").unwrap()),
+        )
+    }
+
+    fn consumer(guarantee: Option<&str>) -> (Arc<ConsumerFactory>, ComponentSpecification) {
+        let factory = Arc::new(ConsumerFactory(FactoryDescriptor {
+            implementation: ImplementationIdentity::try_new("test/persistent-consumer", "1")
+                .unwrap(),
+            role: ComponentRole::Sink,
+            configuration_version: 1,
+            configuration: ConfigurationSchema {
+                allow_additional: true,
+                ..Default::default()
+            },
+            dependencies: BTreeMap::new(),
+        }));
+        let mut configuration = BTreeMap::new();
+        if let Some(guarantee) = guarantee {
+            configuration.insert(
+                Arc::from("deliveryGuarantee"),
+                crate::computation::v1::ConfigurationValue::Literal(serde_json::json!(guarantee)),
+            );
+        }
+        let specification = ComponentSpecification {
+            descriptor: descriptor(2, false),
+            role: ComponentRole::Sink,
+            completion: Some(crate::computation::v1::SinkCompletion::Handled),
+            implementation: factory.0.implementation.clone(),
+            configuration_version: 1,
+            configuration,
+            dependencies: BTreeMap::new(),
+        };
+        (factory, specification)
+    }
+
+    fn builder(volatile: bool, guarantee: Option<&str>, connect: bool) -> ComputationGraphBuilder {
+        let resource = ResourceId::try_new("indexes").unwrap();
+        let producer = Arc::new(ProducerFactory(FactoryDescriptor {
+            implementation: ImplementationIdentity::try_new("test/query-like", "1").unwrap(),
+            role: ComponentRole::Source,
+            configuration_version: 1,
+            configuration: ConfigurationSchema::default(),
+            dependencies: BTreeMap::from([(
+                Arc::from("indexes"),
+                ResourceRequirement::exactly_one::<QueryIndexProviderResource>(
+                    ResourceRole::IndexBackend,
+                ),
+            )]),
+        }));
+        let producer_specification = ComponentSpecification {
+            descriptor: descriptor(1, true),
+            role: ComponentRole::Source,
+            completion: None,
+            implementation: producer.0.implementation.clone(),
+            configuration_version: 1,
+            configuration: BTreeMap::new(),
+            dependencies: BTreeMap::from([(Arc::from("indexes"), vec![resource.clone()])]),
+        };
+        let provider: Arc<dyn drasi_core::computation::ComputationIndexProvider> = if volatile {
+            Arc::new(drasi_core::computation::InMemoryComputationProvider)
+        } else {
+            Arc::new(Durable)
+        };
+        let (sink_factory, sink) = consumer(guarantee);
+        let builder = ComputationGraph::builder("producer-persistence")
+            .declare_resource(ResourceSpecification {
+                id: resource.clone(),
+                role: ResourceRole::IndexBackend,
+                ownership: ResourceOwnership::Borrowed,
+                binding: "indexes".into(),
+            })
+            .unwrap()
+            .provide_resource(
+                resource,
+                ResourceHandle::new(
+                    ResourceRole::IndexBackend,
+                    Arc::new(QueryIndexProviderResource(provider)),
+                ),
+            )
+            .unwrap()
+            .component(
+                ComponentName::try_new("query").unwrap(),
+                producer_specification,
+                producer,
+            )
+            .component(ComponentName::try_new("sink").unwrap(), sink, sink_factory)
+            .bind_stream(edge().from, StreamId::try_new("query/out").unwrap());
+        if connect {
+            builder.connect(
+                edge(),
+                Box::new(crate::computation::v1::BoundedPipeConfig { capacity: 2 }),
+            )
+        } else {
+            builder
+        }
+    }
+
+    fn refused(error: GraphError) {
+        let GraphError::Validation { component, source } = &error else {
+            panic!("expected a typed validation failure, got {error:#}");
+        };
+        assert_eq!(component, &id(2));
+        assert!(
+            source.downcast_ref::<VolatileProducerRefused>().is_some(),
+            "{source:#}"
+        );
+        let message = format!("{error:#}");
+        assert!(message.contains("use a persistent query"), "{message}");
+        assert!(
+            message.contains("set deliveryGuarantee to atLeastOnce"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn graph_construction_refuses_exactly_once_consumers_of_volatile_queries() {
+        refused(builder(true, None, true).build().err().expect("refused"));
+        refused(
+            builder(true, Some("exactlyOnce"), true)
+                .build()
+                .err()
+                .expect("refused"),
+        );
+        builder(true, Some("atLeastOnce"), true)
+            .build()
+            .expect("opted in");
+        builder(false, None, true)
+            .build()
+            .expect("persistent producer");
+    }
+
+    #[test]
+    fn binding_an_edge_later_is_refused_when_it_becomes_bindable() {
+        let graph = builder(true, None, false).build().expect("no edge yet");
+        let plan = preview(
+            &graph,
+            vec![DesiredMutation::Bind(DesiredRelationship {
+                definition: edge(),
+                policy: Default::default(),
+                pipe: DesiredPipe::Bounded { capacity: 2 },
+            })],
+        )
+        .expect("the preview only describes the change");
+        refused(
+            prepare(
+                &PreparationSnapshot::capture(&graph),
+                &plan,
+                TopologyBindings::default(),
+            )
+            .err()
+            .expect("refused"),
+        );
+        let graph = builder(true, Some("atLeastOnce"), false).build().unwrap();
+        let plan = preview(
+            &graph,
+            vec![DesiredMutation::Bind(DesiredRelationship {
+                definition: edge(),
+                policy: Default::default(),
+                pipe: DesiredPipe::Bounded { capacity: 2 },
+            })],
+        )
+        .unwrap();
+        prepare(
+            &PreparationSnapshot::capture(&graph),
+            &plan,
+            TopologyBindings::default(),
+        )
+        .expect("an opted-in consumer binds");
+    }
+
+    #[test]
+    fn switching_a_consumer_to_exactly_once_behind_a_volatile_edge_is_refused() {
+        let graph = builder(true, Some("atLeastOnce"), true).build().unwrap();
+        let (_, strict) = consumer(Some("exactlyOnce"));
+        let mut desired = graph
+            .snapshot
+            .select(GraphSelection::All)
+            .unwrap()
+            .components
+            .into_iter()
+            .find(|node| node.descriptor.id() == &id(2))
+            .unwrap();
+        desired.construction = ComponentConstruction::Factory(strict);
+        for mutation in [
+            DesiredMutation::UpdateComponent(desired.clone()),
+            DesiredMutation::ReplaceComponent(desired),
+        ] {
+            let error = match preview(&graph, vec![mutation]) {
+                Ok(plan) => prepare(
+                    &PreparationSnapshot::capture(&graph),
+                    &plan,
+                    TopologyBindings::default(),
+                )
+                .err()
+                .expect("refused"),
+                Err(error) => error,
+            };
+            refused(error);
+        }
+        // An unrelated change never fails on an existing pairing.
+        let graph = builder(true, Some("atLeastOnce"), true).build().unwrap();
+        let plan = preview(&graph, Vec::new()).unwrap();
+        prepare(
+            &PreparationSnapshot::capture(&graph),
+            &plan,
+            TopologyBindings::default(),
+        )
+        .expect("unrelated");
+    }
+}

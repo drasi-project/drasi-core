@@ -10,7 +10,7 @@
 //! `configuration()` is the persistence hook.
 
 use anyhow::{bail, ensure, Context, Result};
-use drasi_computation_contracts::{OutputAliases, SinkOutputs};
+use drasi_computation_contracts::{DeliveryGuarantee, OutputAliases, SinkOutputs};
 use drasi_mssql_common::sql::CommandTemplate;
 use drasi_reaction_common::{sql_template::validate_parameter_only, OperationType, QueryConfig};
 use serde::{Deserialize, Serialize};
@@ -38,7 +38,7 @@ pub const DEFAULT_RETRY_BUDGET_MS: u64 = 60_000;
 /// Upper bound on `retryBudgetMs`.
 pub const MAX_RETRY_BUDGET_MS: u64 = 3_600_000;
 /// Upper bound on `trustedCaPem`.
-pub const MAX_PEM_BYTES: usize = 256 * 1024;
+pub const MAX_PEM_BYTES: usize = drasi_mssql_common::client::MAX_PEM_BYTES;
 /// SQL Server identifier length limit.
 const MAX_IDENTIFIER: usize = 128;
 
@@ -61,30 +61,9 @@ fn retry_budget_ms() -> u64 {
     DEFAULT_RETRY_BUDGET_MS
 }
 
-/// TDS encryption. `required` (the default) encrypts the whole session and
-/// verifies the server certificate. The other modes are explicit opt-ins to
-/// plaintext and log a warning at start.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Encryption {
-    /// TLS for the whole session.
-    #[default]
-    Required,
-    /// TLS for the login packet only; query data is plaintext.
-    LoginOnly,
-    /// No TLS at all; credentials and data are plaintext.
-    Disabled,
-}
-
-impl Encryption {
-    pub(crate) fn level(self) -> tiberius::EncryptionLevel {
-        match self {
-            Self::Required => tiberius::EncryptionLevel::Required,
-            Self::LoginOnly => tiberius::EncryptionLevel::Off,
-            Self::Disabled => tiberius::EncryptionLevel::NotSupported,
-        }
-    }
-}
+/// TDS encryption, shared with the native SQL Server source
+/// (`drasi_mssql_common::client`). `required` is the default.
+pub use drasi_mssql_common::client::Encryption;
 
 /// Settings of the native SQL Server stored-procedure sink.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -110,6 +89,10 @@ pub struct MsSqlStoredProcConfig {
     pub progress_table: String,
     #[serde(default = "max_streams")]
     pub max_streams: u32,
+    /// `exactlyOnce` (default) accepts only producers with persistent
+    /// progress; `atLeastOnce` also accepts in-memory queries.
+    #[serde(default)]
+    pub delivery_guarantee: DeliveryGuarantee,
     #[serde(default, skip_serializing_if = "OutputAliases::is_empty")]
     pub outputs: OutputAliases,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -138,6 +121,7 @@ impl std::fmt::Debug for MsSqlStoredProcConfig {
             .field("host_name_in_certificate", &self.host_name_in_certificate)
             .field("progress_table", &self.progress_table)
             .field("max_streams", &self.max_streams)
+            .field("delivery_guarantee", &self.delivery_guarantee)
             .field("outputs", &self.outputs)
             .field("routes", &self.routes)
             .field("default_template", &self.default_template)
@@ -168,6 +152,7 @@ impl MsSqlStoredProcConfig {
             Field::new("hostNameInCertificate", String, false, "Host name expected in the server certificate when it differs from host.").default_description("The value of host."),
             Field::new("progressTable", String, false, "Destination cursor table, as table or schema.table (letters, digits and underscores). Created at start when missing; see CONFIGURATION.md for grants.").default(DEFAULT_PROGRESS_TABLE),
             Field::new("maxStreams", Integer, false, "Delivery streams this sink may keep in the progress table (one per producer output).").default(DEFAULT_MAX_STREAMS).minimum(1).maximum(MAX_MAX_STREAMS as u64),
+            Field::new("deliveryGuarantee", String, false, "exactlyOnce accepts only producers with persistent progress (persistent queries). atLeastOnce also accepts in-memory queries: their outputs are delivered at least once, deduplicated within one producer run, and not resumed across a process restart.").default(json!(DeliveryGuarantee::ExactlyOnce)).allowed([json!(DeliveryGuarantee::ExactlyOnce), json!(DeliveryGuarantee::AtLeastOnce)]),
             Field::new("outputs", Object, false, "Optional aliases for incoming outputs: a map of alias to {component, port?}. Every incoming edge is accepted; an unaliased output is named after its producing component. Routes match the alias.").constraint(drasi_computation_contracts::ConfigurationConstraint::output_aliases()),
             Field::new("routes", Object, false, "Per-output-alias command templates: {alias: {added?, updated?, deleted?: {template}}}. A route may also name the last dotted segment of an alias.").default(json!({})),
             Field::new("defaultTemplate", Object, false, "Command templates used when no route matches: {added?, updated?, deleted?: {template}}. At least one template must be configured across routes and defaultTemplate."),
@@ -189,51 +174,12 @@ impl MsSqlStoredProcConfig {
 
     /// Field checks that need no identity binding information.
     pub fn validate(&self) -> Result<()> {
-        ensure!(
-            !self.host.is_empty() && self.host.len() <= 253 && !self.host.contains('\0'),
-            "host must be a nonempty host name of at most 253 bytes"
-        );
-        ensure!(self.port != 0, "port must be in 1..=65535");
-        ensure!(
-            !self.database.is_empty()
-                && self.database.chars().count() <= MAX_IDENTIFIER
-                && !self.database.contains('\0'),
-            "database must be a nonempty name of at most 128 characters"
-        );
-        ensure!(
-            self.user.len() <= 1024 && !self.user.contains('\0'),
-            "user must be at most 1024 bytes"
-        );
-        if let Some(password) = &self.password {
-            ensure!(
-                password.len() <= 1024 && !password.contains('\0'),
-                "password must be at most 1024 bytes"
-            );
-        }
-        if let Some(pem) = &self.trusted_ca_pem {
-            ensure!(
-                pem.len() <= MAX_PEM_BYTES && pem.contains("-----BEGIN CERTIFICATE-----"),
-                "trustedCaPem must hold PEM certificates of at most {MAX_PEM_BYTES} bytes"
-            );
-            ensure!(
-                !self.trust_server_certificate,
-                "trustServerCertificate and trustedCaPem are mutually exclusive"
-            );
-        }
-        if self.encryption == Encryption::Disabled {
-            ensure!(
-                !self.trust_server_certificate
-                    && self.trusted_ca_pem.is_none()
-                    && self.host_name_in_certificate.is_none(),
-                "certificate settings require encryption"
-            );
-        }
-        if let Some(name) = &self.host_name_in_certificate {
-            ensure!(
-                !name.is_empty() && name.len() <= 253 && !name.contains('\0'),
-                "hostNameInCertificate must be a nonempty host name"
-            );
-        }
+        self.connection_settings().validate()?;
+        drasi_mssql_common::client::validate_literal_credentials(
+            &self.user,
+            self.password.as_deref(),
+            true,
+        )?;
         ProgressTable::parse(&self.progress_table)?;
         ensure!(
             (1..=MAX_MAX_STREAMS).contains(&self.max_streams),
@@ -271,13 +217,11 @@ impl MsSqlStoredProcConfig {
     /// Credential checks for construction: literal SQL credentials are
     /// required unless the host binds an activation identity.
     pub fn validate_credentials(&self, identity_bound: bool) -> Result<()> {
-        if !identity_bound {
-            ensure!(
-                !self.user.is_empty() && self.password.as_deref().is_some_and(|p| !p.is_empty()),
-                "user and password are required unless an activation identity is bound"
-            );
-        }
-        Ok(())
+        drasi_mssql_common::client::validate_literal_credentials(
+            &self.user,
+            self.password.as_deref(),
+            identity_bound,
+        )
     }
 
     /// Checks that depend on the incoming edges: at most 256 outputs, and
@@ -357,9 +301,20 @@ impl MsSqlStoredProcConfig {
         .map(|spec| spec.template.as_str())
     }
 
-    /// Whether the session will be plaintext.
-    pub(crate) fn plaintext(&self) -> bool {
-        self.encryption != Encryption::Required
+    /// The transport settings, in the shared SQL Server client's terms.
+    pub fn connection_settings(&self) -> drasi_mssql_common::client::ConnectionSettings<'_> {
+        drasi_mssql_common::client::ConnectionSettings {
+            host: &self.host,
+            port: self.port,
+            database: &self.database,
+            encryption: self.encryption,
+            trust_server_certificate: self.trust_server_certificate,
+            trusted_ca_pem: self.trusted_ca_pem.as_deref(),
+            host_name_in_certificate: self.host_name_in_certificate.as_deref(),
+            command_timeout: self.command_timeout(),
+            connect_timeout: self.connect_timeout(),
+            application_name: "drasi-native-storedproc-mssql",
+        }
     }
 }
 

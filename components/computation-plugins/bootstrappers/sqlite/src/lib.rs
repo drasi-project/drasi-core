@@ -1,6 +1,20 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+//! Native SQLite initial-data providers.
+//!
+//! - `drasi.sqlite/file-bootstrap` reads a database file read-only and emits
+//!   every selected row with the source's element identities. It does not
+//!   establish a replay boundary: order it before live writes.
+//! - `drasi.sqlite/coordinated-bootstrap` and `drasi.sqlite/shared-bootstrap`
+//!   pair with a `drasi.sqlite/replay-transactions` or
+//!   `drasi.sqlite/shared-transactions` source configured with
+//!   `coordinatedSnapshot: true`; the source's coordinator takes the snapshot
+//!   before it admits live writes.
+//!
+//! Configuration is flat camelCase, with the same field names (`path`,
+//! `tables`, `tableKeys`, `stream`) as the source factories.
+
 mod coordinated;
 mod snapshot;
 
@@ -9,11 +23,16 @@ use drasi_computation_contracts::{
     ComponentId, GraphChangeCodec, ImplementationIdentity, StreamId,
 };
 use drasi_computation_plugin_sdk::{
-    BootstrapFactory, BootstrapFactoryMetadata, ConfigSchema, ConfigType, CreateRequest,
-    NativeSourceProgress, PluginDefinition,
+    BootstrapFactory, BootstrapFactoryMetadata, ConfigDefinition, ConfigOption, ConfigType,
+    CreateRequest, NativeSourceProgress, PluginDefinition,
 };
 use serde::Deserialize;
-use std::sync::Arc;
+use serde_json::json;
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    path::PathBuf,
+    sync::Arc,
+};
 
 pub use coordinated::{
     CoordinatedBootstrapFactory, SharedBootstrapFactory, COORDINATED_BOOTSTRAP, SHARED_BOOTSTRAP,
@@ -27,12 +46,149 @@ pub const FILE_BOOTSTRAP: &str = "drasi.sqlite/file-bootstrap";
 
 pub struct FileBootstrapFactory;
 
+pub const DEFAULT_MAX_TABLES: usize = 1024;
+pub const DEFAULT_MAX_BYTES: usize = 16 * 1024 * 1024;
+pub const DEFAULT_MAX_DURATION_MS: u64 = 300_000;
+pub const DEFAULT_OUTPUT_CAPACITY: usize = 16;
+pub const DEFAULT_SHUTDOWN_TIMEOUT_MS: u64 = 10_000;
+
+fn default_max_tables() -> NonZeroUsize {
+    NonZeroUsize::new(DEFAULT_MAX_TABLES).expect("nonzero constant")
+}
+fn default_max_bytes() -> NonZeroUsize {
+    NonZeroUsize::new(DEFAULT_MAX_BYTES).expect("nonzero constant")
+}
+fn default_max_duration_ms() -> NonZeroU64 {
+    NonZeroU64::new(DEFAULT_MAX_DURATION_MS).expect("nonzero constant")
+}
+fn default_output_capacity() -> NonZeroUsize {
+    NonZeroUsize::new(DEFAULT_OUTPUT_CAPACITY).expect("nonzero constant")
+}
+fn default_shutdown_timeout_ms() -> NonZeroU64 {
+    NonZeroU64::new(DEFAULT_SHUTDOWN_TIMEOUT_MS).expect("nonzero constant")
+}
+
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TableKey {
+    table: String,
+    key_columns: Vec<String>,
+}
+
+/// The flat file-bootstrap configuration.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Configuration {
     source: String,
     stream: String,
-    settings: SqliteBootstrapConfig,
+    path: PathBuf,
+    #[serde(default)]
+    tables: Vec<String>,
+    #[serde(default)]
+    table_keys: Vec<TableKey>,
+    #[serde(default = "default_max_tables")]
+    max_tables: NonZeroUsize,
+    #[serde(default = "default_max_bytes")]
+    max_bytes: NonZeroUsize,
+    #[serde(default = "default_max_duration_ms")]
+    max_duration_ms: NonZeroU64,
+    #[serde(default = "default_output_capacity")]
+    output_capacity: NonZeroUsize,
+    #[serde(default = "default_shutdown_timeout_ms")]
+    shutdown_timeout_ms: NonZeroU64,
+}
+
+impl Configuration {
+    fn settings(&self) -> SqliteBootstrapConfig {
+        SqliteBootstrapConfig {
+            path: self.path.clone(),
+            tables: self.tables.clone(),
+            table_keys: self
+                .table_keys
+                .iter()
+                .map(|key| TableKeyConfig {
+                    table: key.table.clone(),
+                    key_columns: key.key_columns.clone(),
+                })
+                .collect(),
+            max_tables: self.max_tables,
+            max_bytes: self.max_bytes,
+            max_duration_ms: self.max_duration_ms,
+            output_capacity: self.output_capacity,
+            shutdown_timeout_ms: self.shutdown_timeout_ms,
+        }
+    }
+}
+
+/// The published file-bootstrap configuration.
+pub fn file_definition() -> ConfigDefinition {
+    let integer = |name: &str, description: &str, default: u64| {
+        ConfigOption::new(name, ConfigType::Integer, false, description)
+            .default(default)
+            .minimum(1)
+    };
+    ConfigDefinition::try_new([
+        ConfigOption::new(
+            "source",
+            ConfigType::ComponentId,
+            true,
+            "The SQLite source whose element identities the snapshot uses.",
+        ),
+        ConfigOption::new(
+            "stream",
+            ConfigType::String,
+            true,
+            "The source's output stream.",
+        ),
+        ConfigOption::new(
+            "path",
+            ConfigType::String,
+            true,
+            "Database file, opened read-only. It must exist.",
+        ),
+        ConfigOption::new(
+            "tables",
+            ConfigType::Array,
+            false,
+            "Tables to read; empty reads every ordinary table. Must match the source.",
+        )
+        .default(json!([])),
+        ConfigOption::new(
+            "tableKeys",
+            ConfigType::Array,
+            false,
+            "Explicit keys, as {\"table\": \"name\", \"keyColumns\": [..]}. Must match the source.",
+        )
+        .default(json!([])),
+        integer(
+            "maxTables",
+            "Largest number of tables read.",
+            DEFAULT_MAX_TABLES as u64,
+        ),
+        integer(
+            "maxBytes",
+            "Bound on schema metadata and on each emitted row, in bytes.",
+            DEFAULT_MAX_BYTES as u64,
+        )
+        .maximum(i32::MAX as u64),
+        integer(
+            "maxDurationMs",
+            "Deadline for the whole snapshot, and SQLite's busy timeout.",
+            DEFAULT_MAX_DURATION_MS,
+        )
+        .maximum(i32::MAX as u64),
+        integer(
+            "outputCapacity",
+            "Rows buffered ahead of the query.",
+            DEFAULT_OUTPUT_CAPACITY as u64,
+        ),
+        integer(
+            "shutdownTimeoutMs",
+            "Bound for stopping the snapshot worker.",
+            DEFAULT_SHUTDOWN_TIMEOUT_MS,
+        ),
+    ])
+    .expect("constant SQLite file bootstrap configuration")
 }
 
 pub fn plugin() -> Result<PluginDefinition> {
@@ -58,11 +214,7 @@ impl BootstrapFactory for FileBootstrapFactory {
             implementation: ImplementationIdentity::try_new(FILE_BOOTSTRAP, "1")
                 .expect("constant implementation"),
             configuration_version: 1,
-            configuration: ConfigSchema::from_fields([
-                ("source", ConfigType::ComponentId, true),
-                ("stream", ConfigType::String, true),
-                ("settings", ConfigType::Object, true),
-            ]),
+            configuration: file_definition().schema(),
             source_progress: false,
         }
     }
@@ -79,7 +231,11 @@ impl BootstrapFactory for FileBootstrapFactory {
         self.metadata()
             .configuration
             .validate(&request.configuration)?;
+        file_definition()
+            .details()
+            .validate(&request.configuration)?;
         let config: Configuration = serde_json::from_value(request.configuration.clone())?;
+        let settings = config.settings();
         let scope = request
             .scope
             .clone()
@@ -89,7 +245,7 @@ impl BootstrapFactory for FileBootstrapFactory {
         let mut provider = SqliteBootstrapProvider::new(
             ComponentId::try_new(config.source)?,
             StreamId::try_new(config.stream)?,
-            config.settings,
+            settings,
         )?;
         provider.query_scope = Some((scope, request.id.clone()));
         Ok(Arc::new(provider))
@@ -120,15 +276,12 @@ mod tests {
             configuration: json!({
                 "source": SOURCE_ID,
                 "stream": "source/out",
-                "settings": {
-                    "path": "a-file-that-must-not-be-opened-at-construction.db",
-                    "tables": [],
-                    "max_tables": 16,
-                    "max_bytes": 65536,
-                    "max_duration_ms": 1000,
-                    "output_capacity": 1,
-                    "shutdown_timeout_ms": 1000
-                }
+                "path": "a-file-that-must-not-be-opened-at-construction.db",
+                "maxTables": 16,
+                "maxBytes": 65536,
+                "maxDurationMs": 1000,
+                "outputCapacity": 1,
+                "shutdownTimeoutMs": 1000
             }),
         })
     }
@@ -157,16 +310,54 @@ mod tests {
     }
 
     #[test]
+    fn minimal_configuration_uses_published_defaults() -> Result<()> {
+        let mut request = request()?;
+        request.configuration = json!({
+            "source": SOURCE_ID,
+            "stream": "source/out",
+            "path": "a-file-that-must-not-be-opened-at-construction.db",
+        });
+        FileBootstrapFactory.create(&request, None)?;
+        let details = file_definition().details();
+        details.validate_schema(&FileBootstrapFactory.metadata().configuration)?;
+        let parsed: Configuration = serde_json::from_value(request.configuration)?;
+        assert_eq!(
+            details.fields["maxTables"].default,
+            Some(json!(parsed.max_tables.get()))
+        );
+        assert_eq!(
+            details.fields["maxBytes"].default,
+            Some(json!(parsed.max_bytes.get()))
+        );
+        assert_eq!(
+            details.fields["maxDurationMs"].default,
+            Some(json!(parsed.max_duration_ms.get()))
+        );
+        assert_eq!(
+            details.fields["outputCapacity"].default,
+            Some(json!(parsed.output_capacity.get()))
+        );
+        assert_eq!(
+            details.fields["shutdownTimeoutMs"].default,
+            Some(json!(parsed.shutdown_timeout_ms.get()))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn native_factory_rejects_unknown_options_invalid_bounds_and_absent_scope() -> Result<()> {
-        for field in ["unknown", "scope", "source", "stream", "bounds", "settings"] {
+        for field in [
+            "unknown", "scope", "source", "stream", "bounds", "nested", "snake",
+        ] {
             let mut request = request()?;
             match field {
                 "unknown" => request.configuration["extra"] = json!(true),
                 "scope" => request.scope = None,
                 "source" => request.configuration["source"] = json!(""),
                 "stream" => request.configuration["stream"] = json!(""),
-                "bounds" => request.configuration["settings"]["output_capacity"] = json!(0),
-                "settings" => request.configuration["settings"]["replay"] = json!(true),
+                "bounds" => request.configuration["outputCapacity"] = json!(0),
+                "nested" => request.configuration["settings"] = json!({}),
+                "snake" => request.configuration["max_tables"] = json!(4),
                 _ => unreachable!(),
             }
             assert!(

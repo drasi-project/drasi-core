@@ -776,8 +776,17 @@ unsafe extern "C" fn begin_consumer(
                 state
                     .run(async {
                         if code == abi::consumer::BEGIN_BATCH {
+                            let guarantee = match &*instance.component.lock().await {
+                                Component::Consumer(handler) => handler.delivery_guarantee(),
+                                _ => drasi_computation_contracts::DeliveryGuarantee::ExactlyOnce,
+                            };
                             return state
-                                .begin_batch(&input, &instance.codec, &instance.metadata.descriptor)
+                                .begin_batch(
+                                    &input,
+                                    &instance.codec,
+                                    &instance.metadata.descriptor,
+                                    guarantee,
+                                )
                                 .map_err(Failure::from);
                         }
                         let context = transaction.as_ref().map(|transaction| {

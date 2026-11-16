@@ -12,6 +12,7 @@
 use crate::rows::RowEmission;
 use crate::shared::{SharedUpdates, TransactionEmission};
 use anyhow::{Context, Result};
+use drasi_computation_contracts::reconnect::BackoffPolicy;
 use drasi_computation_contracts::{OutputEnvelope, SourceProgressUpdates, SourceTransactionError};
 use drasi_postgres_common::{
     decoder::PgOutputDecoder,
@@ -24,8 +25,7 @@ use drasi_postgres_common::{
     types::StandbyStatusUpdate,
 };
 use std::{
-    collections::{hash_map::RandomState, VecDeque},
-    hash::{BuildHasher, Hasher},
+    collections::VecDeque,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -228,21 +228,14 @@ impl Worker {
                 return Err(error);
             }
             self.connection.take();
-            let started = Instant::now();
+            let mut backoff =
+                BackoffPolicy::with_budget(RECONNECT_BASE, RECONNECT_MAX, budget).start();
             let mut failure = error;
-            let mut attempt = 0u32;
             loop {
-                let ceiling = RECONNECT_BASE
-                    .saturating_mul(1u32 << attempt.min(16))
-                    .min(RECONNECT_MAX);
-                let delay = jitter(ceiling);
-                let Some(remaining) = budget.checked_sub(started.elapsed()) else {
+                let Some(delay) = backoff.next_delay() else {
                     return Err(failure.context("PostgreSQL reconnect budget exhausted"));
                 };
-                if delay >= remaining {
-                    return Err(failure.context("PostgreSQL reconnect budget exhausted"));
-                }
-                attempt += 1;
+                let attempt = backoff.attempt();
                 log::warn!(
                     "PostgreSQL connection interrupted; reconnect attempt {attempt} in {delay:?}: {failure:#}"
                 );
@@ -615,25 +608,9 @@ pub(crate) fn decoder_resume(resume: u64, partial: bool) -> Result<u64> {
     }
 }
 
-/// A uniformly random duration in `[0, ceiling]`, so sources reconnecting to
-/// one recovering server spread out.
-fn jitter(ceiling: Duration) -> Duration {
-    let random = RandomState::new().build_hasher().finish();
-    let nanos = u64::try_from(ceiling.as_nanos()).unwrap_or(u64::MAX);
-    Duration::from_nanos(random % nanos.saturating_add(1))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn jitter_stays_within_its_ceiling() {
-        for _ in 0..100 {
-            assert!(jitter(Duration::from_millis(10)) <= Duration::from_millis(10));
-        }
-        assert_eq!(jitter(Duration::ZERO), Duration::ZERO);
-    }
 
     #[test]
     fn partial_cursors_replay_their_commit() {

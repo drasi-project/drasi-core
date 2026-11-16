@@ -35,7 +35,7 @@ compatibility shims or automatic migration of old state are planned.
 
 | Work area | Entries |
 |---|---|
-| Managed updates and lifecycle | [Rebootstrap coordination](#cw-92), [named endpoints](#cw-93), [graph changes and live rebinding](#cw-94) (deferred), [plugin upgrade and configuration migration](#cw-95) (deferred) |
+| Managed updates and lifecycle | [Rebootstrap coordination](#cw-92), [named endpoints](#cw-93), [graph changes and live rebinding](#cw-94) (deferred), [plugin upgrade and configuration migration](#cw-95) (deferred), [late progress binding startup hold](#cw-104) |
 | Connectors and runtime boundaries | [Data connections](#cw-44), [old plugin support](#cw-63), [linked query entry points](#cw-80), [oversized query records](#cw-76) |
 | Native plugins: shared work | [Pause and stop](#cw-96), [erasing disposal](#cw-98), [conformance kit](#source-x-02), [configuration and secrets](#source-x-03), [update planning](#source-x-04), [retry policy](#source-x-05), [delivery contract](#sink-x-03), [observability](#source-x-07), [starter project](#dx-1), [packaging](#dx-10), [provider and transformer review](#cw-103) |
 | Native sources | [Network runtime](#plugin-source-network), [PostgreSQL](#plugin-source-postgres), [MySQL](#plugin-source-mysql), [SQL Server](#plugin-source-mssql), [SQLite](#plugin-source-sqlite), [HTTP](#plugin-source-http), [gRPC](#plugin-source-grpc), [bridge](#plugin-source-bridge), [counter and mock](#plugin-source-counter-mock) |
@@ -44,7 +44,7 @@ compatibility shims or automatic migration of old state are planned.
 | Scaling and maintainability | [Removed-component bookkeeping](#cw-33), [memory limits](#cw-29), [disk work](#cw-28), [processing repetition](#cw-32), [management code](#cw-34) |
 | Public API, dependencies and release | [API curation](#cw-69), [legacy dependencies](#cw-66), [capabilities and delegation](#cw-72), [release documentation](#cw-73) |
 | Optional capabilities | [Store housekeeping](#cw-71), [pipe policies](#cw-74), [isolated hosts](#cw-75), [mixed scheduling proof](#cw-82) |
-| Test quality and CI | [Credential-provider tests](#cw-83), [CI gates](#cw-85), [repeated tests](#cw-86), [asynchronous tests](#cw-37), [build and fixture cost](#cw-87) |
+| Test quality and CI | [Credential-provider tests](#cw-83), [CI gates](#cw-85), [repeated tests](#cw-86), [asynchronous tests](#cw-37), [build and fixture cost](#cw-87), [failing failure-policy tests](#cw-105) |
 | Behavior coverage | [Backend conformance](#cw-89), [loaded query plugin](#cw-77), [status and results](#cw-10), [query matching](#cw-13), [grouped results](#cw-12) |
 | Recovery and failure | [Native input recovery](#cw-14), [completion proof](#cw-36), [interrupted reset](#cw-20), [safe stop](#cw-05), [overlapping changes](#cw-07), [cleanup](#cw-08), [combined failures](#cw-39), [extension failures](#cw-03), [retry questions](#cw-21), [ownership and limits](#cw-35) |
 | Native boundaries, platforms and performance | [Real plugin libraries](#cw-41), [Protocol Buffers compiler](#cw-67), [isolated host profiles](#cw-91), [complete suites](#cw-78), [large applications](#cw-40), [native query overhead](#cw-79) |
@@ -308,6 +308,45 @@ error; out-of-range versions leave stored state unchanged; secret references sta
 unresolved; an interrupted upgrade retries with the same operation ID; a broken
 chain fails registration; and the chosen option's loading rule is enforced with
 a clear error.
+
+<a id="cw-104"></a>
+
+### Remove the fixed startup hold for late consumer progress bindings (CW-104)
+
+**Kind:** Issue (improvement). **Area:** Core. **Priority:** Medium.
+**Effort:** Medium.
+
+When a consumer's progress binding arrives after its producer's start group is
+already reserved, the reconciliation that binds the late edges waits on a
+fixed hold of up to the graph cleanup timeout (5 s by default) for that start
+group's report before it proceeds and starts the waiting members. The start
+deadlock itself is fixed (`Operations::conflicts` no longer keeps settled
+members reserved), but the hold remains, so such graphs start about 5 s late.
+
+Removing the hold outright broke `managed_native_wiring_multi_thread`, because
+the same wait also keeps management and stop requests queued behind the
+in-flight start. The hold is the start-report wait: the binding reconciliation
+drives the start for up to `cleanup_timeout` while awaiting its report.
+
+**What remains:** replace the fixed hold with a wait on the events that end it
+(the producer's start report, or its members settling), while still keeping
+management and stop requests ordered behind the start, as that test requires.
+
+**Example:** `staggered_consumer_progress_bindings_multi_thread` takes about
+5 s although every component is ready well before; the `current_thread`
+variant shares the same hold.
+
+**Evidence:** `drasi-core/lib/src/computation/v1/graph/reconcile.rs:3343-3353`
+(`drive_reconciliation(..., graph.cleanup_timeout, ...)` awaiting the start
+report); `drasi-core/lib/src/computation/v1/lifecycle.rs:29`
+(`DEFAULT_CLEANUP_TIMEOUT` = 5 s);
+`drasi-core/lib/src/computation/v1/graph/controller.rs:3284-3305`
+(`Operations::conflicts`); `drasi-core/lib/tests/computation_queries.rs:861-994`
+(staggered-binding tests and the comment at `:945-946`).
+
+**Done when:** both staggered-binding tests finish well under the cleanup
+timeout on both Tokio flavours, and `managed_native_wiring_multi_thread` and
+the other management and stop ordering tests still pass.
 
 <a id="cw-44"></a>
 <a id="hosting-connectors-server-and-examples"></a>
@@ -1395,8 +1434,8 @@ while paused.
 - Add pause-gate checks to the conformance kit (see
   [the conformance kit entry](#source-x-02)).
 
-The plugins that still work while paused (MySQL, SQL Server, SQLite, bridge
-source, profiler) are tracked under their own entries.
+The plugins that still work while paused (bridge source, profiler) are
+tracked under their own entries.
 
 **Example:** a source worker blocked on a slow database read misses the stop
 deadline. `ActivationScope::stop` keeps waiting instead of returning a timeout
@@ -1523,12 +1562,13 @@ object secret by hand.
   against removing credentials from `configuration()`, which breaks
   reconstruction.
 
-**Example:** the MySQL source declares one secret `settings` object. A form
-shows a single opaque field, with no host, port or TLS mode, and a pasted
-literal object is rejected because secret fields require references.
+**Example:** a plugin that declares one secret object for its whole
+configuration shows a form with a single opaque field, with no host, port or
+TLS mode, and a pasted literal object is rejected because secret fields
+require references. (The MySQL source used to do this; it now declares only
+`password` and the TLS client key as secrets.)
 
 **Evidence:** `drasi-core/components/computation-plugin-sdk/src/configuration.rs:221-226`;
-`drasi-core/components/computation-plugins/sources/mysql/src/lib.rs:71`;
 `drasi-core/components/host-sdk/src/computation/factory.rs:1373`;
 `drasi-core/lib/src/computation/v1/graph/specification.rs:140-160`.
 
@@ -1583,8 +1623,9 @@ the supported live changes.
 **Kind:** Improvement. **Priority:** Medium (P1). **Effort:** Medium.
 
 The only shared retry helper lives in `common/network` and is used by network
-sinks. PostgreSQL has its own jitter, and the database sinks, bridge, MySQL and
-SQL Server have no common policy. `ConsumerFailure::retryable` defaults to
+sinks. The PostgreSQL, MySQL and SQL Server sources share
+`BackoffPolicy` from `computation-contracts/src/reconnect.rs`; the database
+sinks and the bridge still have no common policy. `ConsumerFailure::retryable` defaults to
 `false`, so most sinks report every failure as permanent.
 
 **What remains:**
@@ -1599,11 +1640,11 @@ SQL Server have no common policy. `ConsumerFailure::retryable` defaults to
   MySQL and SQL Server error numbers) and its own copy of jittered backoff;
   they should move onto the shared policy.
 
-**Example:** the stored-procedure sinks, the PostgreSQL source and the network
+**Example:** the stored-procedure sinks, the database sources and the network
 sinks each implement full-jitter backoff separately, with different ceilings.
 
 **Evidence:** `drasi-core/components/computation-plugins/common/network/src/retry.rs`;
-`drasi-core/components/computation-plugins/sources/postgres/src/worker.rs:620`;
+`drasi-core/components/computation-contracts/src/reconnect.rs`;
 `drasi-core/components/grpc-common/src/output/send.rs:309`;
 `drasi-core/components/computation-plugin-sdk/src/consumer.rs:59`.
 
@@ -1772,9 +1813,8 @@ gets an ABI rejection.
 
 Most test infrastructure work is already tracked: CI gates in
 [CW-85](#cw-85), loaded-library checks in [CW-41](#cw-41), recovery in
-[CW-14](#cw-14), build churn in [CW-87](#cw-87) and MySQL timeouts in
-[CW-99](#cw-99). The shared remainder is that the Host pipeline test maps only
-five Core plugins.
+[CW-14](#cw-14) and build churn in [CW-87](#cw-87). The shared remainder is
+that the Host pipeline test maps only five Core plugins.
 
 **What remains:** replace the hard-coded `plugin_package` map with a manifest
 covering all native plugins, and give each database plugin a named CI job that
@@ -2015,191 +2055,21 @@ The source docs are current, but the bootstrapper README still says ABI `2.0.0`;
 
 ### MySQL source
 
-`drasi-core/components/computation-plugins/sources/mysql` (engine in `drasi-core/components/mysql-common/src/native`; in-process wrapper in `drasi-core/components/sources/mysql/src/native`). Seven factories with a strong data path (TLS, caching_sha2, binding-checked cursors, retention checks, bounded channels), but no reconnect, DDL fencing on unrelated statements, silent Pause, no management, and an all-secret `settings` object; not production-ready.
-
-<a id="my-01"></a>
-<a id="my-08"></a>
-
-#### Reconnect after transient failures and detect dead peers (MY-01, MY-08, Source X-06)
-
-**Kind:** Issue. **Priority:** High. **Effort:** Medium.
-
-Any worker error ends replication: the worker logs, exits, and `next()` fails with "replication ended; stop and restart the source". An idle connection never times out, so a half-open TCP connection hangs forever. The legacy source reconnected with exponential backoff.
-
-**What remains:**
-
-- Classify errors as transient or permanent (by MySQL error code, not text).
-- On transient errors, re-run preparation from the last committed position (confirmed checkpoints for tracked modes, last commit file/offset for untracked modes) with jittered, cancellation-aware backoff and a budget; report "retrying" status. Document what untracked and positional modes can lose.
-- Dead-peer watchdog: no frame (heartbeats included) for k × `heartbeat_interval_ms` is a transient error.
-
-**Example:** a MySQL failover or a 5-second network blip ends a `drasi.mysql/shared-changes` source permanently until an operator restarts it.
-
-**Evidence:** worker exits on error `drasi-core/components/mysql-common/src/native/source.rs:906-927`; `next()` bail `:956`; read deadline only after a partial packet `drasi-core/components/mysql-common/src/native/connection.rs:245-254`; legacy backoff `drasi-core/components/sources/mysql/src/stream.rs:123-153`.
-
-**Done when:** proxy-kill, server-restart and half-open-connection tests resume without loss or duplication beyond the documented mode guarantees.
-
-<a id="my-02"></a>
-
-#### Stop fencing on DDL that does not touch selected tables (MY-02, Source D-7)
-
-**Kind:** Issue. **Priority:** High. **Effort:** Medium.
-
-Any non-`CREATE` statement event in the configured database fences the source with "MySQL DDL or statement-based change requires explicit schema recovery", including `ALTER` on unselected tables and `ANALYZE`/`OPTIMIZE`. The legacy source ignored DDL.
-
-**What remains:**
-
-- Ignore statements that do not touch selected tables, including administrative statements.
-- Untracked modes with FULL row metadata: re-inspect the catalog on `ALTER` of a selected table.
-- Tracked modes: fence only selected-table changes that alter bound facts, with a typed `SchemaChanged` error, as PostgreSQL does.
-
-**Example:** `OPTIMIZE TABLE audit_log` on an unrelated table stops a source that only selects `orders`.
-
-**Evidence:** `drasi-core/components/mysql-common/src/native/binlog.rs:595-604`.
-
-**Done when:** live tests show ALTER on an unselected table, ANALYZE and OPTIMIZE are ignored, and ALTER/TRUNCATE on a selected table produce the chosen typed behaviour.
-
-<a id="my-03"></a>
-
-#### Gate the binlog worker on Pause (MY-03, CW-96)
-
-**Kind:** Issue. **Priority:** High. **Effort:** Medium.
-
-`pause()` returns success while the binlog worker keeps reading. Updates applied at a Pause boundary then assume a quiet source. Unverified: a pause longer than `net_write_timeout` probably drops the dump connection, and Resume then fails with "replication ended".
-
-**What remains:**
-
-- Either return `lifecycle::unsupported(...)` from Pause, or gate frame reading at a transaction boundary and, for pauses longer than the server timeout, disconnect deliberately and resume from the committed position.
-- The in-process wrapper uses `passive_component_lifecycle!` for pause and resume; forward them to the same gate.
-
-**Example:** a host pause for a 10-minute maintenance window returns `Ok` immediately while events keep arriving.
-
-**Evidence:** `drasi-core/components/computation-plugins/sources/mysql/src/component.rs:48-53`; wrapper `drasi-core/components/sources/mysql/src/native/source.rs:246-247`.
-
-**Done when:** a test shows no reads after Pause and resumed flow after Resume (including a pause longer than `net_write_timeout`), or an `unsupported` refusal.
-
-<a id="my-04"></a>
-
-#### Make MySQL disposal explicit and erasable (MY-04, CW-98)
-
-**Kind:** Issue. **Priority:** Medium. **Effort:** Small.
-
-`dispose` does nothing: the schema publication is retired only in `Drop`, and because the factory does not declare `erases_owned_state` the host refuses removal with erase, although the source owns no server-side state. The in-process wrapper also refuses erase.
-
-**What remains:** retire the schema reader and assert no worker remains in `dispose`; apply the Source D-1 decision in [CW-98](#cw-98) (declare an idempotent no-op erase, or the host rule); double-dispose test.
-
-**Example:** removing a MySQL source with erase fails with "native component does not support permanent state removal".
-
-**Evidence:** `drasi-core/components/computation-plugins/sources/mysql/src/component.rs:57-59`; `Drop` `drasi-core/components/mysql-common/src/native/source.rs:960-969`; `Capabilities::default()` `drasi-core/components/computation-plugins/sources/mysql/src/lib.rs:79`; wrapper `drasi-core/components/sources/mysql/src/native/source.rs:249-256`.
-
-**Done when:** erase removal succeeds (or is refused by the documented rule), twice, and the schema reader is fenced after dispose.
-
-<a id="my-09"></a>
-
-#### Honour start deadlines, cancellation and StopMode (MY-09)
-
-**Kind:** Issue. **Priority:** Medium. **Effort:** Medium.
-
-`start` waits for progress readiness without a deadline and then uses `io_timeout_ms` as the whole startup budget; `stop` ignores `StopMode` and the host deadline. `io_timeout_ms` is simultaneously the packet timeout, startup budget, stop join budget and history-scan budget.
-
-**What remains:** select on `ctx.cancellation()`/`ctx.deadline()` across every await in `start`, including `wait_ready()`; Drain finishes the current transaction, Abort cancels; keep the worker owned on timeout; split `io_timeout_ms` into separate settings.
-
-**Example:** a host start deadline of 10 s with `io_timeout_ms: 60000` lets startup run for 60 s.
-
-**Evidence:** `drasi-core/components/mysql-common/src/native/source.rs:878-882,898-900,930-937`; `drasi-core/components/computation-plugins/sources/mysql/src/component.rs:45-56`.
-
-**Done when:** conformance-kit start-cancellation, Drain/Abort and stop-timeout-then-retry cases pass.
-
-<a id="my-07"></a>
-
-#### Add MySQL update planning and management (MY-07, Source X-04)
-
-**Kind:** Issue. **Priority:** High. **Effort:** Medium.
-
-The factories do not implement `Factory::assess` or `NativeManagement`, so every configuration change is refused or requires removal.
-
-**What remains:** a pure assess with `update_modes = [Restart]` (plus InPlace once Pause is real) and `NativeManagement`:
-
-| Boundary | Fields |
-|---|---|
-| Restart (recovery preserved) | `user`/`password`, `ssl_mode`, `tls_ca_pem`, `host`/`port` (same server UUID enforced), `server_id`, `heartbeat_interval_ms`, timeouts, `max_protocol_bytes`, `transactions.*` |
-| Unsupported or Recreate | `database`, `tables`, `table_keys`, `start`, `stream`, `output`, `replay`, `persistent` (all in the binding hash) |
-
-**Example:** rotating a password by editing configuration is refused instead of applied at Stop.
-
-**Evidence:** `Capabilities::default()` `drasi-core/components/computation-plugins/sources/mysql/src/lib.rs:79`; binding hash `drasi-core/components/mysql-common/src/native/source.rs:1058`.
-
-**Done when:** each field has a tested boundary in the assess matrix and Restart apply works through the loaded library.
-
-<a id="my-05"></a>
-<a id="my-06"></a>
-<a id="my-10"></a>
-<a id="my-11"></a>
-
-#### Model MySQL configuration, secrets and defaults (MY-05, MY-06, MY-10, MY-11, Source X-03)
-
-**Kind:** Issue. **Priority:** High. **Effort:** Medium.
-
-The whole `settings` object is one secret, so host, tables and limits must live in a secret store and cannot be inspected or diffed. No setting has a default, `server_id` must be supplied by hand, and `configuration()` drops `persistent` for the shared-row factories, so reconstruction changes the source.
-
-**What remains:**
-
-- Flatten: `password` a top-level secret field, the rest non-secret; publish nested schemas and `configuration_details`.
-- Activation credentials using the existing `validate_with_activation_credentials`.
-- Defaults matching legacy (port 3306, `ssl_mode`, heartbeat, transactions, `max_protocol_bytes`, timeouts, `start: end`); warn when `tables` is empty.
-- Derive `server_id` from the component ID when omitted; report duplicate-`server_id` disconnects clearly.
-- Include `persistent` in `configuration()`; round-trip test for all seven factories.
-
-**Example:** `{"stream": "orders", "settings": {...}, "persistent": true}` reconstructs as `{"stream": "orders", "settings": {...}}`, i.e. non-persistent.
-
-**Evidence:** `drasi-core/components/computation-plugins/sources/mysql/src/lib.rs:62-71`; `drasi-core/components/mysql-common/src/native/mod.rs:35-87,141-152`; `drasi-core/components/mysql-common/src/native/source.rs:868-870`; legacy auto `server_id` `drasi-core/components/sources/mysql/src/descriptor.rs:243-247`.
-
-**Done when:** only the password is secret, defaults are published and equal serde defaults, credentials can come from activation, and all seven factories round-trip.
-
-<a id="my-12"></a>
-
-#### Tolerate unsupported tables in database-wide selection (MY-12)
-
-**Kind:** Issue. **Priority:** Medium. **Effort:** Small to medium.
-
-With empty `tables`, one table with an unsupported name, type or charset aborts startup. Identifiers are limited to `[A-Za-z0-9_]`, and catalog queries interpolate names into SQL.
-
-**What remains:** skip and warn on unsupported tables when `tables` is empty; allow any identifier via `quote_identifier`; use prepared statements in catalog queries.
-
-**Example:** a database with an `order-items` table cannot be captured at all.
-
-**Evidence:** `drasi-core/components/mysql-common/src/native/catalog.rs:128-160,165-187,494`; `drasi-core/components/mysql-common/src/config.rs:84-89`.
-
-**Done when:** a database-wide source starts with an unsupported table present and captures the others; hyphenated names work.
-
-<a id="my-13"></a>
-
-#### Extend MySQL type coverage (MY-13)
-
-**Kind:** Issue. **Priority:** Medium. **Effort:** Medium.
-
-The decoder accepts a fixed type list; spatial types and `VECTOR` fail the table, and replication refuses non-UTF-8 charsets except in positional mode. The legacy source decoded leniently.
-
-**What remains:** decode spatial types (WKB/WKT), `VECTOR`, and non-UTF-8 charsets via `encoding_rs`; per-type live tests.
-
-**Example:** a table with a `POINT` column fails with "unsupported native MySQL column type point".
-
-**Evidence:** `drasi-core/components/mysql-common/src/native/catalog.rs:173-187,465-495`.
-
-**Done when:** each type has a live test with the documented mapping.
+`drasi-core/components/computation-plugins/sources/mysql` (engine in `drasi-core/components/mysql-common/src/native`; in-process wrapper in `drasi-core/components/sources/mysql/src/native`). Production-ready: reconnection with a dead-peer watchdog, a DDL policy that ignores unrelated statements, real Pause, Drain/Abort stop within the host deadline, erase, managed updates, flat configuration with only `password` and the TLS client key secret, activation credentials, extended types and typed failures are implemented; behaviour is in its [DESIGN.md](../../components/computation-plugins/sources/mysql/DESIGN.md) and [CONFIGURATION.md](../../components/computation-plugins/sources/mysql/CONFIGURATION.md). The items below remain.
 
 <a id="my-14"></a>
 
-#### Add MySQL status, tracing and metrics (MY-14, Source X-07)
+#### Report MySQL readiness to the host and emit metrics (MY-14, Source X-07)
 
 **Kind:** Improvement. **Priority:** Medium. **Effort:** Small to medium.
 
-The only diagnostics are `log::error!` on worker exit, and the `ControlSender` is dropped. The legacy source reported connect, retry and fence status.
+Readiness changes (streaming, reconnecting, failed), retries, skipped tables and adopted schema changes are only logged. The `ControlSender` is dropped because the factories declare no control interface, so the host never sees the source's readiness, and there are no metrics because the SDK has no metric facility yet.
 
-**What remains:** spans with instance and component IDs; status for connect, retry and fence through the `ControlSender`; the shared metric set ([CW-26](#cw-26)) including binlog lag.
+**What remains:** report readiness through the host (as the SQLite source does through its `ControlSender`); the shared metric set ([CW-26](#cw-26), [Source X-07](#source-x-07)) including binlog lag, once the SDK provides it.
 
-**Evidence:** `drasi-core/components/mysql-common/src/native/source.rs:922-924`; `_: ControlSender` throughout `drasi-core/components/computation-plugins/sources/mysql/src/lib.rs`.
+**Evidence:** `drasi-core/components/computation-plugins/sources/mysql/src/lib.rs:118-121`; `drasi-core/components/computation-plugins/sources/mysql/DESIGN.md:258-265`.
 
-**Done when:** status changes are visible to the host and metrics are emitted under test.
+**Done when:** readiness changes are visible to the host and metrics are emitted under test.
 
 <a id="my-15"></a>
 
@@ -2207,11 +2077,11 @@ The only diagnostics are `log::error!` on worker exit, and the `ControlSender` i
 
 **Kind:** Improvement. **Priority:** Low. **Effort:** Medium.
 
-GTIDs are used only for the initial start position; checkpoints store file/offset, so resume after a primary failover is impossible. The legacy source tracked `current_gtid`.
+GTIDs are used only for the initial start position; checkpoints store file/offset bound to `@@server_uuid`, so a reconnect to a different server fails with `SourceFailure::Unsupported` and a failover needs a new source. The legacy source tracked `current_gtid`.
 
 **What remains:** store the GTID set with each checkpoint and resume by GTID when the server UUID changes.
 
-**Evidence:** `MySqlStartPosition::Gtid` `drasi-core/components/mysql-common/src/native/mod.rs:126-128`; legacy `drasi-core/components/sources/mysql/src/stream.rs:52`.
+**Evidence:** `MySqlStartPosition::Gtid` `drasi-core/components/mysql-common/src/native/mod.rs:146`; server UUID check `drasi-core/components/mysql-common/src/native/source.rs:932`; `drasi-core/components/computation-plugins/sources/mysql/DESIGN.md:267-280` (Unsupported).
 
 **Done when:** a failover test resumes on the new primary without loss.
 
@@ -2221,58 +2091,45 @@ GTIDs are used only for the initial start position; checkpoints store file/offse
 
 **Kind:** Improvement. **Priority:** Low. **Effort:** Medium.
 
-The source and `drasi-core/components/computation-plugins/bootstrappers/mysql` duplicate `settings` and credentials. Use `supports_bootstrap_coordination`/`create_bootstrap_coordinator` as SQLite does.
+The source and `drasi-core/components/computation-plugins/bootstrappers/mysql` take the same flat settings and share committed progress, but are not paired through the SDK bootstrap coordinator. Use `supports_bootstrap_coordination`/`create_bootstrap_coordinator` as SQLite does.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/mysql/DESIGN.md:277-279`.
 
 **Done when:** coordinated MySQL providers are created through the source's coordinator and mismatches are refused.
 
 <a id="my-17"></a>
 <a id="my-18"></a>
 <a id="my-19"></a>
-<a id="my-20"></a>
 
-#### Simplify MySQL code and its TLS stack (MY-17, MY-18, MY-19, MY-20, Source X-05, Source X-08)
+#### Split the largest MySQL engine functions (MY-17, MY-18, MY-19, Source X-08)
 
-**Kind:** Improvement. **Priority:** Low. **Effort:** Medium.
+**Kind:** Improvement. **Priority:** Low. **Effort:** Small to medium.
 
-The seven factories repeat validation and construction; large functions are hard to review; the native build compiles both `mysql_async`/rustls and `native-tls`; errors are untyped prose.
+The factories are table-driven, the native build has one TLS stack (`mysql_async`/rustls only with the `client` feature) and failures are typed `SourceFailure`s. Some engine functions are still long and hard to review.
 
-**What remains:**
+**What remains:** split `Binlog::decode_inner` (about 215 lines) and `prepare_connection` (about 215 lines); replace `RwLock<Option<JoinHandle>>` worker fields with plain owned fields.
 
-- Table-driven factories; collapse `MySqlSource` constructors into a mode enum or builder.
-- Split `Binlog::decode_inner`, `prepare_connection` and `catalog::read_tables`; replace anonymous tuples with named structs.
-- Feature-gate `mysql_async`/rustls out of the native build (track [CW-66](#cw-66) RSA/zstd advisories).
-- A typed error enum (`Config`, `Transient`, `PositionUnavailable`, `SchemaChanged`, `Unsupported`, `Auth`, `Fenced`) as PostgreSQL has; remove `expect` from metadata; `RwLock<Option<JoinHandle>>` to a plain field.
+**Evidence:** `drasi-core/components/mysql-common/src/native/binlog.rs:495`; `drasi-core/components/mysql-common/src/native/source.rs:224,616-830`; `drasi-core/components/mysql-common/src/native/snapshot.rs:102`; `drasi-core/components/mysql-common/src/native/standalone_snapshot.rs:30`.
 
-**Evidence:** `drasi-core/components/computation-plugins/sources/mysql/src/lib.rs:62-81,117-376`; `drasi-core/components/mysql-common/Cargo.toml:51-54,65-67`.
+**Done when:** no engine function is longer than a reviewer can follow, and worker handles are plain fields.
 
-**Done when:** the native plugin build has one TLS stack, factories share one code path, and errors are typed.
+<a id="my-36"></a>
 
-<a id="cw-99"></a>
-<a id="my-34"></a>
+#### Decide what an untracked MySQL source does under restored persistent queries (MY-36)
 
-#### Investigate MySQL multi-thread timeouts (CW-99, MY-34)
+**Kind:** Decision. **Priority:** Medium. **Effort:** Small.
 
-**Kind:** Investigation. **Priority:** Medium. **Effort:** Small to medium.
+An untracked (volatile) MySQL factory keeps no position: after a restart it starts again at `startFrom` (for example the end of the binary log). When its queries use a persistent index provider, the restart restores the queries' rows instead of taking a new snapshot, so changes made while the graph was stopped are never seen and the restored rows stay stale until the next change to them. Nothing refuses or warns about this pairing.
 
-Three shared-graph MySQL source tests time out on the multi-threaded Tokio runtime while their single-threaded variants pass. This may be a concurrency bug in the native MySQL source or a test-timing problem.
+The live test that covers it was changed to expect this: with the untracked factory the offline update is asserted to be missing after restart, while the coordinated (tracked) factory replays it.
 
-**Affected tests** (`drasi-core/components/sources/mysql/src/native/tests/shared.rs`):
+**What remains:** an owner decision: either document the behaviour as intended for untracked factories (in the MySQL CONFIGURATION.md and the native source guide), or refuse, at configuration time, an untracked source feeding a query with persistent progress, as the graph already refuses volatile producers for exactly-once consumers.
 
-- `one_source_two_actual_queries_direct_factory_snapshot_restart_multi_thread` (`:719-721`)
-- `unequal_committed_owners_and_fresh_members_replay_only_missing_effects_multi_thread` (`:919-921`)
-- `independently_timed_snapshots_replay_concurrent_changes_without_stale_rows_multi_thread` (`:1240-1242`)
+**Example:** stop a graph whose `drasi.mysql/changes` source feeds a RocksDB-backed query, run `UPDATE items SET value='offline' WHERE code=3`, start again: the query still shows the old value, and only a later update reaches it.
 
-They fail with "deadline has elapsed"; at least one still fails when run alone.
+**Evidence:** `drasi-core/components/host-sdk/tests/fixtures/native_mysql/parity.rs:799-836` (`manual_keys`, assertion `rows(result)?.contains(&offline) == coordinated`).
 
-**Example:**
-
-```bash
-cargo test -p drasi-source-mysql --lib --locked -- --ignored native:: --test-threads=1
-```
-
-**What remains:** find the cause and fix it in the source (not by raising the deadline) unless it is shown to be test-only. Fixture cost is [CW-87](#cw-87) and the crash matrix [CW-14](#cw-14).
-
-**Done when:** all three `multi_thread` variants pass repeatedly alongside their `current_thread` variants.
+**Done when:** the decision is recorded, and either the behaviour is documented with that test as its proof or the pairing is refused with a test.
 
 <a id="my-30"></a>
 <a id="my-31"></a>
@@ -2281,251 +2138,40 @@ cargo test -p drasi-source-mysql --lib --locked -- --ignored native:: --test-thr
 
 #### Qualify the MySQL source (MY-30, MY-31, MY-32, MY-33)
 
-**Kind:** Qualification. **Priority:** High. **Effort:** Medium to large.
+**Kind:** Qualification. **Priority:** High. **Effort:** Medium.
 
-The plugin crate has two metadata tests and no lifecycle tests; behaviour is covered only through the in-process wrapper's suites.
+Live tests through the in-process wrapper now cover erase twice, a pause longer than server timeouts, reconnection after the server kills replication, DDL on unselected and selected tables, TRUNCATE, large transactions and database-wide selection with unsupported tables and extended types; the Host family suite passes linked and loaded. The plugin crate itself runs only database-free metadata, round-trip, lifecycle and assess tests, without the SDK conformance kit.
 
 **What remains:**
 
-- Run the SDK conformance kit for every factory, linked and loaded, both Tokio flavours.
-- Fault injection: proxy kill, server restart, half-open connection, long pause.
-- DDL: ALTER on selected and unselected tables, TRUNCATE, ANALYZE/OPTIMIZE; database-wide selection with an unsupported table.
-- Configuration validation matrix; `configuration()` round-trip ×7; credential rotation; `server_id` collision; per-type live tests.
+- Run the SDK conformance kit (`SourceConformance`) for every factory, linked and through the loaded library, on both Tokio flavours.
+- Fault injection not yet covered: a proxy kill and a half-open connection detected by the dead-peer watchdog.
+- Credential rotation through activation credentials across a restart; a duplicate `serverId`; one live test per decoded type (spatial, `VECTOR`, non-UTF-8 character sets beyond latin1).
 
-**Evidence:** `drasi-core/components/computation-plugins/sources/mysql/src/tests.rs:10,51`.
+**Evidence:** `drasi-core/components/computation-plugins/sources/mysql/src/tests.rs`; `drasi-core/components/sources/mysql/src/native/tests/production.rs`.
 
-**Done when:** these run in a named CI job ([CW-85](#cw-85)).
-
-<a id="my-35"></a>
-
-#### Repair the stale native MySQL family tests (MY-35)
-
-**Kind:** Issue. **Area:** Host SDK tests. **Priority:** High. **Effort:** Medium.
-
-Every older live test in `native_mysql_components.rs` fails before it reaches
-the component under test, so `make test-native-mysql` gives no evidence for
-the MySQL source, bootstrapper or sink family scenarios. Only the two new
-stored-procedure proofs (`native_mysql_storedproc_*`) pass. The tests had
-rotted: their `id("source")` helper panicked once `ComponentId` became
-UUID-only. Names are now mapped to fixed UUIDs, and the tests then fail in
-setup with three different errors:
-
-- `native configuration field source has an incompatible type` (the
-  bootstrapper configuration);
-- a duplicate component name `fixture-transformer-2`;
-- `uninitialized real owners must fence startup`.
-
-The sink wiring was converted to the consumer model and flat configuration, but
-has not run end to end because of these failures.
-
-**What remains:** fix each setup failure against the current host and SDK
-contracts (component IDs, bootstrapper configuration, graph naming and
-progress-owner startup), then confirm every family scenario passes, both Tokio
-flavours, static and dynamic.
-
-**Example:** `cargo test -p drasi-host-sdk --test native_mysql_components -- --ignored`
-should pass every test, not only the stored-procedure proofs.
-
-**Evidence:** `drasi-core/components/host-sdk/tests/native_mysql_components.rs`;
-`drasi-core/components/host-sdk/tests/fixtures/native_mysql/{database,identity,parity}.rs`.
-
-**Done when:** the whole suite passes and runs in a named CI job
-([CW-85](#cw-85)).
-
-<a id="my-40"></a>
-<a id="my-21"></a>
-<a id="source-d-11"></a>
-
-#### Write MySQL DESIGN and CONFIGURATION docs (MY-40, MY-21, Source D-11)
-
-**Kind:** Issue. **Priority:** High. **Effort:** Medium.
-
-The plugin README defers its field reference to the legacy README. MariaDB is rejected but not documented as unsupported, and mTLS client certificates are not supported.
-
-**What remains:** `DESIGN.md` (engine, binding hash, cursor formats, snapshot handover and its FTWRL use in coordinated mode, positional profile, retention checks, DDL policy, legacy differences) and `CONFIGURATION.md` (every field, privileges and server settings: `binlog_format=ROW`, `binlog_row_image`, `binlog_row_metadata=FULL`, 8.0.20+, GTID; update boundaries; credentials; failure behaviour), following `drasi-core/components/computation-plugins/sources/NATIVE-SOURCE-GUIDE.md`. State MariaDB and mTLS as unsupported.
-
-**Evidence:** `drasi-core/components/computation-plugins/sources/mysql/README.md:20-25`.
-
-**Done when:** both documents exist, match the code, and the README links them instead of the legacy README.
+**Done when:** these pass and run in a named CI job ([CW-85](#cw-85)).
 
 <a id="plugin-source-mssql"></a>
 
 ### SQL Server source
 
-`drasi-core/components/computation-plugins/sources/mssql` (engine in `drasi-core/components/mssql-common/src/native`). One pull-based CDC factory (`drasi.mssql/changes`) with bounded paging, catalog-bound cursors and retention checks; lifecycle hooks are no-ops, there is no retry, and it has never run against a real server ([CW-78](#cw-78)). Not production-ready.
-
-<a id="ms-01"></a>
-
-#### Gate SQL Server polling on Pause (MS-01, CW-96)
-
-**Kind:** Issue. **Priority:** High. **Effort:** Small to medium.
-
-`pause()` returns success while an in-flight poll query keeps running; polling itself stops only because the host stops calling `next()`.
-
-**What remains:** settle or await the in-flight `Work` within the pause deadline, set a paused flag that makes `next()` park, and reopen on Resume; otherwise return `lifecycle::unsupported(...)`.
-
-**Example:** a Pause during a 25-second CDC page read returns immediately; an InPlace update then races the query.
-
-**Evidence:** `drasi-core/components/computation-plugins/sources/mssql/src/source.rs:235-240`.
-
-**Done when:** a test shows no query runs after Pause completes and polling resumes after Resume.
-
-<a id="ms-02"></a>
-
-#### Honour StopMode, deadlines and start cancellation (MS-02)
-
-**Kind:** Issue. **Priority:** High. **Effort:** Small.
-
-Stop waits for pending work for `shutdown_timeout_ms` regardless of `StopMode` or the host deadline, and start ignores cancellation. Tiberius cannot send ATTENTION, so an in-flight query cannot be cancelled server-side.
-
-**What remains:** Drain waits within `ctx.deadline()`; Abort fails fast with a typed "server work retained" error and keeps the work owned for a later stop; start observes cancellation.
-
-**Evidence:** `drasi-core/components/computation-plugins/sources/mssql/src/source.rs:241-271`; `drasi-core/components/mssql-common/src/native/work.rs:30-41`.
-
-**Done when:** conformance-kit Drain/Abort, stop-timeout-then-retry and cancelled-start cases pass.
-
-<a id="ms-03"></a>
-
-#### Make SQL Server disposal explicit and clean up snapshot markers (MS-03, CW-98, CW-44)
-
-**Kind:** Issue. **Priority:** Medium. **Effort:** Small to medium.
-
-`dispose` does nothing and erase removal is refused because the factory does not declare `erases_owned_state`, though the source owns no server-side state. Coordinated snapshots insert marker rows into the barrier table and delete them after each attempt, but rows left by a crash or failed cleanup are never removed.
-
-**What remains:** retire the generation and check no `Work` is pending in `dispose` (today only in `Drop`); apply the Source D-1 decision in [CW-98](#cw-98); decide who removes orphan markers (bootstrapper erase or a startup sweep) and implement it.
-
-**Example:** a process killed during a coordinated snapshot leaves a `token` row in the barrier table permanently.
-
-**Evidence:** `drasi-core/components/computation-plugins/sources/mssql/src/source.rs:244-246,273-279`; markers `drasi-core/components/mssql-common/src/native/snapshot.rs:336,378-399`.
-
-**Done when:** erase removal succeeds or is refused by rule, twice; orphan markers are removed by the chosen owner in a test.
-
-<a id="ms-04"></a>
-<a id="ms-14"></a>
-
-#### Add SQL Server update planning and fix its cursor binding (MS-04, MS-14, Source X-04)
-
-**Kind:** Issue. **Priority:** High. **Effort:** Medium.
-
-No `Factory::assess` or `NativeManagement` exists. The cursor binding hashes `host` and `port` although `service_broker_guid` already identifies the database, so a DNS or availability-group listener rename would invalidate every consumer's cursor.
-
-**What remains:**
-
-- Remove `host`/`port` from the binding.
-- Assess and management: InPlace (after a real Pause) `poll_interval_ms`, `max_rows`, `max_bytes`, timeouts; Restart password, `encryption`, `trust_server_certificate`, `host`/`port`; Unsupported or Recreate `database`, `tables`, `table_keys`, `barrier_table`, `stream`, consumer membership.
-
-**Example:** moving from `sql1.corp` to `sqlag-listener.corp` (same database) forces a query reset.
-
-**Evidence:** `drasi-core/components/mssql-common/src/native/catalog.rs:248-257`; `Capabilities::default()` `drasi-core/components/computation-plugins/sources/mssql/src/lib.rs:56`.
-
-**Done when:** each field has a tested boundary and a host rename keeps cursors.
-
-<a id="ms-05"></a>
-
-#### Retry transient SQL Server failures (MS-05, Source X-06)
-
-**Kind:** Issue. **Priority:** High. **Effort:** Medium.
-
-Any connection or timeout error in a poll fails the source. The legacy source retried with backoff (but fell back unsafely on invalid LSNs).
-
-**What remains:** jittered, cancellation-aware retry inside `next()` for transient connection and timeout errors only (classified by error number); retention gaps, binding changes and authentication errors stay fatal and typed; report retrying status.
-
-**Example:** a failover of the database to another replica ends the source.
-
-**Evidence:** `drasi-core/components/mssql-common/src/native/paging.rs:85-93`; legacy `drasi-core/components/sources/mssql/src/stream.rs:49-117`.
-
-**Done when:** a connection-kill test resumes without loss.
+`drasi-core/components/computation-plugins/sources/mssql` (engine in `drasi-core/components/mssql-common/src/native`). One pull-based CDC factory (`drasi.mssql/changes`) with real Pause, Drain/Abort stop, reconnection, managed updates, erase of owned snapshot markers, flat configuration, activation credentials (including Entra ID tokens) and typed failures; behaviour is in its [DESIGN.md](../../components/computation-plugins/sources/mssql/DESIGN.md) and [CONFIGURATION.md](../../components/computation-plugins/sources/mssql/CONFIGURATION.md). It is verified with unit tests against an in-memory database seam and database-free Host checks only: live qualification against a real server is deferred by an owner decision ([MS-30](#ms-30), [CW-78](#cw-78)), so it is not yet qualified for production.
 
 <a id="ms-06"></a>
 <a id="ms-20"></a>
 
-#### Stop rejecting tables with unmapped column types (MS-06, MS-20)
+#### Add a SQL Server column-exclusion list (MS-06, MS-20)
 
-**Kind:** Issue. **Priority:** High. **Effort:** Small to medium.
+**Kind:** Improvement. **Priority:** Low. **Effort:** Small.
 
-A table with any unmapped column type (`xml`, `json`, `geography`, `geometry`, `hierarchyid`, `sql_variant`, …) is rejected entirely. Decimals and money map to Float, losing precision; identifiers are limited to `[A-Za-z0-9_.]`.
+No column type rejects a table any more, and decimals keep their precision, but every captured column is always read, including bulky `xml`, `varbinary(max)` or `nvarchar(max)` columns a query never uses.
 
-**What remains:** stream unmapped types as string or null with schema type `None` (map `json` to JSON), optionally add a column-exclusion list; preserve decimal precision; allow quoted identifiers.
+**What remains:** an optional per-table column-exclusion list that leaves excluded columns out of change and bootstrap reads, refusing exclusion of key columns.
 
-**Example:** `dbo.Orders` with one `xml` column fails with "unsupported SQL Server CDC column type in dbo.Orders".
+**Evidence:** `drasi-core/components/computation-plugins/sources/mssql/DESIGN.md:285-294` (Known limitations).
 
-**Evidence:** `drasi-core/components/mssql-common/src/native/catalog.rs:218-221,283-299`; `drasi-core/components/mssql-common/src/config.rs:55-66`.
-
-**Done when:** a table with each such type streams its other columns, with tests.
-
-<a id="ms-07"></a>
-
-#### Resolve the CDC capture permission requirement (MS-07, CW-44)
-
-**Kind:** Issue. **Priority:** High. **Effort:** Small to medium.
-
-The native source reads `cdc.<capture>_CT` tables directly and needs `SELECT` on them; the legacy source used `fn_cdc_get_all_changes_*`. A least-privilege account that worked with the legacy source fails at the first poll with a permission error.
-
-**What remains:** either fall back to `fn_cdc_get_all_changes_*` with bounded LSN windows, or check the grant at start with a clear error and document it.
-
-**Evidence:** `drasi-core/components/mssql-common/src/native/paging.rs:228-234,286-288`.
-
-**Done when:** a least-privilege test either works or fails at start with an actionable message.
-
-<a id="ms-08"></a>
-<a id="ms-09"></a>
-
-#### Reuse connections and raise SQL Server throughput (MS-08, MS-09)
-
-**Kind:** Issue. **Priority:** Medium. **Effort:** Medium.
-
-Every poll opens a new connection and re-reads the whole catalog, including every primary key in the database. A page holds at most 32 change groups (`KEY_WINDOW`), and each group is a separate query (N+1). `max_rows` is documented as the page size but is not.
-
-**What remains:** one connection per activation with reconnect; cache catalog and key discovery, refreshed on a cheap change detector (`cdc.change_tables`, `cdc.ddl_history`); make the window configurable or derived from `max_rows`; fetch groups by range; remove the `max_bytes/128` heuristic; document page semantics.
-
-**Example:** a backlog of 1 million changes is read 32 groups and 33 queries at a time, each poll reconnecting.
-
-**Evidence:** `drasi-core/components/mssql-common/src/native/paging.rs:15,91-93,165-169,277-288`; `drasi-core/components/mssql-common/src/keys.rs:57`.
-
-**Done when:** a backlog benchmark shows one connection and page sizes governed by configuration.
-
-<a id="ms-10"></a>
-
-#### Convert CDC commit times correctly and handle capture-instance changes (MS-10, Source D-7)
-
-**Kind:** Issue. **Priority:** Medium. **Effort:** Small to medium.
-
-Commit times are shifted by today's UTC offset (`DATEDIFF(MINUTE, GETDATE(), GETUTCDATE())`), so historical commits across a DST change are off by an hour. Schema and capture-instance changes fail the source without a typed error.
-
-**What remains:** correct time conversion; capture-instance and schema changes follow the PostgreSQL policy (fence only bound facts with typed `SchemaChanged`).
-
-**Evidence:** `drasi-core/components/mssql-common/src/native/paging.rs:286`.
-
-**Done when:** a test across a DST boundary yields correct timestamps and a capture-instance change produces a typed error.
-
-<a id="ms-11"></a>
-
-#### Tolerate transient consumer non-readiness (MS-11)
-
-**Kind:** Issue. **Priority:** Medium. **Effort:** Small.
-
-One consumer momentarily not ready fails the whole shared source. The legacy source allowed dynamic subscribe/unsubscribe; native membership is fixed, and a membership change should be an assessed Recreate.
-
-**Evidence:** `drasi-core/components/computation-plugins/sources/mssql/src/source.rs:140`.
-
-**Done when:** a consumer restart does not fail the source, and a membership change is assessed rather than failing at run time.
-
-<a id="ms-12"></a>
-<a id="ms-13"></a>
-
-#### Harden SQL Server configuration and credentials (MS-12, MS-13, Source X-03)
-
-**Kind:** Issue. **Priority:** High. **Effort:** Medium.
-
-The whole `settings` object is secret. The connection struct lacks `deny_unknown_fields`, so a misspelled password key silently becomes `""`; its derived `Debug` prints the password. `encryption` defaults to `NotSupported`, documented as "encrypt if supported" though it encrypts only the login. Connects have no timeout. Activation credentials are not supported, and neither legacy nor native supports Azure AD / managed identity, which Azure SQL needs.
-
-**What remains:** `password` as the only top-level secret; nested schema and `configuration_details`; `deny_unknown_fields` and a redacting `Debug`; default `encryption` to `On` and fix its doc; a connect timeout; activation credentials via `validate_with_bound_credentials`; a plan for Azure AD authentication.
-
-**Example:** `{"connection": {"pasword": "x", ...}}` is accepted and connects with an empty password.
-
-**Evidence:** `drasi-core/components/mssql-common/src/config.rs:105-115,150-168`; `drasi-core/components/mssql-common/src/connection.rs:80`; `drasi-core/components/mssql-common/src/native.rs:80`; `drasi-core/components/computation-plugins/sources/mssql/src/lib.rs:40-47`.
-
-**Done when:** unknown keys are rejected, encryption is on by default, only the password is secret, and credentials can come from activation.
+**Done when:** an excluded column is neither read nor emitted, in a test, and excluding a key column is refused.
 
 <a id="ms-15"></a>
 
@@ -2533,42 +2179,60 @@ The whole `settings` object is secret. The connection struct lacks `deny_unknown
 
 **Kind:** Investigation. **Priority:** Medium. **Effort:** Small.
 
-The pager fails a group with more than two rows or an unpaired before/after image. Whether SQL Server emits split updates (delete + insert for key changes) or multiple `__$command_id` rows for one LSN/seqval in practice has not been checked.
+The pager fails a group with more than two images or an unpaired before/after image with a typed `Unsupported` error. Whether SQL Server emits split updates (delete + insert for key changes) or several `__$command_id` rows for one LSN/seqval in practice has not been checked, and the SQL text and commit-time conversion have never run against a real server.
 
-**What remains:** reproduce on a real server, then decode those cases instead of failing.
+**What remains:** reproduce on a real server (part of [MS-30](#ms-30)), then decode those cases instead of failing.
 
-**Evidence:** `drasi-core/components/mssql-common/src/native/paging.rs:295-298,332-338`.
+**Evidence:** `drasi-core/components/computation-plugins/sources/mssql/DESIGN.md:114-121`; `drasi-core/components/mssql-common/src/native/paging.rs`.
 
 **Done when:** primary-key updates and multi-statement transactions stream correctly in a live test.
-
-<a id="ms-21"></a>
-
-#### Decide the SQL Server replay retention profile (MS-21)
-
-**Kind:** Decision. **Priority:** Low. **Effort:** Small.
-
-The source declares `consumer_replay_retention = LOCAL_PROCESS_RESTART` without a stated reason, although CDC tables survive power loss. State the rationale or move to `LOCAL_POWER_LOSS`, and consider persisting the activation origin ([CW-14](#cw-14)).
-
-**Evidence:** `drasi-core/components/computation-plugins/sources/mssql/src/source.rs:223-225`.
-
-**Done when:** the chosen profile is documented and tested.
 
 <a id="ms-16"></a>
 <a id="ms-17"></a>
 <a id="ms-18"></a>
 <a id="ms-19"></a>
 
-#### Simplify SQL Server code and add observability (MS-16, MS-17, MS-18, MS-19, Source X-05, Source X-07, Source X-08)
+#### Report SQL Server readiness to the host and emit metrics (MS-16, MS-17, MS-18, MS-19, Source X-07)
 
-**Kind:** Improvement. **Priority:** Low. **Effort:** Medium.
+**Kind:** Improvement. **Priority:** Low. **Effort:** Small to medium.
 
-Before images are rebuilt via a synthetic Insert; state is tracked by `cleanup`/`initialized` flags and generation parity; `next()` cannot be unit-tested without a database; errors are prose; there is almost no logging and no metrics; metadata uses `expect`.
+The engine sits behind a database seam with typed failures, but readiness, reconnect attempts and held consumers are only logged: the factory drops its `ControlSender`, and the SDK has no metric facility yet.
 
-**What remains:** a codec helper for before images; an explicit state enum; a poller trait seam; typed errors; tracing spans, status through the `ControlSender` and metrics ([CW-26](#cw-26)); fallible metadata.
+**What remains:** readiness and reconnect status through the host; metrics ([CW-26](#cw-26), [Source X-07](#source-x-07)) such as poll lag and page sizes, once the SDK provides them.
 
-**Evidence:** `drasi-core/components/computation-plugins/sources/mssql/src/source/processing.rs`; `drasi-core/components/computation-plugins/sources/mssql/src/source.rs:250-279`; `drasi-core/components/computation-plugins/sources/mssql/src/lib.rs:44-53`.
+**Evidence:** `drasi-core/components/computation-plugins/sources/mssql/src/lib.rs:132-138`; `drasi-core/components/computation-plugins/sources/mssql/DESIGN.md:278-283`.
 
-**Done when:** `next()` has database-free state-machine tests and the source emits status and metrics.
+**Done when:** status changes are visible to the host and metrics are emitted under test.
+
+<a id="ms-22"></a>
+
+#### Give the SQL Server bootstrap providers activation credentials (MS-22)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Medium.
+
+The source can take its login from activation credentials, including a Microsoft Entra ID token, but bootstrap factories receive no activation credentials. The paired providers therefore always need a literal `user` and `password` (a secret reference), and a provider configured without them is refused.
+
+**What remains:** pass activation credentials to bootstrap providers (an SDK and Host change shared with the other database bootstrappers), or document that bootstrap needs a SQL login even when the source uses an identity provider.
+
+**Example:** an Azure SQL database with SQL authentication disabled can stream changes through the source with an Entra ID token, but its initial data cannot be loaded.
+
+**Evidence:** `drasi-core/components/computation-plugins/bootstrappers/mssql/src/lib.rs:198-199`; `drasi-core/components/computation-plugins/bootstrappers/mssql/README.md:20-22`.
+
+**Done when:** a provider authenticates with provider-supplied credentials in a test, or the limit is documented in the source and bootstrapper docs.
+
+<a id="ms-23"></a>
+
+#### Keep SQL Server cursors valid across long idle periods (MS-23)
+
+**Kind:** Issue. **Priority:** Low. **Effort:** Small to medium.
+
+Committed cursors advance only with emitted changes. If every selected table stays idle for longer than CDC retention (three days by default), a restart reports `PositionUnavailable` although nothing was lost.
+
+**What remains:** advance the committed position over empty intervals (for example by committing the maximum LSN a poll proved empty), or keep the documented advice to size retention above the longest idle period plus downtime.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/mssql/DESIGN.md:181-192`.
+
+**Done when:** a restart after an idle period longer than retention resumes without error, in a test.
 
 <a id="ms-30"></a>
 <a id="ms-31"></a>
@@ -2576,194 +2240,79 @@ Before images are rebuilt via a synthetic Insert; state is tracked by `cleanup`/
 
 #### Qualify the SQL Server source (MS-30, MS-31, MS-32)
 
-**Kind:** Qualification. **Priority:** High. **Effort:** Large.
+**Kind:** Qualification. **Priority:** High. **Effort:** Large. **USER-DEFERRED.**
 
-No case has run against a real SQL Server ([CW-78](#cw-78)).
+No case has run against a real SQL Server ([CW-78](#cw-78)); an owner deferred live qualification. The live fixture is kept compiling and current: it runs against an explicitly approved isolated database (`DRASI_MSSQL_TEST_MODE=external`) or an owned container (`DRASI_MSSQL_TEST_MODE=podman`, which runs under amd64 emulation on arm64 Macs).
 
-**What remains:** obtain the environment and run the Host and Server real cases; port the legacy integration suite ([CW-41](#cw-41)); conformance kit; tests for unsupported column types, split updates, least privilege, orphan markers, backlog performance, retention-gap and binding-change errors; check element labels match the legacy `normalize_table_label` output.
+**What remains:** run the Host and Server real cases; port the legacy integration suite ([CW-41](#cw-41)); the SDK conformance kit through the loaded library; live tests for column types, split updates ([MS-15](#ms-15)), commit times across a DST change, least privilege, orphan markers, reconnection, backlog performance, retention-gap and binding-change errors; check element labels match the legacy `normalize_table_label` output.
 
-**Evidence:** `drasi-core/components/computation-plugins/sources/mssql/README.md:1-15`; `drasi-core/components/host-sdk/tests/native_mssql_components.rs:335-351` (ignored).
+**Evidence:** `drasi-core/components/host-sdk/tests/fixtures/native_mssql/README.md`; `drasi-core/components/host-sdk/tests/native_mssql_components.rs:487-502` (ignored); `drasi-core/components/computation-plugins/sources/mssql/DESIGN.md:15-22`.
 
 **Done when:** these pass in a named CI job against a real server.
-
-<a id="ms-40"></a>
-
-#### Write SQL Server DESIGN and CONFIGURATION docs (MS-40)
-
-**Kind:** Issue. **Priority:** High. **Effort:** Medium.
-
-The source and bootstrapper READMEs state ABI `2.0.0` (current `4.0.0`), and there is no design or configuration reference.
-
-**What remains:** `DESIGN.md` (paging algorithm, cursor format and binding, source/bootstrapper handover, failure model) and `CONFIGURATION.md` (fields, required grants and CDC setup, encryption guidance, update matrix, secrets); fix the ABI text.
-
-**Evidence:** `drasi-core/components/computation-plugins/sources/mssql/README.md:7`; `drasi-core/components/computation-plugins/bootstrappers/mssql/README.md:6`.
-
-**Done when:** both documents exist and match the code.
 
 <a id="plugin-source-sqlite"></a>
 
 ### SQLite source
 
-`drasi-core/components/computation-plugins/sources/sqlite` (engine in `drasi-core/components/sqlite-common/src/native`; in-process wrapper `drasi-core/components/sources/sqlite/src/native.rs`). Four factories that own the database connection (REST or Rust handle writes, hook-based capture, optional journal) with source/bootstrap coordination; lifecycle hooks are no-ops, journal tables leak on removal, and configuration has no defaults. Not production-ready.
-
-<a id="sq-01"></a>
-
-#### Reproduce and fix a possible stop deadlock (SQ-01)
-
-**Kind:** Investigation. **Priority:** High. **Effort:** Small to medium.
-
-While output is pending the worker stops taking commands, and `stop` waits for the REST listener to drain before signalling database shutdown. An accepted HTTP write waiting for the worker could therefore hold stop until the host timeout, and every retry repeats the wait.
-
-**What remains:** a test with a full output queue, an accepted HTTP write, then Stop. If it hangs: signal database shutdown before or with the REST drain, reject queued commands, let the worker exit with blocked output (replay modes keep it in the journal), and make Abort immediate. Report lost volatile output as a typed outcome instead of a `log::warn!`.
-
-**Evidence:** `drasi-core/components/sqlite-common/src/native/worker.rs:1198-1199,1211`; `drasi-core/components/sqlite-common/src/native/runtime.rs:205-212`.
-
-**Done when:** the scenario stops within the deadline in a test.
-
-<a id="sq-02"></a>
-
-#### Gate SQLite writes and the worker on Pause (SQ-02, CW-96)
-
-**Kind:** Issue. **Priority:** High. **Effort:** Medium.
-
-`pause()` returns success while the database worker and REST listener keep accepting writes. The in-process wrapper ignores Pause too.
-
-**What remains:** reject REST and handle admission while paused (503 or typed error), park the worker after its current transaction, reopen on Resume, bound REST/handle waits; otherwise return `unsupported`. Forward the wrapper's pause and resume.
-
-**Example:** `POST /api/tables/orders` during a host pause commits and emits.
-
-**Evidence:** `drasi-core/components/computation-plugins/sources/sqlite/src/component.rs:214-219`; wrapper `drasi-core/components/sources/sqlite/src/native.rs:365-366`; `drasi-core/components/sqlite-common/src/native/handle.rs:161-190`.
-
-**Done when:** a test shows writes refused while paused and accepted after Resume, or an `unsupported` refusal.
-
-<a id="sq-03"></a>
-
-#### Erase SQLite journal tables on removal (SQ-03, CW-98)
-
-**Kind:** Issue. **Priority:** High. **Effort:** Small to medium.
-
-Replay and shared modes create `__drasi_native_*` tables in the user's database. Removal never drops them (erase is refused because the factory does not declare it), and a later non-replay source on the same file then fails with "native SQLite cannot disable replay on a journal-owned database".
-
-**What remains:** declare `erases_owned_state`; in `dispose(Erase)`, via `spawn_blocking`, drop `__drasi_native_{outbox,consumers,bootstrap,state}_v1` in one transaction, never touching user tables; idempotent when the file is missing, retry-safe when locked. Volatile modes follow the Source D-1 decision in [CW-98](#cw-98).
-
-**Example:** add a `drasi.sqlite/replay-transactions` source on `app.db`, remove it with erase (refused), then add `drasi.sqlite/changes` on `app.db`: start fails.
-
-**Evidence:** `drasi-core/components/computation-plugins/sources/sqlite/src/component.rs:223-225`; `drasi-core/components/sqlite-common/src/native/worker.rs:250-258`; `drasi-core/components/sqlite-common/src/native/journal.rs:177-194`.
-
-**Done when:** erase twice succeeds and a new source on the same file starts, in a test.
-
-<a id="sq-04"></a>
-
-#### Honour start deadlines and cancellation (SQ-04)
-
-**Kind:** Issue. **Priority:** Medium. **Effort:** Small.
-
-`start` awaits progress readiness and runtime start with no deadline or cancellation.
-
-**What remains:** select on `ctx.cancellation()`/`ctx.deadline()` around `wait_ready()` and `runtime.start`, leaving a retry-safe state.
-
-**Evidence:** `drasi-core/components/computation-plugins/sources/sqlite/src/component.rs:211-212,241,259`.
-
-**Done when:** the conformance-kit cancelled-start case passes.
-
-<a id="sq-06"></a>
-
-#### Add SQLite update planning and management (SQ-06, Source X-04)
-
-**Kind:** Issue. **Priority:** Medium. **Effort:** Medium.
-
-No assess or management exists. Restart: numeric bounds and `rest_api` (non-coordinated sources). Unsupported or Recreate: `stream`, `path`, `tables`, `table_keys`, `output`, `replay`, `coordinated_snapshot`. Coordinated sources must match their coordinator exactly, so every change is Recreate.
-
-**Evidence:** `capabilities: Default::default()` `drasi-core/components/computation-plugins/sources/sqlite/src/lib.rs:147`; `drasi-core/components/computation-plugins/sources/sqlite/src/coordinator.rs:151-172`.
-
-**Done when:** every field has a tested boundary.
+`drasi-core/components/computation-plugins/sources/sqlite` (engine in `drasi-core/components/sqlite-common/src/native`; in-process wrapper `drasi-core/components/sources/sqlite/src/native.rs`). Production-ready: four factories that own the database connection (REST or Rust handle writes, hook-based capture, optional journal) with source/bootstrap coordination, real Pause, a two-phase stop, erase of journal tables, managed updates, published defaults, `initSql` and an authenticated `/api/sql`, and a hardened REST API; behaviour is in its [DESIGN.md](../../components/computation-plugins/sources/sqlite/DESIGN.md) and [CONFIGURATION.md](../../components/computation-plugins/sources/sqlite/CONFIGURATION.md). The items below remain.
 
 <a id="sq-05"></a>
-<a id="source-d-6"></a>
 
-#### Decide SQL and DDL access for the loaded SQLite plugin (SQ-05, Source D-6)
+#### Report `path: null` with the in-memory message (SQ-05)
 
-**Kind:** Decision. **Priority:** High. **Effort:** Medium.
+**Kind:** Improvement. **Priority:** Low. **Effort:** Small.
 
-The legacy and host-linked sources offer arbitrary SQL, DDL and transaction callbacks; the loaded plugin offers REST CRUD only, and its authorizer denies DDL and PRAGMA. An in-memory (`path: null`) loaded source therefore has no way to create tables and is unusable, yet it is accepted.
+The SQL and DDL access decision is implemented (`initSql`, `/api/sql`, and refusal of an in-memory loaded source without either). A literal `path: null` is still refused by the Host's field type check before the plugin sees it, so the user gets a type error instead of the plugin's in-memory guidance.
 
-**What remains:** choose between an `init_sql` setting plus an optional authenticated `/api/sql` route, a native service resource, or a documented exception. Until then, reject `path: null` in the dynamic factories.
+**What remains:** accept `null` for `path` in the published schema so the plugin's message applies, or document the type error.
 
-**Example:** a Server configuration with `settings.path: null` loads and starts, but every REST write fails because no table exists.
+**Evidence:** `drasi-core/components/computation-plugins/sources/sqlite/DESIGN.md:160-169`; `drasi-core/components/host-sdk/tests/fixtures/native_sqlite/host_components.rs:1113`.
 
-**Evidence:** `drasi-core/components/sqlite-common/src/native.rs:48`; authorizer `drasi-core/components/sqlite-common/src/native/worker.rs:281-297`; no `path` validation in `drasi-core/components/computation-plugins/sources/sqlite/src/lib.rs`.
-
-**Done when:** the chosen mechanism is implemented or in-memory loaded mode is refused, with a test.
-
-<a id="sq-07"></a>
-
-#### Publish SQLite configuration schemas and defaults (SQ-07, Source X-03)
-
-**Kind:** Issue. **Priority:** Medium. **Effort:** Small to medium.
-
-`settings` and `rest_api` are opaque `Object` fields and no setting has a default, so every bound must be supplied by hand. The legacy source allowed env/secret references for REST host and port.
-
-**What remains:** nested schemas, `configuration_details`, defaults equal to serde defaults, and references for REST host/port if the configuration mechanism allows.
-
-**Evidence:** `drasi-core/components/computation-plugins/sources/sqlite/src/lib.rs:123-128`; `drasi-core/components/sqlite-common/src/native.rs:46-60`.
-
-**Done when:** a minimal configuration (`path`, `tables`, `output`) is accepted and the published defaults round-trip.
+**Done when:** `path: null` produces the same refusal as an absent `path`, or the difference is documented.
 
 <a id="sq-08"></a>
 
-#### Harden the SQLite REST API (SQ-08)
+#### Rate-limit the SQLite REST API (SQ-08)
 
-**Kind:** Issue. **Priority:** Medium. **Effort:** Medium.
+**Kind:** Improvement. **Priority:** Low. **Effort:** Small to medium.
 
-The REST API has no authentication, body-size limit or request timeout, and binds wherever configured. `list_rows` fails once a table exceeds `transactions.max_changes`; the legacy route returned every row.
+The REST listener has bearer authentication, TLS, body and time limits and paging, but no request rate or connection limit.
 
-**What remains:** optional bearer/API-key authentication via a secret reference (shared with the network sources); body and timeout limits; refuse non-loopback binding without authentication or explicit opt-in; paginate `list_rows`.
+**What remains:** rate and connection limits, preferably from the shared network runtime ([plugin-source-network](#plugin-source-network)).
 
-**Evidence:** `drasi-core/components/sqlite-common/src/lib.rs:41-53`; `drasi-core/components/sqlite-common/src/rest_api.rs:180-192`; read bound `drasi-core/components/sqlite-common/src/native/worker.rs:839`.
+**Evidence:** `drasi-core/components/computation-plugins/sources/sqlite/DESIGN.md:362-370` (Known limitations).
 
-**Done when:** tests cover unauthenticated refusal, non-loopback refusal and paging past the bound.
+**Done when:** a test shows excess requests refused with `429` and connections bounded.
 
 <a id="sq-09"></a>
 <a id="sq-12"></a>
 
-#### Report SQLite status and metrics (SQ-09, SQ-12, Source X-07)
-
-**Kind:** Improvement. **Priority:** Low. **Effort:** Small to medium.
-
-Every factory drops its `ControlSender`, so REST or worker failures are visible only through `next()`. There are no spans or counters.
-
-**What remains:** status through the `ControlSender`; spans and counters (commits, rollbacks, journal depth, REST requests) per [CW-26](#cw-26).
-
-**Evidence:** `drasi-core/components/computation-plugins/sources/sqlite/src/lib.rs:180,198,231`.
-
-**Done when:** a REST bind failure after start is reported as status, and counters are emitted.
-
-<a id="sq-15"></a>
-
-#### Offer WAL mode and document the DDL restriction (SQ-15)
+#### Emit SQLite metrics (SQ-09, SQ-12, Source X-07)
 
 **Kind:** Improvement. **Priority:** Low. **Effort:** Small.
 
-Non-replay file mode has no opt-in `journal_mode=WAL`, and the DDL/PRAGMA denial is undocumented.
+Readiness is reported through the `ControlSender`, but counters (commits, rollbacks, journal depth, REST requests) are not exported because the SDK has no metric facility yet.
 
-**Evidence:** `drasi-core/components/sqlite-common/src/native/worker.rs:249,281-297`.
+**What remains:** emit those counters once [Source X-07](#source-x-07) and [CW-26](#cw-26) provide the facility.
 
-**Done when:** WAL is configurable and the restriction is documented.
+**Evidence:** `drasi-core/components/computation-plugins/sources/sqlite/DESIGN.md:344-351`.
+
+**Done when:** counters are emitted under test.
 
 <a id="sq-10"></a>
 <a id="sq-11"></a>
 
-#### Simplify SQLite plugin code (SQ-10, SQ-11, Source X-05, Source X-08)
+#### Type SQLite source errors (SQ-10, SQ-11, Source X-08)
 
-**Kind:** Improvement. **Priority:** Low. **Effort:** Small to medium.
+**Kind:** Improvement. **Priority:** Low. **Effort:** Small.
 
-Progress preparation is duplicated between the plugin and the in-process wrapper; the coordinator has three identical `ensure_active` functions and re-parses configuration; `create()` for Replay says "requires actual consumer progress" where it means source progress; metadata uses `expect`; errors are prose.
+Progress preparation is shared with the in-process wrapper and the coordinator's checks are collapsed, but apart from the journal, failures are prose `anyhow` errors rather than typed `SourceFailure`s.
 
-**What remains:** move progress preparation into `sqlite-common`; collapse `ensure_active` and the `Single`/`Shared` dispatch; pass the validated configuration to the coordinator; fix the error text; document or hide the Rust-only `handle()`/`with_rest_api()`/`bound_rest_address()`; typed errors; fallible metadata.
+**What remains:** typed failures for schema, position and configuration errors, as the PostgreSQL and MySQL sources have.
 
-**Evidence:** `drasi-core/components/computation-plugins/sources/sqlite/src/component.rs:238-278`; `drasi-core/components/computation-plugins/sources/sqlite/src/coordinator.rs:63,96,143,184,307`; `drasi-core/components/computation-plugins/sources/sqlite/src/lib.rs:180-184`.
+**Evidence:** `SourceFailure` is used only in `drasi-core/components/sqlite-common/src/native/journal.rs`.
 
-**Done when:** the duplication is removed and the error text is correct.
+**Done when:** callers can tell a permanent failure from a transient one by type, with tests.
 
 <a id="sq-30"></a>
 <a id="sq-31"></a>
@@ -2772,25 +2321,13 @@ Progress preparation is duplicated between the plugin and the in-process wrapper
 
 **Kind:** Qualification. **Priority:** Medium. **Effort:** Medium.
 
-Data-path coverage is good, but lifecycle, management and loaded-plugin behaviour are untested.
+The linked plugin runs the SDK conformance kit on both Tokio flavours, and tests cover the stop scenario, Drain and Abort, Pause, erase twice, `initSql`, `/api/sql` authentication, REST limits and paging, and token rotation.
 
-**What remains:** conformance kit (linked and loaded); the SQ-01 stop scenario; erase twice and recreate on the same file; Pause/Resume; Drain vs Abort; start cancellation; assess/apply; in-memory loaded mode per SQ-05; `list_rows` past the bound; non-loopback REST; the journal in the [CW-14](#cw-14) crash matrix; the [CW-82](#cw-82) mixed pipeline.
+**What remains:** the conformance kit through the loaded library; cold reconstruction with undrained persistent input-pipe frames (not a qualified guarantee today); the journal in the [CW-14](#cw-14) crash matrix; the [CW-82](#cw-82) mixed pipeline.
+
+**Evidence:** `drasi-core/components/computation-plugins/sources/sqlite/src/tests.rs`; `drasi-core/components/computation-plugins/sources/sqlite/DESIGN.md:362-370`.
 
 **Done when:** these run in a named CI job ([CW-85](#cw-85)).
-
-<a id="sq-40"></a>
-
-#### Write SQLite DESIGN and CONFIGURATION docs (SQ-40)
-
-**Kind:** Issue. **Priority:** High. **Effort:** Medium.
-
-The README states ABI `2.0.0` (current `4.0.0`), the bootstrapper README says "ABI-2", and there is no design or field reference.
-
-**What remains:** `DESIGN.md` (worker and REST architecture, hooks and authorizer, journal tables and binding, coordinator lease, stop ordering, durability) and `CONFIGURATION.md` (every field and default, an example per factory, update matrix, erase semantics, REST security posture, in-memory caveat); fix the ABI text.
-
-**Evidence:** `drasi-core/components/computation-plugins/sources/sqlite/README.md:3`; `drasi-core/components/computation-plugins/bootstrappers/sqlite/README.md:21`.
-
-**Done when:** both documents exist and match the code.
 
 <a id="plugin-source-network"></a>
 <a id="cw-100"></a>
@@ -3970,8 +3507,8 @@ Drain/Abort, plan updates field by field, and publish flat configuration with
 only credentials secret. Behaviour is in each sink's `DESIGN.md` and
 `CONFIGURATION.md`. Decisions Sink D-3 (consumer plus destination cursor),
 Sink D-10 (configurable, per-owner progress table) and Sink D-15 (Entra ID
-tokens) are implemented. The items below are what remains; the first two are
-regressions for the MySQL and SQL Server sinks relative to their earlier plain
+tokens) are implemented. The items below are what remains; the first is a
+regression for the MySQL and SQL Server sinks relative to their earlier plain
 sink versions and the legacy reactions.
 
 <a id="sp-10"></a>
@@ -4023,33 +3560,48 @@ Server authenticates with an Entra ID token.
 
 <a id="sp-11"></a>
 
-#### Decide whether consumer sinks may consume in-memory queries (SP-11)
+#### Finish the volatile-producer refusal for consumer sinks (SP-11)
 
-**Kind:** Decision. **Area:** Core, native sinks. **Priority:** High.
-**Effort:** Medium if a weaker mode is added.
+**Kind:** Issue. **Area:** Core, native sinks. **Priority:** Medium.
+**Effort:** Small to medium.
 
-The `DeliveryRunner` rejects input whose immediate producer has no persistent
-progress (`ReplayRejection::MissingProgress`), and its own ledger must be
-stored durably. The stored-procedure sinks therefore cannot consume an
-in-memory query. This is a regression for MySQL and SQL Server, which accepted
-any producer while they were plain sinks, and for every legacy reaction. The
-PostgreSQL sink already had this limit.
+The decision is made and implemented: a stored-procedure sink may consume an
+in-memory query only with `deliveryGuarantee: atLeastOnce` (a volatile
+identity with a per-run epoch, destination cursor format 3). Without that
+opt-in, an exactly-once consumer input needs a producer with persistent
+progress. Two gaps remain.
 
-**Options:** (a) keep the restriction and document it (done in each sink's
-`DESIGN.md`); (b) add an explicit weaker delivery mode for volatile producers:
-at-least-once, no resume across a process restart, the destination cursor still
-deduplicating within one producer incarnation; (c) let the sink fall back to a
-plain `Handled` sink when its producer is volatile.
+**What remains:**
 
-**Example:** a MySQL stored-procedure sink fed by a memory-backed query fails
-at delivery; the same graph worked before this change.
+1. Only volatile *query* producers (queries on an in-memory index provider)
+   are refused at configuration time by `validate_producer_persistence`. Any
+   other volatile producer, for example a source or transformer without
+   persistent progress, is accepted at configuration time and refused only at
+   the first delivery (`ReplayRejection::MissingProgress`). Extend the
+   configuration-time check to every producer whose progress is volatile, or
+   document which producers it covers.
+2. The HTTP consumer sink has no `deliveryGuarantee` option; it keeps the
+   default exactly-once guarantee and so cannot opt in to consume an
+   in-memory query. Add the option, or document the limit in its docs.
 
-**Evidence:** `drasi-core/components/computation-contracts/src/output_identity.rs:64-84`;
-`drasi-core/lib/src/computation/v1/delivery.rs:342-357`;
-`drasi-core/components/computation-plugins/sinks/storedproc-mysql/DESIGN.md:223-224`.
+**Example:** an exactly-once MySQL stored-procedure sink fed directly by a
+source without persistent progress is accepted by the graph and fails at its
+first delivery; the same sink fed by an in-memory query is refused when the
+edge is configured.
 
-**Done when:** the option is chosen and recorded, and either the restriction
-is documented in all three sinks or the chosen mode is implemented and tested.
+**Evidence:** `drasi-core/lib/src/computation/v1/graph.rs:71-120`
+(`volatile_query_producer`, `validate_producer_persistence`);
+`drasi-core/lib/src/computation/v1/graph/reconcile.rs:1802-1846`;
+`drasi-core/components/computation-contracts/src/output_identity.rs:64-84`
+(delivery-time `MissingProgress`);
+`drasi-core/components/computation-contracts/src/delivery.rs:351` (default
+guarantee); no `delivery_guarantee` override in
+`drasi-core/components/computation-plugins/sinks/http/src/consumer.rs`.
+
+**Done when:** every unsupported volatile pairing is refused at configuration
+time (or the remaining delivery-time cases are documented), and the HTTP
+consumer sink either supports `deliveryGuarantee: atLeastOnce` with a test or
+documents that it does not.
 
 <a id="sp-12"></a>
 
@@ -4240,8 +3792,7 @@ has two progress tables with different formats.
 `drasi-core/components/mysql-common/src/storedproc/`). Production-ready: see
 its [DESIGN.md](../../components/computation-plugins/sinks/storedproc-mysql/DESIGN.md)
 and [CONFIGURATION.md](../../components/computation-plugins/sinks/storedproc-mysql/CONFIGURATION.md).
-The shared items above apply; [SP-10](#sp-10) and [SP-11](#sp-11) are
-regressions for this sink.
+The shared items above apply; [SP-10](#sp-10) is a regression for this sink.
 
 <a id="smy-04"></a>
 
@@ -4272,8 +3823,8 @@ replication settings, and use it for the sink.
 Production-ready by code review and unit tests: see its
 [DESIGN.md](../../components/computation-plugins/sinks/storedproc-mssql/DESIGN.md)
 and [CONFIGURATION.md](../../components/computation-plugins/sinks/storedproc-mssql/CONFIGURATION.md).
-The shared items above apply; [SP-10](#sp-10) (including Entra ID tokens) and
-[SP-11](#sp-11) are regressions for this sink.
+The shared items above apply; [SP-10](#sp-10) (including Entra ID tokens) is a
+regression for this sink.
 
 <a id="sms-30"></a>
 
@@ -5246,6 +4797,37 @@ source lifecycle tests about 744 s.
 feature groups) show shorter feedback without lost coverage, weaker isolation,
 hidden cleanup failures or changed result oracles. Application performance is
 [CW-40](#cw-40) and [CW-79](#cw-79), not this item.
+
+<a id="cw-105"></a>
+
+#### Fix the failing native-error failure-policy tests (CW-105)
+
+**Kind:** Investigation. **Area:** Core. **Priority:** High. **Effort:** Small
+to medium.
+
+`native_errors_keep_nodes_controller_siblings_and_control_requests_usable_current_thread`
+fails deterministically, on HEAD as well as on the working tree. The
+`_multi_thread` variant is intermittent: 3 of 5 runs failed on HEAD and 2 of 5
+on the working tree. The failure surfaces the test's own
+`"invalid native component state"` error, so either the scenario's
+expectations are stale or a native error is no longer contained as the test
+requires (nodes, controller, siblings and control requests stay usable).
+
+**What remains:** reproduce on both flavours, find whether the product or the
+test is wrong, and fix it without raising the 10 s timeout or weakening the
+assertions.
+
+**Example:**
+
+```bash
+cargo test -p drasi-lib --test computation_failure_policy -- native_errors_keep_nodes
+```
+
+**Evidence:** `drasi-core/lib/tests/computation_failure_policy.rs:27` (error
+type), `:135` (`scenario`), `:367-382` (the two tests).
+
+**Done when:** both variants pass repeatedly (for example 20 consecutive runs
+each) on HEAD of the branch.
 
 ### Semantic, application and API coverage
 

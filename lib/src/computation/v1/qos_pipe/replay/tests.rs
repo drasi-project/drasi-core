@@ -180,6 +180,7 @@ fn replay_receipt_and_identifier_limits_match_the_metadata_budget() {
                 producer: producer.clone(),
                 sequence,
                 digest: [255; 32],
+                epoch: None,
             },
             sequence,
         );

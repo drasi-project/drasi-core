@@ -133,11 +133,18 @@ do not falsely advertise one fixed graph property type.
   a cleanup task. Escaped handles cannot write after their scope ends. Cancellation
   **after commit submission has an unknown outcome to the caller**; it is not
   permission to retry the write. This API does not supply caller retry receipts.
-- Stop closes new admission, requests rollback of unfinished scopes and awaits
-  the actual database worker. An already-submitted commit may still complete.
-  Timeout/cancellation retains the worker and blocks restart until a subsequent
-  stop finishes cleanup. Old scoped handles cannot target a replacement worker.
-  Volatile output may be lost at stop; durable output remains in the journal.
+- Stop closes new admission, lets accepted HTTP requests finish while the
+  worker stops waiting for output, then requests rollback of unfinished scopes
+  and awaits the actual database worker. An already-submitted commit may still
+  complete. Timeout/cancellation retains the worker and blocks restart until a
+  subsequent stop finishes cleanup. Old scoped handles cannot target a
+  replacement worker. Volatile output may be lost at stop (it is counted and
+  logged); durable output remains in the journal. `Abort` rolls back and drops
+  HTTP connections at once.
+- Pause refuses handle and REST writes (`SqlitePaused`, HTTP 503) and parks the
+  worker at its next transaction boundary; reads continue; Resume reopens.
+- Dispose with erase drops a journal source's own `__drasi_native_*_v1` tables
+  in one transaction (idempotent; user tables are untouched).
 
 ### Native settings
 
@@ -199,7 +206,9 @@ tables are not exposed by REST. Route IDs remain key values, separated by `:` fo
 composite keys, rather than the native graph's full versioned element references.
 
 Stop rejects new HTTP/ordinary SQL admission, lets already accepted HTTP requests
-finish through their generation-bound SQL client, and then stops the database.
+finish through their generation-bound SQL client (the worker no longer waits
+for output while draining, so a full output queue cannot hold Stop), and then
+stops the database.
 Cancelled/timed-out cleanup retains both worker ownership and the client lease;
 restart remains blocked until cleanup finishes. An old REST client cannot follow
 the shared client resource into a replacement worker. Bind/startup and unexpected

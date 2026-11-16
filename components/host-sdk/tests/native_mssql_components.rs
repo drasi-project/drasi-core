@@ -29,8 +29,16 @@ use drasi_lib::{computation::v1::*, DrasiLib};
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, num::NonZeroUsize, path::PathBuf, sync::Arc, time::Duration};
 
+/// Component IDs are UUIDs. Fixture names map to a stable UUID derived from
+/// the name (SipHash with fixed keys), so every reference to a name agrees.
 fn id(value: &str) -> ComponentId {
-    ComponentId::try_new(value).expect("id")
+    use std::hash::{Hash, Hasher};
+    ComponentId::try_new(value).unwrap_or_else(|_| {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        value.hash(&mut hasher);
+        let bits = hasher.finish() & 0xffff_ffff_ffff;
+        ComponentId::try_new(format!("00000000-0000-4000-8000-{bits:012x}")).expect("fixture id")
+    })
 }
 fn resource(value: &str) -> ResourceId {
     ResourceId::try_new(value).expect("resource")
@@ -77,12 +85,12 @@ fn plugins(dynamic: bool) -> Result<Vec<Arc<NativePlugin>>> {
 /// Flat native sink settings for the fixture's application login, merged
 /// with `extra` (outputs, templates, timeouts).
 fn sink_settings(db: &Database, extra: Value) -> Value {
-    let connection = db.settings()["connection"].clone();
+    let connection = db.settings();
     let mut settings = json!({
         "host": connection["host"], "port": connection["port"],
         "database": connection["database"], "user": connection["user"],
         "password": connection["password"], "encryption": "required",
-        "trustServerCertificate": connection["trust_server_certificate"],
+        "trustServerCertificate": connection["trustServerCertificate"],
         "progressTable": format!("{}.DrasiDeliveryProgress", db.schema),
         "commandTimeoutMs": 15000, "connectTimeoutMs": 15000, "retryBudgetMs": 10000,
     });
@@ -90,6 +98,46 @@ fn sink_settings(db: &Database, extra: Value) -> Value {
         settings.extend(extra.clone());
     }
     settings
+}
+
+/// A bootstrap provider's flat configuration: the shared source settings
+/// beside the provider's own `source`, `stream` and `labels`.
+fn provider_config(settings: &Value, own: Value) -> Value {
+    let mut config = settings.clone();
+    if let (Some(config), Some(own)) = (config.as_object_mut(), own.as_object()) {
+        config.extend(own.clone());
+    }
+    config
+}
+
+/// The source's specification: the flat settings with `password` as a
+/// secret reference resolved by the fixture's secret store (key
+/// `password`), which `secrets` returns.
+fn source_specification(
+    factory: &computation::NativeFactory,
+    settings: &Value,
+) -> Result<(ComponentSpecification, BTreeMap<String, Value>)> {
+    let mut literal = settings.clone();
+    let password = literal
+        .as_object_mut()
+        .context("settings object")?
+        .remove("password")
+        .unwrap_or(Value::Null);
+    literal["stream"] = json!(stream("items"));
+    let mut specification =
+        factory.specification(id("00000000-0000-0000-0000-0000000001b3"), literal)?;
+    specification.configuration.insert(
+        "password".into(),
+        ConfigurationValue::Reference {
+            resource: resource("settings"),
+            key: "password".into(),
+            secret: true,
+        },
+    );
+    Ok((
+        specification,
+        BTreeMap::from([("password".into(), password)]),
+    ))
 }
 
 fn consumer_options() -> DeliveryOptions {
@@ -188,10 +236,19 @@ async fn exercise(dynamic: bool) -> Result<()> {
     let mut queries = Vec::new();
     let mut results = Vec::new();
     for (index, name) in ["all", "high"].into_iter().enumerate() {
-        let bootstrap = bootstrap_factory.create_provider(id(name),
-            json!({"source":"items","stream":stream("items"),"settings":db.settings(),"labels":["Items"]}),
-            Some(drasi_computation_plugin_sdk::Scope { instance_id:"native-mssql".into(),graph_id:ComponentBatch::GRAPH_ID.into(),generation:1 }),
-            Some(owners[index].clone()))?;
+        let bootstrap = bootstrap_factory.create_provider(
+            id(name),
+            provider_config(
+                &db.settings(),
+                json!({"source":id("items").as_str(),"stream":stream("items"),"labels":["Items"]}),
+            ),
+            Some(drasi_computation_plugin_sdk::Scope {
+                instance_id: "native-mssql".into(),
+                graph_id: ComponentBatch::GRAPH_ID.into(),
+                generation: 1,
+            }),
+            Some(owners[index].clone()),
+        )?;
         let query = ContinuousQueryTransformer::new_configured(
             ContinuousQueryDefinition {
                 graph_id: ComponentBatch::GRAPH_ID.into(),
@@ -221,16 +278,7 @@ async fn exercise(dynamic: bool) -> Result<()> {
         queries.push(query);
     }
     let source_factory = plugins[0].factories()[0].clone();
-    let mut source = source_factory
-        .specification(id("items"), json!({"stream":stream("items"),"settings":{}}))?;
-    source.configuration.insert(
-        "settings".into(),
-        ConfigurationValue::Reference {
-            resource: resource("settings"),
-            key: "source".into(),
-            secret: true,
-        },
-    );
+    let (mut source, secrets) = source_specification(&source_factory, &db.settings())?;
     source
         .dependencies
         .insert("consumer_progress".into(), vec![resource("consumers")]);
@@ -255,7 +303,7 @@ async fn exercise(dynamic: bool) -> Result<()> {
             ResourceHandle::new(
                 ResourceRole::SecretStore,
                 Arc::new(ConfigurationResolverResource(Arc::new(Settings(
-                    BTreeMap::from([("source".into(), db.settings())]),
+                    secrets.clone(),
                 )))),
             ),
         ),
@@ -387,6 +435,53 @@ fn dynamic_metadata_has_all_three_real_roles() -> Result<()> {
     assert_eq!(plugins[1].bootstrap_factories().len(), 2);
     assert_eq!(plugins[2].factories().len(), 1);
     Ok(())
+}
+/// Database-free: the source and both bootstrap providers take the flat
+/// settings with `password` as their only secret, and reject the previous
+/// nested format, through the static definitions and the built libraries.
+fn flat_configuration(dynamic: bool) -> Result<()> {
+    let plugins = plugins(dynamic)?;
+    let source = &plugins[0].factories()[0];
+    let fields = &source.metadata().configuration.fields;
+    let secrets: Vec<_> = fields
+        .iter()
+        .filter(|(_, field)| field.secret)
+        .map(|(name, _)| name.as_str())
+        .collect();
+    ensure!(secrets == ["password"], "source secrets: {secrets:?}");
+    let flat =
+        json!({"stream": stream("items"), "host": "no-io.invalid", "database": "d", "user": "u"});
+    let (specification, secrets) = source_specification(source, &flat)?;
+    ensure!(
+        specification.configuration.contains_key("password") && secrets.contains_key("password")
+    );
+    ensure!(
+        source
+            .specification(
+                id("00000000-0000-0000-0000-0000000001b3"),
+                json!({"stream": stream("items"), "settings": {}})
+            )
+            .is_err(),
+        "the nested settings object is rejected"
+    );
+    for bootstrap in plugins[1].bootstrap_factories() {
+        let fields = &bootstrap.metadata().configuration.fields;
+        ensure!(
+            fields.iter().filter(|(_, field)| field.secret).count() == 1
+                && fields["password"].secret
+                && fields.contains_key("barrierTable"),
+            "bootstrap settings are flat"
+        );
+    }
+    Ok(())
+}
+#[test]
+fn static_flat_configuration_with_one_secret() -> Result<()> {
+    flat_configuration(false)
+}
+#[test]
+fn dynamic_flat_configuration_with_one_secret() -> Result<()> {
+    flat_configuration(true)
 }
 #[tokio::test]
 #[ignore = "requires an explicitly configured isolated SQL Server fixture"]

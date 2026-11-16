@@ -53,9 +53,11 @@ mod query_identity;
 mod query_joins;
 mod query_read;
 mod query_recovery;
+pub mod reconnect;
 mod scheduling;
 mod snapshot;
 mod snapshot_consumer;
+pub mod source_failure;
 mod source_schema;
 #[doc(hidden)]
 pub mod source_transaction;
@@ -87,6 +89,7 @@ pub use progress::*;
 pub use query_codec::*;
 pub use snapshot::*;
 pub use snapshot_consumer::SnapshotConsumer;
+pub use source_failure::{is_permanent_source_failure, source_failure, SourceFailure};
 pub use source_schema::SourceSchemaReader;
 pub use source_transaction::*;
 
@@ -107,7 +110,7 @@ pub use scheduling::*;
 
 pub use bootstrap::*;
 pub use delivery::{
-    DeliveryBatch, DeliveryBatchIdentity, DeliveryHandler, DeliveryId, DeliveryItem,
-    DeliveryPosition, DeliveryScope,
+    DeliveryBatch, DeliveryBatchIdentity, DeliveryGuarantee, DeliveryHandler, DeliveryId,
+    DeliveryItem, DeliveryPosition, DeliveryScope, VolatileProducerRefused,
 };
 pub use output_identity::ReplayRejection;

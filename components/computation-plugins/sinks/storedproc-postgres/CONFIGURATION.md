@@ -31,6 +31,7 @@ destination cursor owner.
 | `defaultTemplate` | object | none | `{added?, updated?, deleted?: {template}}` | no | Pause |
 | `progressTable` | string | `public.drasi_delivery_progress` | `schema.table`, lowercase identifiers (`[a-z_][a-z0-9_]*`, ≤ 63 bytes each) | no | Unsupported |
 | `maxStreams` | integer | `4096` | 1..=1,000,000 cursor rows for this consumer | no | Pause |
+| `deliveryGuarantee` | string | `exactlyOnce` | `exactlyOnce`, `atLeastOnce` (see Delivery guarantee) | no | Stop |
 | `commandTimeoutMs` | integer | `30000` | 1..=2,147,483,647; server `statement_timeout` per command, client waits 5 s longer | no | Pause |
 | `connectTimeoutMs` | integer | `10000` | 1..=3,600,000; one attempt: TCP, TLS and authentication | no | Stop |
 | `reconnectBudgetMs` | integer | `60000` | 0..=3,600,000; total reconnect and transient-retry time per operation; `0` = one attempt | no | Pause |
@@ -148,11 +149,12 @@ CREATE SCHEMA IF NOT EXISTS drasi;
 CREATE TABLE IF NOT EXISTS "drasi"."delivery_progress" (
     owner TEXT NOT NULL CHECK (owner ~ '^[0-9a-f]{64}$'),
     stream_key TEXT NOT NULL,
-    version SMALLINT NOT NULL CHECK (version = 2),
+    version SMALLINT NOT NULL CHECK (version = 3),
     sequence TEXT NOT NULL CHECK (sequence ~ '^[1-9][0-9]{0,19}$'),
     digest BYTEA NOT NULL CHECK (octet_length(digest) = 32),
     operations BIGINT NOT NULL CHECK (operations > 0),
     completed BIGINT NOT NULL CHECK (completed >= 0 AND completed <= operations),
+    epoch TEXT NOT NULL CHECK (epoch = '' OR epoch ~ '^[0-9a-f]{64}$'),
     PRIMARY KEY (owner, stream_key)
 );
 GRANT USAGE ON SCHEMA drasi TO drasi_sink;
@@ -160,9 +162,31 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON drasi.delivery_progress TO drasi_sink;
 ```
 
 and configure `"progressTable": "drasi.delivery_progress"`. The statement is
-also available as `create_table_sql` in the crate. Start fails with a message
+also available as `create_table_sql` in the crate. This is format 3 (it adds
+`epoch`); a format-2 table is refused at Start, not migrated. Start fails with a message
 naming the missing schema or privilege, for example
 `role "drasi_sink" lacks CREATE on schema "public"; ...`.
+
+### Delivery guarantee
+
+`deliveryGuarantee` selects which producers the sink accepts:
+
+- `exactlyOnce` (default): only producers with persistent progress, such as
+  persistent queries. Each procedure call commits with its cursor row, so a
+  retry never repeats a completed call. Wiring an in-memory query to this
+  sink is refused when the graph configuration is accepted (the edge becomes
+  bindable, or either endpoint is created, replaced or updated), with the
+  error "the producer is an in-memory query without persistent progress; use
+  a persistent query or set deliveryGuarantee to atLeastOnce". The same
+  refusal is applied, permanently, at the first delivery if a volatile input
+  still arrives.
+- `atLeastOnce`: additionally accepts in-memory (volatile) queries. Their
+  outputs carry a per-run epoch; the cursor still deduplicates retries within
+  one producer run, but a process restart starts a new run whose outputs are
+  delivered against a fresh cursor (the stream row is overwritten, not
+  duplicated, so `maxStreams` is not consumed per run). Effects after a
+  restart may repeat work the previous run already did; nothing is resumed.
+  Persistent producers are still delivered exactly once.
 
 ### TLS and credentials
 
@@ -179,7 +203,7 @@ to consumer factories (DESIGN.md, Known limitations).
 | Boundary | Fields |
 |---|---|
 | Pause (in place, after a completed pause) | `routes`, `defaultTemplate`, `maxStreams`, `commandTimeoutMs`, `reconnectBudgetMs`, `shutdownTimeoutMs` |
-| Stop (restart) | `host`, `port`, `database`, `user`, `password`, `sslMode`, `allowRemotePlaintext`, `tlsCaPem`, `tlsClientCertificatePem`, `tlsClientPrivateKeyPem`, `connectTimeoutMs` |
+| Stop (restart) | `host`, `port`, `database`, `user`, `password`, `sslMode`, `allowRemotePlaintext`, `tlsCaPem`, `tlsClientCertificatePem`, `tlsClientPrivateKeyPem`, `connectTimeoutMs`, `deliveryGuarantee` |
 | Replace (recreate, cursor preserved) | `outputs`, incoming edges |
 | Unsupported | `progressTable`, the graph identity: remove the component with Erase and add a new one |
 
@@ -240,7 +264,7 @@ re-created with the same identity resumes exactly where it stopped.
 | `connect_timeout_ms` | `connectTimeoutMs` (one attempt; no longer applied twice) |
 | `shutdown_timeout_ms` | `shutdownTimeoutMs` (only when the host gives no earlier deadline) |
 | `retry_attempts`, backoff settings | `reconnectBudgetMs` plus the host runner's retry policy |
-| transactional delivery opt-in (`public.drasi_delivery_stream_v1`) | always on; `progressTable`, `maxStreams` (format 2, per owner) |
+| transactional delivery opt-in (`public.drasi_delivery_stream_v1`) | always on; `progressTable`, `maxStreams` (format 3, per owner) |
 
 Template context: legacy `query_id`/`query_name` are replaced by `output`
 (`alias`, `component`, `port`); `operation` `UPDATE` becomes `REPLACE` or

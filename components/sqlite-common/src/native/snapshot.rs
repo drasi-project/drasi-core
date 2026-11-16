@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::journal::Handover;
-use super::{journal, worker, SqliteConfig};
+use super::{journal, worker, SqliteConfig, SqliteConnectionOptions};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use drasi_computation_contracts::{
@@ -121,6 +121,7 @@ pub struct SqliteSnapshot {
     source: ComponentId,
     stream: StreamId,
     config: SqliteConfig,
+    options: SqliteConnectionOptions,
     progress: SourceProgressView,
     shared: Arc<Shared>,
 }
@@ -132,7 +133,26 @@ impl SqliteSnapshot {
         config: SqliteConfig,
         progress: SourceProgressView,
     ) -> Result<Self> {
+        Self::new_with_options(
+            source,
+            stream,
+            config,
+            SqliteConnectionOptions::default(),
+            progress,
+        )
+    }
+
+    /// As [`Self::new`], applying the source's connection options (such as
+    /// `initSql`) to the snapshot connection.
+    pub fn new_with_options(
+        source: ComponentId,
+        stream: StreamId,
+        config: SqliteConfig,
+        options: SqliteConnectionOptions,
+        progress: SourceProgressView,
+    ) -> Result<Self> {
         config.validate()?;
+        options.validate(&config)?;
         anyhow::ensure!(
             config.path.is_some()
                 && config.replay.is_some()
@@ -144,6 +164,7 @@ impl SqliteSnapshot {
             source,
             stream,
             config,
+            options,
             progress,
             shared: Arc::new(Shared {
                 worker: RwLock::new(None),
@@ -410,6 +431,7 @@ impl SqliteSnapshot {
             source: self.source.clone(),
             stream: self.stream.clone(),
             config: self.config.clone(),
+            options: self.options.clone(),
             owner: self.progress.clone(),
             progress: self.progress.snapshot()?,
             handover,

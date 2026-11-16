@@ -100,6 +100,11 @@ pub struct Candidate {
     pub producer: Producer,
     pub sequence: u64,
     pub digest: [u8; 32],
+    /// Present only for an at-least-once candidate derived from a volatile
+    /// (in-memory) query: identifies the producer incarnation and generation
+    /// whose sequence space this candidate belongs to. Strict candidates never
+    /// carry an epoch.
+    pub epoch: Option<String>,
 }
 
 impl Candidate {
@@ -116,15 +121,7 @@ impl Candidate {
                 progress.sequence(),
             ),
             None if query => {
-                let identity = QueryRecoveryIdentity::from_query_output(envelope)?;
-                if QueryChangeCodec::is_snapshot(envelope)
-                    || QueryChangeCodec::is_progress_only(envelope)
-                    || &QueryChangeCodec::metadata(envelope)?.query_id != identity.query_id()
-                {
-                    return Err(ReplayRejection::MissingProgress.into());
-                }
-                let sequence = QueryChangeCodec::output_sequence(envelope)?;
-                let generation = QueryChangeCodec::query_generation(envelope)?;
+                let (identity, generation, sequence) = query_output(envelope)?;
                 (
                     Producer::Query {
                         identity,
@@ -136,18 +133,97 @@ impl Candidate {
             None => return Err(ReplayRejection::MissingProgress.into()),
         };
         producer.validate(envelope.system().stream())?;
-        // Immediate-query completion timings are added after its outbox commit.
-        // Inherited timings remain immutable history.
-        let mut normalized = envelope.reemit(1)?;
-        if query {
-            normalized = QueryChangeCodec::without_post_commit_profiling(&normalized)?;
-        }
         Ok(Self {
             producer,
             sequence,
-            digest: Sha256::digest(codec.encode(&normalized)?).into(),
+            digest: content_digest(envelope, codec, query)?,
+            epoch: None,
         })
     }
+
+    /// Explicit, weaker derivation for an immediate in-memory query output.
+    ///
+    /// Accepts only a live (non-snapshot, non-progress-only) query output whose
+    /// recovery identity carries a volatile incarnation. The candidate's
+    /// `epoch` identifies that incarnation and generation; the delivery stream
+    /// key derived from it excludes both, so one destination cursor serves
+    /// every run of the producer. This never replaces [`Candidate::new`]:
+    /// persistent producers and every non-query producer are rejected here.
+    pub fn new_volatile(envelope: &ChangeEnvelope, codec: &EnvelopeCodec) -> anyhow::Result<Self> {
+        if !QueryChangeCodec::is_query_output(envelope) {
+            return Err(ReplayRejection::MissingProgress.into());
+        }
+        if GraphProducerProgress::from_query_envelope(envelope)?
+            .is_some_and(|progress| progress.identity().persistent())
+        {
+            anyhow::bail!("query output has persistent progress; use exactly-once delivery");
+        }
+        let (identity, generation, sequence) = query_output(envelope)?;
+        let incarnation = identity
+            .incarnation()
+            .ok_or(ReplayRejection::MissingProgress)?;
+        identity.validate()?;
+        for value in [
+            identity.construction_scope(),
+            identity.graph_id(),
+            identity.query_id().as_str(),
+        ] {
+            if value.len() > 256 {
+                return Err(AdmissionRejection::IdentifierTooLong.into());
+            }
+        }
+        anyhow::ensure!(
+            sequence > 0,
+            "volatile query output sequence must be positive"
+        );
+        let mut epoch = Sha256::new();
+        epoch.update(b"drasi.delivery-epoch.v1");
+        epoch.update(incarnation.as_bytes());
+        epoch.update(generation.to_be_bytes());
+        epoch.update(identity.configuration_hash().to_be_bytes());
+        Ok(Self {
+            producer: Producer::Query {
+                identity,
+                generation,
+            },
+            sequence,
+            digest: content_digest(envelope, codec, true)?,
+            epoch: Some(format!("{:x}", epoch.finalize())),
+        })
+    }
+}
+
+fn query_output(envelope: &ChangeEnvelope) -> anyhow::Result<(QueryRecoveryIdentity, u64, u64)> {
+    let identity = QueryRecoveryIdentity::from_query_output(envelope)?;
+    if QueryChangeCodec::is_snapshot(envelope)
+        || QueryChangeCodec::is_progress_only(envelope)
+        || &QueryChangeCodec::metadata(envelope)?.query_id != identity.query_id()
+    {
+        return Err(ReplayRejection::MissingProgress.into());
+    }
+    let sequence = QueryChangeCodec::output_sequence(envelope)?;
+    let generation = QueryChangeCodec::query_generation(envelope)?;
+    Ok((identity, generation, sequence))
+}
+
+fn content_digest(
+    envelope: &ChangeEnvelope,
+    codec: &EnvelopeCodec,
+    query: bool,
+) -> anyhow::Result<[u8; 32]> {
+    // Immediate-query completion timings are added after its outbox commit.
+    // Inherited timings remain immutable history.
+    let mut normalized = envelope.reemit(1)?;
+    if query {
+        normalized = QueryChangeCodec::without_post_commit_profiling(&normalized)?;
+    }
+    Ok(Sha256::digest(codec.encode(&normalized)?).into())
+}
+
+/// True when `error` is the strict derivation's missing-progress rejection,
+/// the only failure for which an at-least-once derivation may be attempted.
+pub fn is_missing_progress(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<ReplayRejection>() == Some(&ReplayRejection::MissingProgress)
 }
 
 impl From<ReplayRejection> for crate::PipeError {

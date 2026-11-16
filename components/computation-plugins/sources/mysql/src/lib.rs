@@ -1,29 +1,45 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! Native MySQL sources hosted in the caller's ComputationGraph.
+//! Native MySQL binlog sources hosted in the caller's ComputationGraph.
+//!
+//! Seven factories stream MySQL row-based binary logs: untracked row changes
+//! and transactions, whole transactions with query-owned or shared consumer
+//! progress, shared row changes, and positional (`@N`) rows. Every factory
+//! takes one flat camelCase configuration (shared with the native MySQL
+//! bootstrap providers), pauses at transaction boundaries, reconnects after
+//! transport failures, supports managed updates, and declares an idempotent
+//! no-op erase because it owns no server-side state.
+//!
+//! See `DESIGN.md` and `CONFIGURATION.md` in this crate.
 
 mod component;
+pub mod config;
+mod management;
 #[cfg(test)]
 mod tests;
 
 use anyhow::{Context, Result};
+use config::{Mode, SourceConfig};
 use drasi_computation_contracts::{
-    ComponentRole, GraphChangeCodec, ImplementationIdentity, StreamId,
+    ComponentRole, ComponentUpdateMode, GraphChangeCodec, ImplementationIdentity, StreamId,
 };
 use drasi_computation_plugin_sdk::{
-    Capabilities, Component, ConfigSchema, ConfigType, ControlSender, CreateRequest,
-    CreatedComponent, Factory, FactoryMetadata, NativeConsumerProgress, NativeSourceProgress,
-    PluginDefinition,
+    lifecycle::Assessment, ActivationCredentialContext, Capabilities, Component, ConfigDetails,
+    ControlSender, CreateRequest, CreatedComponent, Factory, FactoryMetadata,
+    NativeConsumerProgress, NativeSourceProgress, PluginDefinition, UpdateRequest,
 };
-use drasi_mysql_common::native::{progress::ConsumerBinding, MySqlSource};
-use serde::Deserialize;
+use drasi_mysql_common::native::{
+    progress::ConsumerBinding,
+    rows,
+    source::{SourceStatus, StatusSink},
+    MySqlSource,
+};
 use std::sync::Arc;
 
 pub use component::MySqlComponent;
 pub use drasi_mysql_common::native::{
-    MySqlConfig, MySqlConnectionConfig, MySqlOutput, MySqlRetention, MySqlStartPosition,
-    MySqlTlsMode,
+    MySqlOutput, MySqlRetention, MySqlSourceSettings, MySqlTableKey, MySqlTlsMode, StartFrom,
 };
 
 pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
@@ -42,57 +58,6 @@ pub struct MySqlSharedTransactionsFactory;
 pub struct MySqlSharedChangesFactory;
 pub struct MySqlPositionalChangesFactory;
 pub struct MySqlSharedPositionalChangesFactory;
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Configuration {
-    stream: String,
-    settings: MySqlConfig,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RowConfiguration {
-    stream: String,
-    settings: MySqlConfig,
-    #[serde(default)]
-    persistent: bool,
-}
-
-fn metadata(name: &str, output: MySqlOutput) -> FactoryMetadata {
-    let mut configuration = ConfigSchema::from_fields([
-        ("stream", ConfigType::String, true),
-        ("settings", ConfigType::Object, true),
-    ]);
-    configuration
-        .fields
-        .get_mut("settings")
-        .expect("settings")
-        .secret = true;
-    FactoryMetadata {
-        implementation: ImplementationIdentity::try_new(name, "1").expect("implementation"),
-        role: ComponentRole::Source,
-        configuration_version: 1,
-        configuration,
-        ports: MySqlSource::ports(output).expect("constant port descriptor"),
-        completion: None,
-        capabilities: Capabilities::default(),
-    }
-}
-
-fn configuration(
-    request: &CreateRequest,
-    output: MySqlOutput,
-    replay: bool,
-) -> Result<Configuration> {
-    let value: Configuration = serde_json::from_value(request.configuration.clone())?;
-    value.settings.validate()?;
-    anyhow::ensure!(
-        value.settings.output == output && value.settings.replay.is_some() == replay,
-        "MySQL settings do not match this factory's output/recovery contract"
-    );
-    Ok(value)
-}
 
 pub fn plugin() -> Result<PluginDefinition> {
     PluginDefinition::new(
@@ -114,121 +79,145 @@ pub fn plugin() -> Result<PluginDefinition> {
 #[cfg(feature = "dynamic-plugin")]
 drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
 
+fn metadata(mode: Mode) -> FactoryMetadata {
+    FactoryMetadata {
+        implementation: ImplementationIdentity::try_new(mode.implementation(), "1")
+            .expect("constant implementation"),
+        role: ComponentRole::Source,
+        configuration_version: 1,
+        configuration: config::definition(mode).schema(),
+        ports: MySqlSource::ports(mode.output()).expect("constant port descriptor"),
+        completion: None,
+        capabilities: Capabilities {
+            management: true,
+            update_modes: vec![ComponentUpdateMode::InPlace, ComponentUpdateMode::Restart],
+            erases_owned_state: true,
+            ..Capabilities::default()
+        },
+    }
+}
+
+/// Parses and validates a factory request for `mode`.
+fn parse(mode: Mode, request: &CreateRequest) -> Result<SourceConfig> {
+    metadata(mode)
+        .configuration
+        .validate(&request.configuration)?;
+    SourceConfig::from_value(mode, &request.configuration)
+}
+
+fn credential_context(mode: Mode, request: &CreateRequest) -> Result<ActivationCredentialContext> {
+    let config = SourceConfig::from_value(mode, &request.configuration)?;
+    let context = ActivationCredentialContext {
+        hostname: config.settings.host,
+        port: config.settings.port,
+    };
+    context.validate()?;
+    Ok(context)
+}
+
+/// Logs readiness changes with the component identity. The host's
+/// `ControlSender` is bound only for components with a control interface,
+/// which this source does not have.
+fn status_sink(id: &drasi_computation_contracts::ComponentId) -> StatusSink {
+    let id = id.clone();
+    Arc::new(move |status| match status {
+        SourceStatus::Ready => log::info!("Native MySQL source {id} is streaming"),
+        SourceStatus::Reconnecting(error) => {
+            log::warn!("Native MySQL source {id} is reconnecting: {error}")
+        }
+        SourceStatus::Failed(error) => log::error!("Native MySQL source {id} failed: {error}"),
+    })
+}
+
+fn component(config: SourceConfig, source: MySqlSource) -> CreatedComponent {
+    Component::Source(Box::new(MySqlComponent { config, source })).into()
+}
+
+/// An untracked source (`changes`, `untracked-transactions`,
+/// `positional-changes`).
+fn create_untracked(mode: Mode, request: &CreateRequest) -> Result<CreatedComponent> {
+    let config = parse(mode, request)?;
+    let mut source = MySqlSource::new(
+        request.id.clone(),
+        StreamId::try_new(config.stream.clone())?,
+        config.engine_config(&request.id)?,
+        None,
+    )?;
+    if mode.positional() {
+        source = source.with_positional_metadata()?;
+    }
+    Ok(component(
+        config,
+        source.with_status(status_sink(&request.id)),
+    ))
+}
+
+/// The consumer binding of a shared factory, checked against the graph.
+fn consumers(
+    request: &CreateRequest,
+    progress: &NativeConsumerProgress,
+) -> Result<ConsumerBinding> {
+    let scope = request
+        .scope
+        .as_ref()
+        .context("shared MySQL sources require graph scope")?;
+    let view = progress.reader();
+    anyhow::ensure!(
+        view.graph_id() == scope.graph_id,
+        "MySQL consumers belong to another graph"
+    );
+    ConsumerBinding::new(&request.id, view, progress.consumer_ids())
+}
+
+macro_rules! common_factory_methods {
+    ($mode:expr) => {
+        fn metadata(&self) -> FactoryMetadata {
+            metadata($mode)
+        }
+        fn configuration_details(&self) -> Option<ConfigDetails> {
+            Some(config::definition($mode).details())
+        }
+        fn supports_update_planning(&self) -> bool {
+            true
+        }
+        fn assess(&self, request: &UpdateRequest) -> Result<Assessment> {
+            management::assess($mode, request)
+        }
+        fn supports_activation_credentials(&self) -> bool {
+            true
+        }
+        fn activation_credential_context(
+            &self,
+            request: &CreateRequest,
+        ) -> Result<ActivationCredentialContext> {
+            credential_context($mode, request)
+        }
+    };
+}
+
 impl Factory for MySqlChangesFactory {
-    fn metadata(&self) -> FactoryMetadata {
-        metadata(MYSQL_CHANGES, MySqlOutput::Changes)
-    }
-
+    common_factory_methods!(Mode::Changes);
     fn create(&self, request: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
-        self.metadata()
-            .configuration
-            .validate(&request.configuration)?;
-        let config = configuration(request, MySqlOutput::Changes, false)?;
-        Ok(Component::Source(Box::new(MySqlComponent {
-            source: MySqlSource::new(
-                request.id.clone(),
-                StreamId::try_new(config.stream)?,
-                config.settings,
-                None,
-            )?,
-        }))
-        .into())
-    }
-}
-
-impl Factory for MySqlPositionalChangesFactory {
-    fn metadata(&self) -> FactoryMetadata {
-        metadata(MYSQL_POSITIONAL_CHANGES, MySqlOutput::Changes)
-    }
-    fn create(&self, request: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
-        self.metadata()
-            .configuration
-            .validate(&request.configuration)?;
-        let config = configuration(request, MySqlOutput::Changes, false)?;
-        let source = MySqlSource::new(
-            request.id.clone(),
-            StreamId::try_new(config.stream)?,
-            config.settings,
-            None,
-        )?
-        .with_positional_metadata()?;
-        Ok(Component::Source(Box::new(MySqlComponent { source })).into())
-    }
-}
-
-impl Factory for MySqlSharedPositionalChangesFactory {
-    fn metadata(&self) -> FactoryMetadata {
-        let mut metadata = MySqlSharedChangesFactory.metadata();
-        metadata.implementation =
-            ImplementationIdentity::try_new(MYSQL_SHARED_POSITIONAL_CHANGES, "1")
-                .expect("implementation");
-        metadata
-    }
-    fn supports_consumer_progress(&self) -> bool {
-        true
-    }
-    fn create(&self, _: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
-        anyhow::bail!("positional MySQL replay requires its actual fixed consumer set")
-    }
-    fn create_with_consumer_progress(
-        &self,
-        request: &CreateRequest,
-        _: ControlSender,
-        progress: NativeConsumerProgress,
-    ) -> Result<CreatedComponent> {
-        self.metadata()
-            .configuration
-            .validate(&request.configuration)?;
-        let config: RowConfiguration = serde_json::from_value(request.configuration.clone())?;
-        let scope = request
-            .scope
-            .as_ref()
-            .context("positional MySQL rows require graph scope")?;
-        let view = progress.reader();
-        anyhow::ensure!(
-            view.graph_id() == scope.graph_id,
-            "MySQL consumers belong to another graph"
-        );
-        let consumers = ConsumerBinding::new(&request.id, view, progress.consumer_ids())?;
-        let source = MySqlSource::shared_rows(
-            request.id.clone(),
-            StreamId::try_new(config.stream)?,
-            config.settings,
-            consumers,
-            drasi_mysql_common::native::rows::Options {
-                persistent: config.persistent,
-            },
-        )?
-        .with_positional_metadata()?;
-        Ok(Component::Source(Box::new(MySqlComponent { source })).into())
+        create_untracked(Mode::Changes, request)
     }
 }
 
 impl Factory for MySqlUntrackedTransactionsFactory {
-    fn metadata(&self) -> FactoryMetadata {
-        metadata(MYSQL_UNTRACKED_TRANSACTIONS, MySqlOutput::Transactions)
-    }
+    common_factory_methods!(Mode::UntrackedTransactions);
     fn create(&self, request: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
-        self.metadata()
-            .configuration
-            .validate(&request.configuration)?;
-        let config = configuration(request, MySqlOutput::Transactions, false)?;
-        Ok(Component::Source(Box::new(MySqlComponent {
-            source: MySqlSource::new(
-                request.id.clone(),
-                StreamId::try_new(config.stream)?,
-                config.settings,
-                None,
-            )?,
-        }))
-        .into())
+        create_untracked(Mode::UntrackedTransactions, request)
+    }
+}
+
+impl Factory for MySqlPositionalChangesFactory {
+    common_factory_methods!(Mode::PositionalChanges);
+    fn create(&self, request: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
+        create_untracked(Mode::PositionalChanges, request)
     }
 }
 
 impl Factory for MySqlTransactionsFactory {
-    fn metadata(&self) -> FactoryMetadata {
-        metadata(MYSQL_TRANSACTIONS, MySqlOutput::Transactions)
-    }
+    common_factory_methods!(Mode::Transactions);
     fn supports_source_progress(&self) -> bool {
         true
     }
@@ -241,10 +230,7 @@ impl Factory for MySqlTransactionsFactory {
         _: ControlSender,
         progress: NativeSourceProgress,
     ) -> Result<CreatedComponent> {
-        self.metadata()
-            .configuration
-            .validate(&request.configuration)?;
-        let config = configuration(request, MySqlOutput::Transactions, true)?;
+        let config = parse(Mode::Transactions, request)?;
         let scope = request
             .scope
             .as_ref()
@@ -254,88 +240,90 @@ impl Factory for MySqlTransactionsFactory {
             reader.graph_id() == scope.graph_id,
             "MySQL progress belongs to another graph"
         );
-        let stream = StreamId::try_new(config.stream)?;
-        let source = if matches!(config.settings.start, MySqlStartPosition::Snapshot { .. }) {
+        let stream = StreamId::try_new(config.stream.clone())?;
+        let engine = config.engine_config(&request.id)?;
+        let source = if config.settings.start_from == StartFrom::Snapshot {
             MySqlSource::with_published_bootstrap(
                 request.id.clone(),
                 stream,
-                config.settings,
+                engine,
                 Some(reader),
                 None,
             )?
         } else {
-            MySqlSource::new(request.id.clone(), stream, config.settings, Some(reader))?
+            MySqlSource::new(request.id.clone(), stream, engine, Some(reader))?
         };
-        Ok(Component::Source(Box::new(MySqlComponent { source })).into())
+        Ok(component(
+            config,
+            source.with_status(status_sink(&request.id)),
+        ))
     }
 }
 
 impl Factory for MySqlSharedTransactionsFactory {
-    fn metadata(&self) -> FactoryMetadata {
-        metadata(MYSQL_SHARED_TRANSACTIONS, MySqlOutput::Transactions)
-    }
+    common_factory_methods!(Mode::SharedTransactions);
     fn supports_consumer_progress(&self) -> bool {
         true
     }
     fn create(&self, _: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
         anyhow::bail!("MySQL shared transactions require their actual fixed consumer set")
     }
-
     fn create_with_consumer_progress(
         &self,
         request: &CreateRequest,
         _: ControlSender,
         progress: NativeConsumerProgress,
     ) -> Result<CreatedComponent> {
-        self.metadata()
-            .configuration
-            .validate(&request.configuration)?;
-        let config = configuration(request, MySqlOutput::Transactions, true)?;
-        let scope = request
-            .scope
-            .as_ref()
-            .context("MySQL shared transactions require graph scope")?;
-        let view = progress.reader();
-        anyhow::ensure!(
-            view.graph_id() == scope.graph_id,
-            "MySQL consumers belong to another graph"
-        );
-        let consumers = ConsumerBinding::new(&request.id, view, progress.consumer_ids())?;
-        let stream = StreamId::try_new(config.stream)?;
-        let source = if matches!(config.settings.start, MySqlStartPosition::Snapshot { .. }) {
+        let config = parse(Mode::SharedTransactions, request)?;
+        let consumers = consumers(request, &progress)?;
+        let stream = StreamId::try_new(config.stream.clone())?;
+        let engine = config.engine_config(&request.id)?;
+        let source = if config.settings.start_from == StartFrom::Snapshot {
             MySqlSource::with_published_bootstrap(
                 request.id.clone(),
                 stream,
-                config.settings,
+                engine,
                 None,
                 Some(consumers),
             )?
         } else {
-            MySqlSource::new_with_consumer_progress(
-                request.id.clone(),
-                stream,
-                config.settings,
-                consumers,
-            )?
+            MySqlSource::new_with_consumer_progress(request.id.clone(), stream, engine, consumers)?
         };
-        Ok(Component::Source(Box::new(MySqlComponent { source })).into())
+        Ok(component(
+            config,
+            source.with_status(status_sink(&request.id)),
+        ))
     }
 }
 
-impl Factory for MySqlSharedChangesFactory {
-    fn metadata(&self) -> FactoryMetadata {
-        let mut metadata = metadata(MYSQL_SHARED_CHANGES, MySqlOutput::Changes);
-        metadata.configuration.fields.insert(
-            "persistent".into(),
-            drasi_computation_plugin_sdk::ConfigField {
-                constraint: None,
-                value_type: ConfigType::Boolean,
-                required: false,
-                secret: false,
-            },
-        );
-        metadata
+/// A shared row source (`shared-changes`, `shared-positional-changes`).
+fn create_shared_rows(
+    mode: Mode,
+    request: &CreateRequest,
+    progress: &NativeConsumerProgress,
+) -> Result<CreatedComponent> {
+    let config = parse(mode, request)?;
+    let consumers = consumers(request, progress)?;
+    let mut source = MySqlSource::shared_rows(
+        request.id.clone(),
+        StreamId::try_new(config.stream.clone())?,
+        config.engine_config(&request.id)?,
+        consumers,
+        rows::Options {
+            persistent: config.persistent,
+        },
+    )?;
+    if mode.positional() {
+        source = source.with_positional_metadata()?;
     }
+    Ok(component(
+        config,
+        source.with_status(status_sink(&request.id)),
+    ))
+}
+
+impl Factory for MySqlSharedChangesFactory {
+    common_factory_methods!(Mode::SharedChanges);
     fn supports_consumer_progress(&self) -> bool {
         true
     }
@@ -348,29 +336,24 @@ impl Factory for MySqlSharedChangesFactory {
         _: ControlSender,
         progress: NativeConsumerProgress,
     ) -> Result<CreatedComponent> {
-        self.metadata()
-            .configuration
-            .validate(&request.configuration)?;
-        let config: RowConfiguration = serde_json::from_value(request.configuration.clone())?;
-        let scope = request
-            .scope
-            .as_ref()
-            .context("MySQL shared rows require graph scope")?;
-        let view = progress.reader();
-        anyhow::ensure!(
-            view.graph_id() == scope.graph_id,
-            "MySQL row consumers belong to another graph"
-        );
-        let consumers = ConsumerBinding::new(&request.id, view, progress.consumer_ids())?;
-        let source = MySqlSource::shared_rows(
-            request.id.clone(),
-            StreamId::try_new(config.stream)?,
-            config.settings,
-            consumers,
-            drasi_mysql_common::native::rows::Options {
-                persistent: config.persistent,
-            },
-        )?;
-        Ok(Component::Source(Box::new(MySqlComponent { source })).into())
+        create_shared_rows(Mode::SharedChanges, request, &progress)
+    }
+}
+
+impl Factory for MySqlSharedPositionalChangesFactory {
+    common_factory_methods!(Mode::SharedPositionalChanges);
+    fn supports_consumer_progress(&self) -> bool {
+        true
+    }
+    fn create(&self, _: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
+        anyhow::bail!("positional MySQL replay requires its actual fixed consumer set")
+    }
+    fn create_with_consumer_progress(
+        &self,
+        request: &CreateRequest,
+        _: ControlSender,
+        progress: NativeConsumerProgress,
+    ) -> Result<CreatedComponent> {
+        create_shared_rows(Mode::SharedPositionalChanges, request, &progress)
     }
 }

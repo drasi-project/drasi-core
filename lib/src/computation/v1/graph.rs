@@ -64,6 +64,59 @@ use super::{
 
 pub type GraphResult<T> = std::result::Result<T, GraphError>;
 
+/// Whether the producer is known to lack persistent progress: a query whose
+/// actual index provider is volatile (in-memory). Unknown evidence (no
+/// constructed provider yet, or a non-query producer) is not a refusal; the
+/// consumer's first-delivery check remains the defence in depth.
+fn volatile_query_producer(
+    producer: &ComponentSpecification,
+    resources: &BTreeMap<ResourceId, ResourceHandle>,
+) -> bool {
+    producer
+        .dependencies
+        .get("indexes")
+        .and_then(|ids| ids.first())
+        .and_then(|id| resources.get(id))
+        .and_then(|handle| handle.get::<super::QueryIndexProviderResource>().ok())
+        .is_some_and(|provider| provider.0.is_volatile())
+}
+
+/// Configuration-time refusal of a bound edge from a volatile producer into
+/// an input whose factory requires persistent producer progress
+/// ([`ComponentFactory::requires_persistent_producers`]). The typed cause is
+/// [`drasi_computation_contracts::VolatileProducerRefused`].
+pub(super) fn validate_producer_persistence(
+    edge: &EdgeDefinition,
+    producer: Option<&ComponentSpecification>,
+    consumer: Option<(&ComponentSpecification, &dyn ComponentFactory)>,
+    resources: &BTreeMap<ResourceId, ResourceHandle>,
+) -> GraphResult<()> {
+    let (Some(producer), Some((specification, factory))) = (producer, consumer) else {
+        return Ok(());
+    };
+    let required = factory
+        .requires_persistent_producers(specification)
+        .map_err(|source| GraphError::Validation {
+            component: edge.to.component.clone(),
+            source,
+        })?;
+    if required && volatile_query_producer(producer, resources) {
+        return Err(GraphError::Validation {
+            component: edge.to.component.clone(),
+            source: anyhow::Error::new(drasi_computation_contracts::VolatileProducerRefused)
+                .context(format!(
+                    "input '{}' of component {} requires a producer with persistent progress, \
+                     but query {} uses an in-memory index provider: {}",
+                    edge.to.port,
+                    edge.to.component,
+                    edge.from.component,
+                    drasi_computation_contracts::VolatileProducerRefused
+                )),
+        });
+    }
+    Ok(())
+}
+
 /// Errors retain the original component/provider cause. A send failure may follow
 /// successful delivery to other branches; no rollback or retry is implied.
 #[derive(Debug, thiserror::Error)]
@@ -1144,6 +1197,26 @@ impl ComputationGraphBuilder {
             }
         }
         self.unbound_relationships = unbound;
+        {
+            let deferred = |id: &ComponentId| {
+                ids.get(id)
+                    .and_then(|index| match &self.components[*index].1 {
+                        Component::Deferred {
+                            specification,
+                            factory,
+                        } => Some((specification.as_ref(), factory.as_ref())),
+                        _ => None,
+                    })
+            };
+            for (edge, _) in &self.edges {
+                validate_producer_persistence(
+                    edge,
+                    deferred(&edge.from.component).map(|(spec, _)| spec),
+                    deferred(&edge.to.component),
+                    &self.resource_handles,
+                )?;
+            }
+        }
         let mut streams = BTreeSet::new();
         for (endpoint, stream) in self.streams {
             let (index, port) = resolve(&ids, &nodes, &endpoint)?;

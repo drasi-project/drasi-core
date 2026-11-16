@@ -13,6 +13,8 @@ pub(super) fn config(port: u16, output: MySqlOutput) -> MySqlConfig {
             password: "root".into(),
             ssl_mode: MySqlTlsMode::Disabled,
             tls_ca_pem: None,
+            tls_client_cert_pem: None,
+            tls_client_key_pem: None,
             server_id: NonZeroU32::new(874).unwrap(),
             heartbeat_interval_ms: NonZeroU64::new(100).unwrap(),
         },
@@ -28,6 +30,7 @@ pub(super) fn config(port: u16, output: MySqlOutput) -> MySqlConfig {
         },
         max_protocol_bytes: NonZeroUsize::new(1024 * 1024).unwrap(),
         io_timeout_ms: NonZeroU64::new(5000).unwrap(),
+        reconnect_budget_ms: 0,
     }
 }
 
@@ -84,19 +87,43 @@ fn shared_transaction_binding_uses_the_component_uuid_stably() -> Result<()> {
     let source =
         drasi_computation_contracts::ComponentId::try_new("8c950040-bfe1-5104-b7f0-744bb1e73e84")?;
     let stream = drasi_computation_contracts::StreamId::try_new("changes")?;
-    let original = br#"["mysql-native-consumers-v1","server","test",{"items":[{"name":"id","sql_type":"int","key":true,"nullable":false,"charset":null,"collation":null}]},"8c950040-bfe1-5104-b7f0-744bb1e73e84","changes",{"mode":"position","file":"mysql-bin.000001","position":4},["graph","8c950040-bfe1-5104-b7f0-744bb1e73e84"]]"#;
+    // Binding format v2: only the selected table set, key columns and their
+    // types are bound, so non-key column changes keep committed cursors.
+    let original = br#"["mysql-native-consumers-v2","server","test",{"items":[["id","int"]]},"8c950040-bfe1-5104-b7f0-744bb1e73e84","changes",{"mode":"position","file":"mysql-bin.000001","position":4},["graph","8c950040-bfe1-5104-b7f0-744bb1e73e84"]]"#;
     let expected: [u8; 32] = Sha256::digest(original).into();
     assert_eq!(
         source::shared_source_binding(&value, "server", &tables, &source, &stream, "graph")?,
         expected
     );
+    let mut widened = tables.clone();
+    widened.get_mut("items").unwrap().push(catalog::Column {
+        name: "note".into(),
+        sql_type: "text".into(),
+        key: false,
+        nullable: true,
+        charset: Some("utf8mb4".into()),
+        collation: Some(255),
+    });
+    assert_eq!(
+        source::shared_source_binding(&value, "server", &widened, &source, &stream, "graph")?,
+        expected,
+        "a non-key column change keeps the binding"
+    );
+    let mut retyped = tables.clone();
+    retyped.get_mut("items").unwrap()[0].sql_type = "bigint".into();
+    assert_ne!(
+        source::shared_source_binding(&value, "server", &retyped, &source, &stream, "graph")?,
+        expected,
+        "a key type change alters the binding"
+    );
     value.table_keys.push(crate::TableKeyConfig {
         table: "items".into(),
-        key_columns: vec!["id".into()],
+        key_columns: vec!["id".into(), "note".into()],
     });
     assert_ne!(
-        source::shared_source_binding(&value, "server", &tables, &source, &stream, "graph")?,
-        expected
+        source::shared_source_binding(&value, "server", &widened, &source, &stream, "graph")?,
+        expected,
+        "different key columns alter the binding"
     );
     Ok(())
 }

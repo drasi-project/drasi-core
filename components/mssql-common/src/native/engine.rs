@@ -1,8 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-use super::{catalog::SqlClient, Catalog, Cursor, NativeConfig, Table};
-use crate::{decoder::CdcOperation, extract_column_value, value_to_string, Lsn};
+use super::{error::unsupported, Cursor, Table};
+use crate::{decoder::CdcOperation, value_to_string};
 use anyhow::{ensure, Context, Result};
 use drasi_computation_contracts::{ChangeOperation, GraphChangeCodec, StreamId};
 use drasi_core_types::models::{
@@ -11,6 +11,7 @@ use drasi_core_types::models::{
 use std::sync::Arc;
 
 pub(super) type CdcRow = ([u8; 10], [u8; 10], i32, i32, Element);
+#[derive(Debug, Clone)]
 pub struct Change {
     pub change: SourceChange,
     pub before: Option<Element>,
@@ -48,30 +49,11 @@ impl Change {
             .context("SQL Server record byte count overflow")
     }
 }
+/// One page of changes and the cursor that covers it.
+#[derive(Debug, Clone)]
 pub struct Poll {
-    pub catalog: Catalog,
     pub changes: Vec<Change>,
     pub boundary: Cursor,
-}
-pub async fn poll(config: &NativeConfig, source: &str, resume: Option<&Cursor>) -> Result<Poll> {
-    super::paging::poll(config, source, resume).await
-}
-pub(super) async fn lsn(
-    client: &mut SqlClient,
-    query: &str,
-    params: &[&dyn tiberius::ToSql],
-) -> Result<[u8; 10]> {
-    let rows = client
-        .query(query, params)
-        .await?
-        .into_first_result()
-        .await?;
-    let bytes: &[u8] = rows
-        .first()
-        .context("missing CDC LSN row")?
-        .try_get(0)?
-        .context("missing CDC LSN")?;
-    Ok(*Lsn::from_bytes(bytes)?.as_bytes())
 }
 pub fn element_size(element: &Element) -> Result<usize> {
     let frame = GraphChangeCodec::encode_change(
@@ -144,29 +126,23 @@ pub(super) fn decode_rows(mut raw: Vec<CdcRow>, binding: [u8; 32]) -> Result<Vec
     }
     Ok(changes)
 }
-pub(super) fn element(
+/// Builds the node for one row of `table`. The source and the snapshot
+/// providers share this, so element IDs and labels agree.
+pub fn element(
     source: &str,
     table: &Table,
-    row: &tiberius::Row,
+    mut properties: ElementPropertyMap,
     timestamp: u64,
 ) -> Result<Element> {
-    let mut properties = ElementPropertyMap::new();
-    for (name, ..) in &table.columns {
-        let index = row
-            .columns()
-            .iter()
-            .position(|c| c.name() == name)
-            .context("captured SQL Server column is missing")?;
-        properties.insert(name.as_str(), extract_column_value(row, index)?);
-    }
     let mut key = Vec::new();
     for name in &table.keys {
         let value = properties
             .get(name.as_str())
-            .context("SQL Server key column missing")?;
+            .with_context(|| format!("key column {}.{name} is missing", table.canonical()))?;
         ensure!(
             !matches!(value, ElementValue::Null),
-            "SQL Server primary/custom keys must not be NULL"
+            "SQL Server key column {}.{name} is NULL",
+            table.canonical()
         );
         let value = value_to_string(value);
         key.push(if table.keys.len() == 1 {
@@ -174,6 +150,11 @@ pub(super) fn element(
         } else {
             value.replace('%', "%25").replace('_', "%5F")
         });
+    }
+    for column in &table.columns {
+        if properties.get(column.name.as_str()).is_none() {
+            properties.insert(column.name.as_str(), ElementValue::Null);
+        }
     }
     Ok(Element::Node {
         metadata: ElementMetadata {
@@ -186,6 +167,18 @@ pub(super) fn element(
         },
         properties,
     })
+}
+
+/// Checks that one change group has a decodable shape: a single insert or
+/// delete, or an update before/after pair.
+pub(super) fn check_group(operations: &[i32], table: &Table) -> Result<()> {
+    if matches!(operations, [1 | 2] | [3, 4]) {
+        return Ok(());
+    }
+    Err(unsupported(format!(
+        "change group in {} has operations {operations:?}; only a single insert/delete or an          update before/after pair is decoded (MS-15: confirm the server's split-update shape)",
+        table.canonical()
+    )))
 }
 
 #[cfg(test)]

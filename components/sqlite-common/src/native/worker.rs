@@ -2,10 +2,11 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::{
+    error::{SqlitePaused, SqliteStopping},
     handle::{Command, TransactionCommand},
     journal::{GroupHandover, Handover},
     progress::{Observed, Reader as ProgressReader},
-    SqliteConfig, SqliteOutput, SqliteParam, SqliteRow,
+    SqliteConfig, SqliteConnectionOptions, SqliteOutput, SqliteParam, SqliteRow,
 };
 use crate::{row_element as element, value_to_json as json, TableSchema as Table};
 use anyhow::{Context, Result};
@@ -216,12 +217,78 @@ struct Database {
     schema_version: Cell<Option<i64>>,
 }
 
+/// Runs `initSql` with a guard that keeps it away from the source's own
+/// journal objects, attached databases and extensions. Everything else,
+/// including DDL and pragmas, is allowed: the regular authorizer is installed
+/// afterwards.
+fn run_init_sql(connection: &Connection, sql: &str) -> Result<()> {
+    connection.authorizer(Some(|context: AuthContext<'_>| {
+        let reserved = |name: Option<&str>| {
+            name.is_some_and(|name| name.to_ascii_lowercase().starts_with("__drasi_"))
+        };
+        match context.action {
+            AuthAction::Attach { .. } | AuthAction::Detach { .. } => Authorization::Deny,
+            AuthAction::Function { function_name }
+                if function_name.eq_ignore_ascii_case("load_extension") =>
+            {
+                Authorization::Deny
+            }
+            _ => match init_object(&context.action) {
+                Some(name) if reserved(Some(name)) => Authorization::Deny,
+                _ => Authorization::Allow,
+            },
+        }
+    }));
+    let result = connection
+        .execute_batch(sql)
+        .context("native SQLite initSql failed");
+    connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+    result?;
+    anyhow::ensure!(
+        connection.is_autocommit(),
+        "native SQLite initSql left a transaction open"
+    );
+    Ok(())
+}
+
+/// The object an authorizer action names, for the `initSql` reserved-name guard.
+fn init_object<'a>(action: &AuthAction<'a>) -> Option<&'a str> {
+    match *action {
+        AuthAction::Read { table_name, .. }
+        | AuthAction::Insert { table_name }
+        | AuthAction::Update { table_name, .. }
+        | AuthAction::Delete { table_name }
+        | AuthAction::CreateTable { table_name }
+        | AuthAction::DropTable { table_name }
+        | AuthAction::AlterTable { table_name, .. }
+        | AuthAction::Analyze { table_name }
+        | AuthAction::CreateTempTable { table_name }
+        | AuthAction::DropTempTable { table_name } => Some(table_name),
+        AuthAction::CreateIndex { index_name, .. }
+        | AuthAction::DropIndex { index_name, .. }
+        | AuthAction::CreateTempIndex { index_name, .. }
+        | AuthAction::DropTempIndex { index_name, .. }
+        | AuthAction::Reindex { index_name } => Some(index_name),
+        AuthAction::CreateTrigger { trigger_name, .. }
+        | AuthAction::DropTrigger { trigger_name, .. }
+        | AuthAction::CreateTempTrigger { trigger_name, .. }
+        | AuthAction::DropTempTrigger { trigger_name, .. } => Some(trigger_name),
+        AuthAction::CreateView { view_name }
+        | AuthAction::DropView { view_name }
+        | AuthAction::CreateTempView { view_name }
+        | AuthAction::DropTempView { view_name } => Some(view_name),
+        _ => None,
+    }
+}
+
 impl Database {
     fn open(
         config: SqliteConfig,
+        options: &SqliteConnectionOptions,
         source: ComponentId,
-        shutdown: watch::Receiver<bool>,
+        interrupt: watch::Receiver<bool>,
     ) -> Result<Self> {
+        options.validate(&config)?;
         let connection = match &config.path {
             Some(path) => Connection::open(path)?,
             None => Connection::open_in_memory()?,
@@ -247,7 +314,21 @@ impl Database {
                 "native SQLite replay requires an actual persistent database file"
             );
             connection.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA locking_mode=EXCLUSIVE; PRAGMA synchronous=FULL; BEGIN EXCLUSIVE; COMMIT;")?;
+            if let Some(sql) = &options.init_sql {
+                run_init_sql(&connection, sql)?;
+            }
         } else {
+            if options.wal {
+                let mode: String =
+                    connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+                anyhow::ensure!(
+                    mode.eq_ignore_ascii_case("wal"),
+                    "native SQLite could not enable WAL mode (journal_mode is {mode})"
+                );
+            }
+            if let Some(sql) = &options.init_sql {
+                run_init_sql(&connection, sql)?;
+            }
             let has_journal: bool = connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE lower(substr(name,1,8))='__drasi_')",
                 [], |row| row.get(0),
@@ -417,7 +498,7 @@ impl Database {
                 if auth.lock().is_ok_and(|state| state.internal) {
                     return false;
                 }
-                *shutdown.borrow()
+                *interrupt.borrow()
                     || state.lock().map_or(true, |state| {
                         state
                             .deadline
@@ -869,18 +950,24 @@ fn respond<T>(response: oneshot::Sender<Result<T>>, result: Result<T>) -> Result
     }
 }
 
+/// Serves one transaction scope. Abort rolls it back at once. Stop rolls it
+/// back too unless the worker drains open transactions, in which case it may
+/// finish within its own deadline.
 fn scoped(
     database: &Database,
     commands: &mut mpsc::Receiver<TransactionCommand>,
-    shutdown: &mut watch::Receiver<bool>,
+    control: &mut WorkerControl,
     deadline: Instant,
 ) -> Result<bool> {
     let runtime = tokio::runtime::Handle::current();
+    let drain = control.drain_transactions;
+    let (abort, stop) = (&mut control.abort, &mut control.stop);
     loop {
         let command = runtime.block_on(async {
             tokio::select! {
                 biased;
-                _ = shutdown.wait_for(|stopped| *stopped) => anyhow::bail!("native SQLite transaction stopped"),
+                _ = abort.wait_for(|aborted| *aborted) => anyhow::bail!("native SQLite transaction aborted by Stop"),
+                _ = stop.wait_for(|stopped| *stopped), if !drain => anyhow::bail!("native SQLite transaction stopped"),
                 _ = tokio::time::sleep_until(deadline) => anyhow::bail!("native SQLite transaction deadline exceeded"),
                 command = commands.recv() => command.context("native SQLite transaction abandoned"),
             }
@@ -911,6 +998,7 @@ pub struct SnapshotWork {
     pub source: ComponentId,
     pub stream: StreamId,
     pub config: SqliteConfig,
+    pub options: SqliteConnectionOptions,
     pub owner: SourceProgressView,
     pub progress: Arc<SourceProgressSnapshot>,
     pub handover: Handover,
@@ -919,7 +1007,12 @@ pub struct SnapshotWork {
 }
 
 pub fn snapshot(mut work: SnapshotWork) -> Result<Option<Handover>> {
-    let database = Database::open(work.config, work.source.clone(), work.shutdown.clone())?;
+    let database = Database::open(
+        work.config,
+        &work.options,
+        work.source.clone(),
+        work.shutdown.clone(),
+    )?;
     if *work.shutdown.borrow() {
         return Ok(None);
     }
@@ -1061,6 +1154,7 @@ pub struct GroupSnapshotWork {
     pub source: ComponentId,
     pub stream: StreamId,
     pub config: SqliteConfig,
+    pub options: SqliteConnectionOptions,
     pub consumers: ConsumerProgressView,
     pub member: SourceProgressView,
     pub generation: u64,
@@ -1072,7 +1166,12 @@ pub struct GroupSnapshotWork {
 }
 
 pub fn group_snapshot(mut work: GroupSnapshotWork) -> Result<Option<GroupHandover>> {
-    let database = Database::open(work.config, work.source.clone(), work.shutdown.clone())?;
+    let database = Database::open(
+        work.config,
+        &work.options,
+        work.source.clone(),
+        work.shutdown.clone(),
+    )?;
     if *work.shutdown.borrow() {
         return Ok(None);
     }
@@ -1144,23 +1243,75 @@ pub fn group_snapshot(mut work: GroupSnapshotWork) -> Result<Option<GroupHandove
     Ok(Some(handover))
 }
 
+/// Lifecycle signals for the live worker.
+pub struct WorkerControl {
+    /// `true` from the start of a Stop: keep serving in-flight requests, but
+    /// never wait for output (undeliverable volatile output is dropped and
+    /// counted; journal output stays in the journal).
+    pub draining: watch::Receiver<bool>,
+    /// `true` once in-flight requests have drained: refuse queued commands
+    /// and exit.
+    pub stop: watch::Receiver<bool>,
+    /// `true` when Stop is an Abort: open work is rolled back at once.
+    pub abort: watch::Receiver<bool>,
+    /// `true` while the host asks the source to pause.
+    pub pause: watch::Receiver<bool>,
+    /// Set by the worker when it has parked at a transaction boundary.
+    pub paused: Arc<watch::Sender<bool>>,
+    /// Whether Stop lets an open transaction scope finish instead of rolling
+    /// it back.
+    pub drain_transactions: bool,
+}
+
+/// How the live worker ended.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerOutcome {
+    /// Committed volatile transactions whose output could not be delivered
+    /// before Stop. Journal modes never lose output: it stays in the journal.
+    pub lost_volatile_transactions: usize,
+}
+
+/// Answers every queued command with [`SqliteStopping`] without executing it,
+/// then closes the lane so later submissions fail immediately.
+fn reject_queued(commands: &mut mpsc::Receiver<Command>) {
+    commands.close();
+    while let Ok(command) = commands.try_recv() {
+        let stopping = || anyhow::Error::new(SqliteStopping);
+        match command {
+            Command::DescribeSchema { response } => {
+                let _ = response.send(Err(stopping()));
+            }
+            Command::KeyColumns { response, .. } => {
+                let _ = response.send(Err(stopping()));
+            }
+            Command::Query { response, .. } => {
+                let _ = response.send(Err(stopping()));
+            }
+            Command::Transaction { ready, .. } => {
+                let _ = ready.send(Err(stopping()));
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     config: SqliteConfig,
+    options: SqliteConnectionOptions,
     source: ComponentId,
     stream: StreamId,
     sequence: Arc<AtomicU64>,
     mut commands: mpsc::Receiver<Command>,
     outputs: mpsc::Sender<OutputEnvelope>,
-    mut shutdown: watch::Receiver<bool>,
+    mut control: WorkerControl,
     ready: oneshot::Sender<()>,
     progress: Option<(ProgressReader, Observed, Option<uuid::Uuid>)>,
-) -> Result<()> {
+) -> Result<WorkerOutcome> {
     let mut updates = progress
         .as_ref()
         .map(|(owner, _, _)| owner.subscribe())
         .transpose()?;
-    let mut database = Database::open(config, source.clone(), shutdown.clone())?;
+    let mut database = Database::open(config, &options, source.clone(), control.abort.clone())?;
     if let Some((owner, snapshot, bootstrap)) = progress {
         let schema = database.schema()?;
         database.journal = Some(database.internal(|connection| {
@@ -1178,40 +1329,85 @@ pub fn run(
     let runtime = tokio::runtime::Handle::current();
     let _ = ready.send(());
     let mut pending = None;
+    let mut lost = 0usize;
     loop {
         if let Some(progress) = &mut updates {
             database.feedback(&progress.snapshot()?)?;
         }
-        if pending.is_none() {
+        // The loop top is always a transaction boundary: acknowledge Pause
+        // and Resume here, so a paused worker never holds an open write.
+        let pausing = *control.pause.borrow_and_update();
+        if *control.paused.borrow() != pausing {
+            control.paused.send_replace(pausing);
+        }
+        let draining = *control.draining.borrow_and_update();
+        if draining {
+            // Never wait for output while stopping: deliver what fits now.
+            if let Some(output) = pending.take() {
+                match outputs.try_reserve() {
+                    Ok(permit) => permit.send(output),
+                    Err(_) if database.journal.is_none() => lost += 1,
+                    Err(_) => {}
+                }
+            }
+        } else if pending.is_none() && !pausing {
             pending = database.replay(&stream, &sequence)?;
         }
         let wake = runtime.block_on(async {
             tokio::select! {
                 biased;
-                _ = shutdown.wait_for(|stopped| *stopped) => Wake::Stop,
+                _ = control.stop.wait_for(|stopped| *stopped) => Wake::Stop,
+                changed = control.pause.changed() => match changed {
+                    Ok(()) => Wake::Pause,
+                    Err(_) => Wake::Stop,
+                },
+                changed = control.draining.changed(), if !draining => match changed {
+                    Ok(()) => Wake::Pause,
+                    Err(_) => Wake::Stop,
+                },
                 changed = async {
                     match &mut updates {
                         Some(progress) => progress.changed().await.context("native SQLite consumer progress closed"),
                         None => std::future::pending().await,
                     }
                 } => Wake::Progress(changed),
-                permit = outputs.reserve(), if pending.is_some() => Wake::Output(permit),
-                command = commands.recv(), if pending.is_none() => Wake::Command(command),
+                permit = outputs.reserve(), if pending.is_some() && !pausing && !draining => Wake::Output(permit),
+                // Writes wait while output is pending (one envelope of
+                // buffered memory). A paused worker still answers reads and
+                // refuses writes, and a draining worker never holds output,
+                // so callers never wait on held output.
+                command = commands.recv(), if pending.is_none() || pausing || draining => Wake::Command(command),
             }
         });
         let command = match wake {
             Wake::Stop | Wake::Command(None) => {
+                reject_queued(&mut commands);
                 if let Some(updates) = &mut updates {
                     let snapshot = updates.snapshot()?;
                     if matches!(&snapshot, Observed::Group(_)) && snapshot.ready() {
                         database.feedback(&snapshot)?;
                     }
                 }
-                if pending.is_some() && database.journal.is_none() {
-                    log::warn!("Stopping volatile native SQLite output; committed changes are not replayable");
+                let mut outcome = WorkerOutcome {
+                    lost_volatile_transactions: lost,
+                };
+                if let Some(output) = pending.take() {
+                    let delivered = !*control.abort.borrow()
+                        && match outputs.try_reserve() {
+                            Ok(permit) => {
+                                permit.send(output);
+                                true
+                            }
+                            Err(_) => false,
+                        };
+                    if !delivered && database.journal.is_none() {
+                        outcome.lost_volatile_transactions += 1;
+                    }
                 }
-                return database.rollback();
+                database.rollback()?;
+                return Ok(outcome);
             }
+            Wake::Pause => continue,
             Wake::Progress(result) => {
                 result?;
                 continue;
@@ -1290,6 +1486,9 @@ pub fn run(
                     .deadline = None;
                 let _ = response.send(result);
             }
+            Command::Transaction { ready, .. } if pausing => {
+                let _ = ready.send(Err(anyhow::Error::new(SqlitePaused)));
+            }
             Command::Transaction {
                 mut commands,
                 ready,
@@ -1304,7 +1503,7 @@ pub fn run(
                     }
                 };
                 let mut result = if ready.send(Ok(())).is_ok() {
-                    scoped(&database, &mut commands, &mut shutdown, deadline)
+                    scoped(&database, &mut commands, &mut control, deadline)
                 } else {
                     Ok(false)
                 };
@@ -1361,6 +1560,7 @@ pub fn run(
 
 enum Wake<'a> {
     Stop,
+    Pause,
     Progress(Result<()>),
     Output(std::result::Result<mpsc::Permit<'a, OutputEnvelope>, mpsc::error::SendError<()>>),
     Command(Option<Command>),

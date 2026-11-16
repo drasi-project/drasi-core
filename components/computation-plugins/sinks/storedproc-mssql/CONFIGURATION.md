@@ -21,6 +21,7 @@ configuration is one flat camelCase object; unknown fields are rejected.
 | `hostNameInCertificate` | string | `host` | host name | no | no | Restart |
 | `progressTable` | string | `dbo.drasi_delivery_progress` | `table` or `schema.table`; letters, digits, `_`; ≤ 128 per part | no | no | Unsupported |
 | `maxStreams` | integer | `4096` | 1–1 000 000 | no | no | InPlace |
+| `deliveryGuarantee` | string | `exactlyOnce` | `exactlyOnce`, `atLeastOnce` (see Delivery guarantee) | no | no | Restart |
 | `outputs` | object | `{}` | `{alias: {component, port?}}` | no | no | Recreate |
 | `routes` | object | `{}` | `{alias: {added?, updated?, deleted?: {template}}}` | no | no | InPlace |
 | `defaultTemplate` | object | none | `{added?, updated?, deleted?: {template}}` | no | no | InPlace |
@@ -171,25 +172,47 @@ GRANT CREATE TABLE TO drasi_sink;
 GRANT ALTER ON SCHEMA::dbo TO drasi_sink;
 ```
 
-For a least-privilege login, create the table in advance instead (format 2,
+For a least-privilege login, create the table in advance instead (format 3,
 identical for the three stored-procedure sinks) and grant only DML:
 
 ```sql
 CREATE TABLE dbo.drasi_delivery_progress (
     owner NVARCHAR(64) NOT NULL,
     stream_key NVARCHAR(128) NOT NULL,
-    version SMALLINT NOT NULL CHECK (version = 2),
+    version SMALLINT NOT NULL CHECK (version = 3),
     sequence NVARCHAR(20) NOT NULL,
     digest VARBINARY(32) NOT NULL CHECK (DATALENGTH(digest) = 32),
     operations BIGINT NOT NULL CHECK (operations > 0),
     completed BIGINT NOT NULL CHECK (completed >= 0 AND completed <= operations),
+    epoch NVARCHAR(64) NOT NULL,
     PRIMARY KEY (owner, stream_key)
 );
 ```
 
-Start checks the four DML permissions and the columns and names the missing
+A format 2 table (without `epoch`) is refused at Start, not migrated. Start checks the four DML permissions and the columns and names the missing
 grant in its error. A missing `CREATE TABLE` permission fails Start with a
 message that points here.
+
+### Delivery guarantee
+
+`deliveryGuarantee` selects which producers the sink accepts:
+
+- `exactlyOnce` (default): only producers with persistent progress, such as
+  persistent queries. Each procedure call commits with its cursor row, so a
+  retry never repeats a completed call. Wiring an in-memory query to this
+  sink is refused when the graph configuration is accepted (the edge becomes
+  bindable, or either endpoint is created, replaced or updated), with the
+  error "the producer is an in-memory query without persistent progress; use
+  a persistent query or set deliveryGuarantee to atLeastOnce". The same
+  refusal is applied, permanently, at the first delivery if a volatile input
+  still arrives.
+- `atLeastOnce`: additionally accepts in-memory (volatile) queries. Their
+  outputs carry a per-run epoch; the cursor still deduplicates retries within
+  one producer run, but a process restart starts a new run whose outputs are
+  delivered against a fresh cursor (the stream row is overwritten, not
+  duplicated, so `maxStreams` is not consumed per run). Effects after a
+  restart may repeat work the previous run already did; nothing is resumed.
+  Persistent producers are still delivered exactly once.
 
 ### Authentication
 
@@ -226,6 +249,7 @@ only) and logs a warning.
 | `maxStreams`, `retryBudgetMs` | InPlace (Pause) | Read per operation |
 | `commandTimeoutMs`, `connectTimeoutMs` | InPlace (Pause) | The idle connection is replaced; the next operation reconnects |
 | `host`, `port`, `user`, `password`, `encryption`, `trustServerCertificate`, `trustedCaPem`, `hostNameInCertificate` | Restart (Stop) | The connection and credentials are established at Start |
+| `deliveryGuarantee` | Restart (Stop) | Which producers the sink accepts is fixed for one activation |
 | `outputs`, bound inputs | Recreate (Replace) | Route aliases and delivery streams change (live rebinding is CW-94) |
 | `database`, `progressTable` | **Unsupported** | They locate the cursor. Moving it would lose every stream's completed prefix (duplicates or refused operations) and leave old rows behind. Remove the sink with Erase and create a new one |
 
@@ -283,7 +307,7 @@ FROM dbo.drasi_delivery_progress ORDER BY owner, stream_key;
 | `command_timeout_ms` (per command) | `commandTimeoutMs` (per round trip) |
 | `retry_attempts` (blind command retry) | `retryBudgetMs` (classified, cursor-protected retry) |
 | `identity_provider` | Host activation identity binding |
-| — | `progressTable`, `maxStreams`, `connectTimeoutMs`, `outputs` |
+| — | `progressTable`, `maxStreams`, `deliveryGuarantee`, `connectTimeoutMs`, `outputs` |
 | Query names in `routes` | Output aliases in `routes` (full alias or last dotted segment) |
 
 Template changes:

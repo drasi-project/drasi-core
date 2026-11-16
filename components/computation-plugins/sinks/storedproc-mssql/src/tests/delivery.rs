@@ -135,6 +135,7 @@ impl Session for FakeSession {
                 digest: position.digest.to_vec(),
                 operations: position.operations,
                 completed: 0,
+                epoch: position.epoch.clone(),
             },
         );
         anyhow::ensure!(previous.is_none(), "primary key violation");
@@ -150,6 +151,7 @@ impl Session for FakeSession {
         row.digest = position.digest.to_vec();
         row.operations = position.operations;
         row.completed = 0;
+        row.epoch = position.epoch.clone();
         Ok(())
     }
     async fn execute(&mut self, command: &RenderedCommand) -> Result<()> {
@@ -254,6 +256,14 @@ fn position(stream: &str, sequence: u64, operation: i64, operations: i64, digest
         operation,
         operations,
         digest: [digest; 32],
+        epoch: String::new(),
+    }
+}
+
+fn epoch_position(epoch: char, sequence: u64, operation: i64, operations: i64) -> Position {
+    Position {
+        epoch: epoch.to_string().repeat(64),
+        ..position("v", sequence, operation, operations, 1)
     }
 }
 
@@ -305,6 +315,7 @@ fn pure_decisions_cover_every_cursor_state() {
         digest: vec![digest; 32],
         operations,
         completed,
+        epoch: String::new(),
     };
     assert_eq!(
         decide(None, &position("s", 7, 0, 2, 1)).expect("first"),
@@ -393,12 +404,62 @@ fn pure_decisions_cover_every_cursor_state() {
             completed: 0,
             ..finished.clone()
         },
+        CursorRow {
+            epoch: "A".repeat(64),
+            ..finished.clone()
+        },
     ] {
         assert!(matches!(
             decide(Some(&invalid), &position("s", 9, 0, 1, 2)),
             Err(DeliveryError::InvalidProgress(_))
         ));
     }
+}
+
+#[test]
+fn epochs_restart_volatile_cursors_and_never_cross_guarantees() {
+    let stored = |position: &Position, completed: i64| CursorRow {
+        version: PROGRESS_FORMAT_VERSION,
+        sequence: position.sequence.to_string(),
+        digest: position.digest.to_vec(),
+        operations: position.operations,
+        completed,
+        epoch: position.epoch.clone(),
+    };
+    // Same epoch deduplicates exactly as an exactly-once stream.
+    let first = epoch_position('a', 9, 0, 2);
+    let row = stored(&first, 1);
+    assert_eq!(
+        decide(Some(&row), &first).expect("dup"),
+        Decision::Duplicate
+    );
+    assert!(matches!(
+        decide(Some(&row), &epoch_position('a', 3, 0, 1)),
+        Err(DeliveryError::ReceiptExpired { .. })
+    ));
+    // A new epoch treats the row as absent, even with a lower sequence and an
+    // unfinished previous batch.
+    assert_eq!(
+        decide(Some(&row), &epoch_position('b', 1, 0, 1)).expect("new epoch"),
+        Decision::Apply {
+            completed: 0,
+            write: CursorWrite::Rollover
+        }
+    );
+    assert!(matches!(
+        decide(Some(&row), &epoch_position('b', 1, 1, 2)),
+        Err(DeliveryError::MissingFirstOperation)
+    ));
+    // Exactly-once never matches at-least-once, nor the reverse.
+    let strict = position("v", 9, 0, 2, 1);
+    assert!(matches!(
+        decide(Some(&row), &strict),
+        Err(DeliveryError::GuaranteeMismatch)
+    ));
+    assert!(matches!(
+        decide(Some(&stored(&strict, 2)), &first),
+        Err(DeliveryError::GuaranteeMismatch)
+    ));
 }
 
 #[tokio::test]

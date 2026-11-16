@@ -13,6 +13,7 @@ use std::{
 };
 
 pub mod consumer_snapshot;
+pub mod error;
 pub mod handle;
 pub mod journal;
 pub mod progress;
@@ -21,6 +22,7 @@ pub mod schema;
 pub mod snapshot;
 pub mod worker;
 pub use crate::SqliteParam;
+pub use error::{SqlitePaused, SqliteStopping};
 pub use handle::{SqliteHandle, SqliteTransactionHandle};
 pub type SqliteRow = serde_json::Map<String, serde_json::Value>;
 
@@ -60,6 +62,40 @@ pub struct SqliteConfig {
     pub command_capacity: NonZeroUsize,
     pub output_capacity: NonZeroUsize,
     pub shutdown_timeout_ms: NonZeroU64,
+}
+
+/// Per-connection behaviour that is not part of the legacy serialized
+/// [`SqliteConfig`] shape. Every connection the source opens (the live worker
+/// and coordinated snapshot workers) applies the same options.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SqliteConnectionOptions {
+    /// SQL run once on each newly opened connection, before the authorizer and
+    /// capture hooks are installed. It may create tables, indexes, views and
+    /// triggers and set pragmas; it may not touch `__drasi_*` objects, attach
+    /// databases or load extensions. Its changes are not captured.
+    pub init_sql: Option<String>,
+    /// Opt in to `journal_mode=WAL` for a file database without a source
+    /// journal. Replay modes always use `journal_mode=DELETE` with an
+    /// exclusive lock.
+    pub wal: bool,
+}
+
+impl SqliteConnectionOptions {
+    pub fn validate(&self, config: &SqliteConfig) -> Result<()> {
+        if let Some(sql) = &self.init_sql {
+            anyhow::ensure!(!sql.trim().is_empty(), "SQLite initSql must not be empty");
+            anyhow::ensure!(!sql.contains('\0'), "SQLite initSql contains NUL");
+            anyhow::ensure!(
+                sql.len() <= config.max_sql_bytes.get(),
+                "SQLite initSql exceeds maxSqlBytes"
+            );
+        }
+        anyhow::ensure!(
+            !self.wal || (config.path.is_some() && config.replay.is_none()),
+            "SQLite WAL mode requires a file database without a source journal"
+        );
+        Ok(())
+    }
 }
 
 impl SqliteConfig {

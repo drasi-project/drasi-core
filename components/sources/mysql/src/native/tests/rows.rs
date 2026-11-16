@@ -278,6 +278,8 @@ async fn memory_rows() -> Result<()> {
             serde_json::from_value(json!({
                 "hostname":"127.0.0.1","port":settings.connection.port,
                 "database":"test","user":"root","password":"root",
+                // The queries are in-memory (volatile): the sink must opt in.
+                "deliveryGuarantee":"atLeastOnce",
                 "defaultTemplate":{
                     "added":{"template":"CALL apply_effect({{param output.alias}},{{param operation}},{{param after.id}},{{param after.value}})"},
                     "updated":{"template":"CALL apply_effect({{param output.alias}},{{param operation}},{{param after.id}},{{param after.value}})"},
@@ -511,6 +513,8 @@ async fn memory_rows() -> Result<()> {
             let config = |template: &str, stop_ms: u64| serde_json::from_value(json!({
                 "hostname":"127.0.0.1","port":port,"database":"test","user":"root","password":"root",
                 "commandTimeoutMs":5000,"shutdownTimeoutMs":stop_ms,
+                // The input is an in-memory query output: opt in.
+                "deliveryGuarantee":"atLeastOnce",
                 "defaultTemplate":{
                     "added":{"template":template},"updated":{"template":template},"deleted":{"template":template}
                 }

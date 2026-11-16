@@ -1,17 +1,43 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+//! The native MySQL replication engine shared by the native source plugin
+//! and the in-process wrapper.
+//!
+//! One activation owns one replication connection and one worker task. The
+//! worker decodes binlog events, assembles transactions (or rows), emits
+//! them through a bounded channel and validates the host's committed
+//! progress. It also implements:
+//!
+//! - **pause** at a transaction boundary: nothing is decoded or emitted; the
+//!   socket keeps being drained into a bounded buffer (heartbeats discarded)
+//!   so the server does not time the dump thread out, and the connection is
+//!   closed deliberately if the buffer fills;
+//! - **reconnection** after transport failures (including a dead peer
+//!   detected by the heartbeat watchdog), resuming at the end of the last
+//!   transaction it emitted, with jittered exponential backoff bounded by
+//!   `reconnectBudgetMs`; permanent [`SourceFailure`]s never reconnect;
+//! - the **DDL policy** of [`super::ddl`]: schema statements on selected
+//!   tables make the worker re-read their catalog, and only a change to the
+//!   facts the cursor is bound to fences the source.
+
 use super::{
-    binlog::{Binlog, Position, Start},
-    catalog::{self, field},
+    binlog::{Binlog, HistoryMode, Position, Start},
+    catalog::{self, field, Profile, Tables},
     connection::Connection,
+    errors::{self, SourceFailure},
     progress::{ConsumerBinding, ConsumerUpdates, Positions, Starting},
     rows, MySqlConfig, MySqlOutput, MySqlRetention, MySqlStartPosition,
 };
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use drasi_computation_contracts::{
-    workers::{join_owned_worker_gracefully, spawn_owned_worker, WorkerCompletion},
+    lifecycle::{CancellationToken, StopMode},
+    reconnect::BackoffPolicy,
+    workers::{
+        cancel_owned_worker, join_owned_worker, spawn_owned_worker, WorkerCleanupError,
+        WorkerCompletion,
+    },
     ComponentDescriptor, ComponentId, ConsumerProgressSnapshot, GraphChangeCodec,
     InputPositionPolicy, OperationFailures, OutputEnvelope, PipeRequirements, PortDescriptor,
     PortDirection, PortId, SourceProgressKey, SourceProgressSnapshot, SourceProgressUpdates,
@@ -20,35 +46,193 @@ use drasi_computation_contracts::{
 use drasi_core_types::interface::StorageDurability;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
+    time::Duration,
 };
 use tokio::{
     sync::{mpsc, watch, RwLock},
     task::JoinHandle,
+    time::Instant,
 };
+
+/// First reconnect backoff ceiling; doubles per attempt.
+const RECONNECT_BASE: Duration = Duration::from_millis(250);
+/// Largest reconnect backoff ceiling.
+const RECONNECT_MAX: Duration = Duration::from_secs(30);
+/// Missed heartbeats after which the peer is presumed dead.
+const DEAD_PEER_HEARTBEATS: u32 = 3;
+/// `HEARTBEAT_EVENT`, discarded while paused.
+const HEARTBEAT_EVENT: u8 = 27;
+
+/// What the worker should do when the host stops it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shutdown {
+    Running,
+    Drain,
+    Abort,
+}
+
+/// Readiness changes reported to the host.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SourceStatus {
+    /// Replication is connected and streaming (or paused while connected).
+    Ready,
+    /// A transport failure interrupted replication; reconnecting.
+    Reconnecting(String),
+    /// Replication stopped with a failure that `next` reports.
+    Failed(String),
+}
+
+/// Receives [`SourceStatus`] changes; the plugin forwards them to its
+/// `ControlSender`.
+pub type StatusSink = Arc<dyn Fn(SourceStatus) + Send + Sync>;
+
+/// Per-activation inputs from the host.
+#[derive(Default)]
+pub struct Activation<'a> {
+    /// Cancels the start.
+    pub cancellation: Option<&'a CancellationToken>,
+    /// Overall start deadline. Readiness waits (which may include a
+    /// coordinated snapshot) are bounded only by it; connection setup is
+    /// additionally bounded by `ioTimeoutMs`.
+    pub deadline: Option<Instant>,
+    /// Host-supplied `(user, password)` replacing the configured ones.
+    pub credentials: Option<(String, String)>,
+}
+
+/// The binding scope a cursor is bound to.
+#[derive(Clone, Debug)]
+enum Scope {
+    /// Query-owned (or untracked) progress, with its owner.
+    Single(Option<(String, String)>),
+    /// A fixed consumer set of whole transactions.
+    Shared(String),
+    /// A fixed consumer set of rows.
+    Rows(String),
+}
+
+impl Scope {
+    fn binding(
+        &self,
+        config: &MySqlConfig,
+        server: &str,
+        tables: &Tables,
+        source: &ComponentId,
+        stream: &StreamId,
+        positional: bool,
+    ) -> Result<[u8; 32]> {
+        let binding = match self {
+            Self::Single(owner) => binding(
+                config,
+                server,
+                tables,
+                source,
+                stream,
+                (
+                    "mysql-native-v2",
+                    owner
+                        .as_ref()
+                        .map(|(graph, owner)| (graph.as_str(), owner.as_str())),
+                ),
+                positional,
+            )?,
+            Self::Shared(graph) => binding(
+                config,
+                server,
+                tables,
+                source,
+                stream,
+                ("mysql-native-consumers-v2", Some((graph, source.as_str()))),
+                positional,
+            )?,
+            Self::Rows(graph) => binding(
+                config,
+                server,
+                tables,
+                source,
+                stream,
+                (
+                    "mysql-native-consumer-rows-v2",
+                    Some((graph, source.as_str())),
+                ),
+                positional,
+            )?,
+        };
+        Ok(if positional {
+            Sha256::digest(serde_json::to_vec(&("mysql-positional-rows-v2", binding))?).into()
+        } else {
+            binding
+        })
+    }
+}
+
+/// Where a replication connection starts reading.
+#[derive(Clone, Debug)]
+enum StartPoint {
+    /// A file offset; `anchor` is the transaction re-read and compared there.
+    Binlog {
+        file: String,
+        offset: u32,
+        anchor: Option<Position>,
+    },
+    /// After a GTID set (before the first transaction is decoded).
+    Gtid(String),
+    /// A coordinated snapshot boundary whose file prefix is re-hashed.
+    History {
+        file: String,
+        boundary: u32,
+        digest: [u8; 32],
+        confirmed: u64,
+    },
+}
+
+/// Pause request and acknowledgement shared with the worker.
+struct PauseGate {
+    requested: watch::Receiver<bool>,
+    acknowledged: Arc<watch::Sender<bool>>,
+}
+
+/// Raised inside the worker when a paused connection was closed
+/// deliberately and must be reopened on resume.
+#[derive(Debug)]
+struct PausedClose;
+
+impl std::fmt::Display for PausedClose {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MySQL replication connection was closed while paused")
+    }
+}
+
+impl std::error::Error for PausedClose {}
 
 pub struct MySqlSource {
     descriptor: ComponentDescriptor,
     stream: StreamId,
     config: MySqlConfig,
+    credentials: Option<(String, String)>,
     progress: Option<SourceProgressView>,
     consumers: Option<ConsumerBinding>,
     position_policy: Option<Arc<InputPositionPolicy>>,
     receiver: Option<mpsc::Receiver<OutputEnvelope>>,
-    shutdown: watch::Sender<bool>,
+    shutdown: watch::Sender<Shutdown>,
+    pause: watch::Sender<bool>,
+    paused: Arc<watch::Sender<bool>>,
     worker: RwLock<Option<JoinHandle<Result<()>>>>,
     cleanup_required: bool,
     sequence: Arc<AtomicU64>,
+    reconnect_budget_ms: Arc<AtomicU64>,
+    status: Option<StatusSink>,
     snapshot: Option<Arc<super::MySqlSnapshot>>,
     consumer_snapshots: BTreeMap<ComponentId, Arc<super::MySqlSnapshot>>,
     published_snapshot: bool,
     rows: Option<rows::Options>,
     schema: Arc<super::schema::Publication>,
     positional: bool,
+    disposed: bool,
 }
 
 impl MySqlSource {
@@ -250,18 +434,26 @@ impl MySqlSource {
                 .map(Arc::new)
             })
             .transpose()?;
+        let descriptor = Self::describe(id, config.output)?;
+        let reconnect_budget_ms = Arc::new(AtomicU64::new(config.reconnect_budget_ms));
         Ok(Self {
-            descriptor: Self::describe(id, config.output)?,
+            descriptor,
             stream,
             config,
             progress,
             consumers,
             position_policy,
             receiver: None,
-            shutdown: watch::channel(false).0,
+            shutdown: watch::channel(Shutdown::Running).0,
+            pause: watch::channel(false).0,
+            paused: Arc::new(watch::channel(false).0),
             worker: RwLock::new(None),
             cleanup_required: false,
             sequence: Arc::new(AtomicU64::new(0)),
+            reconnect_budget_ms,
+            credentials: None,
+            status: None,
+            disposed: false,
             snapshot,
             consumer_snapshots: BTreeMap::new(),
             schema: Arc::new(super::schema::Publication::default()),
@@ -288,25 +480,67 @@ impl MySqlSource {
         Ok(ComponentDescriptor::try_new(id, Self::ports(output)?)?)
     }
 
+    /// The configuration this activation connects with.
+    fn activation_config(&self) -> MySqlConfig {
+        match &self.credentials {
+            Some((user, password)) => self.config.with_credentials(user.clone(), password.clone()),
+            None => self.config.clone(),
+        }
+    }
+
+    fn scope(&self) -> Scope {
+        match (&self.consumers, &self.rows, &self.progress) {
+            (Some(consumers), Some(_), _) => Scope::Rows(consumers.graph_id().to_owned()),
+            (Some(consumers), None, _) => Scope::Shared(consumers.graph_id().to_owned()),
+            (None, _, progress) => Scope::Single(progress.as_ref().map(|owner| {
+                (
+                    owner.graph_id().to_owned(),
+                    owner.component_id().as_str().to_owned(),
+                )
+            })),
+        }
+    }
+
+    fn profile(&self) -> Profile {
+        if self.positional {
+            Profile::Positional
+        } else if self.config.output == MySqlOutput::Changes {
+            if matches!(self.config.start, MySqlStartPosition::Snapshot { .. }) {
+                Profile::Transactional
+            } else {
+                Profile::Rows
+            }
+        } else {
+            Profile::Transactional
+        }
+    }
+
     async fn prepare(&self, snapshot: Starting) -> Result<Worker> {
+        let config = self.activation_config();
         let progress = self
             .progress
             .as_ref()
             .map(SourceProgressView::subscribe)
             .transpose()?;
         let mut connection = Connection::connect(
-            &self.config.connection,
-            self.config.max_protocol_bytes.get(),
-            self.config.timeout(),
+            &config.connection,
+            config.max_protocol_bytes.get(),
+            config.timeout(),
         )
         .await?;
         let prepared = async {
-            let (decoder, binding, confirmed, server) =
-                self.prepare_connection(&mut connection, &snapshot).await?;
+            let prepared = self
+                .prepare_connection(&config, &mut connection, &snapshot)
+                .await?;
             let consumer_progress = match (&self.consumers, &snapshot) {
-                (Some(consumers), Starting::Consumers(snapshot)) if self.rows.is_none() => Some(
-                    ConsumerUpdates::new(consumers, snapshot, self.descriptor.id(), binding)?,
-                ),
+                (Some(consumers), Starting::Consumers(snapshot)) if self.rows.is_none() => {
+                    Some(ConsumerUpdates::new(
+                        consumers,
+                        snapshot,
+                        self.descriptor.id(),
+                        prepared.binding,
+                    )?)
+                }
                 (None, _) | (Some(_), Starting::Consumers(_)) => None,
                 _ => anyhow::bail!("MySQL consumer progress initialization is missing"),
             };
@@ -316,33 +550,33 @@ impl MySqlSource {
                         consumers,
                         snapshot,
                         self.descriptor.id(),
-                        binding,
+                        prepared.binding,
                         options,
                     )?)
                 }
                 _ => None,
             };
-            Ok((
-                decoder,
-                binding,
-                confirmed,
-                consumer_progress,
-                row_progress,
-                server,
-            ))
+            Ok((prepared, consumer_progress, row_progress))
         }
         .await;
         match prepared {
-            Ok((decoder, binding, confirmed, consumer_progress, row_progress, server)) => {
+            Ok((prepared, consumer_progress, row_progress)) => {
+                let mut decoder_config = config.clone();
+                if self.rows.is_some() {
+                    decoder_config.output = MySqlOutput::Transactions;
+                }
                 Ok(Worker {
-                    config: self.config.clone(),
+                    decoder_config,
                     positional: self.positional,
+                    profile: self.profile(),
+                    scope: self.scope(),
                     schema: self.schema.clone(),
-                    server,
-                    connection,
-                    decoder,
-                    binding,
-                    confirmed,
+                    server: prepared.server,
+                    connection: Some(connection),
+                    decoder: prepared.decoder,
+                    start: prepared.start,
+                    binding: prepared.binding,
+                    confirmed: prepared.confirmed,
                     source: self.descriptor.id().clone(),
                     progress,
                     consumer_progress,
@@ -350,11 +584,22 @@ impl MySqlSource {
                     row_admitted: self.sequence.load(Ordering::Relaxed),
                     stream: self.stream.clone(),
                     sequence: self.sequence.clone(),
-                    limits: self.config.transactions,
+                    limits: config.transactions,
                     generation: match snapshot {
                         Starting::Single(snapshot) => snapshot.reset_generation,
                         _ => 0,
                     },
+                    output: VecDeque::new(),
+                    emission: None,
+                    pause: PauseGate {
+                        requested: self.pause.subscribe(),
+                        acknowledged: self.paused.clone(),
+                    },
+                    reconnect_budget_ms: self.reconnect_budget_ms.clone(),
+                    status: self.status.clone(),
+                    buffered: VecDeque::new(),
+                    buffered_bytes: 0,
+                    config,
                 })
             }
             Err(error) => match connection.close().await {
@@ -370,51 +615,25 @@ impl MySqlSource {
 
     async fn prepare_connection(
         &self,
+        config: &MySqlConfig,
         connection: &mut Connection,
         starting: &Starting,
-    ) -> Result<(Binlog, [u8; 32], u64, String)> {
-        let (server, tables) = if self.positional {
-            catalog::inspect_positional(connection, &self.config).await?
-        } else if self.config.output == MySqlOutput::Changes {
-            catalog::inspect_rows(connection, &self.config).await?
-        } else {
-            catalog::inspect(connection, &self.config).await?
-        };
+    ) -> Result<Prepared> {
+        let found = catalog::inspect_profile(connection, config, self.profile()).await?;
+        let (server, tables) = (found.server.clone(), found.tables.clone());
         if self.positional {
             self.schema.capture_positional(&tables)?;
         } else {
             self.schema.capture(&tables)?;
         }
-        let mut binding = match &self.consumers {
-            Some(consumers) if self.rows.is_some() => row_source_binding(
-                &self.config,
-                &server,
-                &tables,
-                self.descriptor.id(),
-                &self.stream,
-                consumers.graph_id(),
-            )?,
-            Some(consumers) => shared_source_binding(
-                &self.config,
-                &server,
-                &tables,
-                self.descriptor.id(),
-                &self.stream,
-                consumers.graph_id(),
-            )?,
-            None => source_binding(
-                &self.config,
-                &server,
-                &tables,
-                self.descriptor.id(),
-                &self.stream,
-                self.progress.as_ref(),
-            )?,
-        };
-        if self.positional {
-            binding =
-                Sha256::digest(serde_json::to_vec(&("mysql-positional-rows-v1", binding))?).into();
-        }
+        let binding = self.scope().binding(
+            config,
+            &server,
+            &tables,
+            self.descriptor.id(),
+            &self.stream,
+            self.positional,
+        )?;
         let snapshot = match self.rows {
             Some(options) => rows::minimum(starting, self.descriptor.id(), binding, options)?,
             None => starting.minimum(self.descriptor.id(), binding)?,
@@ -437,7 +656,7 @@ impl MySqlSource {
                 }
             }
             anyhow::ensure!(
-                missing == 0 || initialized == 0 || matches!(self.config.start, MySqlStartPosition::Position { .. }),
+                missing == 0 || initialized == 0 || matches!(config.start, MySqlStartPosition::Position { .. }),
                 "mixed MySQL row group has uninitialized consumers; an explicit snapshot or retained initial position is required"
             );
             row_anchor.as_ref().map(|row| row.position.clone())
@@ -502,8 +721,8 @@ impl MySqlSource {
                 }
             }
         }
-        let gtid = match (&anchor, &self.config.start) {
-            (None, MySqlStartPosition::Gtid { set }) => Some(set.as_str()),
+        let gtid = match (&anchor, &config.start) {
+            (None, MySqlStartPosition::Gtid { set }) => Some(set.clone()),
             _ => None,
         };
         let (file, offset) = match &anchor {
@@ -515,7 +734,7 @@ impl MySqlSource {
                     position.start
                 },
             ),
-            None => match &self.config.start {
+            None => match &config.start {
                 MySqlStartPosition::Gtid { .. } => (String::new(), 4),
                 MySqlStartPosition::Start => {
                     let logs = connection.query("SHOW BINARY LOGS").await?;
@@ -546,29 +765,15 @@ impl MySqlSource {
         if gtid.is_none() {
             super::file_number(&file)?;
         }
-        let rows = connection.query("SHOW BINARY LOGS").await?;
-        let mut retained = false;
-        for row in &rows.values {
-            if field(row, 0)? == file {
-                retained = u64::from(offset) <= field(row, 1)?.parse::<u64>()?;
-            }
-        }
-        if !retained && gtid.is_none() {
-            return Err(SourceError::PositionUnavailable {
-                source_id: self.descriptor.id().clone(),
-                requested: Bytes::from(serde_json::to_vec(&MySqlStartPosition::Position {
-                    file,
-                    position: offset,
-                })?),
-                earliest_available: None,
-            }
-            .into());
+        let logs = connection.query("SHOW BINARY LOGS").await?;
+        if gtid.is_none() {
+            ensure_retained(self.descriptor.id(), &logs, &file, offset)?;
         }
         if self.positional {
-            self.verify_positional_profile(&server, &rows, &file, offset, gtid.is_some())
+            self.verify_positional_profile(config, &server, &logs, &file, offset, gtid.is_some())
                 .await?;
             let (current_server, current_tables) =
-                catalog::inspect_positional(connection, &self.config).await?;
+                catalog::inspect_positional(connection, config).await?;
             anyhow::ensure!(
                 current_server == server
                     && serde_json::to_vec(&current_tables)? == serde_json::to_vec(&tables)?,
@@ -576,91 +781,57 @@ impl MySqlSource {
             );
         }
         if let Starting::Consumers(group) = starting {
-            self.verify_consumer_history(&server, &tables, &rows, group, binding)
+            self.verify_consumer_history(config, &server, &tables, &logs, group, binding)
                 .await?;
         }
-        connection
-            .execute(&format!(
-                "SET @master_heartbeat_period={}",
-                self.config.connection.heartbeat_interval_ms.get() * 1_000_000
-            ))
-            .await?;
-        let history =
-            if let Some(position) = anchor.as_ref().filter(|position| position.version == 2) {
-                let (format, digest) = Binlog::snapshot_history(
-                    connection,
-                    &self.config,
-                    &file,
-                    offset,
-                    super::binlog::HistoryMode::Live,
-                )
-                .await?;
-                anyhow::ensure!(
-                    digest == position.digest,
-                    "MySQL snapshot history has different contents"
-                );
-                Some(format)
-            } else {
-                None
-            };
-        if history.is_none() {
-            connection
-                .execute("SET @master_binlog_checksum='CRC32'")
-                .await?;
-            if let Some(set) = gtid {
-                connection
-                    .start_gtid(self.config.connection.server_id.get(), set)
-                    .await?;
-            } else {
-                connection
-                    .start_binlog(self.config.connection.server_id.get(), &file, offset)
-                    .await?;
-            }
-        }
-        let mut decoder_config = self.config.clone();
+        let start = match (&anchor, gtid) {
+            (Some(position), _) if position.version == 2 => StartPoint::History {
+                file: file.clone(),
+                boundary: offset,
+                digest: position.digest,
+                confirmed,
+            },
+            (_, Some(set)) => StartPoint::Gtid(set),
+            _ => StartPoint::Binlog {
+                file: file.clone(),
+                offset,
+                anchor: anchor
+                    .clone()
+                    .filter(|position| position.version == 1 && self.rows.is_none()),
+            },
+        };
+        let mut decoder_config = config.clone();
         if self.rows.is_some() {
             decoder_config.output = MySqlOutput::Transactions;
         }
-        let mut decoder = Binlog::new(Start {
-            source: self.descriptor.id().clone(),
-            stream: self.stream.clone(),
-            config: decoder_config,
-            tables,
+        let decoder = open_decoder_with(
+            connection,
+            &decoder_config,
+            DecoderStart {
+                source: self.descriptor.id(),
+                stream: &self.stream,
+                tables,
+                skipped: found.skipped,
+                binding,
+                sequence: &self.sequence,
+                positional: self.positional,
+                point: &start,
+            },
+            self.config.output == MySqlOutput::Changes,
+        )
+        .await?;
+        Ok(Prepared {
+            decoder,
             binding,
-            file,
-            offset,
-            anchor: anchor.filter(|position| position.version == 1 && self.rows.is_none()),
-            sequence: self.sequence.clone(),
-        })?;
-        if self.config.output == MySqlOutput::Changes {
-            decoder = decoder.with_row_semantics();
-        }
-        if self.positional {
-            decoder = decoder.with_positional_metadata();
-        }
-        if gtid.is_some() {
-            decoder = decoder.with_gtid_start();
-        }
-        if let Some(format) = history {
-            decoder.after_snapshot(format, confirmed);
-            return Ok((decoder, binding, confirmed, server));
-        }
-        // A sent dump request is not evidence that the server accepted the cursor.
-        for _ in 0..2 {
-            let frame = connection.event().await?;
-            anyhow::ensure!(
-                decoder.decode(&frame)?.is_empty(),
-                "MySQL data arrived before startup completed"
-            );
-            if decoder.ready() {
-                return Ok((decoder, binding, confirmed, server));
-            }
-        }
-        anyhow::bail!("MySQL did not provide its replication format during startup")
+            confirmed,
+            server,
+            start,
+        })
     }
 
     async fn verify_positional_profile(
         &self,
+        config: &MySqlConfig,
         server: &str,
         logs: &super::connection::Rows,
         file: &str,
@@ -681,9 +852,9 @@ impl MySqlSource {
             let start = if !gtid && name == file { offset } else { 4 };
             let end: u32 = field(row, 1)?.parse()?;
             let mut connection = Connection::connect(
-                &self.config.connection,
-                self.config.max_protocol_bytes.get(),
-                self.config.timeout(),
+                &config.connection,
+                config.max_protocol_bytes.get(),
+                config.timeout(),
             )
             .await?;
             let proof = async {
@@ -692,10 +863,10 @@ impl MySqlSource {
                     "positional catalog history reached another MySQL server"
                 );
                 tokio::time::timeout(
-                    self.config.timeout(),
+                    config.timeout(),
                     Binlog::verify_positional_catalog_history(
                         &mut connection,
-                        &self.config,
+                        config,
                         name,
                         start,
                         end,
@@ -723,6 +894,7 @@ impl MySqlSource {
 
     async fn verify_consumer_history(
         &self,
+        config: &MySqlConfig,
         server: &str,
         tables: &catalog::Tables,
         logs: &super::connection::Rows,
@@ -739,20 +911,7 @@ impl MySqlSource {
             let Some(position) = position else {
                 continue;
             };
-            let mut retained = false;
-            for row in &logs.values {
-                if field(row, 0)? == position.file {
-                    retained = u64::from(position.end) <= field(row, 1)?.parse::<u64>()?;
-                }
-            }
-            if !retained {
-                return Err(SourceError::PositionUnavailable {
-                    source_id: self.descriptor.id().clone(),
-                    requested: Bytes::from(serde_json::to_vec(&position)?),
-                    earliest_available: None,
-                }
-                .into());
-            }
+            ensure_retained(self.descriptor.id(), logs, &position.file, position.end)?;
             let previous = positions.insert(
                 (position.file.clone(), position.end, position.version),
                 position.clone(),
@@ -764,9 +923,9 @@ impl MySqlSource {
         }
         for position in positions.into_values() {
             let mut connection = Connection::connect(
-                &self.config.connection,
-                self.config.max_protocol_bytes.get(),
-                self.config.timeout(),
+                &config.connection,
+                config.max_protocol_bytes.get(),
+                config.timeout(),
             )
             .await?;
             let verified = async {
@@ -778,7 +937,7 @@ impl MySqlSource {
                 if position.version == 2 {
                     let (_, digest) = Binlog::snapshot_history(
                         &mut connection,
-                        &self.config,
+                        config,
                         &position.file,
                         position.end,
                         super::binlog::HistoryMode::Verify,
@@ -795,7 +954,7 @@ impl MySqlSource {
                     connection
                         .start_binlog_history(&position.file, position.start)
                         .await?;
-                    let mut config = self.config.clone();
+                    let mut config = config.clone();
                     config.output = MySqlOutput::Transactions;
                     let mut decoder = Binlog::new(Start {
                         source: self.descriptor.id().clone(),
@@ -807,6 +966,7 @@ impl MySqlSource {
                         offset: position.start,
                         anchor: Some(position),
                         sequence: Arc::new(AtomicU64::new(0)),
+                        skipped: Default::default(),
                     })?;
                     if self.rows.is_some() {
                         decoder = decoder.with_row_semantics();
@@ -816,7 +976,9 @@ impl MySqlSource {
                     }
                     while decoder.has_replay_anchor() {
                         anyhow::ensure!(
-                            decoder.decode(&connection.event().await?)?.is_empty(),
+                            decoder
+                                .decode(&read_event(&mut connection).await?)?
+                                .is_empty(),
                             "MySQL history verification emitted unexpected live data"
                         );
                     }
@@ -839,15 +1001,189 @@ impl MySqlSource {
         }
         Ok(())
     }
+}
 
-    async fn join(&mut self) -> Result<()> {
-        match join_owned_worker_gracefully(self.worker.get_mut(), self.config.timeout()).await? {
-            WorkerCompletion::Completed(result) => result,
-            WorkerCompletion::Absent => Ok(()),
-            WorkerCompletion::Cancelled => {
-                anyhow::bail!("native MySQL worker was unexpectedly cancelled")
-            }
+/// The result of preparing a replication connection.
+struct Prepared {
+    decoder: Binlog,
+    binding: [u8; 32],
+    confirmed: u64,
+    server: String,
+    start: StartPoint,
+}
+
+/// What a fresh decoder needs besides its configuration.
+struct DecoderStart<'a> {
+    source: &'a ComponentId,
+    stream: &'a StreamId,
+    tables: Tables,
+    skipped: std::collections::BTreeSet<String>,
+    binding: [u8; 32],
+    sequence: &'a Arc<AtomicU64>,
+    positional: bool,
+    point: &'a StartPoint,
+}
+
+/// Reads one binlog event, mapping a binlog-dump refusal to its typed
+/// permanent failure.
+async fn read_event(connection: &mut Connection) -> Result<Bytes> {
+    connection
+        .event()
+        .await
+        .map_err(errors::classify_dump_error)
+}
+
+/// Fails with a typed, permanent `PositionUnavailable` when `file` is not
+/// retained up to `offset`.
+fn ensure_retained(
+    source: &ComponentId,
+    logs: &super::connection::Rows,
+    file: &str,
+    offset: u32,
+) -> Result<()> {
+    let mut retained = false;
+    for row in &logs.values {
+        if field(row, 0)? == file {
+            retained = u64::from(offset) <= field(row, 1)?.parse::<u64>()?;
         }
+    }
+    if retained {
+        return Ok(());
+    }
+    let requested = serde_json::to_vec(&MySqlStartPosition::Position {
+        file: file.to_owned(),
+        position: offset,
+    })?;
+    Err(
+        anyhow::Error::new(SourceFailure::PositionUnavailable(format!(
+            "binlog {file} at {offset} is no longer retained by the server"
+        )))
+        .context(SourceError::PositionUnavailable {
+            source_id: source.clone(),
+            requested: Bytes::from(requested),
+            earliest_available: None,
+        }),
+    )
+}
+
+/// Starts the binlog dump at `point` and returns a decoder that has seen the
+/// stream's format description. The heartbeat period keeps an idle stream
+/// observable by the dead-peer watchdog. `row_semantics` is set for sources
+/// whose output is row changes (including tracked rows, whose decoder still
+/// assembles whole transactions).
+async fn open_decoder_with(
+    connection: &mut Connection,
+    config: &MySqlConfig,
+    start: DecoderStart<'_>,
+    row_semantics: bool,
+) -> Result<Binlog> {
+    connection
+        .execute(&format!(
+            "SET @master_heartbeat_period={}",
+            config.connection.heartbeat_interval_ms.get() * 1_000_000
+        ))
+        .await?;
+    let (file, offset, anchor, history) = match start.point {
+        StartPoint::History {
+            file,
+            boundary,
+            digest,
+            confirmed,
+        } => {
+            let (format, found) =
+                Binlog::snapshot_history(connection, config, file, *boundary, HistoryMode::Live)
+                    .await
+                    .map_err(errors::classify_dump_error)?;
+            anyhow::ensure!(
+                &found == digest,
+                "MySQL snapshot history has different contents"
+            );
+            (file.clone(), *boundary, None, Some((format, *confirmed)))
+        }
+        StartPoint::Gtid(set) => {
+            connection
+                .execute("SET @master_binlog_checksum='CRC32'")
+                .await?;
+            connection
+                .start_gtid(config.connection.server_id.get(), set)
+                .await?;
+            (String::new(), 4, None, None)
+        }
+        StartPoint::Binlog {
+            file,
+            offset,
+            anchor,
+        } => {
+            connection
+                .execute("SET @master_binlog_checksum='CRC32'")
+                .await?;
+            connection
+                .start_binlog(config.connection.server_id.get(), file, *offset)
+                .await?;
+            (file.clone(), *offset, anchor.clone(), None)
+        }
+    };
+    let mut decoder = Binlog::new(Start {
+        source: start.source.clone(),
+        stream: start.stream.clone(),
+        config: config.clone(),
+        tables: start.tables,
+        binding: start.binding,
+        file,
+        offset,
+        anchor,
+        sequence: start.sequence.clone(),
+        skipped: start.skipped,
+    })?;
+    if row_semantics {
+        decoder = decoder.with_row_semantics();
+    }
+    if start.positional {
+        decoder = decoder.with_positional_metadata();
+    }
+    if matches!(start.point, StartPoint::Gtid(_)) {
+        decoder = decoder.with_gtid_start();
+    }
+    if let Some((format, confirmed)) = history {
+        decoder.after_snapshot(format, confirmed);
+        return Ok(decoder);
+    }
+    // A sent dump request is not evidence that the server accepted the cursor.
+    for _ in 0..2 {
+        let frame = read_event(connection).await?;
+        anyhow::ensure!(
+            decoder.decode(&frame)?.is_empty(),
+            "MySQL data arrived before startup completed"
+        );
+        if decoder.ready() {
+            return Ok(decoder);
+        }
+    }
+    anyhow::bail!("MySQL did not provide its replication format during startup")
+}
+
+/// Races `future` against cancellation and an optional deadline.
+async fn bounded<T>(
+    what: &str,
+    cancellation: Option<&CancellationToken>,
+    deadline: Option<Instant>,
+    future: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    let timed = async {
+        match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, future)
+                .await
+                .map_err(|_| anyhow::anyhow!("MySQL {what} exceeded its deadline"))?,
+            None => future.await,
+        }
+    };
+    match cancellation {
+        Some(token) => tokio::select! {
+            biased;
+            _ = token.cancelled() => anyhow::bail!("MySQL {what} was cancelled"),
+            result = timed => result,
+        },
+        None => timed.await,
     }
 }
 
@@ -865,74 +1201,257 @@ impl MySqlSource {
     pub fn position_policy(&self) -> Option<Arc<InputPositionPolicy>> {
         self.position_policy.clone()
     }
+    /// The engine configuration, nested under `settings` (the in-process
+    /// wrapper's configuration shape).
     pub fn configuration(&self) -> Result<serde_json::Value> {
         Ok(serde_json::json!({"stream": self.stream.as_str(), "settings": self.config}))
     }
+    /// The engine configuration this object runs with.
+    pub fn config(&self) -> &MySqlConfig {
+        &self.config
+    }
+    /// Whether this object uses positional (`@N`) rows.
+    pub fn is_positional(&self) -> bool {
+        self.positional
+    }
+    /// Reports readiness changes to `sink`.
+    pub fn with_status(mut self, sink: StatusSink) -> Self {
+        self.status = Some(sink);
+        self
+    }
+    /// Whether a worker is owned (running, or awaiting cleanup).
+    pub fn is_running(&mut self) -> bool {
+        self.worker.get_mut().is_some()
+    }
+    /// Whether the worker has acknowledged a pause.
+    pub fn is_paused(&self) -> bool {
+        *self.paused.borrow()
+    }
+    /// Applies a new `reconnectBudgetMs` to the running worker's next
+    /// transport failure.
+    pub fn set_reconnect_budget(&mut self, millis: u64) {
+        self.reconnect_budget_ms.store(millis, Ordering::Relaxed);
+        self.config.reconnect_budget_ms = millis;
+    }
+    /// Replaces the connection and operational settings of a stopped source.
+    /// The selection and the output contract must stay unchanged; the caller
+    /// checks start-position changes against the committed cursor.
+    pub fn reconfigure(&mut self, config: MySqlConfig) -> Result<()> {
+        anyhow::ensure!(
+            self.worker.get_mut().is_none(),
+            "MySQL reconfiguration requires a stopped source"
+        );
+        let current = &self.config;
+        let snapshot =
+            |start: &MySqlStartPosition| matches!(start, MySqlStartPosition::Snapshot { .. });
+        anyhow::ensure!(
+            current.connection.database == config.connection.database
+                && current.tables == config.tables
+                && current.table_keys == config.table_keys
+                && snapshot(&current.start) == snapshot(&config.start)
+                && current.output == config.output
+                && current.replay == config.replay,
+            "MySQL reconfiguration cannot change fields bound to the committed cursor"
+        );
+        if self.rows.is_some() {
+            config.validate_rows()?;
+        } else {
+            config.validate()?;
+        }
+        self.reconnect_budget_ms
+            .store(config.reconnect_budget_ms, Ordering::Relaxed);
+        self.config = config;
+        Ok(())
+    }
+
+    fn report(&self, status: SourceStatus) {
+        if let Some(sink) = &self.status {
+            sink(status);
+        }
+    }
+
+    /// Starts with no host deadline, cancellation or credentials.
     pub async fn start(&mut self) -> Result<()> {
+        self.start_with(Activation::default()).await
+    }
+
+    /// Waits for progress readiness (bounded only by the host deadline and
+    /// cancellation), opens replication within `ioTimeoutMs`, and spawns the
+    /// worker. A failed or cancelled start keeps the cleanup guard: Stop is
+    /// required before the next start.
+    pub async fn start_with(&mut self, activation: Activation<'_>) -> Result<()> {
+        anyhow::ensure!(!self.disposed, "MySQL source was disposed");
         anyhow::ensure!(
             !self.cleanup_required,
             "MySQL source requires awaited cleanup before restart"
         );
+        self.credentials = activation.credentials;
         self.cleanup_required = true;
         self.schema.clear()?;
-        let snapshot = match (&self.progress, &self.consumers) {
-            (Some(progress), None) => Starting::Single(progress.wait_ready().await?),
-            (None, Some(consumers)) => {
-                Starting::Consumers(consumers.read_only().wait_ready().await?)
-            }
-            (None, None) => Starting::Untracked,
-            (Some(_), Some(_)) => anyhow::bail!("MySQL has conflicting replay progress bindings"),
-        };
-        if let (Some(consumers), Starting::Consumers(group)) = (&self.consumers, &snapshot) {
-            anyhow::ensure!(
-                consumers.members.iter().eq(group.consumers.keys()),
-                "MySQL required consumer membership changed before initialization"
-            );
-        }
-        if let Some(options) = self.rows {
-            for state in snapshot.states() {
-                rows::validate(state, options)?;
-            }
-        } else {
-            snapshot.validate()?;
-        }
-        let mut worker = tokio::time::timeout(self.config.timeout(), self.prepare(snapshot))
-            .await
-            .context("MySQL startup timed out")??;
+        let io = self.config.timeout();
+        let opened = bounded(
+            "start",
+            activation.cancellation,
+            activation.deadline,
+            async {
+                let snapshot = match (&self.progress, &self.consumers) {
+                    (Some(progress), None) => Starting::Single(progress.wait_ready().await?),
+                    (None, Some(consumers)) => {
+                        Starting::Consumers(consumers.read_only().wait_ready().await?)
+                    }
+                    (None, None) => Starting::Untracked,
+                    (Some(_), Some(_)) => {
+                        anyhow::bail!("MySQL has conflicting replay progress bindings")
+                    }
+                };
+                if let (Some(consumers), Starting::Consumers(group)) = (&self.consumers, &snapshot)
+                {
+                    anyhow::ensure!(
+                        consumers.members.iter().eq(group.consumers.keys()),
+                        "MySQL required consumer membership changed before initialization"
+                    );
+                }
+                if let Some(options) = self.rows {
+                    for state in snapshot.states() {
+                        rows::validate(state, options)?;
+                    }
+                } else {
+                    snapshot.validate()?;
+                }
+                tokio::time::timeout(io, self.prepare(snapshot))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("MySQL connection setup exceeded ioTimeoutMs"))?
+            },
+        )
+        .await;
+        let mut worker = opened?;
         let (sender, receiver) = mpsc::channel(1);
         self.receiver = Some(receiver);
-        self.shutdown.send_replace(false);
+        self.shutdown.send_replace(Shutdown::Running);
+        self.pause.send_replace(false);
+        self.paused.send_replace(false);
         let mut shutdown = self.shutdown.subscribe();
+        let paused = self.paused.clone();
+        let status = self.status.clone();
         spawn_owned_worker(&self.worker, async move {
-            let result = tokio::select! {
+            let stopped = tokio::select! {
                 biased;
-                _ = shutdown.wait_for(|stopped| *stopped) => Ok(()),
-                result = worker.run(sender) => result,
+                mode = shutdown.wait_for(|mode| *mode != Shutdown::Running) => {
+                    Ok(mode.is_ok_and(|mode| *mode == Shutdown::Drain))
+                }
+                result = worker.run(sender) => Err(result),
             };
-            let cleanup = worker.connection.close().await;
-            let result = match (result, cleanup) {
-                (Ok(()), Ok(())) => Ok(()),
-                (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-                (Err(error), Err(cleanup)) => Err(OperationFailures::new(
-                    "MySQL replication and socket cleanup failed",
-                    vec![error, cleanup],
-                )
-                .into()),
+            let result = match stopped {
+                Ok(drain) => {
+                    if drain {
+                        worker.drain().await;
+                    }
+                    Ok(())
+                }
+                Err(result) => {
+                    worker.drain().await;
+                    result
+                }
             };
+            // Nothing is read or emitted after exit; a pending pause holds.
+            paused.send_replace(true);
             if let Err(error) = &result {
                 log::error!("Native MySQL replication stopped: {error:#}");
+                if let Some(status) = status {
+                    status(SourceStatus::Failed(format!("{error:#}")));
+                }
             }
             result
         })
         .await?;
+        self.report(SourceStatus::Ready);
         Ok(())
     }
+
+    /// Stops reading and emitting at the next transaction boundary. The
+    /// connection stays open while the paused socket fits a bounded buffer.
+    /// A cancelled or expired pause leaves the source running.
+    pub async fn pause(
+        &mut self,
+        deadline: Option<Instant>,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<()> {
+        if self.worker.get_mut().is_none() {
+            return Ok(());
+        }
+        self.pause.send_replace(true);
+        let mut acknowledged = self.paused.subscribe();
+        let deadline = deadline.unwrap_or_else(|| Instant::now() + self.config.timeout());
+        let result = bounded("pause", cancellation, Some(deadline), async {
+            acknowledged
+                .wait_for(|paused| *paused)
+                .await
+                .map(|_| ())
+                .map_err(|_| anyhow::anyhow!("MySQL worker closed during pause"))
+        })
+        .await;
+        if result.is_err() {
+            self.pause.send_replace(false);
+        }
+        result.context("MySQL could not reach a transaction boundary before the pause deadline")
+    }
+
+    /// Reopens exactly what Pause closed.
+    pub fn resume(&mut self) {
+        self.pause.send_replace(false);
+    }
+
+    /// Stops with `Drain` and the configured I/O timeout.
     pub async fn stop(&mut self) -> Result<()> {
-        self.shutdown.send_replace(true);
-        self.join().await?;
+        self.stop_with(StopMode::Drain, None).await
+    }
+
+    /// `Drain` closes the replication connection gracefully; `Abort` cancels
+    /// the worker. On expiry the worker stays owned and the error is
+    /// retryable: a later Stop completes the cleanup. An earlier replication
+    /// failure was reported through `next` and does not fail Stop.
+    pub async fn stop_with(&mut self, mode: StopMode, deadline: Option<Instant>) -> Result<()> {
+        let shutdown = match mode {
+            StopMode::Abort => Shutdown::Abort,
+            StopMode::Drain => Shutdown::Drain,
+        };
+        self.shutdown.send_replace(shutdown);
+        let timeout = deadline.map_or(self.config.timeout(), |deadline| {
+            deadline.saturating_duration_since(Instant::now())
+        });
+        let joined = if shutdown == Shutdown::Abort {
+            cancel_owned_worker(self.worker.get_mut(), timeout).await
+        } else {
+            join_owned_worker(self.worker.get_mut(), timeout).await
+        };
+        match joined {
+            Ok(WorkerCompletion::Completed(Err(error))) => {
+                log::debug!("MySQL worker had already failed: {error:#}");
+            }
+            Ok(_) => {}
+            Err(error @ WorkerCleanupError::TimedOut { .. }) => {
+                return Err(anyhow::Error::new(error)
+                    .context("MySQL replication did not stop within its deadline"))
+            }
+            Err(error) => return Err(error.into()),
+        }
         self.receiver = None;
         self.schema.clear()?;
         self.cleanup_required = false;
+        Ok(())
+    }
+
+    /// Retires the schema publication. The source owns no server-side state,
+    /// so erasing disposal has nothing to remove; it is idempotent and
+    /// refuses while a worker is owned.
+    pub fn dispose(&mut self) -> Result<()> {
+        anyhow::ensure!(
+            self.worker.get_mut().is_none(),
+            "dispose requires a stopped MySQL source"
+        );
+        self.schema.retire();
+        self.receiver = None;
+        self.disposed = true;
         Ok(())
     }
 }
@@ -952,15 +1471,17 @@ impl MySqlSource {
         if let Some(envelope) = receiver.recv().await {
             return Ok(Some(envelope));
         }
-        self.join().await?;
-        anyhow::bail!("native MySQL replication ended; stop and restart the source")
+        match join_owned_worker(self.worker.get_mut(), self.config.timeout()).await? {
+            WorkerCompletion::Completed(Err(error)) => Err(error),
+            _ => anyhow::bail!("native MySQL replication ended; stop and restart the source"),
+        }
     }
 }
 
 impl Drop for MySqlSource {
     fn drop(&mut self) {
         self.schema.retire();
-        self.shutdown.send_replace(true);
+        self.shutdown.send_replace(Shutdown::Abort);
         if let Some(worker) = self.worker.get_mut() {
             worker.abort();
             log::warn!("Native MySQL source dropped without awaited worker cleanup");
@@ -989,79 +1510,68 @@ pub fn checkpoint(
     );
     let position: Position = serde_json::from_slice(cursor)?;
     anyhow::ensure!(
-        position.binding == binding && position.sequence()? == checkpoint.sequence,
-        "MySQL checkpoint binding or sequence mismatch"
+        position.sequence()? == checkpoint.sequence,
+        "MySQL checkpoint sequence mismatch"
     );
+    if position.binding != binding {
+        return Err(errors::schema_changed(
+            "the committed MySQL cursor is bound to different selected tables, keys or binding format",
+        ));
+    }
     Ok(Some(position))
 }
 
 pub fn source_binding(
     config: &MySqlConfig,
     server: &str,
-    tables: &catalog::Tables,
+    tables: &Tables,
     source: &ComponentId,
     stream: &StreamId,
     progress: Option<&SourceProgressView>,
 ) -> Result<[u8; 32]> {
-    binding(
-        config,
-        server,
-        tables,
-        source,
-        stream,
+    Scope::Single(progress.map(|owner| {
         (
-            "mysql-native-v1",
-            progress.map(|owner| (owner.graph_id(), owner.component_id().as_str())),
-        ),
-    )
+            owner.graph_id().to_owned(),
+            owner.component_id().as_str().to_owned(),
+        )
+    }))
+    .binding(config, server, tables, source, stream, false)
 }
 
 pub fn shared_source_binding(
     config: &MySqlConfig,
     server: &str,
-    tables: &catalog::Tables,
+    tables: &Tables,
     source: &ComponentId,
     stream: &StreamId,
     graph: &str,
 ) -> Result<[u8; 32]> {
-    binding(
-        config,
-        server,
-        tables,
-        source,
-        stream,
-        ("mysql-native-consumers-v1", Some((graph, source.as_str()))),
-    )
+    Scope::Shared(graph.to_owned()).binding(config, server, tables, source, stream, false)
 }
 
 pub fn row_source_binding(
     config: &MySqlConfig,
     server: &str,
-    tables: &catalog::Tables,
+    tables: &Tables,
     source: &ComponentId,
     stream: &StreamId,
     graph: &str,
 ) -> Result<[u8; 32]> {
-    binding(
-        config,
-        server,
-        tables,
-        source,
-        stream,
-        (
-            "mysql-native-consumer-rows-v1",
-            Some((graph, source.as_str())),
-        ),
-    )
+    Scope::Rows(graph.to_owned()).binding(config, server, tables, source, stream, false)
 }
 
+/// The binding hash (format v2): server, database, the selected table set
+/// with each table's key columns and their declared types, source, stream,
+/// configured start and owner scope. Non-key column changes do not change
+/// it, so they never invalidate a committed cursor.
 fn binding(
     config: &MySqlConfig,
     server: &str,
-    tables: &catalog::Tables,
+    tables: &Tables,
     source: &ComponentId,
     stream: &StreamId,
     scope: (&str, Option<(&str, &str)>),
+    positional: bool,
 ) -> Result<[u8; 32]> {
     #[derive(serde::Serialize)]
     #[serde(untagged)]
@@ -1073,21 +1583,26 @@ fn binding(
         MySqlStartPosition::Snapshot { .. } => StartBinding::Snapshot { mode: "snapshot" },
         other => StartBinding::Configured(other),
     };
+    let facts = tables
+        .iter()
+        .map(|(table, columns)| {
+            Ok((
+                table.as_str(),
+                catalog::key_facts(config, table, columns, positional)?,
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
     let mut hash = Sha256::new();
     hash.update(serde_json::to_vec(&(
         scope.0,
         server,
         &config.connection.database,
-        tables,
+        facts,
         source.as_str(),
         stream.as_str(),
         start,
         scope.1,
     ))?);
-    if !config.table_keys.is_empty() {
-        hash.update(b"\0mysql-table-keys-v1\0");
-        hash.update(serde_json::to_vec(&config.table_keys)?);
-    }
     Ok(hash.finalize().into())
 }
 
@@ -1112,12 +1627,19 @@ impl std::fmt::Display for SourceError {
 impl std::error::Error for SourceError {}
 
 struct Worker {
+    /// The activation configuration (activation credentials applied).
     config: MySqlConfig,
+    decoder_config: MySqlConfig,
     positional: bool,
+    profile: Profile,
+    scope: Scope,
     schema: Arc<super::schema::Publication>,
     server: String,
-    connection: Connection,
+    connection: Option<Connection>,
     decoder: Binlog,
+    /// Where the current decoder started, used when it has not completed a
+    /// transaction yet.
+    start: StartPoint,
     source: ComponentId,
     binding: [u8; 32],
     progress: Option<Box<dyn SourceProgressUpdates>>,
@@ -1129,9 +1651,46 @@ struct Worker {
     limits: drasi_computation_contracts::SourceTransactionLimits,
     generation: u64,
     confirmed: u64,
+    /// Decoded envelopes not yet admitted by the host.
+    output: VecDeque<OutputEnvelope>,
+    /// Rows of one decoded transaction, expanded as they are admitted.
+    emission: Option<rows::Emission>,
+    pause: PauseGate,
+    reconnect_budget_ms: Arc<AtomicU64>,
+    status: Option<StatusSink>,
+    /// Raw events read while paused, decoded on resume.
+    buffered: VecDeque<Bytes>,
+    buffered_bytes: usize,
+}
+
+/// Reads the next event within the dead-peer window.
+async fn read_live(connection: &mut Option<Connection>, window: Duration) -> Result<Bytes> {
+    let connection = connection
+        .as_mut()
+        .context("MySQL replication connection is not open")?;
+    match tokio::time::timeout(window, read_event(connection)).await {
+        Ok(frame) => frame,
+        Err(_) => Err(anyhow::Error::new(errors::DeadPeer(window))),
+    }
 }
 
 impl Worker {
+    fn paused(&self) -> bool {
+        *self.pause.requested.borrow()
+    }
+
+    fn report(&self, status: SourceStatus) {
+        if let Some(sink) = &self.status {
+            sink(status);
+        }
+    }
+
+    fn dead_peer_window(&self) -> Duration {
+        Duration::from_millis(self.config.connection.heartbeat_interval_ms.get())
+            .saturating_mul(DEAD_PEER_HEARTBEATS)
+            .max(self.config.timeout())
+    }
+
     fn validate_progress(&mut self) -> Result<()> {
         if let Some(progress) = &mut self.row_progress {
             return progress.validate(&self.source, self.binding, self.row_admitted);
@@ -1169,10 +1728,271 @@ impl Worker {
         Ok(())
     }
 
+    fn has_output(&self) -> bool {
+        !self.output.is_empty() || self.emission.is_some()
+    }
+
+    /// The next envelope to admit, expanding row emissions lazily.
+    fn take_output(&mut self) -> Result<Option<OutputEnvelope>> {
+        if let Some(envelope) = self.output.pop_front() {
+            return Ok(Some(envelope));
+        }
+        let Some(emission) = &mut self.emission else {
+            return Ok(None);
+        };
+        match emission.next() {
+            Some(row) => Ok(Some(row?)),
+            None => {
+                self.emission = None;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Streams until a permanent failure. A transport failure reconnects at
+    /// the end of the last emitted transaction with jittered exponential
+    /// backoff until `reconnectBudgetMs` is spent.
     async fn run(&mut self, sender: mpsc::Sender<OutputEnvelope>) -> Result<()> {
         loop {
+            let error = match self.run_connected(&sender).await {
+                Ok(()) => return Ok(()),
+                Err(error) => error,
+            };
+            let deliberate = error.is::<PausedClose>();
+            let budget = match self.reconnect_budget_ms.load(Ordering::Relaxed) {
+                // A deliberate close while paused is not a failure: reopen
+                // once even when reconnection after failures is disabled.
+                0 if deliberate => self.config.timeout(),
+                0 => return Err(error),
+                millis => Duration::from_millis(millis),
+            };
+            if !deliberate && !errors::is_transient(&error) {
+                return Err(error);
+            }
+            self.close_quietly().await;
+            if !deliberate {
+                self.report(SourceStatus::Reconnecting(format!("{error:#}")));
+            }
+            let mut backoff =
+                BackoffPolicy::with_budget(RECONNECT_BASE, RECONNECT_MAX, budget).start();
+            let mut failure = error;
+            let mut first = deliberate;
+            loop {
+                let delay = if first {
+                    first = false;
+                    Duration::ZERO
+                } else {
+                    match backoff.next_delay() {
+                        Some(delay) => delay,
+                        None => {
+                            return Err(failure.context("MySQL reconnect budget exhausted"));
+                        }
+                    }
+                };
+                if !delay.is_zero() {
+                    log::warn!(
+                        "MySQL replication interrupted; reconnect attempt {} in {delay:?}: {failure:#}",
+                        backoff.attempt()
+                    );
+                }
+                self.idle(delay).await;
+                match tokio::time::timeout(self.config.timeout(), self.reopen()).await {
+                    Ok(Ok(())) => {
+                        log::info!(
+                            "MySQL replication reconnected after {} attempt(s)",
+                            backoff.attempt().max(1)
+                        );
+                        self.report(SourceStatus::Ready);
+                        break;
+                    }
+                    Ok(Err(error)) if errors::is_transient(&error) => failure = error,
+                    Ok(Err(error)) => return Err(error),
+                    Err(elapsed) => {
+                        failure = anyhow::Error::new(elapsed).context("MySQL reconnect timed out")
+                    }
+                }
+            }
+        }
+    }
+
+    /// Sleeps without a connection, acknowledging any pause meanwhile, and
+    /// waits for Resume before reconnecting: nothing is read while paused.
+    async fn idle(&mut self, delay: Duration) {
+        let until = Instant::now() + delay;
+        loop {
+            let paused = self.paused();
+            self.pause.acknowledged.send_replace(paused);
+            if !paused && Instant::now() >= until {
+                return;
+            }
+            tokio::select! {
+                _ = tokio::time::sleep_until(until), if !paused => return,
+                changed = self.pause.requested.changed() => {
+                    if changed.is_err() {
+                        tokio::time::sleep_until(until).await;
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn close_quietly(&mut self) {
+        if let Some(connection) = self.connection.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(1), connection.close()).await;
+        }
+    }
+
+    /// Reopens replication at the end of the last emitted transaction (or
+    /// where the current decoder started), after verifying that the server
+    /// and the bound catalog facts are unchanged.
+    async fn reopen(&mut self) -> Result<()> {
+        let point = match self.decoder.resume_point() {
+            Some(resume) => StartPoint::Binlog {
+                file: resume.file.clone(),
+                offset: resume
+                    .anchor
+                    .as_ref()
+                    .map_or(resume.end, |anchor| anchor.start),
+                anchor: resume.anchor.clone(),
+            },
+            None => self.start.clone(),
+        };
+        let mut connection = Connection::connect(
+            &self.config.connection,
+            self.config.max_protocol_bytes.get(),
+            self.config.timeout(),
+        )
+        .await?;
+        let opened = async {
+            let found = catalog::inspect_profile(&mut connection, &self.config, self.profile)
+                .await?;
+            if found.server != self.server {
+                return Err(errors::unsupported(format!(
+                    "MySQL server identity changed from {} to {} across a reconnect; resuming on \
+                     another server (failover) is not supported",
+                    self.server, found.server
+                )));
+            }
+            let current = self.decoder.catalog().clone();
+            if self.config.replay.is_some() {
+                let binding = self.scope.binding(
+                    &self.config,
+                    &found.server,
+                    &found.tables,
+                    &self.source,
+                    &self.stream,
+                    self.positional,
+                )?;
+                if binding != self.binding {
+                    return Err(errors::schema_changed(
+                        "the selected tables or their keys changed while replication was disconnected",
+                    ));
+                }
+            } else {
+                for (table, columns) in &current {
+                    match found.tables.get(table) {
+                        Some(found_columns)
+                            if catalog::key_facts(&self.config, table, columns, self.positional)?
+                                != catalog::key_facts(
+                                    &self.config,
+                                    table,
+                                    found_columns,
+                                    self.positional,
+                                )? =>
+                        {
+                            return Err(errors::schema_changed(format!(
+                                "the key columns of selected table {table} changed while disconnected"
+                            )));
+                        }
+                        Some(_) => {}
+                        None if !self.config.tables.is_empty() => {
+                            return Err(errors::schema_changed(format!(
+                                "selected table {table} disappeared while disconnected"
+                            )))
+                        }
+                        None => {}
+                    }
+                }
+            }
+            let logs = connection.query("SHOW BINARY LOGS").await?;
+            match &point {
+                StartPoint::Binlog { file, offset, .. } => {
+                    ensure_retained(&self.source, &logs, file, *offset)?
+                }
+                StartPoint::History { file, boundary, .. } => {
+                    ensure_retained(&self.source, &logs, file, *boundary)?
+                }
+                StartPoint::Gtid(_) => {}
+            }
+            let row_semantics = self.positional || self.config.output == MySqlOutput::Changes;
+            open_decoder_with(
+                &mut connection,
+                &self.decoder_config,
+                DecoderStart {
+                    source: &self.source,
+                    stream: &self.stream,
+                    tables: current,
+                    skipped: self.decoder.skipped().clone(),
+                    binding: self.binding,
+                    sequence: &self.sequence,
+                    positional: self.positional,
+                    point: &point,
+                },
+                row_semantics,
+            )
+            .await
+        }
+        .await;
+        match opened {
+            Ok(decoder) => {
+                self.decoder = decoder;
+                self.start = point;
+                self.connection = Some(connection);
+                Ok(())
+            }
+            Err(error) => {
+                let _ = tokio::time::timeout(Duration::from_secs(1), connection.close()).await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Closes the connection gracefully for a Drain stop or after a failure.
+    async fn drain(&mut self) {
+        if let Some(connection) = self.connection.take() {
+            if let Err(error) = tokio::time::timeout(self.config.timeout(), connection.close())
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|result| result)
+            {
+                log::debug!("MySQL replication close reported: {error:#}");
+            }
+        }
+    }
+
+    async fn run_connected(&mut self, sender: &mpsc::Sender<OutputEnvelope>) -> Result<()> {
+        loop {
             self.validate_progress()?;
+            let paused = self.paused();
+            // Pause at a transaction boundary: decoded output is held, and
+            // the socket is drained into a bounded buffer so the server keeps
+            // the connection.
+            if paused && self.decoder.at_boundary() {
+                self.pause.acknowledged.send_replace(true);
+                self.paused_wait().await?;
+                continue;
+            }
+            if !paused {
+                self.pause.acknowledged.send_replace(false);
+            }
+            let has_output = self.has_output();
+            if !has_output && self.buffered.is_empty() && self.connection.is_none() {
+                return Err(anyhow::Error::new(PausedClose));
+            }
             let deadline = self.decoder.deadline();
+            let window = self.dead_peer_window();
+            let between = self.decoder.at_boundary();
             tokio::select! {
                 biased;
                 changed = progress_changed(&mut self.progress, &mut self.consumer_progress, &mut self.row_progress) => changed?,
@@ -1182,62 +2002,158 @@ impl Worker {
                         None => std::future::pending().await,
                     }
                 } => return Err(SourceTransactionError::Deadline.into()),
-                frame = self.connection.event() => {
-                    let frame = frame?;
-                    if let Some(table) = self.decoder.new_table(&frame)? {
-                        self.refresh_table(table).await?;
+                _ = self.pause.requested.changed(), if !paused && between && self.pause.requested.has_changed().is_ok() => {}
+                permit = sender.reserve(), if has_output => {
+                    let permit = permit.context("MySQL output receiver closed")?;
+                    if let Some(envelope) = self.take_output()? {
+                        self.row_admitted = self.row_admitted.max(envelope.envelope.system().sequence());
+                        permit.send(envelope);
                     }
-                    for envelope in self.decoder.decode(&frame)? {
-                        if self.row_progress.is_some() {
-                            let rows = rows::Emission::new(envelope, self.source.clone(), self.stream.clone(), self.sequence.clone(), self.limits)?;
-                            for row in rows { self.send(row?, &sender).await?; }
-                        } else {
-                            self.send(envelope, &sender).await?;
-                        }
+                }
+                frame = read_live(&mut self.connection, window), if !has_output && self.buffered.is_empty() => {
+                    self.process(frame?).await?;
+                }
+                _ = std::future::ready(()), if !has_output && !self.buffered.is_empty() => {
+                    if let Some(frame) = self.buffered.pop_front() {
+                        self.buffered_bytes -= frame.len();
+                        self.process(frame).await?;
                     }
                 }
             }
         }
     }
 
-    async fn refresh_table(&mut self, table: String) -> Result<()> {
+    /// One wait while paused at a boundary: a pause or progress change, or
+    /// one event read into the bounded buffer.
+    async fn paused_wait(&mut self) -> Result<()> {
+        let window = self.dead_peer_window();
+        let open = self.connection.is_some();
+        tokio::select! {
+            biased;
+            changed = self.pause.requested.changed() => {
+                if changed.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+            changed = progress_changed(&mut self.progress, &mut self.consumer_progress, &mut self.row_progress) => changed?,
+            frame = read_live(&mut self.connection, window), if open => match frame {
+                Ok(frame) => self.hold(frame).await,
+                Err(error) if errors::is_transient(&error) => {
+                    log::info!("MySQL replication connection ended while paused; it reopens on resume: {error:#}");
+                    self.close_quietly().await;
+                }
+                Err(error) => return Err(error),
+            },
+        }
+        Ok(())
+    }
+
+    /// Buffers an event read while paused. Heartbeats are discarded; when
+    /// the buffer would exceed `maxProtocolBytes`, the connection is closed
+    /// deliberately and the buffer dropped, so Resume reopens at the last
+    /// emitted transaction instead of holding unbounded memory.
+    async fn hold(&mut self, frame: Bytes) {
+        if frame.get(4) == Some(&HEARTBEAT_EVENT) {
+            return;
+        }
+        if self.buffered_bytes + frame.len() > self.config.max_protocol_bytes.get() {
+            log::info!(
+                "MySQL pause buffer is full; closing the replication connection until resume"
+            );
+            self.buffered.clear();
+            self.buffered_bytes = 0;
+            // Buffered frames were never decoded; reopening starts at the
+            // decoder's last completed transaction.
+            self.close_quietly().await;
+            return;
+        }
+        self.buffered_bytes += frame.len();
+        self.buffered.push_back(frame);
+    }
+
+    async fn process(&mut self, frame: Bytes) -> Result<()> {
+        if let Some(table) = self.decoder.new_table(&frame)? {
+            self.refresh_table(table).await?;
+        }
+        if let Some(tables) = self.decoder.pending_inspection(&frame)? {
+            self.inspect(&frame, tables).await?;
+        }
+        for envelope in self.decoder.decode(&frame)? {
+            if self.row_progress.is_some() {
+                anyhow::ensure!(
+                    self.emission.is_none(),
+                    "MySQL row emission overlaps another transaction"
+                );
+                self.emission = Some(rows::Emission::new(
+                    envelope,
+                    self.source.clone(),
+                    self.stream.clone(),
+                    self.sequence.clone(),
+                    self.limits,
+                )?);
+            } else {
+                self.output.push_back(envelope);
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads the current catalog of `tables` through a separate connection.
+    async fn read_catalog(&self, tables: &[String]) -> Result<catalog::Inspection> {
         let mut config = self.config.clone();
-        config.tables = vec![table.clone()];
-        config.table_keys.retain(|key| key.table == table);
-        config.validate()?;
+        config.tables = tables.to_vec();
+        config.table_keys.retain(|key| tables.contains(&key.table));
         let mut connection = Connection::connect(
             &config.connection,
             config.max_protocol_bytes.get(),
             config.timeout(),
         )
         .await?;
-        let read = if self.positional {
-            catalog::inspect_positional(&mut connection, &config).await
-        } else {
-            catalog::inspect_rows(&mut connection, &config).await
-        };
+        let read = catalog::inspect_tables(&mut connection, &config, self.profile).await;
         let close = connection.close().await;
-        let (server, mut tables) = match (read, close) {
+        let found = match (read, close) {
             (Ok(value), Ok(())) => value,
             (Err(error), Ok(())) | (Ok(_), Err(error)) => return Err(error),
             (Err(error), Err(cleanup)) => {
                 return Err(OperationFailures::new(
-                    "MySQL table discovery and cleanup failed",
+                    "MySQL table inspection and cleanup failed",
                     vec![error, cleanup],
                 )
                 .into())
             }
         };
-        anyhow::ensure!(
-            server == self.server,
-            "MySQL table discovery reached another server"
+        if found.server != self.server {
+            return Err(errors::unsupported(
+                "MySQL table inspection reached another server",
+            ));
+        }
+        Ok(found)
+    }
+
+    /// Re-reads selected tables named by a schema statement and applies the
+    /// DDL policy.
+    async fn inspect(&mut self, frame: &[u8], tables: Vec<String>) -> Result<()> {
+        let found = match self.read_catalog(&tables).await {
+            Ok(found) => found,
+            Err(error) if errors::is_transient(&error) => return Err(error),
+            Err(error) if errors::is_permanent_source_failure(&error) => return Err(error),
+            Err(error) => {
+                return Err(errors::schema_changed(format!(
+                    "selected tables {} can no longer be captured: {error:#}",
+                    tables.join(", ")
+                )))
+            }
+        };
+        self.decoder
+            .apply_inspection(frame, &tables, found.tables)?;
+        log::info!(
+            "MySQL schema statement on selected tables {} kept their keys; continuing",
+            tables.join(", ")
         );
-        self.decoder.include_table(
-            table.clone(),
-            tables
-                .remove(&table)
-                .context("new MySQL table is missing")?,
-        )?;
+        self.capture_schema()
+    }
+
+    fn capture_schema(&self) -> Result<()> {
         if self.positional {
             self.schema.capture_positional(self.decoder.catalog())
         } else {
@@ -1245,25 +2161,28 @@ impl Worker {
         }
     }
 
-    async fn send(
-        &mut self,
-        envelope: OutputEnvelope,
-        sender: &mpsc::Sender<OutputEnvelope>,
-    ) -> Result<()> {
-        loop {
-            tokio::select! {
-                biased;
-                changed = progress_changed(&mut self.progress, &mut self.consumer_progress, &mut self.row_progress) => {
-                    changed?; self.validate_progress()?;
-                }
-                permit = sender.reserve() => {
-                    let permit = permit.context("MySQL output receiver closed")?;
-                    self.row_admitted = self.row_admitted.max(envelope.envelope.system().sequence());
-                    permit.send(envelope);
-                    return Ok(());
-                }
+    /// Adds a table that appeared in an untracked database-wide row source,
+    /// or skips it when it cannot be captured.
+    async fn refresh_table(&mut self, table: String) -> Result<()> {
+        let found = match self.read_catalog(std::slice::from_ref(&table)).await {
+            Ok(found) => found,
+            Err(error) if errors::is_transient(&error) => return Err(error),
+            Err(error) => {
+                log::warn!("Native MySQL skips new table {table}: {error:#}");
+                self.decoder.skip_table(table);
+                return Ok(());
+            }
+        };
+        let mut tables = found.tables;
+        match tables.remove(&table) {
+            Some(columns) => self.decoder.include_table(table, columns)?,
+            None => {
+                log::warn!("Native MySQL skips new table {table}: it cannot be captured");
+                self.decoder.skip_table(table);
+                return Ok(());
             }
         }
+        self.capture_schema()
     }
 }
 

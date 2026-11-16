@@ -6,6 +6,7 @@ use super::{
     transaction::{RequestScope, TransactionRequests},
 };
 use async_trait::async_trait;
+use drasi_computation_contracts::{delivery, output_identity};
 use drasi_computation_plugin_abi::{self as abi, consumer::PluginConsumerV1};
 use drasi_computation_plugin_sdk::{
     consumer::{BeginBatch, ConsumerMode, HandleOperation},
@@ -33,6 +34,8 @@ pub struct NativeConsumerProxy {
     graph: String,
     provider: Arc<dyn ComputationIndexProvider>,
     schemas: Vec<Arc<Schema>>,
+    /// Identity codec for at-least-once delivery, which bypasses the runner.
+    codec: EnvelopeCodec,
     options: DeliveryOptions,
     runner: Option<DeliveryRunner>,
     pending_cleanup: Option<Arc<dyn ComputationResourceCleanup>>,
@@ -58,6 +61,7 @@ impl NativeConsumerProxy {
             scope.graph_id.clone(),
             component.descriptor().id().clone(),
         )?;
+        let volatile_codec = codec(&schemas)?;
         let codec = codec(&schemas)?;
         let indexes = provider
             .create_indexes(&scope.graph_id, component.descriptor().id())
@@ -75,6 +79,7 @@ impl NativeConsumerProxy {
             graph: scope.graph_id,
             provider,
             schemas,
+            codec: volatile_codec,
             options,
             runner: Some(runner),
             pending_cleanup: None,
@@ -377,7 +382,23 @@ impl EnvelopeSink for NativeConsumerProxy {
         // required before more input.
         self.cleanup_required = true;
         let runner = self.runner.as_mut().expect("running consumer");
-        let identity = runner.batch_identity(&input)?;
+        let identity = match runner.batch_identity(&input) {
+            Ok(identity) => identity,
+            // An External consumer may receive an immediate in-memory query's
+            // output at least once. Whether it accepts that is the plugin's
+            // decision: it re-derives the identity and refuses unless it is
+            // configured `atLeastOnce`.
+            Err(error)
+                if self.mode == ConsumerMode::External
+                    && output_identity::is_missing_progress(&error) =>
+            {
+                match output_identity::Candidate::new_volatile(&input.envelope, &self.codec) {
+                    Ok(candidate) => return self.deliver_at_least_once(&input, candidate).await,
+                    Err(_) => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
+        };
         let mut batch = match Batch::begin(
             self.component.inner.clone(),
             self.extension,
@@ -419,6 +440,74 @@ impl EnvelopeSink for NativeConsumerProxy {
                 Err(error)
             }
         }
+    }
+}
+
+impl NativeConsumerProxy {
+    /// At-least-once delivery of a volatile producer's batch. It bypasses the
+    /// `DeliveryRunner`: there is no host-local ledger because nothing can be
+    /// resumed across a restart. The destination cursor, keyed by the batch's
+    /// epoch, still deduplicates retries within one producer incarnation.
+    /// Operations are handled in order and stop at the first failure.
+    async fn deliver_at_least_once(
+        &mut self,
+        input: &InputEnvelope,
+        candidate: output_identity::Candidate,
+    ) -> anyhow::Result<()> {
+        let identity = delivery::batch_identity(&self.scope, input, &candidate)?;
+        let mut batch = match Batch::begin(
+            self.component.inner.clone(),
+            self.extension,
+            self.component.codec.clone(),
+            input,
+            identity.clone(),
+        )
+        .await
+        {
+            Ok(batch) => batch,
+            Err(error) => {
+                // No batch was opened, so nothing remains to clean up.
+                self.cleanup_required = false;
+                return Err(error);
+            }
+        };
+        let delivered = async {
+            for (index, operation) in input.envelope.changes().operations().iter().enumerate() {
+                let id =
+                    delivery::operation_id(&self.scope, input, &candidate, operation.ordinal())?;
+                let attempts = self.options.retry.max_attempts.get();
+                for attempt in 1..=attempts {
+                    let item = delivery::delivery_item(
+                        input,
+                        &candidate,
+                        &identity,
+                        index,
+                        operation,
+                        id.clone(),
+                    );
+                    match DeliveryHandler::handle(&mut batch, item).await {
+                        Ok(()) => break,
+                        Err(source) if attempt < attempts && retryable(&source) => {
+                            tracing::warn!(%id, attempt, error = %format!("{source:#}"), "retrying at-least-once delivery");
+                            tokio::time::sleep(self.options.retry.delay).await;
+                        }
+                        Err(source) => {
+                            return Err(source.context(format!(
+                                "at-least-once delivery {id} failed after {attempt} attempt(s)"
+                            )))
+                        }
+                    }
+                }
+            }
+            anyhow::Ok(())
+        }
+        .await;
+        batch.finish()?;
+        // A returned failure has settled: the destination cursor kept only
+        // the completed prefix, so the same input can be retried. A cancelled
+        // delivery never reaches here and keeps the cleanup requirement.
+        self.cleanup_required = false;
+        delivered
     }
 }
 

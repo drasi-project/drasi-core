@@ -20,7 +20,7 @@ use mysql_common::binlog::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -68,6 +68,16 @@ struct Table {
     bytes: usize,
 }
 
+/// Where replication resumes after the last transaction this decoder
+/// completed: the end of its commit and, for decoders that assemble whole
+/// transactions, its cursor (re-read and compared on resumption).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResumePoint {
+    pub file: String,
+    pub end: u32,
+    pub anchor: Option<Position>,
+}
+
 pub struct Binlog {
     source: ComponentId,
     stream: StreamId,
@@ -88,6 +98,13 @@ pub struct Binlog {
     row_semantics: bool,
     gtid_start: bool,
     positional: bool,
+    /// Database-wide tables skipped as unsupported; treated as unselected.
+    skipped: BTreeSet<String>,
+    /// Start offset of the schema statement whose selected tables the worker
+    /// has re-inspected.
+    inspected: Option<(String, u32)>,
+    /// The boundary after the last completed transaction.
+    resume: Option<ResumePoint>,
 }
 
 pub struct Start {
@@ -100,6 +117,7 @@ pub struct Start {
     pub offset: u32,
     pub anchor: Option<Position>,
     pub sequence: Arc<AtomicU64>,
+    pub skipped: BTreeSet<String>,
 }
 
 pub enum HistoryMode {
@@ -142,7 +160,100 @@ impl Binlog {
             row_semantics: false,
             gtid_start: false,
             positional: false,
+            skipped: start.skipped,
+            inspected: None,
+            resume: None,
         })
+    }
+
+    /// The boundary after the last completed transaction, if any.
+    pub fn resume_point(&self) -> Option<&ResumePoint> {
+        self.resume.as_ref()
+    }
+
+    /// Whether no transaction is partially decoded.
+    pub fn at_boundary(&self) -> bool {
+        self.pending.is_none()
+    }
+
+    /// Selected tables a schema statement in `raw` touches, which the worker
+    /// must re-inspect (and pass to [`Self::apply_inspection`]) before
+    /// decoding it.
+    pub fn pending_inspection(&self, raw: &[u8]) -> Result<Option<Vec<String>>> {
+        if self.positional
+            || !self.described
+            || raw.get(4) != Some(&(EventType::QUERY_EVENT as u8))
+            || self.pending.as_ref().is_some_and(|pending| pending.began)
+        {
+            return Ok(None);
+        }
+        let event = frame(&self.format, raw, self.config.max_protocol_bytes.get())?;
+        let query: mysql_common::binlog::events::QueryEvent<'_> = event.read_event()?;
+        let sql = std::str::from_utf8(query.query_raw())?;
+        if matches!(sql, "BEGIN" | "COMMIT" | "ROLLBACK") {
+            return Ok(None);
+        }
+        let selected = self.tables.keys().map(String::as_str).collect::<Vec<_>>();
+        match super::ddl::classify(
+            sql,
+            std::str::from_utf8(query.schema_raw())?,
+            &self.config.connection.database,
+            &selected,
+        ) {
+            super::ddl::StatementEffect::Inspect(tables) => Ok(Some(tables)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Applies a re-inspection of `inspected` selected tables made for the
+    /// schema statement in `raw`. A dropped or renamed selected table, or a
+    /// change to its key columns or their types, is a typed schema change;
+    /// any other column change is adopted.
+    pub fn apply_inspection(
+        &mut self,
+        raw: &[u8],
+        inspected: &[String],
+        mut found: Tables,
+    ) -> Result<()> {
+        let event = frame(&self.format, raw, self.config.max_protocol_bytes.get())?;
+        let start = event
+            .header()
+            .log_pos()
+            .checked_sub(event.header().event_size())
+            .context("invalid MySQL event position")?;
+        for table in inspected {
+            let current = self
+                .tables
+                .get(table)
+                .with_context(|| format!("MySQL table {table} is not selected"))?;
+            let Some(columns) = found.remove(table) else {
+                return Err(super::errors::schema_changed(format!(
+                    "selected table {table} was dropped or renamed"
+                )));
+            };
+            if catalog::key_facts(&self.config, table, current, false)?
+                != catalog::key_facts(&self.config, table, &columns, false).map_err(|error| {
+                    super::errors::schema_changed(format!("table {table}: {error:#}"))
+                })?
+            {
+                return Err(super::errors::schema_changed(format!(
+                    "the key columns or their types of selected table {table} changed"
+                )));
+            }
+            self.tables.insert(table.clone(), columns);
+        }
+        self.inspected = Some((self.file.clone(), start));
+        Ok(())
+    }
+
+    /// Database-wide tables skipped as unsupported.
+    pub fn skipped(&self) -> &BTreeSet<String> {
+        &self.skipped
+    }
+
+    /// Records a database-wide table that live discovery found unsupported.
+    pub fn skip_table(&mut self, table: String) {
+        self.skipped.insert(table);
     }
 
     pub fn with_row_semantics(mut self) -> Self {
@@ -174,6 +285,7 @@ impl Binlog {
         let name = std::str::from_utf8(table.table_name_raw())?;
         if std::str::from_utf8(table.database_name_raw())? == self.config.connection.database
             && !self.tables.contains_key(name)
+            && !self.skipped.contains(name)
         {
             return Ok(Some(name.to_owned()));
         }
@@ -586,24 +698,56 @@ impl Binlog {
                     "ROLLBACK" => anyhow::bail!("unexpected MySQL rollback in committed binlog"),
                     _ => {
                         let database = std::str::from_utf8(query.schema_raw())?;
-                        anyhow::ensure!(
-                            !self.positional || positional_statement_preserves_catalog(
-                                sql, database, &self.config.connection.database,
-                            ),
-                            "positional MySQL catalog changed; explicit matching-schema recovery is required"
+                        if self.positional
+                            && !positional_statement_preserves_catalog(
+                                sql,
+                                database,
+                                &self.config.connection.database,
+                            )
+                        {
+                            return Err(super::errors::schema_changed(
+                                "positional MySQL catalog changed; explicit matching-schema recovery is required",
+                            ));
+                        }
+                        let selected = self.tables.keys().map(String::as_str).collect::<Vec<_>>();
+                        let effect = super::ddl::classify(
+                            sql,
+                            database,
+                            &self.config.connection.database,
+                            &selected,
                         );
-                        let creation = sql
-                            .split_ascii_whitespace()
-                            .next()
-                            .is_some_and(|word| word.eq_ignore_ascii_case("CREATE"));
-                        anyhow::ensure!(
-                            !pending.began
-                                && (creation
-                                    || (!database.is_empty()
-                                        && database != self.config.connection.database)),
-                            "MySQL DDL or statement-based change requires explicit schema recovery"
-                        );
-                        output.extend(self.commit(end, event.header().timestamp())?);
+                        let began = pending.began;
+                        match effect {
+                            super::ddl::StatementEffect::Ignore if began => {
+                                // SAVEPOINT and similar statements inside a
+                                // transaction carry no row changes.
+                            }
+                            super::ddl::StatementEffect::Ignore => {
+                                output.extend(self.commit(end, event.header().timestamp())?)
+                            }
+                            super::ddl::StatementEffect::Inspect(_)
+                                if !began && !self.positional =>
+                            {
+                                anyhow::ensure!(
+                                    self.inspected.as_ref() == Some(&(self.file.clone(), start)),
+                                    "MySQL schema statement on a selected table was not re-inspected"
+                                );
+                                self.inspected = None;
+                                output.extend(self.commit(end, event.header().timestamp())?);
+                            }
+                            super::ddl::StatementEffect::Inspect(_) => {
+                                // Positional sources passed the catalog check above.
+                                if !began {
+                                    output.extend(self.commit(end, event.header().timestamp())?);
+                                }
+                            }
+                            super::ddl::StatementEffect::SchemaChanged(detail) => {
+                                return Err(super::errors::schema_changed(detail))
+                            }
+                            super::ddl::StatementEffect::Unsupported(detail) => {
+                                return Err(super::errors::unsupported(detail))
+                            }
+                        }
                     }
                 }
             }
@@ -611,12 +755,16 @@ impl Binlog {
             EventData::TableMapEvent(table) => {
                 anyhow::ensure!(pending.began, "MySQL table map before BEGIN");
                 let name = std::str::from_utf8(table.table_name_raw())?;
-                anyhow::ensure!(
-                    !self.config.tables.is_empty()
-                        || std::str::from_utf8(table.database_name_raw())? != self.config.connection.database
-                        || self.tables.contains_key(name),
-                    "MySQL database-wide table selection changed; explicit schema recovery is required"
-                );
+                if self.config.tables.is_empty()
+                    && std::str::from_utf8(table.database_name_raw())?
+                        == self.config.connection.database
+                    && !self.tables.contains_key(name)
+                    && !self.skipped.contains(name)
+                {
+                    return Err(super::errors::schema_changed(format!(
+                        "table {name} joined the database-wide selection"
+                    )));
+                }
                 let selected = std::str::from_utf8(table.database_name_raw())?
                     == self.config.connection.database
                     && self.tables.contains_key(name);
@@ -697,11 +845,13 @@ impl Binlog {
                                 self.config.max_protocol_bytes.get(),
                             );
                         }
-                        catalog::validate_row(columns, row)?;
+                        catalog::validate_row(columns, row)
+                            .map_err(|error| super::errors::schema_changed(format!("{error:#}")))?;
                         decoder.native_element(
                             table,
                             row,
                             &keys,
+                            Some(columns),
                             timestamp,
                             self.config.max_protocol_bytes.get(),
                         )
@@ -772,6 +922,11 @@ impl Binlog {
             .context("MySQL commit without transaction")?;
         self.clear_maps();
         let Some(builder) = pending.builder else {
+            self.resume = Some(ResumePoint {
+                file: self.file.clone(),
+                end,
+                anchor: None,
+            });
             return Ok(None);
         };
         let timestamp = if self.positional {
@@ -801,6 +956,11 @@ impl Binlog {
                 "MySQL committed replay anchor is missing or has different contents"
             );
             self.admitted = logical;
+            self.resume = Some(ResumePoint {
+                file: self.file.clone(),
+                end,
+                anchor: Some(position),
+            });
             return Ok(None);
         }
         anyhow::ensure!(
@@ -814,6 +974,11 @@ impl Binlog {
             transaction.into_envelope(self.stream.clone(), transport, timestamp)?
         };
         self.admitted = logical;
+        self.resume = Some(ResumePoint {
+            file: self.file.clone(),
+            end,
+            anchor: Some(position),
+        });
         Ok(Some(OutputEnvelope {
             port: PortId::try_new("out")?,
             envelope,
@@ -1001,7 +1166,9 @@ fn validate_table(table: &TableMapEvent<'_>) -> Result<()> {
             MYSQL_TYPE_BLOB
             | MYSQL_TYPE_TINY_BLOB
             | MYSQL_TYPE_MEDIUM_BLOB
-            | MYSQL_TYPE_LONG_BLOB => metadata.len() == 1 && (1..=4).contains(&metadata[0]),
+            | MYSQL_TYPE_LONG_BLOB
+            | MYSQL_TYPE_GEOMETRY
+            | MYSQL_TYPE_VECTOR => metadata.len() == 1 && (1..=4).contains(&metadata[0]),
             MYSQL_TYPE_JSON => metadata == [4],
             MYSQL_TYPE_ENUM => metadata.len() == 2 && (1..=2).contains(&metadata[1]),
             MYSQL_TYPE_SET => metadata.len() == 2 && (1..=8).contains(&metadata[1]),

@@ -9,7 +9,7 @@
 
 use crate::storedproc;
 use anyhow::{ensure, Context, Result};
-use drasi_computation_contracts::{OutputAliases, SinkOutputs};
+use drasi_computation_contracts::{DeliveryGuarantee, OutputAliases, SinkOutputs};
 use drasi_reaction_common::{OperationType, QueryConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -105,6 +105,10 @@ pub struct MySqlStoredProcConfig {
     /// Delivery streams this component may hold in the cursor table.
     #[serde(default = "max_streams")]
     pub max_streams: u32,
+    /// `exactlyOnce` (default) accepts only producers with persistent
+    /// progress; `atLeastOnce` also accepts in-memory queries.
+    #[serde(default)]
+    pub delivery_guarantee: DeliveryGuarantee,
     #[serde(default = "command_timeout")]
     pub command_timeout_ms: u64,
     #[serde(default = "connect_timeout")]
@@ -134,6 +138,7 @@ impl fmt::Debug for MySqlStoredProcConfig {
             .field("default_template", &self.default_template)
             .field("progress_table", &self.progress_table)
             .field("max_streams", &self.max_streams)
+            .field("delivery_guarantee", &self.delivery_guarantee)
             .finish_non_exhaustive()
     }
 }
@@ -322,11 +327,35 @@ mod tests {
                 "password": "p", "ssl": false,
                 "defaultTemplate": {"added": {"template": "CALL a({{param after.id}})"}},
                 "progressTable": "drasi_delivery_progress", "maxStreams": 4096,
-                "commandTimeoutMs": 30000, "connectTimeoutMs": 5000, "shutdownTimeoutMs": 10000,
+                "deliveryGuarantee": "exactlyOnce", "commandTimeoutMs": 30000, "connectTimeoutMs": 5000, "shutdownTimeoutMs": 10000,
                 "connectRetryAttempts": 5, "reconnectBudgetMs": 30000, "maxProtocolBytes": 8388608
             })
         );
         assert!(!format!("{config:?}").contains("\"p\""));
+        Ok(())
+    }
+
+    #[test]
+    fn delivery_guarantee_is_opt_in_and_camel_case() -> Result<()> {
+        assert_eq!(
+            MySqlStoredProcConfig::parse(base())?.delivery_guarantee,
+            DeliveryGuarantee::ExactlyOnce
+        );
+        for (value, expected) in [
+            ("exactlyOnce", DeliveryGuarantee::ExactlyOnce),
+            ("atLeastOnce", DeliveryGuarantee::AtLeastOnce),
+        ] {
+            let mut config = base();
+            config["deliveryGuarantee"] = json!(value);
+            let parsed = MySqlStoredProcConfig::parse(config)?;
+            assert_eq!(parsed.delivery_guarantee, expected);
+            assert_eq!(serde_json::to_value(&parsed)?["deliveryGuarantee"], value);
+        }
+        for invalid in [json!("at_least_once"), json!("AtLeastOnce"), json!(true)] {
+            let mut config = base();
+            config["deliveryGuarantee"] = invalid;
+            assert!(MySqlStoredProcConfig::parse(config).is_err());
+        }
         Ok(())
     }
 

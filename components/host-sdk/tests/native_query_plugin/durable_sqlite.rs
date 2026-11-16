@@ -162,9 +162,18 @@ impl Graph {
             output_capacity: NonZeroUsize::new(1).expect("positive output capacity"),
             shutdown_timeout_ms: NonZeroU64::new(5000).expect("positive cleanup deadline"),
         };
+        let replay = settings.replay.as_ref().expect("journal bounds");
         let configuration = json!({
-            "stream": "sqlite/out", "settings": settings, "coordinated_snapshot": true,
-            "rest_api": {"host":"127.0.0.1", "port":port}
+            "stream": "sqlite/out", "path": settings.path, "tables": settings.tables,
+            "maxTransactionChanges": settings.transactions.max_changes,
+            "maxTransactionBytes": settings.transactions.max_bytes,
+            "maxTransactionDurationMs": settings.transactions.max_duration_ms,
+            "maxSqlBytes": settings.max_sql_bytes, "commandCapacity": settings.command_capacity,
+            "outputCapacity": settings.output_capacity,
+            "shutdownTimeoutMs": settings.shutdown_timeout_ms,
+            "pageSize": settings.transactions.max_changes,
+            "maxJournalTransactions": replay.max_transactions, "maxJournalBytes": replay.max_bytes,
+            "coordinatedSnapshot": true, "restApi": true, "restPort": port
         });
         let coordinator = source_factory.create_source_bootstrap(
             ComponentId::try_new("0dcb43b3-f286-5c30-87dc-41c98e4c52e9")?,

@@ -53,10 +53,13 @@ async fn repeated_and_failed_starts_remove_owned_volume_count_and_data() -> Resu
     let mut records = 0usize;
     for entry in std::fs::read_dir(&directory)? {
         let entry = entry?;
+        // Skip AppleDouble metadata ("._*") that macOS writes beside files
+        // on non-APFS volumes.
         if entry
             .path()
             .extension()
             .is_some_and(|extension| extension == "json")
+            && !entry.file_name().to_string_lossy().starts_with("._")
         {
             let proof: Value = serde_json::from_slice(&std::fs::read(entry.path())?)?;
             anyhow::ensure!(

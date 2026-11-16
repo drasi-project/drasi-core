@@ -204,10 +204,7 @@ async fn graph_with_options(
         max_transactions: size(16),
         max_bytes: size(8 << 20),
     });
-    let configuration = json!({
-        "stream":"sqlite/out","settings":settings,"coordinated_snapshot":true,
-        "rest_api":{"host":"127.0.0.1","port":port},
-    });
+    let configuration = super::flat(&settings, Some(port), true);
     let mut builder = ComponentBatch::builder();
     for (name, owner) in names.iter().zip(&owners) {
         builder = provide(
@@ -646,8 +643,7 @@ async fn binding_identity_and_retirement() -> Result<()> {
                 max_transactions: size(8),
                 max_bytes: size(4 << 20),
             });
-            let configuration =
-                json!({"stream":"sqlite/out","settings":config,"coordinated_snapshot":true});
+            let configuration = super::flat(&config, None, true);
             let owner = Arc::new(QuerySourceProgress::new(
                 ComponentBatch::GRAPH_ID,
                 id("first"),
@@ -820,7 +816,7 @@ async fn binding_identity_and_retirement() -> Result<()> {
             );
             drop(source);
             let mut changed = configuration.clone();
-            changed["settings"]["max_sql_bytes"] = json!(32768);
+            changed["maxSqlBytes"] = json!(32768);
             anyhow::ensure!(
                 factory
                     .create_component_with_source_bootstrap(

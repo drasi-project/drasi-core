@@ -444,7 +444,7 @@ fn file_bootstrap(database: &Path, generation: u64) -> Result<Arc<NativeBootstra
         })
         .context("missing file bootstrap factory")?;
     let mut configuration = sqlite::provider_configuration(database);
-    configuration["settings"]["tables"] = json!(["orders", "customers"]);
+    configuration["tables"] = json!(["orders", "customers"]);
     factory.create_query_provider(component_id()?, configuration, scope(generation), None)
 }
 
