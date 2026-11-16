@@ -314,6 +314,10 @@ async fn test_list_indexing_range_index_negative_start_bound() {
             .await
             .unwrap(),
         VariableValue::List(vec![
+            VariableValue::Integer(Integer::from(4)),
+            VariableValue::Integer(Integer::from(5)),
+            VariableValue::Integer(Integer::from(6)),
+            VariableValue::Integer(Integer::from(7)),
             VariableValue::Integer(Integer::from(8)),
             VariableValue::Integer(Integer::from(9)),
             VariableValue::Integer(Integer::from(10)),
@@ -349,4 +353,70 @@ async fn test_list_indexing_range_index_negative_end_bound() {
             VariableValue::Integer(Integer::from(5)),
         ])
     );
+}
+
+async fn eval_slice(expr: &str, bounds: &[(&str, i64)]) -> VariableValue {
+    let expr = drasi_query_cypher::parse_expression(expr).unwrap();
+    let evaluator = ExpressionEvaluator::new(
+        Arc::new(FunctionRegistry::new()),
+        Arc::new(InMemoryResultIndex::new()),
+    );
+    let mut variables = QueryVariables::new();
+    for (name, value) in bounds {
+        variables.insert(
+            (*name).into(),
+            VariableValue::Integer(Integer::from(*value)),
+        );
+    }
+    let context =
+        ExpressionEvaluationContext::new(&variables, Arc::new(InstantQueryClock::new(0, 0)));
+    evaluator
+        .evaluate_expression(&context, &expr)
+        .await
+        .unwrap()
+}
+
+fn int_list(values: &[i64]) -> VariableValue {
+    VariableValue::List(
+        values
+            .iter()
+            .map(|v| VariableValue::Integer(Integer::from(*v)))
+            .collect(),
+    )
+}
+
+#[tokio::test]
+async fn test_list_slice_bounds() {
+    let cases: &[(&str, &[(&str, i64)], &[i64])] = &[
+        ("[1,2,3][-2..]", &[], &[2, 3]),
+        ("[1,2,3,4][-1..]", &[], &[4]),
+        ("[1,2,3,4][-2..]", &[], &[3, 4]),
+        ("[1,2,3][-3..-1]", &[], &[1, 2]),
+        ("[1,2,3][-2..-1]", &[], &[2]),
+        ("[1,2,3][-5..5]", &[], &[1, 2, 3]),
+        ("[1,2,3][0..0]", &[], &[]),
+        ("[1,2,3][2..1]", &[], &[]),
+        ("[1,2,3][3..1]", &[], &[]),
+        ("[1,2,3][..-5]", &[], &[]),
+        ("[][-1..]", &[], &[]),
+        ("[][..-1]", &[], &[]),
+        // The parameters are in parentheses because the parser rejects `$s..`.
+        (
+            "[1,2,3][($s)..($e)]",
+            &[("s", i64::MIN), ("e", i64::MAX)],
+            &[1, 2, 3],
+        ),
+        (
+            "[1,2,3][($s)..($e)]",
+            &[("s", i64::MAX), ("e", i64::MIN)],
+            &[],
+        ),
+    ];
+    for (expr, bounds, want) in cases {
+        assert_eq!(
+            eval_slice(expr, bounds).await,
+            int_list(want),
+            "{expr} {bounds:?}"
+        );
+    }
 }
