@@ -75,6 +75,11 @@ impl NativePlugin {
                 next.register(factory.for_ordinary_queries()?)?;
             }
         }
+        for factory in &self.bootstrap_factories {
+            next.register(Arc::new(super::NativeBootstrapNodeFactory::new(
+                factory.clone(),
+            )))?;
+        }
         *registry = next;
         Ok(())
     }

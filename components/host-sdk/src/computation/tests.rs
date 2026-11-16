@@ -25,6 +25,8 @@ use std::{
 
 #[path = "../../tests/fixtures/native_bootstrap.rs"]
 mod bootstrap_fixture;
+#[path = "bootstrap_node_tests.rs"]
+pub(crate) mod bootstrap_node_tests;
 #[path = "bootstrap_tests.rs"]
 mod bootstrap_tests;
 #[path = "configuration_tests.rs"]
@@ -122,7 +124,7 @@ impl sdk::Factory for TestFactory {
                 vec![port(PortDirection::Input), port(PortDirection::Output)]
             }
             ComponentRole::Sink => vec![port(PortDirection::Input)],
-            ComponentRole::Service => vec![],
+            ComponentRole::Service | ComponentRole::BootstrapProvider => vec![],
         };
         FactoryMetadata {
             implementation: ImplementationIdentity::try_new(self.name, "1").unwrap(),

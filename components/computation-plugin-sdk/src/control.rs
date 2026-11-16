@@ -30,6 +30,9 @@ pub enum ControlNotification {
     Unavailable {
         reason: String,
     },
+    /// A typed graph bootstrap session request, relayed upstream through
+    /// bootstrap ports (see `drasi_computation_contracts::BootstrapRequest`).
+    BootstrapRequest(drasi_computation_contracts::BootstrapRequest),
     Custom {
         kind: String,
         payload: serde_json::Value,

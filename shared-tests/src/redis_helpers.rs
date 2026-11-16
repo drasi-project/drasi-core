@@ -44,6 +44,54 @@ pub async fn setup_redis() -> RedisGuard {
     RedisGuard::new().await
 }
 
+/// Setup a Redis testcontainer intended to be held in a `static` for a whole
+/// test binary.
+///
+/// Rust never drops statics, so the container is also registered for removal
+/// when the test process exits normally.
+pub async fn setup_shared_redis() -> RedisGuard {
+    let guard = RedisGuard::new().await;
+    exit_cleanup::register(&guard);
+    guard
+}
+
+mod exit_cleanup {
+    use super::{RedisGuard, RedisGuardInner};
+    use std::sync::{Mutex, Once, Weak};
+
+    static REGISTERED: Mutex<Vec<Weak<RedisGuardInner>>> = Mutex::new(Vec::new());
+    static HOOK: Once = Once::new();
+
+    extern "C" {
+        fn atexit(callback: extern "C" fn()) -> std::os::raw::c_int;
+    }
+
+    pub(super) fn register(guard: &RedisGuard) {
+        if let Ok(mut registered) = REGISTERED.lock() {
+            registered.push(std::sync::Arc::downgrade(&guard.inner));
+        }
+        HOOK.call_once(|| {
+            // SAFETY: `remove_registered` is a plain `extern "C"` function that
+            // never unwinds across the FFI boundary.
+            unsafe {
+                atexit(remove_registered);
+            }
+        });
+    }
+
+    extern "C" fn remove_registered() {
+        let _ = std::panic::catch_unwind(|| {
+            let registered = match REGISTERED.lock() {
+                Ok(mut registered) => std::mem::take(&mut *registered),
+                Err(_) => return,
+            };
+            for inner in registered.iter().filter_map(Weak::upgrade) {
+                inner.remove_now();
+            }
+        });
+    }
+}
+
 /// Low-level setup function that returns raw container and URL
 ///
 /// Internal use only. Prefer using `setup_redis()` which returns a `RedisGuard`
@@ -398,9 +446,9 @@ mod redis_attribution {
 
 /// Guard wrapper for Redis container that ensures proper cleanup
 ///
-/// This struct wraps the Redis container and uses blocking cleanup in Drop.
-/// The testcontainers library's async drop may not complete before tests exit,
-/// but we force a blocking cleanup using a runtime handle.
+/// The container is removed synchronously on a dedicated thread when the last
+/// clone is dropped, so removal completes even as a test runtime shuts down.
+/// Guards held in statics must come from `setup_shared_redis()`.
 ///
 /// The container is wrapped in an Arc to allow cloning for multiple test accessors.
 #[derive(Clone)]
@@ -464,34 +512,42 @@ impl RedisGuard {
     }
 }
 
+impl RedisGuardInner {
+    /// Remove the container synchronously.
+    ///
+    /// Removal runs on a dedicated thread with its own runtime, so it completes
+    /// whether or not the caller is inside a (possibly shutting down) tokio
+    /// runtime. testcontainers force-removes the container when it is dropped.
+    fn remove_now(&self) {
+        let container = match self.container.lock() {
+            Ok(mut container_guard) => container_guard.take(),
+            Err(_) => None,
+        };
+        let Some(container) = container else {
+            return;
+        };
+        let container_id = container.id().to_string();
+        let removal =
+            std::thread::spawn(move || {
+                match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime.block_on(async move { drop(container) }),
+                    Err(e) => log::warn!("Cannot build runtime to remove Redis container: {e}"),
+                }
+            });
+        if removal.join().is_ok() {
+            log::debug!("Redis container {container_id} removed");
+        } else {
+            log::warn!("Failed to remove Redis container {container_id}");
+        }
+    }
+}
+
 impl Drop for RedisGuardInner {
     fn drop(&mut self) {
-        if let Ok(mut container_guard) = self.container.lock() {
-            if let Some(container) = container_guard.take() {
-                let container_id = container.id().to_string();
-
-                // Block on cleanup to ensure it completes
-                let cleanup_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                        // We're inside a runtime — use spawn instead of block_on
-                        // to avoid "Cannot start a runtime from within a runtime" panic.
-                        handle.spawn(async move {
-                            let _ = container.stop().await;
-                            drop(container);
-                        });
-                    } else {
-                        // We're not in a runtime, just drop it
-                        drop(container);
-                    }
-                }));
-
-                if cleanup_result.is_ok() {
-                    log::debug!("Redis container {container_id} cleaned up in Drop");
-                } else {
-                    log::warn!("Failed to cleanup Redis container {container_id} in Drop");
-                }
-            }
-        }
+        self.remove_now();
     }
 }
 

@@ -297,25 +297,19 @@ impl ComputationBootstrapProvider for ScopedBootstrap {
 }
 
 async fn bootstrap_origin_and_live_binding() -> Result<()> {
-    let plugin = computation::load(library())?;
-    let factory = plugin
-        .factories()
-        .iter()
-        .find(|factory| {
-            factory.metadata().implementation.name.as_ref() == "drasi.experimental/provider-query"
-        })
-        .context("missing provider query factory")?;
     let mut configuration = configured(SOURCE_ID, "Item");
     configuration["volatile"] = json!(true);
-    let mut query = factory.create_component_with_bootstrap(
+    configuration["bootstrap"] = json!(true);
+    let mut query = factory()?.create_component_with_processing(
         component_id()?,
         configuration,
         scope(1),
-        Arc::new(computation::NativeBootstrapResource(Arc::new(
-            ScopedBootstrap,
-        ))),
+        Arc::new(drasi_core::computation::InMemoryComputationProvider),
     )?;
     query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.bind_bootstrap_provider(Arc::new(computation::NativeBootstrapResource(Arc::new(
+        ScopedBootstrap,
+    ))))?;
     query
         .bind_inputs(&[binding(
             ComponentId::try_new("1386fd15-7c70-53b2-b727-5b28f3d05f3f")?,
@@ -363,6 +357,9 @@ async fn bootstrap_origin_and_live_binding() -> Result<()> {
         [QueryPartEvaluationContext::Updating { after, .. }]
             if after.get("value") == Some(&VariableValue::from(json!(2)))
     ));
+    query
+        .delivery_completed(std::slice::from_ref(output))
+        .await?;
     query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
 }
@@ -391,14 +388,7 @@ async fn custom_factory_and_actual_index(persistent: bool) -> Result<()> {
     let factory = plugin
         .factories()
         .iter()
-        .find(|factory| {
-            factory.metadata().implementation.name.as_ref()
-                == if persistent {
-                    "drasi.experimental/indexed-query"
-                } else {
-                    "drasi.experimental/volatile-query"
-                }
-        })
+        .find(|factory| factory.metadata().implementation.name.as_ref() == "drasi.query/indexed")
         .context("missing custom query factory")?;
     let directory = tempfile::tempdir()?;
     let mut configuration = json!({
@@ -415,7 +405,12 @@ async fn custom_factory_and_actual_index(persistent: bool) -> Result<()> {
         )?
     } else {
         configuration["volatile"] = json!(true);
-        factory.create_component(component_id()?, configuration)?
+        factory.create_component_with_processing(
+            component_id()?,
+            configuration,
+            scope(1),
+            Arc::new(drasi_core::computation::InMemoryComputationProvider),
+        )?
     };
     query.initialize(&crate::hooks::initialize_ctx()).await?;
     query

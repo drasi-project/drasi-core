@@ -64,7 +64,7 @@ fn file_query(database: &Path, indexes: &Path, generation: u64) -> Result<Native
         scope(generation),
         super::provider(indexes)?,
     )?;
-    query.bind_bootstrap(Arc::new(NativeBootstrapResource(provider)))?;
+    query.bind_bootstrap_provider(Arc::new(NativeBootstrapResource(provider)))?;
     Ok(query)
 }
 
@@ -140,7 +140,7 @@ async fn volatile_file_bootstrap() -> Result<()> {
         Arc::new(drasi_core::computation::InMemoryComputationProvider),
     )?;
     query.initialize(&crate::hooks::initialize_ctx()).await?;
-    query.bind_bootstrap(Arc::new(NativeBootstrapResource(file_provider(
+    query.bind_bootstrap_provider(Arc::new(NativeBootstrapResource(file_provider(
         &database, 1,
     )?)))?;
     query.start(&crate::hooks::start_ctx()).await?;
@@ -216,7 +216,7 @@ async fn volatile_bootstrap_recovery() -> Result<()> {
         Arc::new(drasi_core::computation::InMemoryComputationProvider),
     )?;
     query.initialize(&crate::hooks::initialize_ctx()).await?;
-    query.bind_bootstrap(Arc::new(NativeBootstrapResource(provider.clone())))?;
+    query.bind_bootstrap_provider(Arc::new(NativeBootstrapResource(provider.clone())))?;
     assert!(query.start(&crate::hooks::start_ctx()).await.is_err());
     assert!(reader(&query)?.snapshot().await.is_err());
     provider
@@ -236,4 +236,78 @@ async fn indexed_volatile_bootstrap_resets_partial_state_current_thread() -> Res
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn indexed_volatile_bootstrap_resets_partial_state_multi_thread() -> Result<()> {
     volatile_bootstrap_recovery().await
+}
+
+async fn memory_file_query(
+    database: &Path,
+    query: &str,
+) -> Result<(
+    NativeComponentProxy,
+    Arc<drasi_host_sdk::computation::NativeBootstrapProxy>,
+)> {
+    let provider = file_provider(database, 1)?;
+    let mut component = factory()?.create_component_with_processing(
+        component_id()?,
+        json!({"query": query, "bootstrap": true, "volatile": true, "recovery": "auto_reset"}),
+        scope(1),
+        Arc::new(drasi_core::computation::InMemoryComputationProvider),
+    )?;
+    component
+        .initialize(&crate::hooks::initialize_ctx())
+        .await?;
+    component.bind_bootstrap_provider(Arc::new(NativeBootstrapResource(provider.clone())))?;
+    Ok((component, provider))
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn missing_sqlite_file_is_an_error_and_cleanup_allows_retry() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("missing.db");
+    let (mut query, provider) = memory_file_query(&path, TEXT).await?;
+    let exercise = async {
+        assert!(query.start(&crate::hooks::start_ctx()).await.is_err());
+        assert!(!path.exists());
+        assert!(reader(&query)?.snapshot().await.is_err());
+        provider.freeze_for_retirement()?.resume();
+        query.stop(&crate::hooks::stop_ctx()).await?;
+        sqlite::create_database(&path)?;
+        query.start(&crate::hooks::start_ctx()).await?;
+        assert_eq!(total(&reader(&query)?.snapshot().await?)?, 30.0);
+        provider.freeze_for_retirement()?.resume();
+        query.stop(&crate::hooks::stop_ctx()).await?;
+        Ok::<(), anyhow::Error>(())
+    };
+    tokio::time::timeout(Duration::from_secs(15), exercise).await?
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn failed_consumer_cancels_and_stops_the_real_sqlite_stream() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("invalid-value.db");
+    sqlite::create_database(&path)?;
+    {
+        let mut connection = rusqlite::Connection::open(&path)?;
+        let transaction = connection.transaction()?;
+        transaction.execute("UPDATE items SET amount = 'not-a-number' WHERE id = 2", [])?;
+        for id in 3..=128 {
+            transaction.execute("INSERT INTO items VALUES (?1, 20)", [id])?;
+        }
+        transaction.commit()?;
+    }
+    let (mut query, provider) =
+        memory_file_query(&path, "MATCH (n:items) RETURN abs(n.amount) AS value").await?;
+    let exercise = async {
+        assert!(query.start(&crate::hooks::start_ctx()).await.is_err());
+        assert!(reader(&query)?.snapshot().await.is_err());
+        provider.freeze_for_retirement()?.resume();
+        query.stop(&crate::hooks::stop_ctx()).await?;
+        rusqlite::Connection::open(&path)?
+            .execute("UPDATE items SET amount = 20 WHERE id = 2", [])?;
+        query.start(&crate::hooks::start_ctx()).await?;
+        assert_eq!(reader(&query)?.snapshot().await?.records().len(), 128);
+        provider.freeze_for_retirement()?.resume();
+        query.stop(&crate::hooks::stop_ctx()).await?;
+        Ok::<(), anyhow::Error>(())
+    };
+    tokio::time::timeout(Duration::from_secs(15), exercise).await?
 }

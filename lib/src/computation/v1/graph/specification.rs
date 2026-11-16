@@ -550,6 +550,11 @@ impl ConstructedComponent {
     pub fn service(service: Box<dyn crate::computation::v1::ComputationService>) -> Self {
         Self(Component::Service(service))
     }
+    pub fn bootstrap_provider(
+        provider: Box<dyn crate::computation::v1::ComputationBootstrapper>,
+    ) -> Self {
+        Self(Component::BootstrapProvider(provider))
+    }
 }
 
 /// Construction is distinct from activation. Implementations must be cancellation
@@ -700,21 +705,46 @@ pub(super) fn snapshot_input_bindings(
                 .and_then(|node| node.output_streams.get(&endpoint.port))
                 .cloned()
         },
+        |endpoint| {
+            snapshot
+                .nodes
+                .iter()
+                .find(|node| node.descriptor.id() == &endpoint.component)
+                .is_some_and(|node| is_bootstrap_port(&node.descriptor, &endpoint.port))
+        },
     )
 }
 
+/// Producers connected to `component`'s bootstrap inputs in `snapshot`.
+pub(super) fn snapshot_bootstrap_producers(
+    snapshot: &super::GraphSnapshot,
+    component: &ComponentId,
+) -> Vec<ComponentId> {
+    let mut producers: Vec<_> = snapshot
+        .edges
+        .iter()
+        .map(|edge| &edge.definition)
+        .filter(|edge| &edge.to.component == component && snapshot.is_bootstrap_relationship(edge))
+        .map(|edge| edge.from.component.clone())
+        .collect();
+    producers.sort();
+    producers.dedup();
+    producers
+}
+
 /// Bindings for `component`'s declared incoming `edges`, ordered by input port
-/// then producer endpoint. `stream` gives a producer output's declared stream;
+/// then producer endpoint. Bootstrap relationships are not data inputs and are skipped. `stream` gives a producer output's declared stream;
 /// an endpoint without one is returned as the error.
 pub(super) fn collect_input_bindings<'a>(
     component: &ComponentId,
     edges: impl IntoIterator<Item = &'a EdgeDefinition>,
     stream: impl Fn(&Endpoint) -> Option<StreamId>,
+    is_bootstrap: impl Fn(&Endpoint) -> bool,
 ) -> Result<Vec<InputBinding>, Endpoint> {
     let mut bindings = Vec::new();
     for edge in edges
         .into_iter()
-        .filter(|edge| &edge.to.component == component)
+        .filter(|edge| &edge.to.component == component && !is_bootstrap(&edge.from))
     {
         let stream = stream(&edge.from).ok_or_else(|| edge.from.clone())?;
         bindings.push(InputBinding {
@@ -740,6 +770,7 @@ pub struct ConstructionContext {
     resources: BTreeMap<ResourceId, ResourceHandle>,
     output_catalogue: crate::computation::v1::OutputCatalogue,
     input_bindings: Vec<InputBinding>,
+    bootstrap_producers: Vec<ComponentId>,
     replacement: bool,
     update_directive: Option<crate::computation::v1::ComponentUpdateDirective>,
 }
@@ -770,6 +801,7 @@ pub(crate) struct ComponentUpdateExecution {
 
 pub(crate) struct ConstructionBindings {
     pub(crate) inputs: Vec<InputBinding>,
+    pub(crate) bootstrap_producers: Vec<ComponentId>,
     pub(crate) replacement: bool,
     pub(crate) update: Option<crate::computation::v1::ComponentUpdateDirective>,
 }
@@ -794,6 +826,12 @@ impl ConstructionContext {
     /// when the bindings change.
     pub fn input_bindings(&self) -> &[InputBinding] {
         &self.input_bindings
+    }
+
+    /// Components declared on this component's bootstrap inputs when it was
+    /// constructed, such as the provider a source coordinates.
+    pub fn bootstrap_producers(&self) -> &[ComponentId] {
+        &self.bootstrap_producers
     }
 
     /// Read-only access to this graph's actual output providers. The view holds
@@ -849,6 +887,7 @@ impl ConstructionContext {
             resources,
             output_catalogue,
             input_bindings: bindings.inputs,
+            bootstrap_producers: bindings.bootstrap_producers,
             replacement: bindings.replacement,
             update_directive: bindings.update,
         })
@@ -971,5 +1010,15 @@ pub(super) fn validate_specification(
             };
         }
         super::topology(format!("invalid component definition: {error:#}"))
+    })
+}
+
+/// Whether `port` is one of `descriptor`'s bootstrap ports.
+pub(super) fn is_bootstrap_port(
+    descriptor: &crate::computation::v1::ComponentDescriptor,
+    port: &crate::computation::v1::PortId,
+) -> bool {
+    descriptor.ports().iter().any(|candidate| {
+        candidate.id() == port && candidate.kind() == crate::computation::v1::PortKind::Bootstrap
     })
 }

@@ -13,18 +13,11 @@ use drasi_lib::{
 };
 use serde::{Deserialize, Serialize};
 
-mod bootstrap_coordination;
-#[cfg(test)]
-mod composite_bootstrap_tests;
 mod identity;
 mod native;
 mod time_merge;
-pub use bootstrap_coordination::NativeSourceBootstrapConfig;
 pub use identity::NativeIdentityConfig;
-pub use native::{
-    CompositeBootstrapConfig, ConsumerProgressConfig, NativeBootstrapConfig, NativeOutputSelector,
-    NativeOutputSnapshotsConfig,
-};
+pub use native::{ConsumerProgressConfig, NativeOutputSelector, NativeOutputSnapshotsConfig};
 pub use time_merge::SourceTimeMergeStorageConfig;
 
 fn managed_resource_component_id(
@@ -66,9 +59,6 @@ enum Recipe {
     SharedQos(SharedQosConfig),
     SourceTimeMergeStorage(SourceTimeMergeStorageConfig),
     NativeConsumer(NativeConsumerConfig),
-    NativeBootstrap(NativeBootstrapConfig),
-    NativeSourceBootstrap(NativeSourceBootstrapConfig),
-    CompositeBootstrap(CompositeBootstrapConfig),
     NativeOutputSnapshots(NativeOutputSnapshotsConfig),
     ConsumerProgress(ConsumerProgressConfig),
     NativeIdentity(NativeIdentityConfig),
@@ -211,8 +201,6 @@ pub struct HostManagementResources {
     transactional: Arc<TransactionalTransformerRegistry>,
     secrets: Option<Arc<dyn SecretStoreProvider>>,
     factories: FactoryRegistry,
-    bootstraps: crate::computation::NativeBootstrapFactories,
-    source_bootstraps: crate::computation::NativeSourceBootstrapFactories,
     identity_providers: crate::computation::NativeIdentityProviders,
     indexes: BTreeMap<String, RegisteredIndexes>,
 }
@@ -311,8 +299,6 @@ impl HostManagementResources {
             middleware,
             secrets,
             factories: registry.computation_factory_registry()?,
-            bootstraps: registry.computation_bootstrap_factories()?,
-            source_bootstraps: registry.computation_source_bootstrap_factories()?,
             identity_providers: registry.computation_identity_providers(),
             indexes: BTreeMap::new(),
         })
@@ -442,44 +428,6 @@ impl ManagementResourceResolver for HostManagementResources {
                 .cloned()
                 .unwrap_or_default();
             match serde_json::from_value(configuration.clone())? {
-                Recipe::NativeBootstrap(config) => {
-                    config.validate(resource, &dependencies)?;
-                    config.validate_owner(&resource.id, desired)?;
-                    if self
-                        .bootstraps
-                        .get(&config.implementation)
-                        .is_some_and(|factory| {
-                            factory.metadata().configuration_version == config.configuration_version
-                        })
-                    {
-                        config.validate_configuration(
-                            &self.bootstraps,
-                            &dependencies,
-                            &BTreeMap::new(),
-                        )?;
-                    }
-                }
-                Recipe::NativeSourceBootstrap(config) => {
-                    config.validate(resource, &dependencies)?;
-                    config.validate_owner(&resource.id, desired)?;
-                    if self
-                        .source_bootstraps
-                        .get(&config.implementation)
-                        .is_some_and(|factory| {
-                            factory.metadata().configuration_version == config.configuration_version
-                        })
-                    {
-                        config.validate_configuration(
-                            &self.source_bootstraps,
-                            &dependencies,
-                            &BTreeMap::new(),
-                        )?;
-                    }
-                }
-                Recipe::CompositeBootstrap(config) => {
-                    config.validate(resource, &dependencies)?;
-                    config.validate_owner(&resource.id, desired)?;
-                }
                 Recipe::NativeConsumer(config) => {
                     config.validate_dependencies(resource, &dependencies)?
                 }
@@ -559,31 +507,6 @@ impl ManagementResourceResolver for HostManagementResources {
             return config.resolve(instance, graph, specification, dependencies);
         }
         if let Recipe::SourceTimeMergeStorage(config) = recipe {
-            return config.resolve(instance, graph, specification, dependencies);
-        }
-        if let Recipe::NativeBootstrap(config) = recipe {
-            return config
-                .resolve(
-                    instance,
-                    graph,
-                    specification,
-                    dependencies,
-                    &self.bootstraps,
-                )
-                .await;
-        }
-        if let Recipe::NativeSourceBootstrap(config) = recipe {
-            return config
-                .resolve(
-                    instance,
-                    graph,
-                    specification,
-                    dependencies,
-                    &self.source_bootstraps,
-                )
-                .await;
-        }
-        if let Recipe::CompositeBootstrap(config) = recipe {
             return config.resolve(instance, graph, specification, dependencies);
         }
         if let Recipe::NativeOutputSnapshots(config) = recipe {
@@ -669,15 +592,6 @@ impl ManagementResourceResolver for HostManagementResources {
             Recipe::NativeConsumer(_) => unreachable!("native consumer resolved with dependencies"),
             Recipe::SourceTimeMergeStorage(_) => {
                 unreachable!("time merge storage resolved with dependencies")
-            }
-            Recipe::NativeBootstrap(_) => {
-                unreachable!("native bootstrap resolved with dependencies")
-            }
-            Recipe::NativeSourceBootstrap(_) => {
-                unreachable!("native source bootstrap resolved with dependencies")
-            }
-            Recipe::CompositeBootstrap(_) => {
-                unreachable!("composite bootstrap resolved with dependencies")
             }
             Recipe::NativeOutputSnapshots(_) => {
                 unreachable!("native output snapshots resolved separately")

@@ -74,11 +74,10 @@ pub(super) fn bind_positions(
             .iter()
             .find(|node| node.descriptor.id() == &producer)
             .ok_or_else(|| topology("input replay path has no actual producer"))?;
-        for edge in snapshot
-            .edges
-            .iter()
-            .filter(|edge| edge.definition.from.component == producer)
-        {
+        for edge in snapshot.edges.iter().filter(|edge| {
+            edge.definition.from.component == producer
+                && !snapshot.is_bootstrap_relationship(&edge.definition)
+        }) {
             let stream = node
                 .output_streams
                 .get(&edge.definition.from.port)

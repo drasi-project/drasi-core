@@ -989,6 +989,9 @@ impl ComputationComponent for CheckpointedSink {
     fn bind_control(&mut self, control: super::ComponentControl) {
         self.inner.bind_control(control);
     }
+    fn bind_bootstrap(&mut self, ports: super::BootstrapPorts) {
+        self.inner.bind_bootstrap(ports);
+    }
     fn control_handler(&self) -> Option<Arc<dyn super::ControlHandler>> {
         self.inner.control_handler()
     }

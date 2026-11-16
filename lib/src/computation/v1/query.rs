@@ -31,10 +31,12 @@ use drasi_core::{
     computation::{ComputationIndexProvider, ComputationQuery},
     interface::{IndexError, SourceCheckpoint},
 };
-pub use drasi_query_common::ContinuousQueryDefinition;
 use drasi_query_common::{
     parser, query_builder, query_descriptor, FutureWakeup, QueryExecutionSettingsExt,
     QueryOperation,
+};
+pub use drasi_query_common::{
+    ContinuousQueryDefinition, QUERY_BOOTSTRAP_INPUT_PORT, QUERY_BOOTSTRAP_OUTPUT_PORT,
 };
 
 use crate::profiling::{timestamp_ns, ProfilingMetadata};
@@ -232,6 +234,13 @@ pub struct ContinuousQueryTransformer {
     delivered_output: AtomicU64,
     output_binding_state: Option<Arc<super::output_bindings::OutputBindingState>>,
     output_bindings: super::OutputBindings,
+    bootstrap_ports: super::BootstrapPorts,
+    control: Option<super::ComponentControl>,
+    snapshot_server: Arc<super::BootstrapSnapshotServer>,
+    /// `bootstrap` is the graph-edge provider selected at the last start.
+    graph_bootstrap: bool,
+    /// Provider supplied at construction for inputs without bootstrap edges.
+    resource_bootstrap: Option<Arc<dyn ComputationBootstrapProvider>>,
 }
 
 impl ContinuousQueryTransformer {
@@ -290,11 +299,11 @@ impl ContinuousQueryTransformer {
         codec.register_schema(QueryChangeCodec::schema())?;
         let projector = definition.projector(&definition.graph_id, &execution)?;
         let results = QueryOutputOwner::new(definition.outbox_capacity, projector.clone());
+        let output_reader =
+            super::query_output::QueryOutputProvider::new(&results, &definition.output_stream);
         let mut instance = Self {
-            output_reader: super::query_output::QueryOutputProvider::new(
-                &results,
-                &definition.output_stream,
-            ),
+            snapshot_server: super::BootstrapSnapshotServer::new(output_reader.clone()),
+            output_reader,
             descriptor: definition.descriptor(),
             recovery_scope: Arc::from(definition.graph_id.as_str()),
             default_dispatch_capacity: 1_000,
@@ -341,6 +350,10 @@ impl ContinuousQueryTransformer {
             delivered_output: AtomicU64::new(0),
             output_binding_state: None,
             output_bindings: super::OutputBindings::default(),
+            bootstrap_ports: super::BootstrapPorts::default(),
+            control: None,
+            graph_bootstrap: false,
+            resource_bootstrap: None,
         };
         if !defer_build {
             instance.build().await?;
@@ -475,8 +488,55 @@ impl ContinuousQueryTransformer {
         }
     }
 
+    /// Bootstrap from bound bootstrap edges when there are any. A provider
+    /// supplied at construction serves the inputs that have no bootstrap
+    /// edge; both are merged into one bootstrap.
+    fn select_graph_bootstrap(&mut self) -> anyhow::Result<()> {
+        let bound = !self.bootstrap_ports.inputs().is_empty();
+        if self.graph_bootstrap {
+            self.bootstrap = self.resource_bootstrap.clone();
+            self.graph_bootstrap = false;
+            self.api_view.take();
+        }
+        if !bound {
+            return Ok(());
+        }
+        let control = self.control.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "query {} bootstraps from edges without control",
+                self.definition.id
+            )
+        })?;
+        let edges = super::PipeBootstrapProvider::new(
+            self.definition.graph_id.as_str(),
+            self.bootstrap_ports.clone(),
+            control,
+            self.source_progress.clone(),
+        )?;
+        if self.bootstrap_complete.load(Ordering::Acquire) {
+            edges.mark_completed();
+        }
+        let provider: Arc<dyn ComputationBootstrapProvider> = match &self.resource_bootstrap {
+            None => edges,
+            Some(resource) => Arc::new(super::CompositeBootstrapProvider::new(
+                self.recovery_scope.to_string(),
+                self.definition.graph_id.clone(),
+                self.definition.id.clone(),
+                vec![
+                    (super::ResourceId::try_new("inputs")?, resource.clone()),
+                    (super::ResourceId::try_new("bootstrap-edges")?, edges),
+                ],
+            )?),
+        };
+        self.bootstrap = Some(provider);
+        self.graph_bootstrap = true;
+        self.api_view.take();
+        Ok(())
+    }
+
     pub fn with_bootstrap(mut self, provider: Arc<dyn ComputationBootstrapProvider>) -> Self {
         self.api_view.take();
+        self.resource_bootstrap = Some(provider.clone());
         self.bootstrap = Some(provider);
         self
     }
@@ -1219,6 +1279,19 @@ impl Drop for ContinuousQueryTransformer {
 
 #[async_trait]
 impl ComputationComponent for ContinuousQueryTransformer {
+    fn bind_bootstrap(&mut self, ports: super::BootstrapPorts) {
+        self.snapshot_server.bind(ports.clone());
+        self.bootstrap_ports = ports;
+    }
+
+    fn bind_control(&mut self, control: super::ComponentControl) {
+        self.control = Some(control);
+    }
+
+    fn control_handler(&self) -> Option<Arc<dyn super::ControlHandler>> {
+        Some(self.snapshot_server.clone())
+    }
+
     #[cfg(feature = "test-support")]
     fn bind_query_test_support(
         &mut self,
@@ -1365,6 +1438,7 @@ impl ComputationComponent for ContinuousQueryTransformer {
                 &declaration.sources,
             )?;
         }
+        self.select_graph_bootstrap()?;
         if let Some(provider) = &self.bootstrap {
             provider.validate_query_scope(
                 &self.recovery_scope,
@@ -1396,6 +1470,10 @@ impl ComputationComponent for ContinuousQueryTransformer {
         if self.query.is_none() {
             self.build().await?;
         }
+        anyhow::ensure!(
+            self.options.recovery != QueryRecoveryPolicy::AutoReset || self.bootstrap.is_some(),
+            "auto_reset requires a bootstrap provider or a connected bootstrap input"
+        );
         self.initialize_recovery().await?;
         self.prepare_delivery().await?;
         self.pending_input_replay = match &self.bootstrap {
@@ -2169,11 +2247,9 @@ impl ComponentFactory for ContinuousQueryFactory {
                 }
             })
             .collect();
-        if options(&literals)?.recovery == QueryRecoveryPolicy::AutoReset
-            && spec.dependencies.get("bootstrap").is_none_or(Vec::is_empty)
-        {
-            anyhow::bail!("auto_reset requires a declared bootstrap provider");
-        }
+        // `auto_reset` needs a bootstrap provider: a `bootstrap` resource or a
+        // connected bootstrap input, which only the graph knows; `start` checks it.
+        options(&literals)?;
         let execution: QueryExecutionSettings = literals
             .get("execution")
             .map(|value| serde_json::from_value(value.clone()))

@@ -95,6 +95,9 @@ fn incoming(notification: sdk::ControlNotification) -> ControlNotification {
         sdk::ControlNotification::Unavailable { reason } => {
             ControlNotification::Unavailable { reason }
         }
+        sdk::ControlNotification::BootstrapRequest(request) => {
+            ControlNotification::BootstrapRequest(request)
+        }
         sdk::ControlNotification::Custom { kind, payload } => {
             ControlNotification::Custom { kind, payload }
         }
@@ -110,6 +113,9 @@ fn outgoing(notification: ControlNotification) -> sdk::ControlNotification {
         }
         ControlNotification::Custom { kind, payload } => {
             sdk::ControlNotification::Custom { kind, payload }
+        }
+        ControlNotification::BootstrapRequest(request) => {
+            sdk::ControlNotification::BootstrapRequest(request)
         }
     }
 }

@@ -46,6 +46,7 @@ struct ProbeState {
     activations: Arc<AtomicUsize>,
     readers: Arc<AtomicUsize>,
     skip_configuration_update: AtomicBool,
+    fresh_starts: Mutex<Vec<Option<bool>>>,
     /// Overrides the live instance assessment to model drift after approval.
     live_assessment: Mutex<Option<Assessment>>,
 }
@@ -177,7 +178,7 @@ impl Factory for ProbeFactory {
                 vec![("in", PortDirection::Input), ("out", PortDirection::Output)]
             }
             ComponentRole::Sink => vec![("in", PortDirection::Input)],
-            ComponentRole::Service => Vec::new(),
+            ComponentRole::Service | ComponentRole::BootstrapProvider => Vec::new(),
         };
         FactoryMetadata {
             implementation: ImplementationIdentity::try_new("fixture/lifecycle", "1").unwrap(),
@@ -293,7 +294,9 @@ impl Factory for ProbeFactory {
                 ComponentRole::Source => Component::Source(component),
                 ComponentRole::Transformer => Component::Transformer(component),
                 ComponentRole::Sink => Component::Sink(component),
-                ComponentRole::Service => Component::Service(component),
+                ComponentRole::Service | ComponentRole::BootstrapProvider => {
+                    Component::Service(component)
+                }
             }
         };
         Ok(CreatedComponent {
@@ -398,6 +401,11 @@ impl ComputationComponent for Probe {
         if let Some(credentials) = ctx.take_credentials() {
             credentials.validate()?;
         }
+        self.state
+            .fresh_starts
+            .lock()
+            .unwrap()
+            .push(ctx.fresh_start());
         let resource = Resource::new(self.state.activations.clone());
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let worker = tokio::spawn(async move {
@@ -2338,5 +2346,27 @@ async fn credential_bound_updates_recheck_the_same_description_only_factory_plan
         component.run(STOP).await?;
         component.run(DISPOSE).await?;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn start_reports_whether_this_is_the_first_start() -> anyhow::Result<()> {
+    let harness = Harness::new(Options::default())?;
+    let component = harness.create()?;
+    component.run(INITIALIZE).await?;
+    for fresh_start in [None, Some(true), Some(false)] {
+        component
+            .call(
+                START,
+                &wire::encode(&component.context(START).with_fresh_start(fresh_start))?,
+            )
+            .await?;
+        component.run(STOP).await?;
+    }
+    assert_eq!(
+        *harness.state.fresh_starts.lock().unwrap(),
+        vec![None, Some(true), Some(false)]
+    );
+    component.run(DISPOSE).await?;
     Ok(())
 }

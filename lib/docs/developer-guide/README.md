@@ -5224,17 +5224,16 @@ lease while its real operation is still running.
 
 <a id="declare-shared-progress-and-composed-bootstrap-resources"></a>
 
-#### Host profile: shared progress and composed bootstrap
+#### Host profile: shared progress and graph bootstrap
 
 The basic managed Stockroom is now complete. The following **Host SDK/Server**
-recipes extend it to the alternative shared and multi-input protocols of
-Chapter 10; they are not required by the file-backed managed lesson.
+configuration extends it to the alternative shared and multi-input protocols of
+Chapter 10; it is not required by the file-backed managed lesson.
 
-A `consumerProgress` recipe groups downstream owners of **one producer**.
-A `compositeBootstrap` recipe groups initializers of **one query**. These JSON
-objects are recipe configurations, not complete graph definitions: declare the
-resources, dependencies, factories and connections around them.
-They contain already assigned component UUIDs, not name selectors. In this
+A `consumerProgress` recipe groups downstream owners of **one producer**. This
+JSON object is a recipe configuration, not a complete graph definition: declare
+the resources, dependencies, factories and connections around it.
+It contains already assigned component UUIDs, not name selectors. In this
 illustration, `inventory`, `low-stock`, and `stock-audit` have the IDs ending in
 `2f6`, `2f5`, and `300` respectively. Use the actual assignments returned by your
 configuration owner. Resource IDs such as `low-stock-progress` remain separate
@@ -5258,32 +5257,30 @@ Bind the set to the source's `consumer_progress`, and each query's own member to
 its `source_progress`. Eligible standalone transformers/Handled sinks instead
 use their own `input_progress` slot.
 
-For one query to initialize from inventory and an HTTP catalog:
-
-<!-- json-example: composite-bootstrap -->
-```json
-{
-  "kind": "compositeBootstrap",
-  "component": "00000000-0000-0000-0000-0000000002f5",
-  "providers": ["inventory-bootstrap", "catalog-bootstrap"]
-}
-```
-
-Declare a graph-owned Bootstrap resource with exactly those distinct Bootstrap
-dependencies. Each child resolves an actual provider for `low-stock`; any
-progress-bearing child uses its same `low-stock-progress` owner. Bind only the
-composite to the query's single `bootstrap` slot. Other queries need their own
-providers/composites, not aliases for this one.
+Bootstrap data travels over graph edges, not resource slots. Bootstrap providers
+are graph components with the `BootstrapProvider` role and one `snapshot`
+output. A source has an optional `bootstrap` input and a `snapshot` output; a
+query has a `bootstrap` input. For one query to initialize from inventory and an
+HTTP catalog, connect each provider to its source's `bootstrap` input and each
+source's `snapshot` output to the query's `bootstrap` input:
 
 ```text
-inventory -> consumerProgress set -> low-stock-progress <- low-stock query
-                                -> stock-audit-progress <- stock-audit query
-low-stock query -> compositeBootstrap -> inventory-bootstrap -> low-stock-progress
-                                     -> catalog-bootstrap
+inventory-bootstrap.snapshot -> inventory.bootstrap
+catalog-bootstrap.snapshot   -> catalog.bootstrap
+inventory.snapshot           -> low-stock.bootstrap
+catalog.snapshot             -> low-stock.bootstrap
 ```
 
-Here arrows describe dependencies/read capabilities, not data pipes. Data still
-needs its own inventory/catalog-to-query connections.
+The query sends one bootstrap request per edge. Each source relays the request
+to its provider, returns the records only to the requesting query and adds its
+handover boundary, so the query skips live changes the snapshot already covers.
+A progress-bearing provider binds each consumer query's actual progress resource
+under its `source_progress` slot.
+
+Alternatively, connect one provider directly to the query's `bootstrap` input
+(`bootstrapProvider` in managed query configuration). A query with such a local
+provider never asks its inputs for bootstrap data. Data still needs its own
+inventory/catalog-to-query connections.
 
 Build canonical component specifications from actual factory metadata and keep
 secret `ConfigurationValue` references. Server's `computation.graph.config` is
@@ -5301,27 +5298,26 @@ bundles are errors, not implicit membership replacement.
 
 #### Host profile: source-owned database initialization
 
-Paired SQLite's `nativeSourceBootstrap` creates a graph-owned Bootstrap resource
-using the **source** factory's real identity, canonical configuration and plugin
-provenance. It depends on its actual single `sourceProgress` or fixed
-`consumerProgress`, plus declared configuration dependencies.
+Paired SQLite coordinates initialization in the **source**. A source with a
+provider on its `bootstrap` input creates its library's coordinator from its own
+single `source_progress` owner or fixed `consumer_progress` set. There is no
+coordinator resource or recipe to declare.
 
 | Binding | Required relationship |
 |---|---|
-| Source `source_bootstrap` | Coordinator resource, in addition to the source's normal progress dependency |
-| Per-query `nativeBootstrap` | `sourceBootstrap` names the coordinator; `sourceProgress` names this query's actual owner |
-| Query `bootstrap` / `source_progress` | Paired provider and that same query progress resource |
+| Source `source_progress` or `consumer_progress` | The source's normal progress dependency |
+| Paired provider node `source_progress` | Each consumer query's actual progress resource |
+| Provider `snapshot` -> source `bootstrap` | The paired provider connected to the source |
+| Source `snapshot` -> query `bootstrap` | One bootstrap edge per consuming query |
 
-Each paired provider declares its coordinator as a Bootstrap dependency and its
-query owner as a Checkpoint dependency. Source/provider scope and configuration
-must match the coordinator. The Host checks actual owners, not matching paths,
-and dependency order keeps the coordinator alive through dependent cleanup.
+The provider node finds the coordinator of the source it is connected to and
+serves each session with the requesting consumer's actual progress owner. The
+Host checks actual owners, not matching paths. Only the source's first start,
+with no saved position, holds the live stream until the first boundary; a
+consumer that joins later gets its own snapshot while live changes continue.
 
-Use the [Host coordination recipe](../../../components/host-sdk/README.md#internal-native-sourcebootstrap-coordination)
-and loaded factory metadata. Matching Server generators `examples/native-sqlite.rs`
-and `examples/native-mysql.rs` supply complete definitions; SQLite's covers file,
-single-owner and shared modes. SQL Server's generator exists but its database
-qualification remains deferred. These are Server consumers, not extra Stockroom
+Use the [Host coordination contract](../../../components/host-sdk/README.md#native-source-bootstrap-coordination)
+and loaded factory metadata. These are Server consumers, not extra Stockroom
 lessons or a general database-access API.
 
 #### Keep configuration history intentional
@@ -6181,7 +6177,7 @@ for executable schemas and configurations.
 
 | Database profile | Native interface | Required setup |
 |---|---|---|
-| [SQLite](../../../components/computation-plugins/sources/sqlite/README.md) | Independent source/bootstrap libraries and preserved `drasi_source_sqlite::native::SqliteSource` API | Source-owned SQL/REST; actual persistent owner/set for replay; `nativeSourceBootstrap` and per-query providers for paired initialization |
+| [SQLite](../../../components/computation-plugins/sources/sqlite/README.md) | Independent source/bootstrap libraries and preserved `drasi_source_sqlite::native::SqliteSource` API | Source-owned SQL/REST; actual persistent owner/set for replay; source-coordinated paired provider nodes for initialization |
 | [PostgreSQL](../../../components/computation-plugins/sources/postgres/README.md) | Independent source/bootstrap factories sharing one flat configuration ([fields](../../../components/computation-plugins/sources/postgres/CONFIGURATION.md)) | PostgreSQL 13+, a publication without TRUNCATE, keyed tables, matching row/transaction modes and actual owners; shared row mode can use memory queries without process-restart recovery |
 | [MySQL](../../../components/computation-plugins/sources/mysql/README.md) | Independent source/bootstrap/procedure libraries | Explicit row/transaction/positional semantics, actual owners, binlog retention and matching bootstrap resources |
 | [SQL Server](../../../components/computation-plugins/sources/mssql/README.md) | Independent libraries, not database-qualified | CDC/permissions; coordinated snapshots need a pre-provisioned marker and locking contract |
@@ -6420,7 +6416,7 @@ The book supplies the application path; the reference supplies the catalog.
 | Retain transport and retry identity | `QosChannel`, `SourceAdmission`, `RetainedPipe`; [QoS guide](../computation-graph-qos.md) |
 | Share source recovery | `ConsumerProgressSet`, `InputPositionPolicy`; [Host bindings and recipes](../../../components/host-sdk/README.md#native-producer-consumer-progress) |
 | Combine initial snapshots | `CompositeBootstrapProvider`; [query bootstrap contracts](../../src/computation/v1/query_bootstrap.rs) |
-| Pair source-owned initialization | `NativeSourceBootstrapResource`; [Host coordination recipes](../../../components/host-sdk/README.md#internal-native-sourcebootstrap-coordination) |
+| Pair source-owned initialization | Paired provider node on the source's `bootstrap` input; [Host coordination](../../../components/host-sdk/README.md#native-source-bootstrap-coordination) |
 | Refresh native login credentials | `NativeIdentityResource`, `nativeIdentity`; [activation identity](../../../components/host-sdk/README.md#native-activation-identity) |
 | Track ordinary handled input | `ComponentRecovery::with_volatile_input_progress`; [input-progress cases](../../tests/computation_input_progress.rs) |
 | Recover a result view | `QueryReplayTransformer`, `CheckpointedSink`, `ConsumerProgressStore` |

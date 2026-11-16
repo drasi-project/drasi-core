@@ -81,10 +81,9 @@ errors are sanitized. Cancellation drops the caller-owned resolution future;
 there is no cached credential or unrestricted fetch callback that can later
 apply old credentials to a replacement.
 
-For a coordinated source, declare the same optional Identity resource as a
-dependency of its `nativeSourceBootstrap` resource. The Host validates exact
-resource identity and passes only the construction marker to the coordinator;
-the live source still receives credentials through its normal START. This does
+A coordinated source passes its own Identity dependency to the coordinator it
+creates. The Host passes only the construction marker to the coordinator; the
+live source still receives credentials through its normal START. This does
 not independently add authentication to a connector's bootstrap implementation.
 Consumer-wrapper factories currently reject identity dependencies rather than
 silently ignoring them.
@@ -220,83 +219,86 @@ catalogue; instances are built with the resolved ports and the Host re-checks th
 constructed component's descriptor. No format is converted or defaulted. See the
 plugin SDK's "Optional per-port format selection".
 
-## Managed native bootstrap
+## Native bootstrap provider nodes
 
-`nativeBootstrap` recipes create one graph-owned `Bootstrap` resource for the
-named query `component`. Supply the negotiated `implementation`,
-`configurationVersion` and an unresolved `configuration` map using the same
-`ConfigurationValue` format as component specifications. `PluginRegistry` exposes
-`computation_bootstrap_factories()` and `computation_bootstrap_metadata()` from
-the already loaded libraries; no provider is cached in a second runtime registry.
+Each loaded bootstrap factory is registered as a graph component factory,
+`NativeBootstrapNodeFactory`, with the `BootstrapProvider` role. A provider node
+has one `snapshot` bootstrap output and no live ports. Connect it to a source's
+`bootstrap` input, or directly to a query's or transformer's `bootstrap` input
+as a local provider. `PluginRegistry` exposes `computation_bootstrap_factories()`
+and `computation_bootstrap_metadata()` from the already loaded libraries.
 
-If the factory requires progress, `sourceProgress` names the actual checkpoint
-resource also bound to the query's `source_progress` slot. Declare that resource
-as a `Checkpoint` dependency of the bootstrap resource. Configuration references
-likewise declare their `SecretStore` dependencies. Missing, extra, wrongly typed
-or foreign-owner bindings fail; secret fields cannot be persisted as literals.
-The query binds the bootstrap resource under `bootstrap`. One recipe/provider
-cannot be shared between different queries or instances. Snapshot generations
-are owned by bootstrap-v1, not invented component generations for resources.
+A provider node serves one provider instance per bootstrap session, created for
+the consumer named in the session request. Its specification carries the
+factory's `configurationVersion` and `configuration`; configuration references
+declare their `SecretStore` dependencies and remain references in persisted
+definitions. Optional dependencies:
 
-Query stop joins bootstrap work before releasing query storage. Graph resource
-retirement also stops the provider and revokes its progress binding; a retained
-old handle cannot restart it. Recipes preserve references through persistence
-and reconstruction. These contracts are qualified with test-only native
-libraries; production bootstrap/consumer plugin migrations remain separate.
+| Slot | Role | Use |
+|---|---|---|
+| `source_progress` | `Checkpoint` | One or more query progress owners. A session uses the owner whose query matches the request's origin consumer; durable factories require it. |
 
-## Internal native source/bootstrap coordination
+A source-paired factory takes no extra slot: it must be connected to the
+`bootstrap` input of a coordination-capable native source and uses that
+source's coordinator and progress owners. Construction rejects a paired
+provider whose configured `source` is not the connected source or whose
+configured `stream` is not one the connected source publishes.
+
+A provider node accepts bootstrap requests that arrive before it starts and
+serves them once it is running; requests fail only after it is disposed.
+
+A durable session forwards the consumer's persisted bootstrap state to the
+provider and returns the provider's state markers to the consumer. A consumer
+with completed progress does not bootstrap again after restart. Stopping the
+node stops in-flight sessions and awaits provider cleanup.
+
+Native sources relay bootstrap sessions from their connected provider to the
+requesting consumer and add the source's handover boundary. Every session,
+including one for a consumer that joins later, gets its own snapshot and
+boundary; the consumer skips live changes its snapshot covers. Only a source's
+very first start, when none of its progress owners has a saved position or
+completed bootstrap, holds the live stream until the first boundary; START then
+carries `fresh_start: true` (`StartContext::fresh_start()`). Restarts and late
+joiners never pause the live stream.
+
+Native transformers that declare `quiescent_bootstrap` or `durable_bootstrap`
+bootstrap over their `bootstrap` input edges when any are connected. Native
+transformers that publish output snapshots (such as the native continuous
+query) expose a `snapshot` bootstrap output served from their committed output
+snapshot, so downstream queries and transformers bootstrap from them over an
+edge.
+
+## Native source bootstrap coordination
 
 Sources negotiating `bootstrap_coordination_v1` may share their actual engine
 with a separately loaded paired bootstrap factory. This is not a SQL or general
-service API. The graph owns one `Bootstrap` resource with the distinct concrete
-type `NativeSourceBootstrapResource`; it is not a query's `QueryBootstrapResource`.
-There is no path-based component lookup, global coordinator registry, copied
-worker, or forwarding task.
+service API, and there is no coordinator resource or recipe to declare. The
+source coordinates: when a provider is connected to its `bootstrap` input, the
+source creates its library's coordinator (`NativeSourceBootstrapResource`) from
+its own `source_progress` or `consumer_progress` owners and registers it for its
+instance, graph and component. Registrations are scoped to the running graph, so
+parallel runtimes that reuse instance and component IDs never share a
+coordinator. A paired provider node finds the coordinator of the source its
+`snapshot` output is connected to in its own graph, and serves each session with
+the progress owner of the requesting consumer. In shared mode the source knows
+its bootstrap consumers from its consumer progress set.
 
-The `nativeSourceBootstrap` recipe names the **source** component and its actual
-source factory's `implementation`, `configurationVersion`, and unresolved
-`configuration`. Exactly one of `sourceProgress` or `consumerProgress` names
-its actual checkpoint dependency. Configuration references declare their exact
-`SecretStore` dependencies and remain references in persisted definitions.
-For example, a shared source uses:
-
-```yaml
-kind: nativeSourceBootstrap
-component: source
-implementation: # the registered native source implementation identity
-  name: example/source
-  version: "1"
-configurationVersion: 1
-configuration: {} # same ConfigurationValue map as the source specification
-consumerProgress: consumers
+```text
+paired provider.snapshot -> source.bootstrap
+source.out               -> query.in
+source.snapshot          -> query.bootstrap
 ```
 
-Use the implementation identity from loaded metadata, including plugin provenance;
-the abbreviated identity above illustrates only the recipe shape.
-Bind that resource to the source's `source_bootstrap` slot **and** bind the
-actual progress resource to its ordinary `source_progress` or `consumer_progress`
-slot. A paired `nativeBootstrap` recipe names the **query**, its bootstrap factory,
-`sourceBootstrap: <coordinator-resource>`, and
-`sourceProgress: <query-progress-resource>`. Declare both as resource dependencies,
-with roles `Bootstrap` and `Checkpoint`, respectively. Bind the resulting query
-bootstrap resource under the query's existing `bootstrap` slot and the same actual
-query progress under `source_progress`.
-
-The coordinator captures the real single owner or complete consumer set, including
-all actual member owners. Pairing requires Arc identity, not matching IDs, paths,
-configuration, or an equal reconstructed member map. Source construction also
-checks source ID, implementation, resolved configuration, instance, and graph.
-Component generation may change without changing its coordinator. Live source
-leases prevent overlapping reconstruction; resource retirement fences old opens.
-
-Coordinator-owned group/member read capabilities activate when the resource is
-constructed, without snapshot, subscription, or network I/O. The source still
-receives its separate normal live binding, activated by source lifecycle.
-Cleanup retains an accepted STOP operation and readers across cancelled/timed-out
-awaits and failed cleanup. Successful final resource cleanup revokes every reader.
-Paired query providers retain the real query recovery reader and use the existing
-bounded bootstrap operations and retirement behavior. Standalone file bootstrap
-and ordinary source construction are unchanged.
+Pairing requires Arc identity, not matching IDs, paths, configuration, or an
+equal reconstructed member map. Coordinator-owned group/member read
+capabilities activate when the coordinator is created, without snapshot,
+subscription, or network I/O. The source still receives its separate normal
+live binding, activated by source lifecycle. Cleanup retains an accepted STOP
+operation and readers across cancelled/timed-out awaits and failed cleanup.
+Successful final cleanup revokes every reader. Paired query providers retain
+the real query recovery reader and use the existing bounded bootstrap
+operations and retirement behavior. Standalone file bootstrap and ordinary
+source construction are unchanged.
 
 A successfully stopped paired provider may be replaced even while its old handle
 is retained. The old lease cannot resume, cancel, or stop the replacement. Active
@@ -308,13 +310,11 @@ dropping after failed or cancelled START/STOP does not bypass cleanup.
 Retained subscriptions remain usable through
 failed or cancelled coordinator cleanup and are revoked only at final retirement.
 
-`PluginRegistry::computation_source_bootstrap_factories()` snapshots immutable
-native source factories from loaded plugins. Programmatic graph assembly uses
+Programmatic assembly outside a graph may still use
 `NativeFactory::create_source_bootstrap(...)`,
 `create_component_with_source_bootstrap(...)`, and
-`NativeBootstrapFactory::create_paired_query_provider(...)`.
-`NativeSourceBootstrapProgress::{Single, Shared}` supplies actual owners; retain
-the coordinator as a graph resource with its cleanup and dependency edges.
+`NativeBootstrapFactory::create_paired_query_provider(...)` with
+`NativeSourceBootstrapProgress::{Single, Shared}` owners.
 
 The focused Host coordination tests cover both progress modes, both Tokio runtime
 flavors, real malformed/partial library discovery, constructor callback counters,

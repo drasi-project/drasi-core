@@ -18,7 +18,10 @@ pub use configuration::{
     parser, query_builder, query_input_scope, query_input_scopes, validate_middleware_configs,
     QueryExecutionSettingsExt, QueryInputScopes,
 };
-pub use definition::{query_descriptor, ContinuousQueryDefinition};
+pub use definition::{
+    query_descriptor, ContinuousQueryDefinition, QUERY_BOOTSTRAP_INPUT_PORT,
+    QUERY_BOOTSTRAP_OUTPUT_PORT,
+};
 pub use execution::{
     prepare_query_input, project_due_query_output, PreparedQueryInput, QueryOperation,
 };

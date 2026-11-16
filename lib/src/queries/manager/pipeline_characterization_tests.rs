@@ -1274,6 +1274,7 @@ fn query_config() -> QueryConfig {
         outbox_capacity: 16,
         bootstrap_timeout_secs: 5,
         result: Default::default(),
+        bootstrap_provider: None,
     }
 }
 

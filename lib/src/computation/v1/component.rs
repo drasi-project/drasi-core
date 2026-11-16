@@ -113,6 +113,9 @@ pub trait ComputationComponent: Send + Sync {
     /// Supplies a generation-bound sender. This is optional for components that
     /// do not originate control notifications.
     fn bind_control(&mut self, _control: super::ComponentControl) {}
+    /// Supplies this generation's bootstrap pipe ends. The view is shared with
+    /// the graph, so it reflects bootstrap edges bound or removed later.
+    fn bind_bootstrap(&mut self, _ports: super::BootstrapPorts) {}
     /// Bind generation-scoped observation for opt-in query test controls.
     #[doc(hidden)]
     fn bind_query_test_support(
@@ -196,6 +199,12 @@ pub trait ComputationService: ComputationComponent {
     /// Drive service work until completion or graph-owned cancellation.
     async fn run(&mut self) -> anyhow::Result<()>;
 }
+
+/// A graph node that serves bootstrap sessions on bootstrap output ports. It has
+/// no data ports; requests arrive as control notifications and replies leave on
+/// the requesting consumer's bootstrap edge only.
+#[async_trait]
+pub trait ComputationBootstrapper: ComputationComponent {}
 
 /// A producer beside legacy Source. Its descriptor has output ports only.
 #[async_trait]

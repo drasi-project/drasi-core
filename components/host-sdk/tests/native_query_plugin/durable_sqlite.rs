@@ -205,7 +205,7 @@ impl Graph {
             }),
             None => provider.clone(),
         };
-        query.bind_bootstrap(Arc::new(NativeBootstrapResource(bound)))?;
+        query.bind_bootstrap_provider(Arc::new(NativeBootstrapResource(bound)))?;
         query.prepare_processing().await?;
         let query = core
             .add_computation_component(

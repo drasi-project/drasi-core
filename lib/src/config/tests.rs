@@ -203,6 +203,7 @@ mod schema_tests {
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
             result: Default::default(),
+            bootstrap_provider: None,
         });
 
         assert_eq!(config.queries.len(), 1);
@@ -264,6 +265,7 @@ mod persistence_tests {
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
             result: Default::default(),
+            bootstrap_provider: None,
         });
 
         // Serialize to YAML
@@ -341,6 +343,7 @@ mod persistence_tests {
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
             result: Default::default(),
+            bootstrap_provider: None,
         });
 
         // Save config
@@ -399,6 +402,7 @@ mod runtime_tests {
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
             result: Default::default(),
+            bootstrap_provider: None,
         };
 
         let config = config.with_assigned_id(crate::config::ComponentId::generate());
@@ -451,6 +455,7 @@ mod runtime_tests {
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
             result: Default::default(),
+            bootstrap_provider: None,
         };
 
         let config = config.with_assigned_id(crate::config::ComponentId::generate());
@@ -762,6 +767,7 @@ mod runtime_tests {
                 outbox_capacity: 1000,
                 bootstrap_timeout_secs: 300,
                 result: Default::default(),
+                bootstrap_provider: None,
             }],
         };
 
@@ -815,6 +821,7 @@ mod runtime_tests {
                     outbox_capacity: 1000,
                     bootstrap_timeout_secs: 300,
                     result: Default::default(),
+                    bootstrap_provider: None,
                 },
                 QueryConfig {
                     id: None,
@@ -835,6 +842,7 @@ mod runtime_tests {
                     outbox_capacity: 1000,
                     bootstrap_timeout_secs: 300,
                     result: Default::default(),
+                    bootstrap_provider: None,
                 },
             ],
         };
@@ -1111,6 +1119,7 @@ mod dispatch_mode_tests {
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
             result: Default::default(),
+            bootstrap_provider: None,
         };
         config
             .queries
@@ -1281,5 +1290,36 @@ mod query_input_tests {
 
         config.result.label = Some(String::new());
         assert!(config.validate_declarations().is_err(), "empty label");
+    }
+
+    #[test]
+    fn local_bootstrap_provider_requires_enabled_bootstrap() {
+        let mut config: QueryConfig = serde_json::from_value(json!({
+            "name": "q",
+            "query": "MATCH (n) RETURN n",
+            "inputs": ["a"],
+            "bootstrapProvider": "snapshot-provider"
+        }))
+        .unwrap();
+        config.validate_declarations().unwrap();
+        assert_eq!(
+            serde_json::to_value(&config).unwrap()["bootstrapProvider"],
+            json!("snapshot-provider")
+        );
+
+        config.enable_bootstrap = false;
+        assert!(
+            config.validate_declarations().is_err(),
+            "provider with disabled bootstrap"
+        );
+
+        config.enable_bootstrap = true;
+        config.bootstrap_provider = Some(crate::config::ComponentReference::by_name(
+            drasi_core_types::ComponentName::try_new("a").expect("fixture component name"),
+        ));
+        assert!(
+            config.validate_declarations().is_err(),
+            "provider is also a data input"
+        );
     }
 }

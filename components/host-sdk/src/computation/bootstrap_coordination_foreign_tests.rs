@@ -510,9 +510,6 @@ async fn bootstrap_coordination_absent_and_opted_out_factories_preserve_ordinary
         };
         let mut registry = crate::PluginRegistry::new();
         registry.register_computation_plugin(plugin.clone())?;
-        assert!(registry
-            .computation_source_bootstrap_factories()?
-            .is_empty());
         let factory = &plugin.factories()[0];
         assert!(!factory.supports_source_bootstrap());
         assert!(!factory

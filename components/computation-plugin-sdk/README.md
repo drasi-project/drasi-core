@@ -1,8 +1,8 @@
 # Native ComputationGraph plugin SDK
 
 This is a separate plugin family, not a replacement or layout change to the
-Source/Reaction/Bootstrap SDK. It uses `drasi-computation-plugin-abi` **4.0.0**
-with native **wire version 4**, independent of workspace package versions.
+Source/Reaction/Bootstrap SDK. It uses `drasi-computation-plugin-abi` **5.0.0**
+with native **wire version 5**, independent of workspace package versions.
 Ordinary Source/Reaction/Bootstrap ABI **0.19.0** is independently versioned.
 Hosts accept native plugins with the same ABI major and an older or equal
 minor, and reject a newer minor or another major. Unknown native wire versions
@@ -316,6 +316,38 @@ resources. Failure/cancellation may leave partially erased state; the retained
 owner is disposed again with the same reason and intent, so erasure must be
 idempotent. Completed disposal is acknowledged without repeating the hook.
 
+## Bootstrap ports and provider components
+
+Bootstrap data moves over graph edges. `FactoryMetadata::bootstrap_ports()`
+derives the bootstrap ports from a factory's role and capabilities, and
+`FactoryMetadata::descriptor()` appends them to the declared data ports:
+
+| Factory | Bootstrap ports |
+|---|---|
+| Source | optional `bootstrap` input from one provider; `snapshot` output to consumers |
+| Transformer with `Capabilities::provider_bootstrap()` | optional `bootstrap` input |
+
+Plugins must not declare bootstrap ports themselves; validation rejects them.
+A component instance may describe itself with or without the derived bootstrap
+ports, and the Host always exposes the full descriptor.
+
+A source relays bootstrap sessions. When a consumer sends a
+`ControlNotification::BootstrapRequest`, the source forwards the request to its
+connected provider, relays records and state markers back to the requesting
+consumer only, and adds its handover boundary to the completion. Without a
+connected provider it completes an empty session with its handover boundary.
+
+A plugin publishes provider components through the bootstrap extension
+(`BootstrapFactory`). The Host registers each one as a graph factory with the
+`BootstrapProvider` role. A provider node has one `snapshot` output and no live
+ports; it serves one provider instance per session for the consumer named in
+the request. Provider nodes accept a `source_progress` dependency for durable
+bootstrap and, for source-paired factories, one `source_bootstrap` coordinator.
+
+A consumer bootstraps either from its inputs' `snapshot` outputs or from one
+local provider connected directly to its `bootstrap` input. With a local
+provider it never asks its inputs.
+
 ## Quiescent provider-driven transformer initialization
 
 A transformer can declare `Capabilities::quiescent_bootstrap = Some(input_port)`.
@@ -325,12 +357,11 @@ not claim durable or coordinated bootstrap.
 
 `bootstrap_optional` lets a quiescent transformer use `bootstrap_status()` to
 declare whether its configuration requests a provider. The Host checks that
-choice before activation. Without a configured provider it completes the
-initialization barrier without loading records. Required-provider factories keep
-their required resource dependency.
+choice before activation. Without a connected bootstrap edge it completes the
+initialization barrier without loading records.
 
-`start()` prepares private initialization state. The Host SDK then drives an
-existing `ComputationBootstrapProvider` bound as `NativeBootstrapResource`:
+`start()` prepares private initialization state. The Host SDK then requests a
+bootstrap session over the transformer's connected `bootstrap` input edges:
 prepare, stream snapshot envelopes, complete the snapshot and await provider
 stop. Each envelope reaches `NativeTransformer::bootstrap(InputEnvelope)`.
 Only after that succeeds does `bootstrap_completed(completion)` publish initialized
@@ -352,8 +383,8 @@ through startup. Source-paired/coordinated providers use the separate
 Provider cleanup precedes transformer cleanup on failure/stop. The Host retains
 accepted provider cleanup across waiter cancellation and reports cleanup errors;
 dropping an owner is not proof of completed asynchronous cleanup. The
-experimental query's `drasi.experimental/provider-query` factory exercises this
-contract using the unchanged native SQLite file-bootstrap library.
+`drasi.standard/middleware` transformer exercises this contract using the
+unchanged native SQLite file-bootstrap library.
 
 ## Optional activation credentials
 
@@ -546,8 +577,7 @@ error rather than an empty snapshot. Admission limits and readiness timeouts are
 host-owned. Dropping the stream releases its reader, and component stop revokes
 pending reads. Errors remain errors, including after streaming has begun.
 
-The native SSE sink and experimental volatile query transformer use this
-interface. The Host resource is a
+The native SSE sink uses this interface. The Host resource is a
 `NativeOutputSnapshotsResource`, an immutable allow-list and limits policy bound
 as the factory's `output_snapshots` dependency. The native factory combines it
 with the graph's actual output catalogue when it creates the binding. Snapshot
@@ -556,11 +586,8 @@ catalogue or graph control crosses the ABI. This read service is distinct from
 incoming recovery snapshot envelopes and does not provide an atomic
 snapshot/live subscription.
 
-The experimental query initializes its configured inputs from captured snapshots,
-then checks each input's live producer progress against its own cursor. Its volatile factory also
-exports completed result snapshots, allowing another transformer to initialize
-from its output. This is not the full bootstrap-consumer protocol, and the read
-service does not itself retain the live suffix or order component activation.
+This is not the full bootstrap-consumer protocol, and the read service does not
+itself retain the live suffix or order component activation.
 
 ## Declared input bindings
 
@@ -910,9 +937,9 @@ the actual catalogue transport counter so replacement cannot reuse a sequence.
 and committed progress. The component declares the same
 `durable_bootstrap_input`, reports whether bootstrap is configured/completed,
 consumes streamed initialization through `bootstrap`, and atomically stages
-watermarks/completion state in `bootstrap_completed`. The Host binds an existing
-`NativeBootstrapResource`, passes its actual owner's state service to the provider,
-awaits cleanup, and keeps normal processing and reads behind the completion
+watermarks/completion state in `bootstrap_completed`. The Host bootstraps it
+over its `bootstrap` input edges, forwards its actual owner's state service to
+the provider session, awaits cleanup, and keeps normal processing and reads behind the completion
 barrier. Progress-bound providers must retain the exact local owner; external
 views or matching names are not accepted as ownership.
 
@@ -1257,14 +1284,13 @@ instead of registering a dummy processing component. Empty libraries still
 reject, and the host validates the complete factory catalogue at load time.
 Metadata-only inspection validates the advertised extension table without
 calling the plugin entry point; catalogue discovery happens during loading.
-This adds no component role and does
-not change base metadata, ABI **4.0.0**, wire **4**, or existing optional tables.
+The Host publishes each bootstrap factory as a graph factory with the
+`BootstrapProvider` role; see "Bootstrap ports and provider components".
 The Host SDK exposes the negotiated `NativePlugin::bootstrap_factories()`.
 Plugin-side factories return `NativeBootstrapProvider`; only the host-side
 `NativeBootstrapFactory::create_provider` returns a real
-`ComputationBootstrapProvider`, suitable for a query's `QueryBootstrapResource`.
-Factories only configure providers: preparation and snapshot work remain
-query-owned, and Server recipe integration is separate from this Host API.
+`ComputationBootstrapProvider`. Factories only configure providers: preparation
+and snapshot work remain consumer-owned sessions.
 
 A factory declares whether it requires source progress. Both SDK and Host reject
 missing, undeclared or wrong-graph bindings. The provider's `recovery_reader()`

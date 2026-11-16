@@ -375,6 +375,12 @@ pub struct LifecycleRequest {
     /// START only, and only for activation-credential factories.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials: Option<crate::ActivationCredentials>,
+    /// START only, for sources: `Some(true)` when no consumer has a saved
+    /// live position or a completed bootstrap, so this is the source's very
+    /// first start; `Some(false)` when one does; `None` when the host does not
+    /// know yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fresh_start: Option<bool>,
     /// STOP only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_mode: Option<crate::lifecycle::StopMode>,
@@ -396,6 +402,7 @@ impl std::fmt::Debug for LifecycleRequest {
                 "credentials",
                 &self.credentials.as_ref().map(|_| "<redacted>"),
             )
+            .field("fresh_start", &self.fresh_start)
             .field("stop_mode", &self.stop_mode)
             .field("dispose", &self.dispose)
             .finish_non_exhaustive()
@@ -425,6 +432,7 @@ impl LifecycleRequest {
             deadline_ms: None,
             required: Vec::new(),
             credentials: None,
+            fresh_start: None,
             stop_mode: None,
             dispose: None,
             update: None,
@@ -457,6 +465,11 @@ impl LifecycleRequest {
 
     pub fn with_credentials(mut self, credentials: crate::ActivationCredentials) -> Self {
         self.credentials = Some(credentials);
+        self
+    }
+
+    pub fn with_fresh_start(mut self, fresh_start: Option<bool>) -> Self {
+        self.fresh_start = fresh_start;
         self
     }
 

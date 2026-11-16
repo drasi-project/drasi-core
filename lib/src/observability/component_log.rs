@@ -160,6 +160,7 @@ impl From<ComponentRole> for ComponentLogType {
             ComponentRole::Transformer => Self::Transformer,
             ComponentRole::Sink => Self::Sink,
             ComponentRole::Service => Self::Service,
+            ComponentRole::BootstrapProvider => Self::BootstrapProvider,
         }
     }
 }

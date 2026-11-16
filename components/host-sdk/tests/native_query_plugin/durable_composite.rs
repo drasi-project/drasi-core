@@ -47,7 +47,7 @@ fn query(
     let mut query = factory()?.create_component_with_processing(component_id()?,
         json!({"query":"MATCH (o:Orders), (c:Customers) WHERE o.customer=c.id RETURN o.id AS id, c.name AS name, o.amount AS amount",
             "bootstrap":true, "stream": format!("{COMPONENT}/out")}), scope(generation), super::super::provider(indexes)?)?;
-    query.bind_bootstrap(Arc::new(NativeBootstrapResource(composite)))?;
+    query.bind_bootstrap_provider(Arc::new(NativeBootstrapResource(composite)))?;
     Ok(query)
 }
 

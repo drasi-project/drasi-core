@@ -15,6 +15,7 @@ mod admission;
 mod bootstrap;
 mod bootstrap_consumer;
 mod bootstrap_coordination;
+mod bootstrap_node;
 mod consumer;
 mod consumer_progress;
 mod control;
@@ -34,9 +35,8 @@ mod transaction;
 pub use activation_credentials::{NativeIdentityProviders, NativeIdentityResource};
 pub use bootstrap::{NativeBootstrapFactories, NativeBootstrapFactory, NativeBootstrapProxy};
 pub use bootstrap_consumer::NativeBootstrapResource;
-pub use bootstrap_coordination::{
-    NativeSourceBootstrapFactories, NativeSourceBootstrapProgress, NativeSourceBootstrapResource,
-};
+pub use bootstrap_coordination::{NativeSourceBootstrapProgress, NativeSourceBootstrapResource};
+pub use bootstrap_node::NativeBootstrapNodeFactory;
 pub use consumer::{NativeConsumerProxy, NativeConsumerResource};
 /// Native computation ABI version this host loads.
 pub use drasi_computation_plugin_abi::ABI_VERSION;

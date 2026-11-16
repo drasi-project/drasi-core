@@ -24,14 +24,14 @@ use drasi_core::models::{ElementReference, TimestampBound, TimestampRange};
 use drasi_index_garnet::{
     element_index::GarnetElementIndex, GarnetSessionControl, GarnetSessionState,
 };
-use shared_tests::redis_helpers::{setup_redis, RedisGuard};
+use shared_tests::redis_helpers::{setup_shared_redis, RedisGuard};
 use tokio::sync::OnceCell;
 
 static SHARED_REDIS: OnceCell<RedisGuard> = OnceCell::const_new();
 
 async fn shared_redis() -> &'static RedisGuard {
     SHARED_REDIS
-        .get_or_init(|| async { setup_redis().await })
+        .get_or_init(|| async { setup_shared_redis().await })
         .await
 }
 

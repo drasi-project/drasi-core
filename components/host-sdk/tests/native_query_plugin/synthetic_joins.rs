@@ -91,12 +91,14 @@ async fn matches_builtin() -> Result<()> {
         ("gql", ComputationQueryLanguage::Gql),
     ] {
         let joins = join_settings();
-        let mut query = plugin_factory("drasi.experimental/volatile-query")?.create_component(
+        let mut query = plugin_factory("drasi.query/indexed")?.create_component_with_processing(
             ComponentId::try_new("62180e0c-6690-5dff-9c21-c145e9a23680")?,
             json!({
                 "query": JOIN_QUERY, "language": language,
                 "volatile": true, "joins": joins,
             }),
+            scope(1),
+            Arc::new(InMemoryComputationProvider),
         )?;
         query.initialize(&crate::hooks::initialize_ctx()).await?;
         let mut reference = ContinuousQueryTransformer::new_configured(
@@ -453,14 +455,16 @@ async fn synthetic_join_file_provider_uses_the_same_core_builder() -> Result<()>
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("source.sqlite");
     create_database(&database)?;
-    let mut query = plugin_factory("drasi.experimental/provider-query")?
-        .create_component_with_bootstrap(
-            component_id()?,
-            json!({"query":JOIN_QUERY, "volatile":true, "joins":join_settings()}),
-            scope(1),
-            Arc::new(NativeBootstrapResource(file_bootstrap(&database, 1)?)),
-        )?;
+    let mut query = plugin_factory("drasi.query/indexed")?.create_component_with_processing(
+        component_id()?,
+        json!({"query":JOIN_QUERY, "volatile":true, "bootstrap":true, "joins":join_settings()}),
+        scope(1),
+        Arc::new(InMemoryComputationProvider),
+    )?;
     query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.bind_bootstrap_provider(Arc::new(NativeBootstrapResource(file_bootstrap(
+        &database, 1,
+    )?)))?;
     query.start(&crate::hooks::start_ctx()).await?;
     assert_eq!(
         component_rows(&query).await?,
@@ -476,7 +480,7 @@ async fn synthetic_join_changed_settings_auto_reset_rebuilds_from_file() -> Resu
     let database = directory.path().join("source.sqlite");
     let indexes = directory.path().join("indexes");
     create_database(&database)?;
-    let factory = plugin_factory("drasi.experimental/indexed-query")?;
+    let factory = plugin_factory("drasi.query/indexed")?;
     let mut original = factory.create_component_with_processing(
         component_id()?,
         json!({"query":JOIN_QUERY, "bootstrap":true, "joins":join_settings()}),
@@ -484,7 +488,7 @@ async fn synthetic_join_changed_settings_auto_reset_rebuilds_from_file() -> Resu
         provider(&indexes)?,
     )?;
     original.initialize(&crate::hooks::initialize_ctx()).await?;
-    original.bind_bootstrap(Arc::new(NativeBootstrapResource(file_bootstrap(
+    original.bind_bootstrap_provider(Arc::new(NativeBootstrapResource(file_bootstrap(
         &database, 1,
     )?)))?;
     original.start(&crate::hooks::start_ctx()).await?;
@@ -508,7 +512,7 @@ async fn synthetic_join_changed_settings_auto_reset_rebuilds_from_file() -> Resu
         provider(&indexes)?,
     )?;
     query.initialize(&crate::hooks::initialize_ctx()).await?;
-    query.bind_bootstrap(Arc::new(NativeBootstrapResource(file_bootstrap(
+    query.bind_bootstrap_provider(Arc::new(NativeBootstrapResource(file_bootstrap(
         &database, 2,
     )?)))?;
     query.start(&crate::hooks::start_ctx()).await?;
@@ -541,22 +545,11 @@ async fn synthetic_join_changed_settings_auto_reset_rebuilds_from_file() -> Resu
 fn synthetic_join_validation_rejects_invalid_settings_at_construction() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let indexes = directory.path().join("unopened-indexes");
-    let indexed = plugin_factory("drasi.experimental/indexed-query")?;
-    let volatile = plugin_factory("drasi.experimental/volatile-query")?;
-    for implementation in [
-        "drasi.experimental/volatile-query",
-        "drasi.experimental/indexed-query",
-        "drasi.experimental/provider-query",
-    ] {
-        assert_eq!(
-            plugin_factory(implementation)?
-                .metadata()
-                .configuration
-                .fields["joins"]
-                .value_type,
-            drasi_computation_plugin_sdk::ConfigType::Array
-        );
-    }
+    let indexed = plugin_factory("drasi.query/indexed")?;
+    assert_eq!(
+        indexed.metadata().configuration.fields["joins"].value_type,
+        drasi_computation_plugin_sdk::ConfigType::Array
+    );
     let mut invalid = vec![json!(null), json!({}), json!([{}])];
     let mut duplicate = join_settings();
     duplicate.push(duplicate[0].clone());
@@ -584,10 +577,12 @@ fn synthetic_join_validation_rejects_invalid_settings_at_construction() -> Resul
                 provider(&indexes)?,
             )
             .is_err());
-        assert!(volatile
-            .create_component(
+        assert!(indexed
+            .create_component_with_processing(
                 component_id()?,
                 json!({"query":JOIN_QUERY, "volatile":true, "joins":joins}),
+                scope(1),
+                Arc::new(InMemoryComputationProvider),
             )
             .is_err());
     }
@@ -598,7 +593,7 @@ fn synthetic_join_validation_rejects_invalid_settings_at_construction() -> Resul
 #[tokio::test(flavor = "current_thread")]
 async fn synthetic_join_empty_and_omitted_settings_share_retained_identity() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let factory = plugin_factory("drasi.experimental/indexed-query")?;
+    let factory = plugin_factory("drasi.query/indexed")?;
     let mut configuration = json!({"query":"MATCH (n:Item) RETURN n.value AS value"});
     let mut query = factory.create_component_with_processing(
         component_id()?,

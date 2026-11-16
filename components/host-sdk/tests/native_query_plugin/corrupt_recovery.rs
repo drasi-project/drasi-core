@@ -40,7 +40,7 @@ fn query(
             QueryPublicationMode::Atomic
         },
     )?;
-    query.bind_bootstrap(Arc::new(NativeBootstrapResource(
+    query.bind_bootstrap_provider(Arc::new(NativeBootstrapResource(
         super::bootstrap::file_provider(database, generation)?,
     )))?;
     Ok(query)

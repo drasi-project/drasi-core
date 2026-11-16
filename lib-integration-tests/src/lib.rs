@@ -17,8 +17,7 @@ pub fn query_factory() -> Arc<dyn ComponentFactory> {
                 .factories()
                 .iter()
                 .find(|factory| {
-                    factory.metadata().implementation.name.as_ref()
-                        == "drasi.experimental/indexed-query"
+                    factory.metadata().implementation.name.as_ref() == "drasi.query/indexed"
                 })
                 .expect("native indexed query factory")
                 .for_ordinary_queries()

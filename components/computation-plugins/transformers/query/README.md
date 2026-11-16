@@ -9,29 +9,25 @@ it through `DrasiLib`, computation pipelines and Server query APIs. There is no
 implicit query factory or fallback evaluator. The optional `language` is
 `cypher` (default) or `gql`.
 
-- `drasi.experimental/volatile-query` requires `query` and `volatile: true`.
-  It exposes a current-result snapshot on `out`. Its indexes, result rows and
-  output sequence are discarded on stop; restart uses a new volatile output epoch.
-- `drasi.experimental/indexed-query` requires `query` and a host-provided
-  `processing` resource. The ordinary-query adapter supplies the actual selected
-  index provider. In-memory providers use the explicitly volatile profile and
-  retain their evaluator and state across healthy stop/start. Persistent providers
-  use atomic publication by default, requiring a proven atomic result domain and
-  process-restart durability. Explicit non-atomic publication is described below.
-  The persistent profile commits indexes, source progress, current
-  result rows and retained output together. It restores the result snapshot
-  and replays unconfirmed output after restart. With `bootstrap: true`, bind an
-  existing provider as `bootstrap`; initialization is durable and remains hidden
-  until the provider finishes and its completion state and watermarks commit.
-  Simple, grouped, minimum-aggregate, GQL and relationship queries run through
-  the loaded library. Archive queries use the actual provider's archive index.
-- `drasi.experimental/provider-query` requires `query`, `volatile: true` and a
-  host-bound `bootstrap` resource containing an existing bootstrap provider.
-  It is the quiescent file-provider integration path described below.
+`drasi.query/indexed` requires `query` and a host-provided
+`processing` resource. The ordinary-query adapter supplies the actual selected
+index provider. In-memory providers use the explicitly volatile profile and
+retain their evaluator and state across healthy stop/start. Persistent providers
+use atomic publication by default, requiring a proven atomic result domain and
+process-restart durability. Explicit non-atomic publication is described below.
+The persistent profile commits indexes, source progress, current
+result rows and retained output together. It restores the result snapshot
+and replays unconfirmed output after restart. With `bootstrap: true`, bind an
+existing provider as `bootstrap`; initialization is durable and remains hidden
+until the provider finishes and its completion state and watermarks commit.
+Simple, grouped, minimum-aggregate, GQL and relationship queries run through
+the loaded library. Archive queries use the actual provider's archive index.
+The Host SDK registers this factory for ordinary queries as
+`drasi.query/continuous`.
 
-The factories use the query definition, Core builder configuration, canonical
+The factory uses the query definition, Core builder configuration, canonical
 result state and readers extracted from the built-in implementation into
-`drasi-query-common`. They do not maintain a separate projection/history engine.
+`drasi-query-common`. It does not maintain a separate projection/history engine.
 The native adapter retains the actual host-owned storage and progress boundary.
 
 The indexed profile supports ordinary query creation/replacement/removal,
@@ -66,8 +62,8 @@ source-only instance needs no query factory; creating an ordinary query without
 one returns `QueryFactoryNotRegistered`. An existing instance can register its
 factory once with `register_query_factory`. Explicit computation pipelines use
 `query_factory`; `DrasiLib::computation_pipeline()` inherits the instance's choice.
-The ordinary wrapper has the distinct implementation name
-`drasi.experimental/indexed-query/ordinary`, because its authoring schema differs
+The continuous-query wrapper has the distinct implementation name
+`drasi.query/continuous`, because its authoring schema differs
 from the raw plugin factory's schema.
 
 `NativePlugin::register_factories` and
@@ -87,7 +83,7 @@ Statically linked hosts can use `NativePlugin::from_definition(plugin()?)?` and
 register the same factory through the validated native ABI. `drasi-lib` itself
 does not depend on the Host SDK or bundle a query plugin.
 
-All factories accept optional `stream`, `result: {"label": "..."}` and positive
+The factory accepts optional `stream`, `result: {"label": "..."}` and positive
 `outbox_capacity` settings. The default stream is `<component>/out`; native
 retention defaults to one output. Result datasets use the existing
 instance/graph/component/output identity calculation. Retention capacity is an
@@ -225,14 +221,13 @@ custom query cdylib whose middleware reads the query's scoped indexes.
 
 ## Configured synthetic joins
 
-All three factories accept an optional `joins` array using the existing
+The factory accepts an optional `joins` array using the existing
 `QueryJoinConfig` format. A synthetic join matches properties on nodes without
 requiring relationship records from their sources:
 
 ```json
 {
   "query": "MATCH (o:Order)-[:PLACED_BY]->(c:Customer) RETURN o.id AS order_id, c.name AS customer",
-  "volatile": true,
   "joins": [
     {
       "id": "PLACED_BY",
@@ -245,9 +240,8 @@ requiring relationship records from their sources:
 }
 ```
 
-For the indexed factory, omit `volatile` and bind its processing resource as
-usual. Provider and upstream-snapshot bootstrap use the same configured joins
-as live processing. The factory uses the shared ordinary-query validation:
+Bind its processing resource as usual. Provider bootstrap uses the same
+configured joins as live processing. The factory uses the shared ordinary-query validation:
 unique join IDs, at least two keys, and nonempty identifiers without whitespace
 or control characters. Invalid joins fail construction before opening storage.
 
@@ -312,8 +306,7 @@ Stored configuration includes the state format. An incompatible store is
 rejected rather than attempting to reconstruct missing rows from incomplete
 output history; use fresh storage when changing that format.
 
-The indexed factory exposes the same `out` snapshot contract as the volatile
-factory. Startup reads the existing live-result store in bounded pages, validates
+The indexed factory exposes a current-result snapshot on `out`. Startup reads the existing live-result store in bounded pages, validates
 row identities and the committed row count, and publishes the restored map only
 after the host operation succeeds. The Host does not keep another projection.
 Snapshot cursors use the persistent producer and logical query sequence, not
@@ -477,8 +470,8 @@ supports independent subscriptions; cancellation does not consume an update.
 Failure or cancellation leaves the last committed positions unchanged and
 marks the view failed/not ready. Stop revokes old views and subscriptions;
 obtain a fresh view for the new activation. View handles keep no index/store
-owner alive. The raw `volatile-query` and `provider-query` factories do not allocate this publisher.
-The indexed factory does allocate it for ordinary memory queries, using the
+owner alive. The indexed factory allocates this publisher for ordinary memory
+queries, using the
 actual graph-provided progress owner. Server progress metrics observe that
 committed input/output pair, including no-op input advances.
 
@@ -532,158 +525,7 @@ These are per-input cuts, not a globally atomic distributed snapshot.
 
 The standard native middleware transformer also accepts optional quiescent
 bootstrap. Its initial and live records pass through the same map/relabel
-pipeline before a downstream query snapshots its output.
-
-## Upstream snapshot bootstrap
-
-The volatile factory can initialize its evaluator from configured upstream
-output snapshots before accepting live changes:
-
-```json
-{
-  "query": "MATCH (o:Order), (c:Customer) WHERE o.customerId = c.id RETURN o.id AS orderId, c.name AS customer, o.amount AS amount",
-  "volatile": true,
-  "bootstrap": [
-    { "component": "orders", "port": "data" },
-    { "component": "customers", "port": "data" }
-  ]
-}
-```
-
-Bind a host `NativeOutputSnapshotsResource` as the `output_snapshots` dependency
-and allow each configured output. The nonempty bootstrap list must cover every
-declared incoming edge exactly once. Inputs can share the `in` port but must
-have distinct streams there. Unknown, duplicate, missing and ambiguous bindings
-are rejected before initialization. The previous experimental single-object
-form is rejected; use a one-element array for one upstream.
-
-The same generic snapshot service streams each input's full-image records into
-one evaluator, in configured order. Initial results stay private until every
-snapshot finishes. A later snapshot failure does not start the query or publish
-the partial initialization.
-
-Each input port/stream has its own captured producer identity and logical
-position. Live input must carry matching `GraphProducerProgress`. Covered
-positions are ignored independently; missing progress, an undeclared stream or
-a changed epoch is an error. The host must retain each live input before
-capturing its snapshot: this read service does not create atomic snapshot/live
-subscriptions itself.
-
-This remains deliberately volatile. Initial evaluation does not emit live
-result events or consume output sequence numbers.
-Instead, `out` exposes the completed initial result snapshot at logical sequence
-zero. Later completed changes update those same rows and the snapshot cursor;
-live envelopes carry that cursor's producer identity and logical sequence.
-Failed or stopped processing does not expose a ready snapshot.
-
-A second volatile query can select the first query's `out` as its bootstrap
-endpoint, then consume its live output through the graph. Initial aggregate
-results contain the final rows, not every intermediate aggregate update during
-snapshot loading.
-
-The running-upstream case is covered with an already-bound, lossless live edge.
-The test holds a real native snapshot after capture while the upstream query
-continues processing, fills the bounded queues, then completes initialization.
-Queued positions covered by the snapshot are skipped, and all later inserts,
-updates and deletes match an uninterrupted reference query. The same case runs
-on both Tokio flavors. The existing handover logic passes without a separate
-runtime implementation for this scenario.
-
-The two-input proof uses snapshot positions 100 and 3, then live changes on
-both streams, including customer position 4 after order position 101. It also
-holds the second snapshot while the first input produces live changes, verifies
-that no partial result is readable, and checks those changes after initialization.
-Both runtime flavors are covered; reversed provider order and failed-second-
-snapshot cleanup are checked. These are independent per-input cuts, not a
-globally atomic snapshot across upstream systems.
-
-This does not make an unbound or lossy live path safe. This volatile endpoint-array
-profile does not retain restart history; use the indexed provider binding above
-for coordinated handover and durable recovery. Wider fan-in and other
-topology/provider combinations are not yet qualified. The existing native snapshot
-frame limits still apply; large native snapshot transfer is not solved here.
-The indexed factory exposes result snapshots and uses the separate boolean
-`bootstrap` option for an explicitly bound provider; the endpoint-array shorthand
-above remains specific to the volatile factory.
-
-## Existing bootstrap-provider integration
-
-`drasi.experimental/provider-query` consumes an existing
-`ComputationBootstrapProvider` through the Host SDK's
-`NativeBootstrapResource`. This is separate from the upstream-output snapshot
-API: provider records are not wrapped in a fake producer snapshot, and snapshot
-ordinals are not adopted as live-source watermarks.
-
-The actual native [`drasi.sqlite/file-bootstrap`](../../bootstrappers/sqlite/README.md)
-library is covered end to end with the actual query library and a real SQLite
-database, inside a `drasi-lib` graph. SQLite schema discovery, row/key mapping,
-streaming and worker cleanup remain in that existing provider.
-The existing [`drasi.sqlite/changes`](../../sources/sqlite/README.md) library can
-then supply live changes to the same query. All three are independently loaded
-native libraries, not source/query adapters.
-
-For embedded construction:
-
-- Load the two libraries and select their existing file-bootstrap and
-  provider-query factories.
-- Create the provider with `NativeBootstrapFactory::create_query_provider`,
-  using the target query's component ID and actual instance/graph scope.
-- Put `Arc<NativeBootstrapResource>` in a `ResourceRole::Bootstrap` handle and
-  bind the query specification's `bootstrap` dependency to it. Graph-owned
-  native providers also retain their existing resource-cleanup implementation.
-- Use query configuration such as
-  `{"query":"MATCH (n:items) RETURN sum(n.amount) AS total","volatile":true}`.
-  This factory does not take the upstream `bootstrap` endpoint array.
-- For SQLite live capture, also load `drasi.sqlite/changes`. Use the same file,
-  table/key mapping, source component ID and stream as the file provider. Connect
-  the source's `out` to the query's `in` before starting either component. Start
-  the source to establish capture, await query startup, then admit writes.
-  Starting capture alone is not permission to write during this file snapshot.
-
-The host calls the provider's `prepare`, streams its `snapshot` envelopes into
-the native transformer, checks `complete_snapshot`/`completion_state`, and awaits
-provider `stop` before enabling query processing and result reads. Initial
-results appear at output sequence zero without live result emissions. Failed
-initialization stops the provider and transformer; failed cleanup remains an
-error and prevents unsafe restart. An accepted cleanup future is retained if its
-waiter is cancelled.
-
-**Keep file writers quiescent until startup finishes.** This mode rejects
-progress-bound providers, non-ready preparation, source watermarks and durable
-completion state. It does not silently discard those requirements or upgrade
-file snapshots to coordinated/recoverable bootstrap. SQLite coordinated/shared
-providers and their durable handover remain unconnected. Server configuration
-for this new resource/factory is outside this increment.
-
-The [provider integration cases](../../../host-sdk/tests/native_query_plugin/provider.rs)
-show the complete graph binding. They verify initial results and rereading a
-changed file on restart on both runtimes, missing-file errors, scope validation,
-and stopping a real bounded SQLite stream after the consumer rejects a row.
-
-The [live SQLite cases](../../../host-sdk/tests/native_query_plugin/sqlite_live.rs)
-connect the actual source, file provider and query in one graph on both Tokio
-runtime flavors. One `items` table uses its primary key, source ID `sqlite` and
-stream `sqlite/out`. Initial rows come only from the file provider. Subsequent
-insert/update/delete requests use the source's existing REST endpoints, which
-execute SQL on its capture-owned connection; an independent read-only connection
-verifies the database contents. The cases await actual query output, compare
-exact live before/after values and snapshots, and verify that updates/deletes
-address the original bootstrapped result identities. Arbitrary external
-connection writes are not captured by that connection-local SQLite hook.
-No Drasi Server API or hand-built change envelopes are involved. Writers remain
-quiescent until initialization completes; this is not overlapping snapshot/live
-handover or durable recovery.
-
-Interrupted startup is covered by the same real integration. A child process
-holds an exclusive SQLite lock, preventing the provider's first snapshot read.
-Cancelling the startup wait leaves the accepted initialization owned by the
-graph; request query stop to cancel it. Stop remains pending while the read is
-blocked, result reads remain unavailable, and the provider cannot be reused or
-retired before cleanup finishes. Releasing the lock allows awaited stop, a fresh
-bootstrap on the same query, and a captured SQL update without stopping the
-independent source. This passes on both runtime flavors without production
-lifecycle changes. It does not qualify caller cancellation after partial row
-loading, expiry of the provider's cleanup deadline, or other provider types.
+pipeline before it exposes them as its output snapshot.
 
 ## Development
 
@@ -694,25 +536,9 @@ make build-test-plugins
 cargo test --locked -p drasi-host-sdk --features test-support --test native_query_plugin -- --test-threads=1
 ```
 
-Use the `bootstrap::provider::` Cargo test filter for only the real file-provider
-integration, live capture and unsupported-handover guards. Use
-the `bootstrap::provider::sqlite_live::` filter for the four real-source cases:
-ordinary bootstrap/mutations and interrupted-startup restart on both runtimes.
-The ignored `sqlite_read_lock_holder` entry is a subprocess fixture launched by
-the interruption cases, not a skipped regression case. Use the `bootstrap::` filter for snapshot initialization,
-result-snapshot behavior, query chaining and running-upstream handover. During
-focused development, use the `bootstrap::live_handover::` or
-`bootstrap::two_inputs::` test filter after rebuilding the actual query library:
-
-```sh
-cargo test --locked -p drasi-host-sdk --test native_query_plugin bootstrap::two_inputs:: -- --test-threads=1
-```
-
-For only the interrupted-startup scenario after building the three libraries:
-
-```sh
-cargo test --locked -p drasi-host-sdk --test native_query_plugin interrupted_sqlite_bootstrap -- --test-threads=1
-```
+Use the `durable::bootstrap::` Cargo test filter for the real file-provider
+initialization cases, and `bootstrap::provider::middleware::` for the standard
+middleware transformer's quiescent file bootstrap with live SQLite capture.
 
 Use the `durable::` filter for the indexed restart,
 process-exit, persistent snapshot and atomic state-boundary cases. Its process

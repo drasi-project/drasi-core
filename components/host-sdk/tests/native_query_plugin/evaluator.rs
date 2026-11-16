@@ -181,7 +181,7 @@ fn query(
     if bootstrap {
         let database = directory.path().join("source.sqlite");
         sqlite::create_database(&database)?;
-        query.bind_bootstrap(Arc::new(NativeBootstrapResource(file_provider(
+        query.bind_bootstrap_provider(Arc::new(NativeBootstrapResource(file_provider(
             &database, 1,
         )?)))?;
     }
@@ -315,7 +315,7 @@ async fn retained_evaluator_reused_for_prepared_bootstrap_reset() -> Result<()> 
         }),
     )?;
     query.initialize(&crate::hooks::initialize_ctx()).await?;
-    query.bind_bootstrap(Arc::new(NativeBootstrapResource(Arc::new(
+    query.bind_bootstrap_provider(Arc::new(NativeBootstrapResource(Arc::new(
         lifecycle::PausedProvider {
             inner: file_provider(&database, 2)?,
             gate,

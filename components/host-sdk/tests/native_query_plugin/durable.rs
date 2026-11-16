@@ -62,9 +62,7 @@ fn factory() -> Result<Arc<NativeFactory>> {
     plugin
         .factories()
         .iter()
-        .find(|factory| {
-            factory.metadata().implementation.name.as_ref() == "drasi.experimental/indexed-query"
-        })
+        .find(|factory| factory.metadata().implementation.name.as_ref() == "drasi.query/indexed")
         .cloned()
         .context("indexed query factory missing")
 }

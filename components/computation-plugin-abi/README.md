@@ -1,16 +1,22 @@
 # Native ComputationGraph ABI
 
 This dependency-free crate freezes the C layouts for native computation plugins.
-The ABI version is **4.0.0**, independent of crate releases and the
+The ABI version is **5.0.0**, independent of crate releases and the
 Source/Reaction/Bootstrap SDK **0.17.0** (which also accepts 0.16 fast-mode plugins).
 Its two symbols are
 `drasi_computation_plugin_metadata` and `drasi_computation_plugin_entry`.
 Do not call a legacy registration function to interpret native metadata.
-The native payload contract is **wire version 4**: UUID component identities,
+The native payload contract is **wire version 5**: UUID component identities,
 bounded MessagePack with bulk binary buffers and binary computation envelopes.
-Other wire versions are rejected. The family magic is `DRASICG4` and the header
-major is 4. This does not change BinaryEnvelopeCodec/EnvelopeCodec serialization
+Other wire versions are rejected. The family magic is `DRASICG5` and the header
+major is 5. This does not change BinaryEnvelopeCodec/EnvelopeCodec serialization
 version 2.
+
+Wire 5 descriptors carry a port `kind` (`Data` or `Bootstrap`, serialized only
+for bootstrap ports). Bootstrap ports are optional graph connections that carry
+bootstrap sessions between providers, sources and consumers. Control
+notifications include a typed `BootstrapRequest` that addresses one bootstrap
+session to its consumer edge.
 
 Headers must match the family magic and major before reading any subsequent
 field. A host accepts the same major with an older or equal minor, whose
@@ -150,7 +156,7 @@ complete consumer set. `PluginConsumerProgressV1` supplies per-factory discovery
 construction with `ConsumerProgressV1`, and immutable upstream-retention inspection.
 An advertising factory requires the binding and must reject unbound creation.
 Only source and transformer producers support it; single-owner recovery cannot
-be combined with this capability. Base ABI 4.0, wire 4 and recovery-v1 are unchanged.
+be combined with this capability. Base ABI 5.0, wire 5 and recovery-v1 are unchanged.
 
 The identity fixes the graph, producer and 1-256 distinct consumer IDs. Each
 snapshot carries every member's existing recovery-v1 snapshot as a binary frame,
@@ -181,8 +187,11 @@ Absence is valid and does not imply any generic ordering.
 
 ## Optional bootstrap and consumer services, version 1
 
-`drasi_computation_plugin_bootstrap_v1` negotiates query-owned bootstrap factories,
-bounded snapshot streaming and borrowed initialization-state calls. Preparation,
+`drasi_computation_plugin_bootstrap_v1` negotiates bootstrap factories,
+bounded snapshot streaming and borrowed initialization-state calls. The Host
+publishes each bootstrap factory as a graph component with the
+`BootstrapProvider` role; a provider instance serves one bootstrap session for
+the consumer named by the session request. Preparation,
 snapshot polling, completion and stop retain their provider/generation ownership.
 The query owns the final state/watermark commit; a stream end is not that commit.
 
@@ -195,7 +204,7 @@ subsequent generation/index/key request is limited to 4096 bytes. Batch release
 rejects stale generations or active calls. Explicit retryable handler failures use
 the extension's `RETRYABLE` status, not an empty success response.
 
-Both extensions leave base tables, strict metadata, ABI 4.0 and wire 4 unchanged.
+Both extensions leave base tables, strict metadata, ABI 5.0 and wire 5 unchanged.
 Only negotiated, bound factories may use them; missing services never imply
 recovery guarantees. See the SDK's authoring and lifecycle contracts.
 
@@ -203,7 +212,7 @@ recovery guarantees. See the SDK's authoring and lifecycle contracts.
 
 `drasi_computation_plugin_output_reads_v2` and
 `drasi_computation_plugin_output_follow_v2` are independent extensions; base ABI
-4.0, wire 4 and every other table are unchanged. A factory declares the output
+5.0, wire 5 and every other table are unchanged. A factory declares the output
 ports it serves in manifest `capabilities.output_snapshots`, `output_replays` and
 `output_follows` (empty lists are omitted); the Host requires the matching
 extension exactly then.

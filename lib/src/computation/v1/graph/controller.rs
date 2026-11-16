@@ -76,6 +76,7 @@ struct Instance {
     sink_batch: Option<Box<super::sink_batching::SinkBatchState>>,
     input_progress: Option<Box<super::input_progress::InputProgress>>,
     outputs: Vec<Outgoing>,
+    bootstrap: crate::computation::v1::BootstrapPorts,
     attempted: bool,
     initialization_attempted: bool,
     initialized: bool,
@@ -163,6 +164,7 @@ impl InstanceSlot {
                 sink_batch: None,
                 input_progress: None,
                 outputs: Vec::new(),
+                bootstrap: Default::default(),
                 attempted: false,
                 initialization_attempted: false,
                 initialized: false,
@@ -1501,10 +1503,11 @@ fn binding_dependencies(graph: &ComputationGraph, id: &ComponentId) -> Vec<Compo
                 && graph.snapshot.unbound_relationships.iter().any(|edge| {
                     edge.definition.to == endpoint && !edge.policy.required_for_binding
                 });
-        if !bound && !optional_input {
+        if !bound && !optional_input && !port.is_optional() {
             missing.insert(id.clone());
         }
         if port.direction() == super::super::PortDirection::Output
+            && port.kind() == super::super::PortKind::Data
             && !node.output_streams.contains_key(port.id())
         {
             missing.insert(id.clone());
@@ -1721,12 +1724,14 @@ fn binding_waits(graph: &ComputationGraph, id: &ComponentId) -> Vec<super::super
                 && graph.snapshot.unbound_relationships.iter().any(|edge| {
                     edge.definition.to == endpoint && !edge.policy.required_for_binding
                 });
-        if !connected && !optional_input {
+        if !connected && !optional_input && !port.is_optional() {
             waiting.push(DependencyWait::Connection {
                 endpoint: endpoint.clone(),
             });
         }
-        if port.direction() == PortDirection::Output && !node.output_streams.contains_key(port.id())
+        if port.direction() == PortDirection::Output
+            && port.kind() == super::super::PortKind::Data
+            && !node.output_streams.contains_key(port.id())
         {
             waiting.push(DependencyWait::Stream { endpoint });
         }
@@ -2819,6 +2824,41 @@ fn install_pipe(
     controls
         .0
         .insert(index, provided.control.take().expect("owned pipe control"));
+    let bootstrap = graph.nodes[graph.ids[&edge.definition.from.component]]
+        .descriptor
+        .ports()
+        .iter()
+        .any(|port| {
+            port.id() == &edge.definition.from.port
+                && port.kind() == crate::computation::v1::PortKind::Bootstrap
+        });
+    if bootstrap {
+        let outgoing = provided.outgoing.take().expect("owned pipe output");
+        let incoming = provided.incoming.take().expect("owned pipe input");
+        from.bootstrap.install_output(
+            index,
+            crate::computation::v1::BootstrapOutputEdge {
+                output_port: edge.definition.from.port.clone(),
+                consumer: edge.definition.to.component.clone(),
+                input_port: edge.definition.to.port.clone(),
+            },
+            outgoing.sender,
+        );
+        to.bootstrap.install_input(
+            index,
+            crate::computation::v1::BootstrapInputEdge {
+                producer: crate::computation::v1::OutputEndpoint {
+                    component: edge.definition.from.component.clone(),
+                    port: edge.definition.from.port.clone(),
+                },
+                input_port: edge.definition.to.port.clone(),
+                local: graph.nodes[graph.ids[&edge.definition.from.component]].role
+                    == drasi_computation_contracts::ComponentRole::BootstrapProvider,
+            },
+            incoming.receiver,
+        );
+        return Ok(());
+    }
     from.outputs
         .push(provided.outgoing.take().expect("owned pipe output"));
     to.inputs
@@ -2998,6 +3038,7 @@ impl PeerDriver {
             } else if matches!(
                 message.notification,
                 crate::computation::v1::ControlNotification::Custom { .. }
+                    | crate::computation::v1::ControlNotification::BootstrapRequest(_)
             ) {
                 anyhow::bail!(
                     "component {} has no handler for a custom control message",
@@ -4508,6 +4549,10 @@ impl Operations {
                             output_catalogue.clone(),
                             super::ConstructionBindings {
                                 inputs: input_bindings,
+                                bootstrap_producers: super::specification::snapshot_bootstrap_producers(
+                                    &admission_snapshot,
+                                    node.descriptor.id(),
+                                ),
                                 replacement: lease.replacement,
                                 update: lease.pending_update.as_ref()
                                     .filter(|update| update.plan.mode == crate::computation::v1::ComponentUpdateMode::Recreate)
@@ -4577,6 +4622,8 @@ impl Operations {
                     if let Some(control) = peer_control {
                         lease.component.bind_control(control);
                     }
+                    let bootstrap = lease.bootstrap.clone();
+                    lease.component.bind_bootstrap(bootstrap);
                     if operation == Operation::Create && !lease.initialized {
                         if lease.initialization_attempted || lease.disposal_started {
                             return Err(topology("failed initialization requires a newly constructed object"));
@@ -4618,6 +4665,7 @@ impl Operations {
                                             resources.clone(), &factory.descriptor().configuration,
                                             output_catalogue.clone(), super::ConstructionBindings {
                                                 inputs: bindings,
+                                                bootstrap_producers: super::specification::snapshot_bootstrap_producers(&admission_snapshot, node.descriptor.id()),
                                                 replacement: false,
                                                 update: None,
                                             },
@@ -4749,6 +4797,8 @@ impl Operations {
                     if let Some(control) = peer_control {
                         lease.component.bind_control(control);
                     }
+                    let bootstrap = lease.bootstrap.clone();
+                    lease.component.bind_bootstrap(bootstrap);
                     super::bind_inputs(&mut lease.component, &node, &admission_snapshot).await?;
                     if !already_activated {
                         let context = crate::computation::v1::StartContext::new(
@@ -4780,6 +4830,7 @@ impl Operations {
                                 resources.clone(), &factory.descriptor().configuration,
                                 output_catalogue.clone(), super::ConstructionBindings {
                                     inputs: bindings,
+                                    bootstrap_producers: super::specification::snapshot_bootstrap_producers(&admission_snapshot, node.descriptor.id()),
                                     replacement: false,
                                     update: None,
                                 },
@@ -6061,12 +6112,17 @@ impl Operations {
                             .all(|port| match port.direction() {
                                 crate::computation::v1::PortDirection::Input => {
                                     lease.inputs.iter().any(|input| &input.port == port.id())
+                                        || port.kind() != crate::computation::v1::PortKind::Data
                                 }
                                 crate::computation::v1::PortDirection::Output => {
-                                    lease.outputs.iter().any(|output| &output.port == port.id())
-                                        && graph.nodes[completion.index]
-                                            .output_streams
-                                            .contains_key(port.id())
+                                    port.kind() != crate::computation::v1::PortKind::Data
+                                        || (lease
+                                            .outputs
+                                            .iter()
+                                            .any(|output| &output.port == port.id())
+                                            && graph.nodes[completion.index]
+                                                .output_streams
+                                                .contains_key(port.id()))
                                 }
                             });
                     let waiting = if connected {
@@ -7992,6 +8048,7 @@ pub(super) async fn cleanup(graph: &mut ComputationGraph, dispose: bool) -> Vec<
                 lease.inputs.clear();
                 lease.sink_batch = None;
                 lease.outputs.clear();
+                lease.bootstrap.clear();
                 Ok(())
             }) {
                 errors.push(error);

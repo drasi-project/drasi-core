@@ -177,6 +177,12 @@ impl SystemMetadata {
         self
     }
 
+    /// The same metadata without its event-local control.
+    pub fn without_control(mut self) -> Self {
+        self.control = None;
+        self
+    }
+
     /// Immutable stale-admission policy for this event. New metadata defaults to
     /// `EventTime`; `ProducerSequence` is only valid when the receiver has
     /// externally validated the producer identity/epoch and accepted sequence.

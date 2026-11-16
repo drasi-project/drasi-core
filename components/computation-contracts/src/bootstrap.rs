@@ -36,6 +36,8 @@ pub trait BootstrapState: Send + Sync {
     async fn write(&self, state: Bytes) -> anyhow::Result<()>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BootstrapWatermark {
     pub stream: StreamId,
     pub source_id: Option<ComponentId>,

@@ -253,38 +253,47 @@ async fn hosted_file_snapshot() -> Result<()> {
         })?;
         let sql = source.handle();
         let output = Endpoint::new(source.descriptor().id().clone(), PortId::try_new("out")?);
+        // One local provider node serves both queries over separate bootstrap edges.
+        let node = Arc::new(computation::NativeBootstrapNodeFactory::new(file_factory(&native)?.clone()));
+        let provider = id("provider");
+        let specification = node.specification_from_config(provider.clone(), configuration(&path))?;
         core.add_components(
             ComponentBatch::builder()
                 .source(name("source"), Box::new(source))
                 .bind_stream(output.clone(), stream("source/out"))
+                .component(name("provider"), specification, node)
                 .build()?,
         )
         .await?;
         let mut pipeline = core.computation_pipeline()?.native_source(output.clone())?;
         for query in ["query", "observer"] {
-            let query_id = id(query);
             let query_name = drasi_core_types::ComponentName::try_new(query)
                 .expect("fixture component name");
-            let snapshot = file_factory(&native)?.create_provider(
-                query_id.clone(), configuration(&path),
-                Some(Scope {
-                    instance_id: INSTANCE.into(),
-                    graph_id: core.computation_control()?.desired_snapshot().id.to_string(),
-                    generation: 1,
-                }),
-                None,
-            )?;
-            pipeline = pipeline.query_bootstrap(&query_id, snapshot)?.query(
+            pipeline = pipeline.query(
                 drasi_lib::Query::cypher(query_name)
                     .query("MATCH (n:items) RETURN n.id AS id,n.value AS value")
                     .from_input_port_by_id(output.component.clone(), output.port.clone())
                     .enable_bootstrap(true)
+                    .with_bootstrap_provider(drasi_lib::config::ComponentReference::by_id(provider.clone()))
                     .build()?
                     .with_assigned_id(id(query)),
             );
         }
         core.add_components(pipeline.build()?).await?;
         core.start().await?;
+        // The local provider is exclusive: no query bootstraps from its input.
+        let observed = core.computation_control()?.observed();
+        let bootstrap_edges: Vec<_> = observed
+            .relationships
+            .keys()
+            .filter(|edge| edge.to.port.as_str() == "bootstrap")
+            .map(|edge| (edge.from.component.clone(), edge.to.component.clone()))
+            .collect();
+        let mut expected = vec![(provider.clone(), id("observer")), (provider.clone(), id("query"))];
+        expected.sort();
+        let mut actual = bootstrap_edges;
+        actual.sort();
+        assert_eq!(actual, expected);
         let mut subscriptions = Vec::new();
         for query in ["query", "observer"] {
             let query = drasi_core_types::ComponentName::try_new(query)

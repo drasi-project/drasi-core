@@ -52,6 +52,7 @@ pub struct InitializeContext {
 pub struct StartContext {
     scope: OperationScope,
     credentials: Option<ActivationCredentials>,
+    fresh_start: Option<bool>,
 }
 
 /// Context for [`crate::NativeComponent::pause`].
@@ -110,7 +111,26 @@ impl InitializeContext {
 
 impl StartContext {
     pub fn new(scope: OperationScope, credentials: Option<ActivationCredentials>) -> Self {
-        Self { scope, credentials }
+        Self {
+            scope,
+            credentials,
+            fresh_start: None,
+        }
+    }
+
+    /// Report whether this is a source's very first start.
+    pub fn with_fresh_start(mut self, fresh_start: Option<bool>) -> Self {
+        self.fresh_start = fresh_start;
+        self
+    }
+
+    /// For a source: `Some(true)` on its very first start, when no consumer
+    /// has a saved live position or a completed bootstrap. The host then holds
+    /// live delivery until the first bootstrap boundary, as a legacy source
+    /// waits for its first bootstrap; later consumers bootstrap while live
+    /// changes continue. `None` when the host does not know.
+    pub fn fresh_start(&self) -> Option<bool> {
+        self.fresh_start
     }
 
     /// Resolved activation credentials, present only when the factory declares
@@ -138,6 +158,7 @@ impl std::fmt::Debug for StartContext {
                 "credentials",
                 &self.credentials.as_ref().map(|_| "<redacted>"),
             )
+            .field("fresh_start", &self.fresh_start)
             .finish()
     }
 }

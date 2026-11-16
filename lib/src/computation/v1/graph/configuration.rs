@@ -94,6 +94,7 @@ impl Component {
             Self::Transformer(component) => component.configuration(),
             Self::Sink(component) => component.configuration(),
             Self::Service(component) => component.configuration(),
+            Self::BootstrapProvider(component) => component.configuration(),
             Self::Deferred { specification, .. } => {
                 return Ok(CapturedComponentConfiguration::Declared {
                     values: specification.configuration.clone(),

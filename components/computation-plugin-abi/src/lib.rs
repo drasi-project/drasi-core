@@ -23,11 +23,11 @@
 
 use std::{ffi::c_void, fmt, mem::size_of, ptr};
 
-pub const ABI_VERSION: &str = "4.0.0";
-pub const ABI_MAJOR: u16 = 4;
+pub const ABI_VERSION: &str = "5.0.0";
+pub const ABI_MAJOR: u16 = 5;
 pub const ABI_MINOR: u16 = 0;
-pub const ABI_MAGIC: u64 = 0x4452_4153_4943_4734; // DRASICG4
-pub const WIRE_VERSION: u32 = 4;
+pub const ABI_MAGIC: u64 = 0x4452_4153_4943_4735; // DRASICG5
+pub const WIRE_VERSION: u32 = 5;
 pub const METADATA_SYMBOL: &[u8] = b"drasi_computation_plugin_metadata\0";
 pub const ENTRY_SYMBOL: &[u8] = b"drasi_computation_plugin_entry\0";
 pub const MAX_METADATA_BYTES: usize = 1024 * 1024;
@@ -69,7 +69,7 @@ impl Header {
     }
 
     /// Accepts the same family and major, and an older or equal minor whose
-    /// layout size is known. Only minor 0 exists in 4.x, so its size is exact.
+    /// layout size is known. Only minor 0 exists in 5.x, so its size is exact.
     pub fn validate<T>(&self) -> Result<(), InvalidHeader> {
         let current = Self::new::<T>();
         if self.magic == current.magic
@@ -445,12 +445,12 @@ mod tests {
         for bad in [
             Header { magic: 0, ..good },
             Header {
-                magic: 0x4452_4153_4943_4733,
-                major: 3,
+                magic: 0x4452_4153_4943_4734,
+                major: 4,
                 ..good
             },
-            Header { major: 3, ..good },
-            Header { major: 5, ..good },
+            Header { major: 4, ..good },
+            Header { major: 6, ..good },
             Header { minor: 1, ..good },
             Header { size: 16, ..good },
             Header {

@@ -10,6 +10,7 @@ mod admission_messages;
 #[doc(hidden)]
 pub mod binary_codec;
 mod bootstrap;
+mod bootstrap_session;
 #[doc(hidden)]
 pub mod codec;
 mod component_data;
@@ -106,6 +107,7 @@ pub use query_recovery::*;
 pub use scheduling::*;
 
 pub use bootstrap::*;
+pub use bootstrap_session::*;
 pub use delivery::{
     DeliveryBatch, DeliveryBatchIdentity, DeliveryHandler, DeliveryId, DeliveryItem,
     DeliveryPosition, DeliveryScope,

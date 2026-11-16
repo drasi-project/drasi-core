@@ -316,6 +316,18 @@ pub struct NativeComponentProxy {
     output_snapshots: Option<super::output_snapshots::OutputSnapshotsBinding>,
     processing: Option<super::processing::ProcessingBinding>,
     bootstrap: Option<Box<super::bootstrap_consumer::BootstrapBinding>>,
+    graph_bootstrap: Option<BootstrapPorts>,
+    bootstrap_relay: Option<Arc<BootstrapRelay>>,
+    /// Serves this transformer's committed output on its bootstrap output.
+    snapshot_server: Option<Arc<BootstrapSnapshotServer>>,
+    /// Whether this activation decided if live delivery waits for the first
+    /// bootstrap boundary.
+    live_hold_decided: bool,
+    /// The source library's bootstrap coordinator, registered for paired
+    /// provider nodes while this source exists, and stopped after disposal when
+    /// this source created it.
+    source_coordinator: Option<SourceCoordinator>,
+    graph_control: Option<ComponentControl>,
     bootstrap_replay: std::collections::VecDeque<InputEnvelope>,
     source_schema: Option<Arc<super::source_schema::NativeSourceSchemaReader>>,
     output_reads: Option<super::output_reads::NativeOutputReads>,
@@ -335,6 +347,26 @@ pub struct NativeComponentProxy {
     management: Option<abi::management::PluginManagementV1>,
     /// The latest live assessment, whose fingerprint an accepted apply repeats.
     assessment: Mutex<Option<(drasi_computation_plugin_sdk::UpdateRequest, Assessment)>>,
+}
+
+pub(super) struct SourceCoordinator {
+    pub(super) coordinator: Arc<super::NativeSourceBootstrapResource>,
+    pub(super) owned: bool,
+    _registration: super::bootstrap_coordination::SourceCoordinatorRegistration,
+}
+
+impl SourceCoordinator {
+    pub(super) fn new(
+        coordinator: Arc<super::NativeSourceBootstrapResource>,
+        owned: bool,
+        graph: Option<drasi_lib::computation::v1::OutputCatalogue>,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            _registration: coordinator.register(graph)?,
+            coordinator,
+            owned,
+        })
+    }
 }
 
 struct StopState {
@@ -579,8 +611,10 @@ impl NativeComponentProxy {
         let inner = Arc::new(unsafe { RemoteComponent::new(raw, plugin)? });
         let mut bindings = bindings;
         let actual = inner.inspect()?;
+        let descriptor = metadata.descriptor(request.id.clone())?;
         anyhow::ensure!(
-            actual.descriptor == metadata.descriptor(request.id.clone())?
+            (actual.descriptor == descriptor
+                || actual.descriptor == metadata.data_descriptor(request.id.clone())?)
                 && actual.capabilities == metadata.capabilities,
             "constructed native component changed its descriptor/capabilities"
         );
@@ -635,7 +669,7 @@ impl NativeComponentProxy {
         }
         Ok(Self {
             inner,
-            descriptor: actual.descriptor,
+            descriptor,
             metadata,
             creation_request: request.clone(),
             codec,
@@ -648,6 +682,12 @@ impl NativeComponentProxy {
             output_snapshots: None,
             processing: None,
             bootstrap: None,
+            graph_bootstrap: None,
+            bootstrap_relay: None,
+            snapshot_server: None,
+            live_hold_decided: false,
+            source_coordinator: None,
+            graph_control: None,
             bootstrap_replay: std::collections::VecDeque::new(),
             source_schema: None,
             output_reads: None,
@@ -668,13 +708,13 @@ impl NativeComponentProxy {
         mut self,
         resource: Arc<super::NativeBootstrapResource>,
     ) -> anyhow::Result<Self> {
-        self.bind_bootstrap(resource)?;
+        self.bind_bootstrap_provider(resource)?;
         Ok(self)
     }
 
     /// Bind an existing provider once, before activation. A progress-bound
     /// provider must retain this proxy's exact local processing-progress owner.
-    pub fn bind_bootstrap(
+    pub fn bind_bootstrap_provider(
         &mut self,
         resource: Arc<super::NativeBootstrapResource>,
     ) -> anyhow::Result<()> {
@@ -776,6 +816,13 @@ impl NativeComponentProxy {
         self.output_snapshots = snapshots;
         self
     }
+    pub(super) fn with_source_coordinator(
+        mut self,
+        coordinator: Option<SourceCoordinator>,
+    ) -> Self {
+        self.source_coordinator = coordinator;
+        self
+    }
     pub(super) fn with_processing(
         mut self,
         processing: Option<super::processing::ProcessingBinding>,
@@ -807,6 +854,40 @@ impl NativeComponentProxy {
         self.management = Some(extension);
         Ok(self)
     }
+    /// The consumers whose progress this source's live position belongs to.
+    fn progress_owners(&self) -> Vec<Arc<QuerySourceProgress>> {
+        match (&self.bindings.progress, &self.bindings.consumer_progress) {
+            (Some(progress), _) => vec![progress.owner.clone()],
+            (None, Some(progress)) => progress.owner.owners().values().cloned().collect(),
+            (None, None) => Vec::new(),
+        }
+    }
+
+    /// Whether this is the source's very first start: no consumer has a saved
+    /// live position for it or a completed bootstrap. `None` while a consumer
+    /// has not recovered its progress, unless `wait` waits for it.
+    async fn fresh_start(&self, wait: bool) -> anyhow::Result<Option<bool>> {
+        let owners = self.progress_owners();
+        if owners.is_empty() {
+            return Ok(None);
+        }
+        let key = SourceProgressKey::Source(self.descriptor.id().clone());
+        let mut fresh = true;
+        for owner in owners {
+            let snapshot = if wait {
+                owner.wait_recovered().await?
+            } else {
+                let snapshot = owner.snapshot();
+                if !snapshot.recovered {
+                    return Ok(None);
+                }
+                snapshot
+            };
+            fresh &= !snapshot.bootstrap_complete && !snapshot.checkpoints.contains_key(&key);
+        }
+        Ok(Some(fresh))
+    }
+
     /// The lifecycle payload for one hook, bound to this object's identity.
     fn lifecycle_request(&self, scope: &OperationScope) -> LifecycleRequest {
         LifecycleRequest::new(
@@ -868,7 +949,9 @@ impl NativeComponentProxy {
             "ordinary query resources must bind once before activation"
         );
         if let Some(provider) = &construction.bootstrap {
-            self.bind_bootstrap(Arc::new(super::NativeBootstrapResource(provider.clone())))?;
+            self.bind_bootstrap_provider(Arc::new(super::NativeBootstrapResource(
+                provider.clone(),
+            )))?;
         }
         if let Some(clock) = &construction.scheduling {
             self.processing
@@ -1100,6 +1183,66 @@ impl NativeComponentProxy {
         })
     }
 }
+/// A native source's control handler: bootstrap requests are relayed from
+/// the provider on the source's bootstrap input; other messages reach the
+/// plugin's own handler, if it has one.
+/// Routes bootstrap requests to the component's relay or snapshot server and
+/// every other control message to the native component.
+struct BootstrapControl {
+    bootstrap: Arc<dyn ControlHandler>,
+    native: Option<Arc<dyn ControlHandler>>,
+}
+
+#[async_trait]
+impl ControlHandler for BootstrapControl {
+    async fn on_message(
+        &self,
+        message: PeerMessage,
+        control: ComponentControl,
+    ) -> anyhow::Result<()> {
+        if matches!(
+            message.notification,
+            ControlNotification::BootstrapRequest(_)
+        ) {
+            return self.bootstrap.on_message(message, control).await;
+        }
+        match &self.native {
+            Some(native) => native.on_message(message, control).await,
+            None => Ok(()),
+        }
+    }
+}
+
+impl NativeComponentProxy {
+    /// Bind graph bootstrap: a transformer with connected bootstrap inputs
+    /// reads its snapshot from them. Without connected inputs it keeps a
+    /// directly bound provider, or none.
+    fn bind_graph_bootstrap(&mut self) -> anyhow::Result<()> {
+        if self.bootstrap.is_some() {
+            return Ok(());
+        }
+        let (Some(ports), Some(control)) = (&self.graph_bootstrap, &self.graph_control) else {
+            return Ok(());
+        };
+        if ports.inputs().is_empty() {
+            return Ok(());
+        }
+        let scope = self
+            .construction_scope
+            .as_ref()
+            .context("graph bootstrap requires the actual component construction scope")?;
+        let provider = PipeBootstrapProvider::new(
+            scope.graph_id.clone(),
+            ports.clone(),
+            control.clone(),
+            self.processing
+                .as_ref()
+                .and_then(super::processing::ProcessingBinding::progress_owner),
+        )?;
+        self.bind_bootstrap_provider(Arc::new(super::NativeBootstrapResource(provider)))
+    }
+}
+
 impl Drop for NativeComponentProxy {
     fn drop(&mut self) {
         if let Some(schema) = self.source_schema.take() {
@@ -1208,15 +1351,56 @@ impl ComputationComponent for NativeComponentProxy {
         Ok(())
     }
     fn bind_control(&mut self, control: ComponentControl) {
+        self.graph_control = Some(control.clone());
         if self.metadata.capabilities.control {
             control::bind(&self.inner, control);
         }
     }
+    fn bind_bootstrap(&mut self, ports: BootstrapPorts) {
+        match self.metadata.role {
+            ComponentRole::Source => {
+                // The provider's watermarks are the native source's own
+                // positions, so they are the handover boundary unchanged.
+                let relay = BootstrapRelay::new(Arc::new(|_, watermarks| Ok(watermarks.to_vec())));
+                relay.bind(ports);
+                self.bootstrap_relay = Some(relay);
+            }
+            ComponentRole::Transformer => {
+                if let Some(snapshot) = self
+                    .metadata
+                    .capabilities
+                    .output_snapshots
+                    .first()
+                    .and_then(|port| {
+                        self.output_readers()
+                            .ports()
+                            .get(port)
+                            .and_then(|readers| readers.snapshot().cloned())
+                    })
+                {
+                    let server = BootstrapSnapshotServer::new(snapshot);
+                    server.bind(ports.clone());
+                    self.snapshot_server = Some(server);
+                }
+                if self.metadata.capabilities.provider_bootstrap().is_some() {
+                    self.graph_bootstrap = Some(ports);
+                }
+            }
+            _ => {}
+        }
+    }
     fn control_handler(&self) -> Option<Arc<dyn ControlHandler>> {
-        self.metadata
+        let native = self
+            .metadata
             .capabilities
             .control
-            .then(|| Arc::new(control::Handler(self.inner.clone())) as Arc<dyn ControlHandler>)
+            .then(|| Arc::new(control::Handler(self.inner.clone())) as Arc<dyn ControlHandler>);
+        let bootstrap = match (&self.bootstrap_relay, &self.snapshot_server) {
+            (Some(relay), _) => relay.clone() as Arc<dyn ControlHandler>,
+            (None, Some(server)) => server.clone() as Arc<dyn ControlHandler>,
+            (None, None) => return native,
+        };
+        Some(Arc::new(BootstrapControl { bootstrap, native }))
     }
     fn requires_readiness_confirmation(&self) -> bool {
         self.metadata.capabilities.readiness
@@ -1260,6 +1444,7 @@ impl ComputationComponent for NativeComponentProxy {
         {
             return Err(operation_failure(Failure::closed()));
         }
+        self.bind_graph_bootstrap()?;
         anyhow::ensure!(
             self.metadata.capabilities.quiescent_bootstrap.is_none()
                 || self.metadata.capabilities.bootstrap_optional
@@ -1309,6 +1494,11 @@ impl ComputationComponent for NativeComponentProxy {
         // Caller-owned resolution is cancelled with this activation. Nothing is
         // cached on the proxy or sent to native code until resolution succeeds.
         let mut request = self.lifecycle_request(context.scope());
+        if let Some(relay) = &self.bootstrap_relay {
+            relay.begin_activation();
+            self.live_hold_decided = false;
+            request = request.with_fresh_start(self.fresh_start(false).await?);
+        }
         if let Some((identity, endpoint)) = &self.identity {
             request = request.with_credentials(identity.resolve(endpoint).await?);
         }
@@ -1622,6 +1812,23 @@ impl NativeComponentProxy {
             "native disposal returned unexpected data"
         );
         state.completed = true;
+        if let Some(source) = self
+            .source_coordinator
+            .as_ref()
+            .filter(|source| source.owned)
+        {
+            // Each bootstrap session reports its own failure to its consumer; a
+            // session cut short by the stop must not fail the source's disposal.
+            if let Err(error) =
+                drasi_lib::computation::v1::ResourceCleanup::shutdown(source.coordinator.as_ref())
+                    .await
+            {
+                log::warn!(
+                    "Source {} bootstrap coordinator stopped with a failed session: {error:#}",
+                    self.descriptor.id()
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -1640,6 +1847,15 @@ impl EnvelopeSource for NativeComponentProxy {
             .map(|(admission, _)| admission.clone())
     }
     async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
+        if let Some(relay) = self.bootstrap_relay.clone() {
+            if !self.live_hold_decided {
+                if relay.relays_sessions() && self.fresh_start(true).await? == Some(true) {
+                    relay.hold_live();
+                }
+                self.live_hold_decided = true;
+            }
+            relay.live_released().await;
+        }
         let reply = self.inner.call(abi::operation::NEXT, &[]).await?;
         let output: Option<wire::Envelope<'_>> = wire::decode(&reply)?;
         let output = output

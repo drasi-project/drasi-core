@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::{
-    PipeCapability, PortDirection, PortId, RecordId, RecordImage, RecordValidationError,
+    PipeCapability, PortDirection, PortId, PortKind, RecordId, RecordImage, RecordValidationError,
     SchemaDescriptor, SinkCompletion,
 };
 
@@ -65,6 +65,8 @@ pub enum ContractError {
         expected: PortDirection,
         actual: PortDirection,
     },
+    #[error("a {output:?} output port cannot connect to a {input:?} input port")]
+    PortKindMismatch { output: PortKind, input: PortKind },
     #[error("pipe does not support required capability {capability:?}")]
     UnsupportedCapability { capability: PipeCapability },
     #[error("capability {capability:?} requires {requires:?}")]

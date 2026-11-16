@@ -540,7 +540,7 @@ async fn ordinary_non_atomic() -> Result<()> {
                 .implementation
                 .name
                 .as_ref(),
-            "drasi.experimental/indexed-query/ordinary",
+            "drasi.query/continuous",
         );
         let mut subscription = core
             .subscribe_query_results_by_name(&component_name()?)

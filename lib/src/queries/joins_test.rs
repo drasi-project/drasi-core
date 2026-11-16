@@ -72,6 +72,7 @@ mod query_joins_tests {
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
             result: Default::default(),
+            bootstrap_provider: None,
         }
     }
 

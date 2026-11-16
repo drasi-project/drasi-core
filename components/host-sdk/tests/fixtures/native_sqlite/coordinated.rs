@@ -2,7 +2,10 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
-use drasi_host_sdk::computation::{NativeSourceBootstrapProgress, NativeSourceBootstrapResource};
+use drasi_host_sdk::computation::{
+    NativeBootstrapFactory, NativeBootstrapNodeFactory, NativeSourceBootstrapProgress,
+    NativeSourceBootstrapResource,
+};
 use futures_util::StreamExt;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -106,9 +109,110 @@ impl Options {
 struct Graph {
     core: Arc<DrasiLib>,
     owners: Vec<Arc<QuerySourceProgress>>,
-    coordinator: Arc<NativeSourceBootstrapResource>,
     names: Vec<&'static str>,
-    superseded: Vec<Arc<dyn ComputationBootstrapProvider>>,
+    superseded: Superseded,
+}
+
+type Superseded = Arc<std::sync::Mutex<Vec<Arc<dyn ComputationBootstrapProvider>>>>;
+
+/// A graph bootstrap provider node for the paired SQLite factory, connected
+/// to the source's bootstrap input. Each session resolves the coordinator the
+/// source owns, exactly as `NativeBootstrapNodeFactory` does, and adds the
+/// fixture's snapshot gates and superseded providers.
+struct PairedProviderNode {
+    node: NativeBootstrapNodeFactory,
+    bootstrap: Arc<NativeBootstrapFactory>,
+    gates: BTreeMap<ComponentId, Arc<SnapshotGate>>,
+    supersede_stopped: bool,
+    superseded: Superseded,
+}
+
+#[async_trait::async_trait]
+impl ComponentFactory for PairedProviderNode {
+    fn descriptor(&self) -> &FactoryDescriptor {
+        self.node.descriptor()
+    }
+
+    fn specification_from_config(
+        &self,
+        id: ComponentId,
+        configuration: Value,
+    ) -> Result<ComponentSpecification> {
+        self.node.specification_from_config(id, configuration)
+    }
+
+    fn validate(&self, specification: &ComponentSpecification) -> Result<()> {
+        self.node.validate(specification)
+    }
+
+    async fn create(
+        &self,
+        context: ConstructionContext,
+    ) -> std::result::Result<ConstructedComponent, ComponentCreationError> {
+        self.node
+            .validate(&context.specification)
+            .map_err(ComponentCreationError::terminal)?;
+        let configuration = serde_json::to_value(context.configuration())
+            .map_err(ComponentCreationError::terminal)?;
+        let scope = drasi_computation_plugin_sdk::Scope {
+            instance_id: context.instance_id.to_string(),
+            graph_id: context.graph_id.to_string(),
+            generation: context.generation.0,
+        };
+        let bootstrap = self.bootstrap.clone();
+        let gates = self.gates.clone();
+        let supersede_stopped = self.supersede_stopped;
+        let superseded = self.superseded.clone();
+        let running = context.output_catalogue().clone();
+        let sessions: BootstrapProviderFactory = Arc::new(move |request| {
+            let origin = request.origin().clone();
+            let source = NativeSourceBootstrapResource::registered(
+                &scope.instance_id,
+                &scope.graph_id,
+                &request.consumer,
+                Some(&running),
+            )
+            .context("source coordinator is not registered")?;
+            let owner = source
+                .owner_for(&origin)
+                .context("source has no progress for the consumer")?;
+            if supersede_stopped {
+                let previous = bootstrap.create_paired_query_provider(
+                    origin.clone(),
+                    configuration.clone(),
+                    scope.clone(),
+                    owner.clone(),
+                    source.clone(),
+                )?;
+                // A provider that never prepared stops without native work.
+                futures_util::FutureExt::now_or_never(previous.stop())
+                    .context("unprepared provider stop pended")??;
+                superseded
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("superseded providers poisoned"))?
+                    .push(previous);
+            }
+            let inner = bootstrap.create_paired_query_provider(
+                origin.clone(),
+                configuration.clone(),
+                scope.clone(),
+                owner,
+                source,
+            )?;
+            Ok(Arc::new(GatedProvider {
+                inner,
+                gate: gates.get(&origin).cloned(),
+            }) as Arc<dyn ComputationBootstrapProvider>)
+        });
+        let component = BootstrapProviderComponent::with_descriptor(
+            context.specification.descriptor.clone(),
+            sessions,
+        )
+        .map_err(ComponentCreationError::terminal)?;
+        Ok(ConstructedComponent::bootstrap_provider(Box::new(
+            component,
+        )))
+    }
 }
 
 fn scope() -> drasi_computation_plugin_sdk::Scope {
@@ -221,7 +325,7 @@ async fn graph_with_options(
             ),
         )?;
     }
-    let (progress_id, progress) = if shared {
+    let progress_id = if shared {
         let group = Arc::new(ConsumerProgressSet::new(
             ComponentBatch::GRAPH_ID,
             id("source"),
@@ -234,46 +338,49 @@ async fn graph_with_options(
             ResourceOwnership::Borrowed,
             ResourceHandle::new(ResourceRole::Checkpoint, group.clone()),
         )?;
-        (
-            "consumers".to_owned(),
-            NativeSourceBootstrapProgress::Shared(group),
-        )
+        "consumers".to_owned()
     } else {
-        (
-            "first-progress".to_owned(),
-            NativeSourceBootstrapProgress::Single(owners[0].clone()),
-        )
+        "first-progress".to_owned()
     };
-    let coordinator =
-        factory.create_source_bootstrap(id("source"), configuration.clone(), scope(), progress)?;
-    builder = provide(
-        builder,
-        "source-bootstrap",
-        ResourceRole::Bootstrap,
-        ResourceOwnership::Graph,
-        ResourceHandle::new(ResourceRole::Bootstrap, coordinator.clone())
-            .with_cleanup(coordinator.clone()),
-    )?
-    .resource_dependency(
-        resource("source-bootstrap")?,
-        resource(&progress_id)?,
-        ResourceRole::Checkpoint,
-    )?;
     let mut source = factory.specification(id("source"), configuration)?;
-    source.dependencies = BTreeMap::from([
-        (
-            if shared {
-                "consumer_progress".into()
-            } else {
-                "source_progress".into()
-            },
-            vec![resource(&progress_id)?],
-        ),
-        (
-            "source_bootstrap".into(),
-            vec![resource("source-bootstrap")?],
-        ),
-    ]);
+    source.dependencies = BTreeMap::from([(
+        if shared {
+            "consumer_progress".into()
+        } else {
+            "source_progress".into()
+        },
+        vec![resource(&progress_id)?],
+    )]);
+    let superseded = Superseded::default();
+    let provider = Arc::new(PairedProviderNode {
+        node: NativeBootstrapNodeFactory::new(bootstrap.clone()),
+        bootstrap: bootstrap.clone(),
+        gates: options
+            .gates
+            .iter()
+            .flat_map(|gates| names.iter().map(|name| id(name)).zip(gates.iter().cloned()))
+            .collect(),
+        supersede_stopped: options.supersede_stopped,
+        superseded: superseded.clone(),
+    });
+    let provider_spec = provider.specification_from_config(
+        id("provider"),
+        json!({"source":id("source"),"stream":"sqlite/out"}),
+    )?;
+    builder = builder
+        .component(
+            drasi_lib::computation::v1::ComponentName::try_new("provider")
+                .expect("fixture component name"),
+            provider_spec,
+            provider,
+        )
+        .connect(
+            EdgeDefinition::new(
+                endpoint("provider", "snapshot"),
+                endpoint("source", "bootstrap"),
+            ),
+            Box::new(BoundedPipeConfig { capacity: 8 }),
+        );
     builder = builder
         .component(
             drasi_lib::computation::v1::ComponentName::try_new("source")
@@ -309,52 +416,7 @@ async fn graph_with_options(
         )
         .context("query results outlet factory")?
         .clone();
-    let mut superseded: Vec<Arc<dyn ComputationBootstrapProvider>> = Vec::new();
-    for (index, (name, owner)) in names.iter().zip(&owners).enumerate() {
-        let bootstrap_id = format!("{name}-bootstrap");
-        if options.supersede_stopped {
-            let previous = bootstrap.create_paired_query_provider(
-                id(name),
-                json!({"source":id("source"),"stream":"sqlite/out"}),
-                scope(),
-                owner.clone(),
-                coordinator.clone(),
-            )?;
-            previous.stop().await?;
-            superseded.push(previous);
-        }
-        let inner = bootstrap.create_paired_query_provider(
-            id(name),
-            json!({"source":id("source"),"stream":"sqlite/out"}),
-            scope(),
-            owner.clone(),
-            coordinator.clone(),
-        )?;
-        let provider = Arc::new(GatedProvider {
-            inner,
-            gate: options.gates.as_ref().map(|gates| gates[index].clone()),
-        });
-        builder = provide(
-            builder,
-            &bootstrap_id,
-            ResourceRole::Bootstrap,
-            ResourceOwnership::Graph,
-            ResourceHandle::new(
-                ResourceRole::Bootstrap,
-                Arc::new(QueryBootstrapResource(provider.clone())),
-            )
-            .with_cleanup(provider),
-        )?
-        .resource_dependency(
-            resource(&bootstrap_id)?,
-            resource("source-bootstrap")?,
-            ResourceRole::Bootstrap,
-        )?
-        .resource_dependency(
-            resource(&bootstrap_id)?,
-            resource(&format!("{name}-progress"))?,
-            ResourceRole::Checkpoint,
-        )?;
+    for name in &names {
         let indexes_id = format!("{name}-indexes");
         let indexes: Arc<dyn ComputationIndexProvider> = Arc::new(RocksDbComputationProvider::new(
             indexes.join(name),
@@ -387,7 +449,6 @@ async fn graph_with_options(
                 "source_progress".into(),
                 vec![resource(&format!("{name}-progress"))?],
             ),
-            ("bootstrap".into(), vec![resource(&bootstrap_id)?]),
         ]);
         let output = format!("{name}-results");
         let sink = ComponentSpecification {
@@ -426,6 +487,10 @@ async fn graph_with_options(
                 Box::new(BoundedPipeConfig { capacity: 8 }),
             )
             .connect(
+                EdgeDefinition::new(endpoint("source", "snapshot"), endpoint(name, "bootstrap")),
+                Box::new(BoundedPipeConfig { capacity: 8 }),
+            )
+            .connect(
                 EdgeDefinition::new(endpoint(name, "out"), endpoint(&output, "in")),
                 Box::new(BoundedPipeConfig { capacity: 8 }),
             );
@@ -445,6 +510,9 @@ async fn graph_with_options(
                     .expect("reference query factory")
                     .clone(),
             )
+            // Parallel tests run graphs with identical instance, graph and
+            // component IDs in one process; each source coordinator is found
+            // only from its own running graph.
             .with_id(INSTANCE)
             .with_components(builder.build()?)
             .build()
@@ -453,7 +521,6 @@ async fn graph_with_options(
     Ok(Graph {
         core,
         owners,
-        coordinator,
         names,
         superseded,
     })
@@ -575,7 +642,6 @@ async fn snapshot_live_restart() -> Result<()> {
             let cleanup = opened.core.shutdown().await;
             result?;
             cleanup?;
-            opened.coordinator.shutdown().await?;
             drop(opened);
             let restarted = graph(
                 &plugins,
@@ -910,13 +976,17 @@ fn gates(count: usize) -> Vec<Arc<SnapshotGate>> {
         .collect()
 }
 
-async fn wait_partial(gates: &[Arc<SnapshotGate>]) -> Result<()> {
+/// Waits until a query holds a partial initialization and returns its index.
+async fn wait_partial(gates: &[Arc<SnapshotGate>]) -> Result<usize> {
     tokio::time::timeout(DEADLINE, async {
         // The query asks for its second envelope only after committing the first.
-        while !gates
-            .iter()
-            .any(|gate| gate.requests.load(Ordering::SeqCst) >= 2)
-        {
+        loop {
+            if let Some(index) = gates
+                .iter()
+                .position(|gate| gate.requests.load(Ordering::SeqCst) >= 2)
+            {
+                return index;
+            }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
@@ -949,7 +1019,12 @@ async fn retained_provider_replacement() -> Result<()> {
             let result = async {
                 let exercise = async {
                     wait_partial(&gates).await?;
-                    for old in &graph.superseded {
+                    let superseded = graph
+                        .superseded
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("superseded providers poisoned"))?
+                        .clone();
+                    for old in &superseded {
                         let error = match old.prepare().await {
                             Ok(_) => {
                                 anyhow::bail!(
@@ -1035,7 +1110,9 @@ async fn paired_retained_provider_multi_thread_static_and_dynamic() -> Result<()
     retained_provider_replacement().await
 }
 
-async fn expect_failed_initialization(graph: &Graph) -> Result<()> {
+/// Expects startup to fail and the query at `partial`, whose initialization
+/// is incomplete, not to publish a completed bootstrap.
+async fn expect_failed_initialization(graph: &Graph, partial: usize) -> Result<()> {
     let started = graph.core.start().await;
     let failure: anyhow::Error = match started {
         Err(error) => error.into(),
@@ -1055,7 +1132,7 @@ async fn expect_failed_initialization(graph: &Graph) -> Result<()> {
         "unexpected startup failure: {failure:#}"
     );
     anyhow::ensure!(
-        !graph.owners[0].snapshot().bootstrap_complete,
+        !graph.owners[partial].snapshot().bootstrap_complete,
         "failed initialization published a completed bootstrap"
     );
     Ok(())
@@ -1092,11 +1169,12 @@ async fn incomplete_initialization(cancel: bool) -> Result<()> {
                 options.gates = Some(gates.clone());
             }
             let opened = graph_with_options(&plugins, &path, &indexes, port()?, options).await?;
+            let mut partial = 0;
             let result = async {
                 if cancel {
                     let core = opened.core.clone();
                     let starting = tokio::spawn(async move { core.start().await });
-                    let result = wait_partial(&gates).await;
+                    let result = wait_partial(&gates).await.map(|index| partial = index);
                     starting.abort();
                     match starting.await {
                         Ok(result) => result?,
@@ -1105,7 +1183,7 @@ async fn incomplete_initialization(cancel: bool) -> Result<()> {
                     }
                     result
                 } else {
-                    tokio::time::timeout(DEADLINE, expect_failed_initialization(&opened)).await?
+                    tokio::time::timeout(DEADLINE, expect_failed_initialization(&opened, 0)).await?
                 }
             }
             .await;
@@ -1119,7 +1197,7 @@ async fn incomplete_initialization(cancel: bool) -> Result<()> {
             }
             let strict = graph_with_options(&plugins, &path, &indexes, port()?, options).await?;
             let result =
-                tokio::time::timeout(DEADLINE, expect_failed_initialization(&strict))
+                tokio::time::timeout(DEADLINE, expect_failed_initialization(&strict, partial))
                     .await
                     .with_context(|| format!(
                         "strict incomplete startup (dynamic={dynamic}, shared={shared}, cancel={cancel}): {:?}",

@@ -68,8 +68,16 @@ pub enum ControlNotification {
     Ready,
     NotReady,
     Available,
-    Unavailable { reason: String },
-    Custom { kind: String, payload: Value },
+    Unavailable {
+        reason: String,
+    },
+    Custom {
+        kind: String,
+        payload: Value,
+    },
+    /// A consumer asks the producer of one of its bootstrap edges to open a
+    /// session. The reply travels only on that edge's bootstrap pipe.
+    BootstrapRequest(drasi_computation_contracts::BootstrapRequest),
 }
 
 /// An accepted notification with unforgeable attachment and connection tokens.
@@ -158,7 +166,7 @@ impl ComponentControl {
         let category = match notification {
             ControlNotification::Ready | ControlNotification::NotReady => 0,
             ControlNotification::Available | ControlNotification::Unavailable { .. } => 1,
-            ControlNotification::Custom { .. } => {
+            ControlNotification::Custom { .. } | ControlNotification::BootstrapRequest(_) => {
                 return self.notify(Target::Direction(direction), notification)
             }
         };
@@ -843,6 +851,13 @@ impl ControlNotification {
                 budget.consume(kind.len())?;
                 validate_json_shape(payload, budget.remaining)?;
                 serde_json::to_writer(&mut budget, payload).map_err(|_| payload_too_large())
+            }
+            Self::BootstrapRequest(request) => {
+                request
+                    .validate()
+                    .map_err(|_| ControlError::PayloadTooLarge {
+                        limit: drasi_computation_contracts::MAX_BOOTSTRAP_STATE_BYTES,
+                    })
             }
             _ => Ok(()),
         }

@@ -119,6 +119,10 @@ impl ResourceConstructor for SubscriptionRecipe {
     }
 }
 
+/// Bootstrap sessions are finite and acknowledged per edge; a small bound keeps
+/// provider memory proportional to one batch of records.
+const BOOTSTRAP_EDGE_CAPACITY: usize = 64;
+
 struct BootstrapRecipe {
     subscriptions: Vec<ResourceId>,
     output: Option<Arc<dyn ComputationBootstrapProvider>>,
@@ -226,6 +230,7 @@ pub struct ComputationPipelineBuilder {
     output_capacity: usize,
     sources: BTreeMap<ComponentId, (Option<Arc<SourcePluginHost>>, SourceSubscriptionOptions)>,
     native_sources: BTreeMap<ComponentId, Option<Endpoint>>,
+    native_bootstraps: BTreeMap<ComponentId, Endpoint>,
     output_catalogue: Option<(String, OutputCatalogue)>,
     bootstraps: BTreeMap<ComponentId, Arc<dyn ComputationBootstrapProvider>>,
     queries: Vec<QueryConfig>,
@@ -289,6 +294,7 @@ impl ComputationPipelineBuilder {
             output_capacity,
             sources: BTreeMap::new(),
             native_sources: BTreeMap::new(),
+            native_bootstraps: BTreeMap::new(),
             output_catalogue: None,
             bootstraps: BTreeMap::new(),
             queries: Vec::new(),
@@ -343,6 +349,24 @@ impl ComputationPipelineBuilder {
     pub fn native_source(self, output: Endpoint) -> GraphResult<Self> {
         let id = output.component.clone();
         self.native_source_binding(id, Some(output))
+    }
+
+    /// Connect a native graph-change output whose component also serves
+    /// bootstrap sessions on `bootstrap`. A query with enabled bootstrap and no
+    /// local provider bootstraps from it over a bootstrap edge.
+    pub fn native_source_with_bootstrap(
+        mut self,
+        output: Endpoint,
+        bootstrap: Endpoint,
+    ) -> GraphResult<Self> {
+        if bootstrap.component != output.component {
+            return Err(GraphError::Topology {
+                reason: "a native input's bootstrap output belongs to the same component".into(),
+            });
+        }
+        self.native_bootstraps
+            .insert(output.component.clone(), bootstrap);
+        self.native_source(output)
     }
 
     pub(crate) fn pending_native_source(self, component: &ComponentId) -> GraphResult<Self> {
@@ -585,6 +609,29 @@ impl ComputationPipelineBuilder {
                     "explicit query bootstrap requires enabled bootstrap and native input bindings"
                         .into(),
                 ));
+            }
+        }
+        for query in &self.queries {
+            let Some(provider) = &query.bootstrap_provider else {
+                continue;
+            };
+            if !query.enable_bootstrap {
+                return Err(invalid(format!(
+                    "query {} declares a bootstrap provider but bootstrap is disabled",
+                    query.id
+                )));
+            }
+            if provider.as_id().is_none() {
+                return Err(invalid(format!(
+                    "query {} bootstrap provider {provider} is unresolved",
+                    query.id
+                )));
+            }
+            if self.bootstraps.contains_key(&query.id) {
+                return Err(invalid(format!(
+                    "query {} has both a local bootstrap provider and an explicit bootstrap",
+                    query.id
+                )));
             }
         }
         let mut reaction_ids = BTreeSet::new();
@@ -834,7 +881,9 @@ impl ComputationPipelineBuilder {
                 )?;
                 let stream = StreamId::try_new(format!("{source_id}/out"))?;
                 let options = SourceSubscriptionOptions {
-                    enable_bootstrap: setting.enable_bootstrap,
+                    // A local provider is exclusive: inputs are never asked for bootstrap data.
+                    enable_bootstrap: setting.enable_bootstrap
+                        && config.bootstrap_provider.is_none(),
                     nodes: setting.nodes,
                     relations: setting.relations,
                     bootstrap_timeout_secs: config.bootstrap_timeout_secs,
@@ -1036,35 +1085,106 @@ impl ComputationPipelineBuilder {
                         ..Default::default()
                     },
                 );
-            let bootstrap = self.bootstraps.get(&config.id);
+            let descriptor = query_authoring
+                .expect("query authoring was required")
+                .query_descriptor(query_id.clone())
+                .map_err(|error| invalid(format!("{error:#}")))?;
+            if descriptor.id() != &query_id {
+                return Err(invalid(
+                    "query factory substituted its assigned UUID".into(),
+                ));
+            }
+            let accepts_bootstrap = descriptor.ports().iter().any(|port| {
+                port.kind() == drasi_computation_contracts::PortKind::Bootstrap
+                    && port.direction() == PortDirection::Input
+                    && port.id().as_str() == drasi_computation_contracts::BOOTSTRAP_INPUT_PORT
+            });
+            let local = config
+                .bootstrap_provider
+                .as_ref()
+                .and_then(crate::config::ComponentReference::as_id);
+            let mut bootstrap_edges = Vec::new();
+            if let Some(provider) = local {
+                if !accepts_bootstrap {
+                    return Err(invalid(format!(
+                        "query {} has a local bootstrap provider but no bootstrap input",
+                        config.id
+                    )));
+                }
+                bootstrap_edges.push(EdgeDefinition::new(
+                    endpoint(
+                        provider.clone(),
+                        drasi_computation_contracts::BOOTSTRAP_OUTPUT_PORT,
+                    ),
+                    endpoint(
+                        query_id.clone(),
+                        drasi_computation_contracts::BOOTSTRAP_INPUT_PORT,
+                    ),
+                ));
+            }
+            let bootstrap = self.bootstraps.get(&config.id).filter(|_| local.is_none());
+            let edge_inputs: BTreeSet<ComponentId> = if local.is_none()
+                && bootstrap.is_none()
+                && config.enable_bootstrap
+                && accepts_bootstrap
+            {
+                config
+                    .inputs
+                    .iter()
+                    .filter_map(|input| input.component.as_id())
+                    .filter(|id| self.native_bootstraps.contains_key(*id))
+                    .cloned()
+                    .collect()
+            } else {
+                BTreeSet::new()
+            };
+            for id in &edge_inputs {
+                bootstrap_edges.push(EdgeDefinition::new(
+                    self.native_bootstraps[id].clone(),
+                    endpoint(
+                        query_id.clone(),
+                        drasi_computation_contracts::BOOTSTRAP_INPUT_PORT,
+                    ),
+                ));
+            }
             let generic_outputs: Vec<_> = config
                 .inputs
                 .iter()
                 .filter_map(|input| {
-                    self.native_sources
-                        .get(input.component.as_id()?)
-                        .and_then(Option::as_ref)
+                    let id = input.component.as_id()?;
+                    if edge_inputs.contains(id) {
+                        return None;
+                    }
+                    self.native_sources.get(id).and_then(Option::as_ref)
                 })
                 .map(|output| OutputEndpoint::new(output.component.clone(), output.port.clone()))
                 .collect();
-            let generic =
-                if bootstrap.is_none() && config.enable_bootstrap && !generic_outputs.is_empty() {
-                    self.output_catalogue
-                        .as_ref()
-                        .map(|(_, catalogue)| {
-                            super::output_bootstrap::OutputBootstrapProvider::new(
-                                catalogue.clone(),
-                                generic_outputs,
-                                progress.clone(),
-                                std::time::Duration::from_secs(config.bootstrap_timeout_secs),
-                            )
-                            .map(|provider| provider as Arc<dyn ComputationBootstrapProvider>)
-                        })
-                        .transpose()
-                        .map_err(|error| invalid(format!("{error:#}")))?
-                } else {
-                    None
-                };
+            let subscription_ids = if local.is_some() {
+                Vec::new()
+            } else {
+                subscription_ids
+            };
+            let generic = if local.is_none()
+                && bootstrap.is_none()
+                && config.enable_bootstrap
+                && !generic_outputs.is_empty()
+            {
+                self.output_catalogue
+                    .as_ref()
+                    .map(|(_, catalogue)| {
+                        super::output_bootstrap::OutputBootstrapProvider::new(
+                            catalogue.clone(),
+                            generic_outputs,
+                            progress.clone(),
+                            std::time::Duration::from_secs(config.bootstrap_timeout_secs),
+                        )
+                        .map(|provider| provider as Arc<dyn ComputationBootstrapProvider>)
+                    })
+                    .transpose()
+                    .map_err(|error| invalid(format!("{error:#}")))?
+            } else {
+                None
+            };
             let bootstrap_id =
                 if bootstrap.is_some() || generic.is_some() || !subscription_ids.is_empty() {
                     let id = resource("query-bootstrap", &config.id)?;
@@ -1108,6 +1228,18 @@ impl ComputationPipelineBuilder {
                 };
                 builder = builder.construct_resource(bootstrap_id.clone(), Arc::new(recipe))?;
             }
+            native_inputs.extend(bootstrap_edges.into_iter().map(|definition| {
+                DesiredRelationship {
+                    definition,
+                    policy: RelationshipPolicy {
+                        activation: ActivationCoupling::RequiresRunning,
+                        ..Default::default()
+                    },
+                    pipe: DesiredPipe::Bounded {
+                        capacity: BOOTSTRAP_EDGE_CAPACITY,
+                    },
+                }
+            }));
             let indexes_id = Self::index_resource_id(&config.id)?;
             let (handle, publication, ownership) =
                 if let Some((provider, publication)) = self.overrides.get(&config.id) {
@@ -1188,15 +1320,6 @@ impl ComputationPipelineBuilder {
                 .expect("bounded capacity"),
             };
             let recovery = config.recovery_policy.unwrap_or(self.default_recovery);
-            let descriptor = query_authoring
-                .expect("query authoring was required")
-                .query_descriptor(query_id.clone())
-                .map_err(|error| invalid(format!("{error:#}")))?;
-            if descriptor.id() != &query_id {
-                return Err(invalid(
-                    "query factory substituted its assigned UUID".into(),
-                ));
-            }
             builder = builder
                 .component(
                     config.name.clone(),

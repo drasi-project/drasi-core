@@ -273,6 +273,9 @@ impl NativeControlHandler for CounterControl {
             | ControlNotification::NotReady
             | ControlNotification::Available
             | ControlNotification::Unavailable { .. } => {}
+            ControlNotification::BootstrapRequest(_) => {
+                anyhow::bail!("counter does not serve bootstrap requests")
+            }
         }
         Ok(())
     }

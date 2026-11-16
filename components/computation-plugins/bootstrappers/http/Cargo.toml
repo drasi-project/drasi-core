@@ -18,7 +18,7 @@ dynamic-plugin = []
 
 [package.metadata.drasi-plugin]
 abi-family = "computation"
-abi-version = "4.0.0"
+abi-version = "5.0.0"
 kind = "bootstrap-http"
 
 [dependencies]

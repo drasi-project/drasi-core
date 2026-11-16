@@ -83,16 +83,16 @@ snapshot engine with the independently loaded bootstrap library:
 | `drasi.sqlite/replay-transactions` | `drasi.sqlite/coordinated-bootstrap` | One query owner |
 | `drasi.sqlite/shared-transactions` | `drasi.sqlite/shared-bootstrap` | Complete fixed consumer set and each actual query owner |
 
-Create one graph-owned `nativeSourceBootstrap` resource using the source's exact
-factory identity and configuration. Its `sourceProgress` or `consumerProgress`
-dependency must be the source's actual live progress resource. Bind it to the
-source's `source_bootstrap` slot, keeping the ordinary progress slot too.
-Each query has a separate `nativeBootstrap` resource with `sourceBootstrap`
-naming that coordinator and `sourceProgress` naming that query's actual progress.
-Declare both dependencies and bind the provider under the query's `bootstrap`
-slot. The paired factory accepts only `source` and `stream`; SQLite settings and
-the one engine belong to the source resource, not a copied bootstrap connection.
-See the [Host resource contracts](../../../host-sdk/README.md#internal-native-sourcebootstrap-coordination).
+Keep the source's ordinary `source_progress` or `consumer_progress` binding.
+Add one paired bootstrap provider node, bind each query's actual progress under
+its `source_progress` slot, and connect its `snapshot` output to the source's
+`bootstrap` input. The source then creates its own coordinator from its actual
+progress owners; there is no coordinator resource to declare. Connect the
+source's `snapshot` output to each query's `bootstrap` input. The source relays
+each query's session from the provider and adds its handover boundary. The
+paired factory accepts only `source` and `stream`; SQLite settings and
+the one engine belong to the source, not a copied bootstrap connection.
+See the [Host contracts](../../../host-sdk/README.md#native-source-bootstrap-coordination).
 
 The graph activates bootstrap readers before source readiness. Live sources use
 their separately bound live readers; identical names never substitute for the

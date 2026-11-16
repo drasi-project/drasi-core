@@ -208,7 +208,6 @@ use drasi_source_sqlite::native::SqliteSource;
     ))
     for name, kind, config in [
         ("consumer-progress", "consumerProgress", "ConsumerProgressConfig"),
-        ("composite-bootstrap", "compositeBootstrap", "CompositeBootstrapConfig"),
     ]:
         if name not in recipes:
             raise SystemExit(f"Missing typed JSON example: {name}")

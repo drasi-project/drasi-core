@@ -79,6 +79,7 @@ pub(crate) fn query_configuration(
         outbox_capacity: definition.outbox_capacity.get(),
         bootstrap_timeout_secs: 300,
         source_transactions: execution.source_transactions,
+        bootstrap_provider: None,
     })
 }
 

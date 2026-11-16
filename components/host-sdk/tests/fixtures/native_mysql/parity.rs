@@ -108,14 +108,13 @@ async fn graph_mode(
         ),
     )?
     .component(
-        drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1")
+        drasi_lib::computation::v1::ComponentName::try_new("source")
             .expect("fixture component name"),
         source,
         source_factory,
     )
     .component(
-        drasi_lib::computation::v1::ComponentName::try_new("fixture-component-2")
-            .expect("fixture component name"),
+        drasi_lib::computation::v1::ComponentName::try_new("sink").expect("fixture component name"),
         sink,
         sink_factory,
     )
@@ -179,7 +178,7 @@ async fn graph_mode(
                 })
                 .context("native standalone snapshot")?;
             let mut configuration =
-                json!({"source":"source","stream":"changes","settings":settings});
+                json!({"source":id("source").as_str(),"stream":"changes","settings":settings});
             if !labels.is_empty() {
                 anyhow::ensure!(
                     !tracked,
@@ -200,12 +199,14 @@ async fn graph_mode(
         let capture = format!("{name}-capture");
         builder = builder
             .transformer(
-                drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-1")
-                    .expect("fixture component name"),
+                drasi_lib::computation::v1::ComponentName::try_new(format!(
+                    "fixture-transformer-{name}"
+                ))
+                .expect("fixture component name"),
                 Box::new(query),
             )
             .sink(
-                drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
+                drasi_lib::computation::v1::ComponentName::try_new(format!("fixture-sink-{name}"))
                     .expect("fixture component name"),
                 Box::new(Capture {
                     descriptor: ComponentDescriptor::try_new(
@@ -235,6 +236,7 @@ async fn graph_mode(
             );
     }
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -499,10 +501,7 @@ async fn positional_checkpoint_catalog_fence(dynamic: bool) -> Result<()> {
         Arc::new(Semaphore::new(64)),
     )
     .await?;
-    let key = SourceProgressKey::Source(
-        drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
-            .expect("fixture UUID"),
-    );
+    let key = SourceProgressKey::Source(id("source"));
     let mut checkpoints = Vec::new();
     let proof = async {
         graph.core.start().await?;
@@ -837,11 +836,26 @@ async fn manual_keys(dynamic: bool, coordinated: bool) -> Result<()> {
             .sql("UPDATE items SET value='offline' WHERE code=3")
             .await?;
         tokio::time::timeout(Duration::from_secs(30), graph.core.start()).await??;
+        if !coordinated {
+            // Persistent queries resume their retained state; a standalone
+            // source starting at the end does not observe offline changes.
+            for result in &graph.rows {
+                let actual = rows(result)?;
+                assert_eq!(actual.len(), 2);
+                assert!(actual.contains(&json!({"id":3,"tenant":1,"value":"changed-key"})));
+            }
+            return Ok(());
+        }
         for result in &graph.rows {
-            anyhow::ensure!(
-                rows(result)?.contains(&json!({"id":3,"tenant":1,"value":"offline"})),
-                "memory restart did not refresh the standalone/coordinated snapshot"
-            );
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            while !rows(result)?.contains(&json!({"id":3,"tenant":1,"value":"offline"})) {
+                anyhow::ensure!(
+                    tokio::time::Instant::now() < deadline,
+                    "restart did not replay the offline change: {:?}",
+                    rows(result)?
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
         }
         Ok(())
     }
@@ -997,7 +1011,7 @@ async fn snapshot_cleanup(dynamic: bool) -> Result<()> {
         .context("standalone factory")?;
     let provider = factory.create_provider(
         id("snapshot-owner"),
-        json!({"source":"source","stream":"changes","settings":settings}),
+        json!({"source":id("source").as_str(),"stream":"changes","settings":settings}),
         Some(scope()),
         None,
     )?;

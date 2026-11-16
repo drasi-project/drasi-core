@@ -58,7 +58,7 @@ use super::{
     ComponentId, ComponentName, ContractError, Delivery, EnvelopeReceiver, EnvelopeSender,
     EnvelopeSink, EnvelopeSource, GraphRevision, InputEnvelope, InputMergePolicy, LifecyclePolicy,
     ObservedGraph, OutputEnvelope, OutputProgress, PipeCapabilities, PipeCapability, PipeControl,
-    PipeError, PipeProvider, PipeRequirements, PortDescriptor, PortDirection, PortId,
+    PipeError, PipeProvider, PipeRequirements, PortDescriptor, PortDirection, PortId, PortKind,
     RelationshipPolicy, ResourceId, SendFailure, SinkCompletion, StreamId, Transformer,
 };
 
@@ -207,18 +207,29 @@ fn validate_role(
     role: ComponentRole,
     completion: Option<SinkCompletion>,
 ) -> GraphResult<()> {
-    let inputs = descriptor
-        .ports()
-        .iter()
-        .filter(|port| port.direction() == PortDirection::Input)
-        .count();
-    let outputs = descriptor.ports().len() - inputs;
-    let valid = match role {
-        ComponentRole::Source => inputs == 0 && outputs > 0,
-        ComponentRole::Transformer => inputs > 0 && outputs > 0,
-        ComponentRole::Sink => inputs > 0 && outputs == 0,
-        ComponentRole::Service => inputs == 0 && outputs == 0,
+    let count = |direction, kind| {
+        descriptor
+            .ports()
+            .iter()
+            .filter(|port| port.direction() == direction && port.kind() == kind)
+            .count()
     };
+    let inputs = count(PortDirection::Input, PortKind::Data);
+    let outputs = count(PortDirection::Output, PortKind::Data);
+    let bootstrap_inputs = count(PortDirection::Input, PortKind::Bootstrap);
+    let bootstrap_outputs = count(PortDirection::Output, PortKind::Bootstrap);
+    // A component consumes bootstrap data on at most one port. Providers have
+    // only bootstrap outputs; sinks serve no snapshots; services have no ports.
+    let valid = bootstrap_inputs <= 1
+        && match role {
+            ComponentRole::Source => inputs == 0 && outputs > 0,
+            ComponentRole::Transformer => inputs > 0 && outputs > 0,
+            ComponentRole::Sink => inputs > 0 && outputs == 0 && bootstrap_outputs == 0,
+            ComponentRole::Service => descriptor.ports().is_empty(),
+            ComponentRole::BootstrapProvider => {
+                inputs == 0 && outputs == 0 && bootstrap_inputs == 0 && bootstrap_outputs > 0
+            }
+        };
     if !valid || (role == ComponentRole::Sink) != completion.is_some() {
         return Err(topology(format!(
             "invalid role/ports/completion for {}",
@@ -435,6 +446,20 @@ pub struct GraphSnapshot {
 }
 
 impl GraphSnapshot {
+    /// Whether a relationship connects bootstrap ports rather than data ports.
+    pub fn is_bootstrap_relationship(&self, edge: &EdgeDefinition) -> bool {
+        self.nodes
+            .iter()
+            .find(|node| node.descriptor.id() == &edge.from.component)
+            .and_then(|node| {
+                node.descriptor
+                    .ports()
+                    .iter()
+                    .find(|port| port.id() == &edge.from.port)
+            })
+            .is_some_and(|port| port.kind() == PortKind::Bootstrap)
+    }
+
     pub(crate) fn data_connections(&self) -> impl Iterator<Item = (&ComponentId, &ComponentId)> {
         self.edges
             .iter()
@@ -444,6 +469,7 @@ impl GraphSnapshot {
                     .iter()
                     .map(|edge| &edge.definition),
             )
+            .filter(|edge| !self.is_bootstrap_relationship(edge))
             .map(|edge| (&edge.from.component, &edge.to.component))
             .chain(self.subscriptions.iter().map(|(from, to)| (from, to)))
     }
@@ -470,6 +496,7 @@ enum Component {
     Transformer(Box<dyn Transformer>),
     Sink(Box<dyn EnvelopeSink>),
     Service(Box<dyn super::ComputationService>),
+    BootstrapProvider(Box<dyn super::ComputationBootstrapper>),
     Deferred {
         specification: Arc<ComponentSpecification>,
         factory: Arc<dyn ComponentFactory>,
@@ -488,6 +515,7 @@ impl Component {
             Self::Transformer(component) => Ok(component.as_mut()),
             Self::Sink(component) => Ok(component.as_mut()),
             Self::Service(component) => Ok(component.as_mut()),
+            Self::BootstrapProvider(component) => Ok(component.as_mut()),
             Self::Deferred { .. } | Self::Unresolved(_) => {
                 anyhow::bail!("component has not been constructed")
             }
@@ -541,6 +569,7 @@ impl Component {
             }
             Self::Sink(component) => component.recovery_contract(),
             Self::Service(component) => component.recovery_contract(),
+            Self::BootstrapProvider(component) => component.recovery_contract(),
             Self::Deferred { .. } | Self::Unresolved(_) => super::ComponentRecovery::default(),
         }
     }
@@ -551,6 +580,7 @@ impl Component {
             Self::Transformer(component) => component.query_api(),
             Self::Sink(component) => component.query_api(),
             Self::Service(component) => component.query_api(),
+            Self::BootstrapProvider(component) => component.query_api(),
             Self::Deferred { .. } | Self::Unresolved(_) => None,
         }
     }
@@ -561,6 +591,7 @@ impl Component {
             Self::Transformer(component) => component.source_schema_reader(),
             Self::Sink(component) => component.source_schema_reader(),
             Self::Service(component) => component.source_schema_reader(),
+            Self::BootstrapProvider(component) => component.source_schema_reader(),
             Self::Deferred { .. } | Self::Unresolved(_) => None,
         }
     }
@@ -571,6 +602,7 @@ impl Component {
             Self::Transformer(component) => component.output_readers(),
             Self::Sink(component) => component.output_readers(),
             Self::Service(component) => component.output_readers(),
+            Self::BootstrapProvider(component) => component.output_readers(),
             Self::Deferred { .. } | Self::Unresolved(_) => super::OutputReaders::default(),
         }
     }
@@ -581,6 +613,7 @@ impl Component {
             Self::Transformer(component) => component.descriptor(),
             Self::Sink(component) => component.descriptor(),
             Self::Service(component) => component.descriptor(),
+            Self::BootstrapProvider(component) => component.descriptor(),
             Self::Deferred { specification, .. } => &specification.descriptor,
             Self::Unresolved(definition) => &definition.descriptor,
         }
@@ -592,6 +625,7 @@ impl Component {
             Self::Transformer(_) => ComponentRole::Transformer,
             Self::Sink(_) => ComponentRole::Sink,
             Self::Service(_) => ComponentRole::Service,
+            Self::BootstrapProvider(_) => ComponentRole::BootstrapProvider,
             Self::Deferred { specification, .. } => specification.role,
             Self::Unresolved(definition) => definition.role,
         }
@@ -616,6 +650,7 @@ impl Component {
             Self::Transformer(component) => component.binds_inputs(),
             Self::Sink(component) => component.binds_inputs(),
             Self::Service(component) => component.binds_inputs(),
+            Self::BootstrapProvider(component) => component.binds_inputs(),
         }
     }
 
@@ -625,6 +660,7 @@ impl Component {
             Self::Transformer(component) => component.bind_inputs(bindings).await,
             Self::Sink(component) => component.bind_inputs(bindings).await,
             Self::Service(component) => component.bind_inputs(bindings).await,
+            Self::BootstrapProvider(component) => component.bind_inputs(bindings).await,
         }
     }
 
@@ -643,6 +679,7 @@ impl Component {
             Self::Transformer(component) => component.as_ref(),
             Self::Sink(component) => component.as_ref(),
             Self::Service(component) => component.as_ref(),
+            Self::BootstrapProvider(component) => component.as_ref(),
             Self::Deferred { .. } | Self::Unresolved(_) => return Ok(None),
         };
         match component.management() {
@@ -673,6 +710,18 @@ impl Component {
             Self::Transformer(component) => component.bind_control(control),
             Self::Sink(component) => component.bind_control(control),
             Self::Service(component) => component.bind_control(control),
+            Self::BootstrapProvider(component) => component.bind_control(control),
+            Self::Deferred { .. } | Self::Unresolved(_) => {}
+        }
+    }
+
+    fn bind_bootstrap(&mut self, ports: super::BootstrapPorts) {
+        match self {
+            Self::Source(component) => component.bind_bootstrap(ports),
+            Self::Transformer(component) => component.bind_bootstrap(ports),
+            Self::Sink(component) => component.bind_bootstrap(ports),
+            Self::Service(component) => component.bind_bootstrap(ports),
+            Self::BootstrapProvider(component) => component.bind_bootstrap(ports),
             Self::Deferred { .. } | Self::Unresolved(_) => {}
         }
     }
@@ -694,6 +743,7 @@ impl Component {
             Self::Transformer(component) => component.control_handler(),
             Self::Sink(component) => component.control_handler(),
             Self::Service(component) => component.control_handler(),
+            Self::BootstrapProvider(component) => component.control_handler(),
             Self::Deferred { .. } | Self::Unresolved(_) => None,
         }
     }
@@ -704,6 +754,7 @@ impl Component {
             Self::Transformer(component) => component.requires_readiness_confirmation(),
             Self::Sink(component) => component.requires_readiness_confirmation(),
             Self::Service(component) => component.requires_readiness_confirmation(),
+            Self::BootstrapProvider(component) => component.requires_readiness_confirmation(),
             Self::Deferred { .. } | Self::Unresolved(_) => false,
         }
     }
@@ -884,6 +935,16 @@ impl ComputationGraphBuilder {
         service: Box<dyn super::ComputationService>,
     ) -> Self {
         self.components.push((name, Component::Service(service)));
+        self
+    }
+
+    pub fn bootstrap_provider(
+        mut self,
+        name: ComponentName,
+        provider: Box<dyn super::ComputationBootstrapper>,
+    ) -> Self {
+        self.components
+            .push((name, Component::BootstrapProvider(provider)));
         self
     }
     pub(crate) fn unbound(mut self, relationship: DesiredRelationship) -> Self {
@@ -1235,7 +1296,9 @@ impl ComputationGraphBuilder {
                 return Err(topology("duplicate edge"));
             }
             let (from, output) = resolve(&ids, &nodes, &edge.from)?;
-            if !nodes[from].output_streams.contains_key(&edge.from.port) {
+            if output.kind() == PortKind::Data
+                && !nodes[from].output_streams.contains_key(&edge.from.port)
+            {
                 return Err(topology(
                     "connect an output only after binding its producer stream",
                 ));
@@ -1292,6 +1355,7 @@ impl ComputationGraphBuilder {
                 resources,
             });
         }
+        controller::reconcile::validate_bootstrap_relationships(&ids, &nodes, &edges)?;
         let order = dependency_order(&ids, &edges, &[])?;
         if self
             .lifecycle_policies
@@ -1971,6 +2035,7 @@ impl ComputationGraph {
         }) {
             if node.descriptor.ports().iter().any(|port| {
                 port.direction() == super::PortDirection::Output
+                    && port.kind() == PortKind::Data
                     && !node.output_streams.contains_key(port.id())
             }) {
                 validation.wait_for(node.descriptor.id().clone());
@@ -2833,11 +2898,11 @@ fn validate_admission(
     if admission.component_id() != node.descriptor.id()
         || admission.identity().graph_id() != snapshot.id.as_ref()
         || scope.is_some_and(|scope| scope != admission.identity().construction_scope())
-        || node
-            .descriptor
-            .ports()
-            .iter()
-            .any(|port| port.direction() == PortDirection::Output && port.id() != admission.port())
+        || node.descriptor.ports().iter().any(|port| {
+            port.direction() == PortDirection::Output
+                && port.kind() == PortKind::Data
+                && port.id() != admission.port()
+        })
         || snapshot
             .subscriptions
             .iter()
@@ -2855,7 +2920,15 @@ fn validate_admission(
     let mut outputs = snapshot
         .edges
         .iter()
-        .filter(|edge| &edge.definition.from.component == node.descriptor.id())
+        .filter(|edge| {
+            &edge.definition.from.component == node.descriptor.id()
+                && node
+                    .descriptor
+                    .ports()
+                    .iter()
+                    .find(|port| port.id() == &edge.definition.from.port)
+                    .is_none_or(|port| port.kind() == PortKind::Data)
+        })
         .peekable();
     if outputs.peek().is_none() && scope.is_none() {
         return Ok(());
@@ -3034,6 +3107,11 @@ async fn run_node(
             ))
             .await;
         }
+    }
+    if matches!(component, Component::BootstrapProvider(_)) {
+        drop(startup_work.take());
+        cancelled(quiesce).await;
+        return Ok(());
     }
     if let Component::Service(service) = component {
         tokio::select! {
@@ -3254,7 +3332,9 @@ async fn run_node(
                             .map_err(|source| component_error(node, "handle", source))?;
                         Vec::new()
                     }
-                    Component::Source(_) | Component::Service(_) => unreachable!(),
+                    Component::Source(_)
+                    | Component::Service(_)
+                    | Component::BootstrapProvider(_) => unreachable!(),
                     Component::Deferred { .. } | Component::Unresolved(_) => {
                         return Err(topology("cannot process an unconstructed component"))
                     }

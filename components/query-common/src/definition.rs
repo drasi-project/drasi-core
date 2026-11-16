@@ -11,6 +11,15 @@ use drasi_computation_contracts::{
 };
 use serde::{Deserialize, Serialize};
 
+/// The query's optional bootstrap input. Connected bootstrap edges replace
+/// resource-declared initialization: either every input producer's bootstrap
+/// output, or exactly one local bootstrap provider.
+pub const QUERY_BOOTSTRAP_INPUT_PORT: &str = "bootstrap";
+
+/// The query's optional bootstrap output, serving its own output snapshot to
+/// downstream consumers that request it.
+pub const QUERY_BOOTSTRAP_OUTPUT_PORT: &str = "snapshot";
+
 /// The existing query definition, independent of how its component is hosted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -90,6 +99,18 @@ pub fn query_descriptor(id: ComponentId) -> ComponentDescriptor {
             ),
             PortDescriptor::new(
                 PortId::try_new("out").expect("port"),
+                PortDirection::Output,
+                GraphChangeCodec::schema().descriptor().clone(),
+                PipeRequirements::default(),
+            ),
+            PortDescriptor::bootstrap(
+                PortId::try_new(QUERY_BOOTSTRAP_INPUT_PORT).expect("port"),
+                PortDirection::Input,
+                GraphChangeCodec::schema().descriptor().clone(),
+                PipeRequirements::default(),
+            ),
+            PortDescriptor::bootstrap(
+                PortId::try_new(QUERY_BOOTSTRAP_OUTPUT_PORT).expect("port"),
                 PortDirection::Output,
                 GraphChangeCodec::schema().descriptor().clone(),
                 PipeRequirements::default(),

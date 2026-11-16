@@ -11,12 +11,6 @@ fn has_bootstrap(request: &CreateRequest) -> bool {
         INDEXED_IMPLEMENTATION => {
             request.configuration.get("bootstrap") == Some(&serde_json::Value::Bool(true))
         }
-        PROVIDER_IMPLEMENTATION => true,
-        IMPLEMENTATION => request
-            .configuration
-            .get("bootstrap")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|inputs| !inputs.is_empty()),
         _ => false,
     }
 }

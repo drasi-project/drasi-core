@@ -28,7 +28,7 @@ use drasi_index_garnet::{
     GarnetIndexProvider, GarnetLiveResultsWriter, GarnetOutboxWriter, GarnetSessionControl,
     GarnetSessionState,
 };
-use shared_tests::redis_helpers::{setup_redis, RedisGuard};
+use shared_tests::redis_helpers::{setup_shared_redis, RedisGuard};
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
@@ -38,7 +38,7 @@ static SHARED_REDIS: OnceCell<RedisGuard> = OnceCell::const_new();
 async fn shared_redis() -> &'static RedisGuard {
     SHARED_REDIS
         .get_or_init(|| async {
-            let redis = setup_redis().await;
+            let redis = setup_shared_redis().await;
             GarnetIndexProvider::new(redis.url(), None, false)
                 .create_indexes(&unique_query_id())
                 .await

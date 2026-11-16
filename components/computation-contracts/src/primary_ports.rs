@@ -16,11 +16,11 @@
 //!
 //! A shorthand names a component without naming a port. The port is chosen
 //! only from actual declarations: an explicit port, the factory's validated
-//! primary port for that direction, or the single port of that direction.
-//! Several candidates with no primary designation are ambiguous and never
+//! primary port for that direction, or the single data port of that
+//! direction. Bootstrap ports are never inferred; they must be named. Several candidates with no primary designation are ambiguous and never
 //! resolved by position or name.
 
-use super::{ContractError, PortDescriptor, PortDirection, PortId, Result};
+use super::{ContractError, PortDescriptor, PortDirection, PortId, PortKind, Result};
 
 /// A factory's optional designation of one primary input and one primary
 /// output. Designations name ports by id, so they survive format overrides, and
@@ -64,8 +64,9 @@ impl PortPrimaries {
     /// Resolve the port a shorthand endpoint refers to.
     ///
     /// An explicit port must exist with the requested direction. Without one,
-    /// the validated primary for that direction is used, otherwise the only port
-    /// of that direction. No port, or several without a primary, is an error.
+    /// the validated primary for that direction is used, otherwise the only data
+    /// port of that direction. No data port, or several without a primary, is an
+    /// error.
     pub fn resolve(
         &self,
         ports: &[PortDescriptor],
@@ -79,7 +80,10 @@ impl PortPrimaries {
         if let Some(primary) = self.primary(direction) {
             return Ok(primary.clone());
         }
-        let mut candidates = ports_of(ports, direction);
+        let mut candidates = ports
+            .iter()
+            .filter(|port| port.direction() == direction && port.kind() == PortKind::Data)
+            .map(PortDescriptor::id);
         match (candidates.next(), candidates.next()) {
             (None, _) => Err(ContractError::NoEndpointPort { direction }),
             (Some(only), None) => Ok(only.clone()),
@@ -204,6 +208,31 @@ mod tests {
             none.resolve(&ports, PortDirection::Output, None),
             Err(ContractError::AmbiguousEndpointPort { .. })
         ));
+    }
+
+    #[test]
+    fn bootstrap_ports_are_never_inferred() {
+        let none = PortPrimaries::default();
+        let ports = vec![
+            port("in", PortDirection::Input, "graph").with_kind(PortKind::Bootstrap),
+            port("out", PortDirection::Output, "graph"),
+            port("snapshot", PortDirection::Output, "graph").with_kind(PortKind::Bootstrap),
+        ];
+        assert_eq!(
+            none.resolve(&ports, PortDirection::Output, None).unwrap(),
+            id("out")
+        );
+        assert!(matches!(
+            none.resolve(&ports, PortDirection::Input, None),
+            Err(ContractError::NoEndpointPort {
+                direction: PortDirection::Input
+            })
+        ));
+        assert_eq!(
+            none.resolve(&ports, PortDirection::Output, Some(&id("snapshot")))
+                .unwrap(),
+            id("snapshot")
+        );
     }
 
     #[test]

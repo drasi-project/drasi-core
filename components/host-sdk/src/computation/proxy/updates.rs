@@ -70,9 +70,8 @@ macro_rules! unchanged {
 impl NativeComponentProxy {
     fn update_implementation(&self) -> anyhow::Result<ImplementationIdentity> {
         Ok(if self.query_construction.is_some() {
-            ImplementationIdentity::try_new(
-                format!("{}/ordinary", self.metadata.implementation.name),
-                self.metadata.implementation.version.clone(),
+            crate::computation::query::continuous_query_implementation(
+                &self.metadata.implementation,
             )?
         } else {
             self.metadata.implementation.clone()

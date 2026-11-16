@@ -118,21 +118,6 @@ impl NativeFactory {
             "incomplete native factory table"
         );
         let mut descriptor = runtime_descriptor(&metadata);
-        if metadata.capabilities.quiescent_bootstrap.is_some()
-            || metadata.capabilities.durable_bootstrap.is_some()
-        {
-            let mut requirement = ResourceRequirement::exactly_one::<super::NativeBootstrapResource>(
-                ResourceRole::Bootstrap,
-            );
-            if metadata.capabilities.durable_bootstrap.is_some()
-                || metadata.capabilities.bootstrap_optional
-            {
-                requirement.minimum = 0;
-            }
-            descriptor
-                .dependencies
-                .insert("bootstrap".into(), requirement);
-        }
         if admission.is_some() {
             let mut requirement =
                 ResourceRequirement::exactly_one::<QosChannel>(ResourceRole::StateStore);
@@ -349,15 +334,6 @@ impl NativeFactory {
                     && (self.recovery.is_some() ^ self.consumer_progress.is_some())),
             "source bootstrap coordination requires one negotiated source progress mode"
         );
-        if extension.is_some() {
-            let mut requirement = ResourceRequirement::exactly_one::<
-                super::NativeSourceBootstrapResource,
-            >(ResourceRole::Bootstrap);
-            requirement.minimum = 0;
-            self.descriptor
-                .dependencies
-                .insert("source_bootstrap".into(), requirement);
-        }
         self.bootstrap_coordination = extension;
         Ok(self)
     }
@@ -1013,7 +989,7 @@ impl NativeFactory {
             output_snapshots,
             consumer_progress,
             input_progress,
-            source_bootstrap,
+            source_bootstrap.map(|coordinator| (coordinator, false, None)),
             None,
             None,
         )
@@ -1029,7 +1005,11 @@ impl NativeFactory {
         output_snapshots: Option<super::OutputSnapshotsService>,
         consumer_progress: Option<Arc<ConsumerProgressSet>>,
         input_progress: Option<Arc<QuerySourceProgress>>,
-        source_bootstrap: Option<Arc<super::NativeSourceBootstrapResource>>,
+        source_bootstrap: Option<(
+            Arc<super::NativeSourceBootstrapResource>,
+            bool,
+            Option<drasi_lib::computation::v1::OutputCatalogue>,
+        )>,
         identity: Option<Arc<super::NativeIdentityResource>>,
         processing: Option<super::processing::ProcessingBinding>,
     ) -> anyhow::Result<NativeComponentProxy> {
@@ -1172,7 +1152,7 @@ impl NativeFactory {
                         &mut component,
                     )
                 }))?;
-            } else if let Some(coordinator) = &source_bootstrap {
+            } else if let Some((coordinator, _, _)) = &source_bootstrap {
                 anyhow::ensure!(
                     admission.is_none() && !consumer && output_snapshots.is_none(),
                     "source bootstrap cannot be combined with unrelated service bindings"
@@ -1274,8 +1254,14 @@ impl NativeFactory {
             Some(extension) => component.with_batching(extension),
             None => Ok(component),
         }?;
+        let source_coordinator = source_bootstrap
+            .map(|(coordinator, owned, graph)| {
+                super::proxy::SourceCoordinator::new(coordinator, owned, graph)
+            })
+            .transpose()?;
         component
             .with_identity(activation_identity)
+            .with_source_coordinator(source_coordinator)
             .with_processing(processing)
             .with_output_snapshots(output_snapshots)
             .with_source_schema(self.source_schema)?
@@ -1358,9 +1344,11 @@ impl ComponentFactory for NativeFactory {
         if specification.dependencies.contains_key("catalog") {
             if self.supports_ordinary_queries() {
                 anyhow::bail!(
-                    "native query implementation '{0}' does not bind a query result catalog; \
-                     declare the query with implementation '{0}/ordinary' to use a 'catalog' dependency",
-                    self.metadata.implementation.name
+                    "native query implementation '{}' does not bind a query result catalog; \
+                     declare the query with implementation '{}' to use a 'catalog' dependency",
+                    self.metadata.implementation.name,
+                    super::query::continuous_query_implementation(&self.metadata.implementation)?
+                        .name
                 );
             }
             anyhow::bail!(
@@ -1374,7 +1362,6 @@ impl ComponentFactory for NativeFactory {
                     && match name.as_ref() {
                         "admission" => self.admission.is_some(),
                         "source_progress" => self.recovery.is_some(),
-                        "source_bootstrap" => self.bootstrap_coordination.is_some(),
                         "input_progress" => self.supports_input_progress(),
                         "consumer_progress" => {
                             self.consumer_progress.is_some() && resources.len() == 1
@@ -1386,24 +1373,10 @@ impl ComponentFactory for NativeFactory {
                             self.activation_credentials.is_some() && self.consumer.is_none()
                         }
                         "processing" => self.processing.is_some() && resources.len() == 1,
-                        "bootstrap" => {
-                            (self.metadata.capabilities.quiescent_bootstrap.is_some()
-                                || self.metadata.capabilities.durable_bootstrap.is_some())
-                                && resources.len() == 1
-                        }
                         _ => false,
                     }
             }),
             "native resource binding requires its negotiated service interface"
-        );
-        anyhow::ensure!(
-            self.metadata.capabilities.quiescent_bootstrap.is_none()
-                || self.metadata.capabilities.bootstrap_optional
-                || specification
-                    .dependencies
-                    .get("bootstrap")
-                    .is_some_and(|ids| ids.len() == 1),
-            "native bootstrap consumer requires one provider resource"
         );
         anyhow::ensure!(
             self.consumer.is_none()
@@ -1421,28 +1394,6 @@ impl ComponentFactory for NativeFactory {
                     .is_some_and(|ids| ids.len() == 1),
             "native transformer requires one host-owned indexed processing resource"
         );
-        if specification
-            .dependencies
-            .get("source_bootstrap")
-            .is_some_and(|ids| !ids.is_empty())
-        {
-            let slot = if self.consumer_progress.is_some() {
-                "consumer_progress"
-            } else {
-                "source_progress"
-            };
-            anyhow::ensure!(
-                specification
-                    .dependencies
-                    .get(slot)
-                    .is_some_and(|ids| ids.len() == 1)
-                    && specification
-                        .dependencies
-                        .get("admission")
-                        .is_none_or(Vec::is_empty),
-                "source bootstrap requires exactly its live progress dependency"
-            );
-        }
         anyhow::ensure!(
             self.consumer_progress.is_none()
                 || specification
@@ -1652,19 +1603,6 @@ impl ComponentFactory for NativeFactory {
         } else {
             None
         };
-        let source_bootstrap = if context
-            .specification
-            .dependencies
-            .contains_key("source_bootstrap")
-        {
-            context
-                .resources::<super::NativeSourceBootstrapResource>("source_bootstrap")
-                .map_err(ComponentCreationError::terminal)?
-                .into_iter()
-                .next()
-        } else {
-            None
-        };
         let identity = if context.specification.dependencies.contains_key("identity") {
             context
                 .resources::<super::NativeIdentityResource>("identity")
@@ -1719,31 +1657,43 @@ impl ComponentFactory for NativeFactory {
         } else {
             None
         };
-        let bootstrap = if (self.metadata.capabilities.quiescent_bootstrap.is_some()
-            || self.metadata.capabilities.durable_bootstrap.is_some())
-            && context.specification.dependencies.contains_key("bootstrap")
-        {
-            let bootstrap = context
-                .resources::<super::NativeBootstrapResource>("bootstrap")
-                .map_err(ComponentCreationError::terminal)?
-                .into_iter()
-                .next();
-            if self.metadata.capabilities.quiescent_bootstrap.is_some()
-                && !self.metadata.capabilities.bootstrap_optional
-                && bootstrap.is_none()
-            {
-                return Err(ComponentCreationError::terminal(anyhow::anyhow!(
-                    "missing native bootstrap provider"
-                )));
-            }
-            bootstrap
-        } else {
-            None
-        };
         let scope = Scope {
             instance_id: context.instance_id.to_string(),
             graph_id: context.graph_id.to_string(),
             generation: context.generation.0,
+        };
+        // A coordination-capable source with a provider on its bootstrap input
+        // coordinates its consumers' bootstrap itself: it creates its
+        // library's coordinator from its own progress owners, so the paired
+        // provider node shares the live engine.
+        let running = context.output_catalogue().clone();
+        let source_bootstrap = if self.bootstrap_coordination.is_some()
+            && admission.is_none()
+            && !context.bootstrap_producers().is_empty()
+        {
+            let owners = match (&progress, &consumer_progress) {
+                (Some(owner), None) => {
+                    Some(super::NativeSourceBootstrapProgress::Single(owner.clone()))
+                }
+                (None, Some(owners)) => {
+                    Some(super::NativeSourceBootstrapProgress::Shared(owners.clone()))
+                }
+                _ => None,
+            };
+            owners
+                .map(|owners| {
+                    self.create_source_bootstrap_with_identity(
+                        context.component_id.clone(),
+                        configuration.clone(),
+                        scope.clone(),
+                        owners,
+                        identity.clone(),
+                    )
+                })
+                .transpose()
+                .map_err(ComponentCreationError::terminal)?
+        } else {
+            None
         };
         let proxy = self
             .construct_bound_with_identity(
@@ -1767,7 +1717,7 @@ impl ComponentFactory for NativeFactory {
                 snapshots,
                 consumer_progress,
                 input_progress,
-                source_bootstrap,
+                source_bootstrap.map(|coordinator| (coordinator, true, Some(running))),
                 identity,
                 processing,
             )
@@ -1784,12 +1734,7 @@ impl ComponentFactory for NativeFactory {
                     ComponentCreationError::terminal(error)
                 }
             })?;
-        let mut proxy = match bootstrap {
-            Some(bootstrap) => proxy
-                .with_bootstrap(bootstrap)
-                .map_err(ComponentCreationError::terminal)?,
-            None => proxy,
-        };
+        let mut proxy = proxy;
         if self
             .metadata
             .capabilities
@@ -1806,6 +1751,11 @@ impl ComponentFactory for NativeFactory {
             ComponentRole::Transformer => ConstructedComponent::transformer(Box::new(proxy)),
             ComponentRole::Sink => ConstructedComponent::sink(Box::new(proxy)),
             ComponentRole::Service => ConstructedComponent::service(Box::new(proxy)),
+            ComponentRole::BootstrapProvider => {
+                return Err(ComponentCreationError::terminal(anyhow::anyhow!(
+                    "native bootstrap provider components are not supported by the plugin ABI"
+                )))
+            }
         })
     }
 }

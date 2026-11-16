@@ -275,14 +275,15 @@ async fn family(dynamic: bool) -> Result<()> {
         scope(),
         consumers.clone(),
     )?;
+    unready.initialize(&crate::hooks::initialize_ctx()).await?;
+    let fenced = tokio::time::timeout(
+        Duration::from_millis(100),
+        unready.start(&crate::hooks::start_ctx()),
+    )
+    .await;
     assert!(
-        tokio::time::timeout(
-            Duration::from_millis(100),
-            unready.start(&crate::hooks::start_ctx())
-        )
-        .await
-        .is_err(),
-        "uninitialized real owners must fence startup"
+        fenced.is_err(),
+        "uninitialized real owners must fence startup: {fenced:?}"
     );
     tokio::time::timeout(
         Duration::from_secs(5),
@@ -294,8 +295,7 @@ async fn family(dynamic: bool) -> Result<()> {
         "0",
         "waiting for actual owners must not open replication"
     );
-    let bootstrap_configuration =
-        json!({"source":"source","stream":"changes","settings":database.source_settings()});
+    let bootstrap_configuration = json!({"source":id("source").as_str(),"stream":"changes","settings":database.source_settings()});
     assert!(bootstrap
         .create_provider(
             id("left"),
@@ -395,13 +395,13 @@ async fn family(dynamic: bool) -> Result<()> {
     ));
     builder = builder
         .component(
-            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1")
+            drasi_lib::computation::v1::ComponentName::try_new("source")
                 .expect("fixture component name"),
             source,
             source_factory,
         )
         .component(
-            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-2")
+            drasi_lib::computation::v1::ComponentName::try_new("sink")
                 .expect("fixture component name"),
             sink,
             sink_factory.clone(),
@@ -414,7 +414,7 @@ async fn family(dynamic: bool) -> Result<()> {
         let name = owner.component_id().as_str();
         let provider = bootstrap.create_provider(
             owner.component_id().clone(),
-            json!({"source":"source","stream":"changes","settings":database.source_settings()}),
+            json!({"source":id("source").as_str(),"stream":"changes","settings":database.source_settings()}),
             Some(scope()),
             Some(owner.clone()),
         )?;
@@ -435,12 +435,14 @@ async fn family(dynamic: bool) -> Result<()> {
         outputs.push(receiver);
         builder = builder
             .transformer(
-                drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-1")
-                    .expect("fixture component name"),
+                drasi_lib::computation::v1::ComponentName::try_new(format!(
+                    "fixture-transformer-{name}"
+                ))
+                .expect("fixture component name"),
                 Box::new(query),
             )
             .sink(
-                drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
+                drasi_lib::computation::v1::ComponentName::try_new(format!("fixture-sink-{name}"))
                     .expect("fixture component name"),
                 Box::new(Capture {
                     descriptor: ComponentDescriptor::try_new(
@@ -458,7 +460,7 @@ async fn family(dynamic: bool) -> Result<()> {
             .bind_stream(endpoint(name, "out"), stream(&format!("{name}/out")))
             .connect(
                 EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in")),
-                if name == "right" {
+                if name == id("right").as_str() {
                     Box::new(GateProvider(gate.clone())) as Box<dyn PipeProvider>
                 } else {
                     Box::new(BoundedPipeConfig { capacity: 8 })
@@ -474,6 +476,7 @@ async fn family(dynamic: bool) -> Result<()> {
             );
     }
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -511,7 +514,7 @@ async fn family(dynamic: bool) -> Result<()> {
             if input.changes().operations().len() == 1 { actual_input = Some(input); }
         }
         next(&mut outputs[1]).await?;
-        let key = SourceProgressKey::Source(drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d").expect("fixture UUID"));
+        let key = SourceProgressKey::Source(id("source"));
         let partial = position(&owners[1], &key)?;
         assert_eq!(partial["offset"], 0);
         assert_eq!(partial["count"], 4);
@@ -555,8 +558,16 @@ async fn family(dynamic: bool) -> Result<()> {
         core.stop().await?;
         database.sql("UPDATE items SET value='offline' WHERE id=1").await?;
         tokio::time::timeout(Duration::from_secs(30),core.start()).await??;
-        for query in &results { assert!(rows(query)?.contains(&json!({"id":1,"value":"offline"}))); }
-        for owner in &owners { assert!(owner.snapshot().bootstrap_complete && !owner.snapshot().persistent); }
+        // Persistent queries resume and the source replays the offline change.
+        for query in &results {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            while !rows(query)?.contains(&json!({"id":1,"value":"offline"})) {
+                anyhow::ensure!(tokio::time::Instant::now() < deadline,
+                    "restart did not replay the offline change: {:?}", rows(query)?);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+        for owner in &owners { assert!(owner.snapshot().bootstrap_complete && owner.snapshot().persistent); }
         Result::<()>::Ok(())
     }.await;
     gate.close();
@@ -770,13 +781,13 @@ async fn tracked_graph(
     )?;
     builder = builder
         .component(
-            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-3")
+            drasi_lib::computation::v1::ComponentName::try_new("source")
                 .expect("fixture component name"),
             source,
             source_factory,
         )
         .component(
-            drasi_lib::computation::v1::ComponentName::try_new("fixture-component-4")
+            drasi_lib::computation::v1::ComponentName::try_new("sink")
                 .expect("fixture component name"),
             sink,
             sink_factory,
@@ -817,7 +828,7 @@ async fn tracked_graph(
         if !positional {
             query = query.with_bootstrap(bootstrap.create_provider(
                 owner.component_id().clone(),
-                json!({"source":"source","stream":"changes","settings":settings}),
+                json!({"source":id("source").as_str(),"stream":"changes","settings":settings}),
                 Some(scope()),
                 Some(owner.clone()),
             )?);
@@ -828,12 +839,14 @@ async fn tracked_graph(
         outputs.push(receiver);
         builder = builder
             .transformer(
-                drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-2")
-                    .expect("fixture component name"),
+                drasi_lib::computation::v1::ComponentName::try_new(format!(
+                    "fixture-transformer-{name}"
+                ))
+                .expect("fixture component name"),
                 Box::new(query),
             )
             .sink(
-                drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-2")
+                drasi_lib::computation::v1::ComponentName::try_new(format!("fixture-sink-{name}"))
                     .expect("fixture component name"),
                 Box::new(Capture {
                     descriptor: ComponentDescriptor::try_new(
@@ -851,7 +864,7 @@ async fn tracked_graph(
             .bind_stream(endpoint(name, "out"), stream(&format!("{name}/out")))
             .connect(
                 EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in")),
-                if name == "right" {
+                if name == id("right").as_str() {
                     Box::new(GateProvider(gate.clone())) as Box<dyn PipeProvider>
                 } else {
                     Box::new(BoundedPipeConfig { capacity: 8 })
@@ -867,6 +880,7 @@ async fn tracked_graph(
             );
     }
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -965,10 +979,7 @@ async fn transactions(dynamic: bool, shared: bool) -> Result<()> {
         );
         assert_eq!(graph.results[0].snapshot()?.as_of_sequence, heads[0] + 1);
         if shared {
-            let key = SourceProgressKey::Source(
-                drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
-                    .expect("fixture UUID"),
-            );
+            let key = SourceProgressKey::Source(id("source"));
             assert_eq!(position(&graph.owners[0], &key)?["version"], 1);
             assert_eq!(
                 position(&graph.owners[1], &key)?["version"],
@@ -1139,10 +1150,7 @@ async fn persistent_rows_profile(dynamic: bool, positional: bool) -> Result<()> 
             );
         }
         next(&mut graph.outputs[1]).await?;
-        let key = SourceProgressKey::Source(
-            drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
-                .expect("fixture UUID"),
-        );
+        let key = SourceProgressKey::Source(id("source"));
         assert_eq!(position(&graph.owners[1], &key)?["offset"], 0);
         assert_eq!(position(&graph.owners[0], &key)?["offset"], 3);
         graph
@@ -1440,13 +1448,13 @@ async fn untracked(dynamic: bool, transactions: bool) -> Result<()> {
                 ),
             )?
             .component(
-                drasi_lib::computation::v1::ComponentName::try_new("fixture-component-5")
+                drasi_lib::computation::v1::ComponentName::try_new("source")
                     .expect("fixture component name"),
                 source,
                 source_factory,
             )
             .component(
-                drasi_lib::computation::v1::ComponentName::try_new("fixture-component-6")
+                drasi_lib::computation::v1::ComponentName::try_new("sink")
                     .expect("fixture component name"),
                 sink,
                 sink_factory.clone(),
@@ -1484,12 +1492,14 @@ async fn untracked(dynamic: bool, transactions: bool) -> Result<()> {
         outputs.push(receiver);
         builder = builder
             .transformer(
-                drasi_lib::computation::v1::ComponentName::try_new("fixture-transformer-3")
-                    .expect("fixture component name"),
+                drasi_lib::computation::v1::ComponentName::try_new(format!(
+                    "fixture-transformer-{name}"
+                ))
+                .expect("fixture component name"),
                 Box::new(query),
             )
             .sink(
-                drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-3")
+                drasi_lib::computation::v1::ComponentName::try_new(format!("fixture-sink-{name}"))
                     .expect("fixture component name"),
                 Box::new(Capture {
                     descriptor: ComponentDescriptor::try_new(
@@ -1519,6 +1529,7 @@ async fn untracked(dynamic: bool, transactions: bool) -> Result<()> {
             );
     }
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(

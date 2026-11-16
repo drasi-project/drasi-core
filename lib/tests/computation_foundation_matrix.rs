@@ -59,7 +59,9 @@ fn stage_descriptor(role: ComponentRole) -> ComponentDescriptor {
             &["in"],
             &[],
         ),
-        ComponentRole::Service => unreachable!("synthetic pipeline roles"),
+        ComponentRole::Service | ComponentRole::BootstrapProvider => {
+            unreachable!("synthetic pipeline roles")
+        }
     }
 }
 
@@ -213,7 +215,9 @@ impl ComponentFactory for Factory {
             ComponentRole::Source => ConstructedComponent::source(stage),
             ComponentRole::Transformer => ConstructedComponent::transformer(stage),
             ComponentRole::Sink => ConstructedComponent::sink(stage),
-            ComponentRole::Service => unreachable!("synthetic pipeline roles"),
+            ComponentRole::Service | ComponentRole::BootstrapProvider => {
+                unreachable!("synthetic pipeline roles")
+            }
         })
     }
 }
@@ -238,7 +242,9 @@ async fn matrix() {
                             ComponentRole::Source => builder.source(name, stage),
                             ComponentRole::Transformer => builder.transformer(name, stage),
                             ComponentRole::Sink => builder.sink(name, stage),
-                            ComponentRole::Service => unreachable!(),
+                            ComponentRole::Service | ComponentRole::BootstrapProvider => {
+                                unreachable!()
+                            }
                         };
                     } else {
                         let implementation =

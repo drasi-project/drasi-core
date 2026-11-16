@@ -63,6 +63,7 @@ mod manager_tests {
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
             result: Default::default(),
+            bootstrap_provider: None,
         }
     }
 
@@ -98,6 +99,7 @@ mod manager_tests {
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
             result: Default::default(),
+            bootstrap_provider: None,
         }
     }
 
@@ -1124,6 +1126,7 @@ mod query_core_tests {
                 outbox_capacity: 1000,
                 bootstrap_timeout_secs: 300,
                 result: Default::default(),
+                bootstrap_provider: None,
             };
 
             // Just verify the config can be created
@@ -1151,6 +1154,7 @@ mod query_core_tests {
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
             result: Default::default(),
+            bootstrap_provider: None,
         };
 
         // Empty queries should be caught during validation
@@ -1205,6 +1209,7 @@ mod output_state_integration_tests {
             outbox_capacity: 1000,
             bootstrap_timeout_secs: 300,
             result: Default::default(),
+            bootstrap_provider: None,
         }
     }
 
@@ -1500,6 +1505,7 @@ mod output_state_integration_tests {
             outbox_capacity: 2, // Very small — will evict quickly
             bootstrap_timeout_secs: 300,
             result: Default::default(),
+            bootstrap_provider: None,
         };
         add_query(&manager, &graph, config).await.unwrap();
         manager
@@ -1797,6 +1803,7 @@ mod output_state_integration_tests {
             outbox_capacity: 100,
             bootstrap_timeout_secs: 300,
             result: Default::default(),
+            bootstrap_provider: None,
         };
         add_query(&manager, &graph, config).await.unwrap();
         manager

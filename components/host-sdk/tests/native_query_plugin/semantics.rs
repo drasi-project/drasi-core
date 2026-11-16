@@ -20,8 +20,7 @@ async fn semantics() -> Result<()> {
             .factories()
             .iter()
             .find(|factory| {
-                factory.metadata().implementation.name.as_ref()
-                    == "drasi.experimental/indexed-query"
+                factory.metadata().implementation.name.as_ref() == "drasi.query/indexed"
             })
             .context("native indexed factory")?;
         for persistent in [false, true] {

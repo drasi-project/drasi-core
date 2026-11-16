@@ -111,7 +111,7 @@ fn query(
         super::super::provider(indexes)?,
     )?;
     if let Some(bootstrap) = bootstrap {
-        query.bind_bootstrap(Arc::new(NativeBootstrapResource(bootstrap)))?;
+        query.bind_bootstrap_provider(Arc::new(NativeBootstrapResource(bootstrap)))?;
     }
     Ok(query)
 }
@@ -278,7 +278,7 @@ async fn indexed_bootstrap_prepared_refresh_obeys_recovery_policy() -> Result<()
         super::super::provider(&indexes)?,
     )?;
     strict.initialize(&crate::hooks::initialize_ctx()).await?;
-    strict.bind_bootstrap(Arc::new(NativeBootstrapResource(Arc::new(
+    strict.bind_bootstrap_provider(Arc::new(NativeBootstrapResource(Arc::new(
         PausedProvider {
             inner: file_provider(&database, 2)?,
             gate: gate.clone(),

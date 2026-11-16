@@ -11,7 +11,8 @@ use std::{
 use drasi_computation_contracts::{
     ComponentDescriptor, ComponentId, ComponentName, ComponentRole, ComponentSemanticKind,
     ComponentUpdateMode, ImplementationIdentity, OutputProgress, PluginIdentity, PortDescriptor,
-    PortDirection, PortFormatAlternative, PortId, PortPrimaries, SchemaDescriptor, SinkCompletion,
+    PortDirection, PortFormatAlternative, PortId, PortKind, PortPrimaries, SchemaDescriptor,
+    SinkCompletion, BOOTSTRAP_INPUT_PORT, BOOTSTRAP_OUTPUT_PORT,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -274,6 +275,13 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
+    /// The data input that receives provider bootstrap records, if any.
+    pub fn provider_bootstrap(&self) -> Option<&PortId> {
+        self.quiescent_bootstrap
+            .as_ref()
+            .or(self.durable_bootstrap.as_ref())
+    }
+
     pub fn declares_output_reads(&self) -> bool {
         !self.output_snapshots.is_empty()
             || !self.output_replays.is_empty()
@@ -299,7 +307,23 @@ pub struct FactoryMetadata {
 
 impl FactoryMetadata {
     pub fn descriptor(&self, id: ComponentId) -> anyhow::Result<ComponentDescriptor> {
-        let mut descriptor = ComponentDescriptor::try_new(id, self.ports.clone())?;
+        let mut ports = self.ports.clone();
+        ports.extend(self.bootstrap_ports()?);
+        self.descriptor_with_ports(id, ports)
+    }
+
+    /// The descriptor without the host-added bootstrap ports. Plugins may
+    /// describe their instances either way; the host exposes [`Self::descriptor`].
+    pub fn data_descriptor(&self, id: ComponentId) -> anyhow::Result<ComponentDescriptor> {
+        self.descriptor_with_ports(id, self.ports.clone())
+    }
+
+    fn descriptor_with_ports(
+        &self,
+        id: ComponentId,
+        ports: Vec<PortDescriptor>,
+    ) -> anyhow::Result<ComponentDescriptor> {
+        let mut descriptor = ComponentDescriptor::try_new(id, ports)?;
         if let Some(kind) = self.capabilities.semantic_kind {
             descriptor = descriptor.with_semantic_kind(kind);
         }
@@ -310,6 +334,44 @@ impl FactoryMetadata {
             Some(plugin) => Ok(descriptor.with_plugin_identity(plugin.clone())?),
             None => Ok(descriptor),
         }
+    }
+
+    /// The graph bootstrap ports the host adds to every instance. A source
+    /// relays its consumers' sessions from an optional provider on
+    /// [`BOOTSTRAP_INPUT_PORT`] and serves them on [`BOOTSTRAP_OUTPUT_PORT`]. A
+    /// transformer declaring provider bootstrap reads its snapshot from its
+    /// inputs' bootstrap outputs, or from a local provider, on
+    /// [`BOOTSTRAP_INPUT_PORT`]. A transformer serving output snapshots serves
+    /// its committed output to downstream consumers' sessions on
+    /// [`BOOTSTRAP_OUTPUT_PORT`]. Plugins never declare bootstrap ports.
+    pub fn bootstrap_ports(&self) -> anyhow::Result<Vec<PortDescriptor>> {
+        let port = |name: &str, direction| -> anyhow::Result<PortDescriptor> {
+            Ok(PortDescriptor::bootstrap(
+                PortId::try_new(name)?,
+                direction,
+                drasi_computation_contracts::GraphChangeCodec::schema()
+                    .descriptor()
+                    .clone(),
+                drasi_computation_contracts::PipeRequirements::default(),
+            ))
+        };
+        Ok(match self.role {
+            ComponentRole::Source => vec![
+                port(BOOTSTRAP_INPUT_PORT, PortDirection::Input)?,
+                port(BOOTSTRAP_OUTPUT_PORT, PortDirection::Output)?,
+            ],
+            ComponentRole::Transformer => {
+                let mut ports = Vec::new();
+                if self.capabilities.provider_bootstrap().is_some() {
+                    ports.push(port(BOOTSTRAP_INPUT_PORT, PortDirection::Input)?);
+                }
+                if !self.capabilities.output_snapshots.is_empty() {
+                    ports.push(port(BOOTSTRAP_OUTPUT_PORT, PortDirection::Output)?);
+                }
+                ports
+            }
+            _ => Vec::new(),
+        })
     }
 
     /// The semantic kind of this factory's instances.
@@ -339,6 +401,12 @@ impl FactoryMetadata {
         self.descriptor(ComponentId::try_new(
             "00000000-0000-0000-0000-000000000000",
         )?)?;
+        anyhow::ensure!(
+            self.ports
+                .iter()
+                .all(|port| port.kind() == drasi_computation_contracts::PortKind::Data),
+            "native factories do not declare bootstrap ports; the host adds them"
+        );
         let inputs = self
             .ports
             .iter()
@@ -351,6 +419,8 @@ impl FactoryMetadata {
                 ComponentRole::Transformer => inputs > 0 && outputs > 0,
                 ComponentRole::Sink => inputs > 0 && outputs == 0,
                 ComponentRole::Service => inputs == 0 && outputs == 0,
+                // Plugins publish bootstrap providers as bootstrap factories.
+                ComponentRole::BootstrapProvider => false,
             },
             "unsupported native role or incompatible ports"
         );
@@ -549,8 +619,22 @@ impl FactoryMetadata {
         descriptor: &ComponentDescriptor,
         id: &ComponentId,
     ) -> anyhow::Result<()> {
+        let data: Vec<_> = descriptor
+            .ports()
+            .iter()
+            .filter(|port| port.kind() == PortKind::Data)
+            .cloned()
+            .collect();
+        let bootstrap: Vec<_> = descriptor
+            .ports()
+            .iter()
+            .filter(|port| port.kind() == PortKind::Bootstrap)
+            .cloned()
+            .collect();
         anyhow::ensure!(
-            descriptor.id() == id && descriptor.ports() == self.ports,
+            descriptor.id() == id
+                && data == self.ports
+                && (bootstrap.is_empty() || bootstrap == self.bootstrap_ports()?),
             "native component descriptor differs from its factory contract"
         );
         anyhow::ensure!(
@@ -734,9 +818,9 @@ mod abi_version_tests {
     #[test]
     fn accepts_same_major_older_or_equal_minor_only() {
         assert!(super::accepts_abi_version(super::abi::ABI_VERSION));
-        assert!(!super::accepts_abi_version("3.0.0"));
-        assert!(!super::accepts_abi_version("4.1.0"));
-        assert!(!super::accepts_abi_version("4.0"));
-        assert!(!super::accepts_abi_version("5.0.0"));
+        assert!(!super::accepts_abi_version("4.0.0"));
+        assert!(!super::accepts_abi_version("5.1.0"));
+        assert!(!super::accepts_abi_version("5.0"));
+        assert!(!super::accepts_abi_version("6.0.0"));
     }
 }

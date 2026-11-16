@@ -9,6 +9,22 @@ use drasi_lib::computation::v1::*;
 
 use super::{NativeFactory, NativePlugin};
 
+/// The implementation identity of the continuous-query wrapper around a native
+/// query factory: the factory name's final segment becomes `continuous`, so
+/// `drasi.query/indexed` is wrapped as `drasi.query/continuous`.
+pub(crate) fn continuous_query_implementation(
+    factory: &ImplementationIdentity,
+) -> anyhow::Result<ImplementationIdentity> {
+    let family = factory
+        .name
+        .rsplit_once('/')
+        .map_or(&*factory.name, |(family, _)| family);
+    Ok(ImplementationIdentity::try_new(
+        format!("{family}/continuous"),
+        factory.version.clone(),
+    )?)
+}
+
 pub(crate) fn select_query_factory<'a>(
     factories: impl IntoIterator<Item = &'a Arc<NativeFactory>>,
 ) -> anyhow::Result<Option<Arc<dyn ComponentFactory>>> {
@@ -146,10 +162,7 @@ impl NativeFactory {
         if let Some(factory) = cached.as_ref().and_then(std::sync::Weak::upgrade) {
             return Ok(factory);
         }
-        let implementation = ImplementationIdentity::try_new(
-            format!("{}/ordinary", self.metadata().implementation.name),
-            self.metadata().implementation.version.clone(),
-        )?;
+        let implementation = continuous_query_implementation(&self.metadata().implementation)?;
         let factory: Arc<dyn ComponentFactory> =
             Arc::new(ContinuousQueryFactory::with_constructor(
                 implementation,
@@ -173,10 +186,7 @@ impl QueryConstructor for NativeQueryConstructor {
         proposed: &ComponentSpecification,
     ) -> anyhow::Result<ComponentUpdatePlan> {
         let metadata = self.factory.metadata();
-        let implementation = ImplementationIdentity::try_new(
-            format!("{}/ordinary", metadata.implementation.name),
-            metadata.implementation.version.clone(),
-        )?;
+        let implementation = continuous_query_implementation(&metadata.implementation)?;
         anyhow::ensure!(
             current.implementation == implementation
                 && proposed.implementation == implementation
@@ -383,9 +393,7 @@ mod tests {
         let error = ComponentFactory::validate(raw.as_ref(), &specification)
             .expect_err("raw native query factory accepted a catalog");
         assert!(
-            error
-                .to_string()
-                .contains("'drasi.experimental/indexed-query/ordinary'"),
+            error.to_string().contains("'drasi.query/continuous'"),
             "{error:#}"
         );
         Ok(())
@@ -445,7 +453,7 @@ mod tests {
         let first = plugin.query_factory()?;
         assert_eq!(
             first.descriptor().implementation.name.as_ref(),
-            "drasi.experimental/indexed-query/ordinary"
+            "drasi.query/continuous"
         );
         assert!(Arc::ptr_eq(&first, &plugin.query_factory()?));
         let mut registry = crate::PluginRegistry::new();

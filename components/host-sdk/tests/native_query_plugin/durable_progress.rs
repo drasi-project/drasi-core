@@ -351,25 +351,3 @@ async fn loaded_query_publishes_actual_committed_progress_current_thread() -> Re
 async fn loaded_query_publishes_actual_committed_progress_multi_thread() -> Result<()> {
     tokio::time::timeout(Duration::from_secs(20), actual_loaded_progress()).await?
 }
-
-#[tokio::test(flavor = "current_thread")]
-async fn volatile_query_does_not_acquire_a_committed_progress_view() -> Result<()> {
-    let plugin = computation::load(library())?;
-    let factory = plugin
-        .factories()
-        .iter()
-        .find(|factory| {
-            factory.metadata().implementation.name.as_ref() == "drasi.experimental/volatile-query"
-        })
-        .context("volatile factory")?;
-    let mut query = factory.create_component(
-        ComponentId::try_new("a4e18a8d-c209-5e45-8f98-663600681e28")?,
-        json!({"query":QUERY, "volatile":true}),
-    )?;
-    query.initialize(&crate::hooks::initialize_ctx()).await?;
-    assert!(query.committed_input_progress()?.is_none());
-    query.start(&crate::hooks::start_ctx()).await?;
-    assert!(query.committed_input_progress()?.is_none());
-    query.stop(&crate::hooks::stop_ctx()).await?;
-    Ok(())
-}

@@ -981,7 +981,7 @@ async fn unknown_and_wrong_direction_ports_fail_before_processing() {
                 query(drasi_core_types::ComponentName::try_new("wrong-direction").expect("fixture component name"), "Item")
                     .from_input_port_by_name(drasi_core_types::ComponentName::try_new("upstream").expect("fixture component name"), drasi_computation_contracts::PortId::try_new("in").expect("fixture PortId"))
                     .build().expect("valid query"),
-                r#"no Output port PortId("in") is declared (declared Output ports: [PortId("out")])"#,
+                r#"no Output port PortId("in") is declared (declared Output ports: [PortId("out"), PortId("snapshot")])"#,
             ),
         ] {
             let name = config.name.clone();

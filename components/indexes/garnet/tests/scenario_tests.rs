@@ -14,7 +14,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use shared_tests::redis_helpers::{setup_redis, RedisGuard};
+use shared_tests::redis_helpers::{setup_shared_redis, RedisGuard};
 use tokio::sync::OnceCell;
 
 use async_trait::async_trait;
@@ -36,12 +36,12 @@ use drasi_index_garnet::{
 
 /// Shared Redis container for all tests in this file.
 /// Each test uses unique query IDs so they don't interfere with each other.
-/// The container is cleaned up by testcontainers' ryuk sidecar on process exit.
+/// The container is removed when the test process exits.
 static SHARED_REDIS: OnceCell<RedisGuard> = OnceCell::const_new();
 
 async fn shared_redis() -> &'static RedisGuard {
     SHARED_REDIS
-        .get_or_init(|| async { setup_redis().await })
+        .get_or_init(|| async { setup_shared_redis().await })
         .await
 }
 

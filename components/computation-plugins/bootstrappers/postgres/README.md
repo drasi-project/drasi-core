@@ -121,8 +121,9 @@ graph and source identifiers, so the source and the provider agree on it
 without configuration, and erasing removal of the source drops every slot
 with that prefix, including an abandoned unfinished snapshot slot. The host must provide the actual
 query-owned `QuerySourceProgress`, a matching query ID and instance/graph scope.
-Attach the returned provider to that query's `QueryBootstrapResource` or
-`with_bootstrap`. The source and bootstrap may be independently loaded libraries;
+In a graph, the Host publishes the factory as a bootstrap provider node
+connected to the source's `bootstrap` input; Rust callers can also attach the
+returned provider directly with `with_bootstrap`. The source and bootstrap may be independently loaded libraries;
 only host-owned committed progress connects their handover.
 
 ```rust,ignore

@@ -68,9 +68,10 @@ Source-plugin event conversion. Its
 apply to both paths.
 
 The production dependency graph contains no query evaluator, parser, graph
-runtime or legacy SDK. Server's existing `nativeBootstrap` resource recipe
-accepts this factory with `component` naming its query and the configuration
-above; omit `sourceProgress`. Native catalogue discovery, YAML/configuration
+runtime or legacy SDK. The Host publishes this factory as a bootstrap provider
+graph node. Connect its `snapshot` output to a source's `bootstrap` input, or to
+a query's `bootstrap` input as that query's local provider; it needs no
+`source_progress` dependency. Native catalogue discovery, YAML/configuration
 round-trips and memory-backed query loading are covered by the Server native
 integration suite. The independently packaged
 [`drasi-computation-source-sqlite`](../../sources/sqlite) can supply live changes
@@ -79,12 +80,12 @@ Server example is `drasi-server/examples/native-sqlite.rs`, using its `file` mod
 This does not turn file initialization into coordinated journal ownership:
 writers must remain quiescent until both queries finish loading.
 
-Embedded hosts can also bind this existing file provider to the experimental
-[`drasi.experimental/provider-query`](../../transformers/query/README.md#existing-bootstrap-provider-integration)
-transformer through `NativeBootstrapResource`. That path uses the provider's
-real prepare/stream/complete/stop lifecycle and keeps writers quiescent; it
-does not yet accept the coordinated/shared factories. This is Host SDK/library
-integration, not new Server recipe support.
+A [`drasi.query/indexed`](../../transformers/query/README.md#durable-provider-bootstrap)
+query configured with `bootstrap: true`, or the standard
+`drasi.standard/middleware` transformer, can bootstrap from the same provider
+node connected to its `bootstrap` input. The consumer drives the provider's real
+prepare/stream/complete/stop lifecycle over the bootstrap edge; writers must
+remain quiescent until initialization completes.
 
 ## Source-paired snapshots
 
@@ -97,10 +98,11 @@ source configuration. Paired factory configuration is deliberately only:
 {"source": "sqlite", "stream": "sqlite/out"}
 ```
 
-A graph-owned `nativeSourceBootstrap` resource captures the actual source factory,
-immutable settings and single owner or complete consumer group. Each paired
-`nativeBootstrap` resource declares `sourceBootstrap` and its query's
-`sourceProgress`, with matching `Bootstrap` and `Checkpoint` dependencies.
+The source coordinates: connected to the source's `bootstrap` input, the paired
+provider node uses the coordinator the source created from its actual factory,
+immutable settings and single owner or complete consumer group. The node binds
+each query's actual progress under `source_progress`.
+Each query bootstraps through the source's `snapshot` output.
 The source and query also retain their normal progress bindings. Actual owner
 identity is validated; names, matching paths or independently rebuilt resources
 cannot replace it.

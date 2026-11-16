@@ -84,6 +84,19 @@ impl OutputCatalogue {
         self.registry.borrow().desired.id.clone()
     }
 
+    /// Whether `other` views the same running graph. Graphs in different
+    /// runtimes may share instance, graph and component IDs; this tells them
+    /// apart.
+    pub fn same_graph(&self, other: &Self) -> bool {
+        self.registry.same_channel(&other.registry)
+    }
+
+    /// The graph's current desired topology: descriptive data only, with no
+    /// providers, resolved secrets or live endpoints.
+    pub fn desired_graph(&self) -> Arc<crate::computation::v1::GraphSnapshot> {
+        self.registry.borrow().desired.clone()
+    }
+
     /// Resolve an explicit output, or the factory's primary/single output.
     /// An omitted port never means "the first port" or an assumed `out`.
     pub fn resolve_endpoint(
@@ -139,12 +152,9 @@ impl OutputCatalogue {
         let publication = self.registry_snapshot();
         let mut descriptions = Vec::new();
         for node in publication.desired.nodes.iter() {
-            for port in node
-                .descriptor
-                .ports()
-                .iter()
-                .filter(|port| port.direction() == PortDirection::Output)
-            {
+            for port in node.descriptor.ports().iter().filter(|port| {
+                port.direction() == PortDirection::Output && port.kind() == PortKind::Data
+            }) {
                 let endpoint = OutputEndpoint::new(node.descriptor.id().clone(), port.id().clone());
                 descriptions.push(Self::resolve_at(&publication, &endpoint)?.description);
             }
@@ -270,7 +280,11 @@ impl OutputCatalogue {
             .descriptor
             .ports()
             .iter()
-            .find(|port| port.id() == &endpoint.port && port.direction() == PortDirection::Output)
+            .find(|port| {
+                port.id() == &endpoint.port
+                    && port.direction() == PortDirection::Output
+                    && port.kind() == PortKind::Data
+            })
             .ok_or_else(unknown)?;
         let observed = publication
             .observed

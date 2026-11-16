@@ -177,8 +177,7 @@ async fn native_query_rejects_unqualified_garnet_without_touching_storage() -> R
             .factories()
             .iter()
             .find(|factory| {
-                factory.metadata().implementation.name.as_ref()
-                    == "drasi.experimental/indexed-query"
+                factory.metadata().implementation.name.as_ref() == "drasi.query/indexed"
             })
             .context("indexed native query")?;
         let query_id = ComponentId::try_new("70a753ff-f396-5582-91b3-1c2f5948550c")?;

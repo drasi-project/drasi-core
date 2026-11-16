@@ -1170,11 +1170,12 @@ cancellation.
 ### Paired bootstrap borrows the source's actual engine
 
 SQLite's separately loaded source and paired bootstrap libraries use the narrow
-`bootstrap_coordination_v1` extension. One graph-owned
-`NativeSourceBootstrapResource` holds the actual source-factory coordinator.
-Its role is Bootstrap, but its concrete type is not `QueryBootstrapResource`.
-There is no path-global registry, copied coordinator, forwarding worker or
-application SQL service.
+`bootstrap_coordination_v1` extension. The source coordinates: when a provider
+is connected to its `bootstrap` input, its factory creates the library's
+`NativeSourceBootstrapResource` from the source's own progress owners and
+registers it under the source's instance, graph and component ID while the
+source lives. There is no graph resource or recipe, copied coordinator,
+forwarding worker or application SQL service.
 
 `SourceBootstrapProgress` supplies the actual single owner or fixed group and all
 actual member readers. Those bootstrap bindings are active under the resource
@@ -1183,12 +1184,12 @@ source's separate normally activated binding. The Host checks actual owner/group
 identity; the SDK checks that the source and provider return their negotiated
 views. Matching IDs, paths or reconstructed member maps are insufficient.
 
-The source's `source_bootstrap` slot and each paired `nativeBootstrap` resource
-depend on that coordinator. The latter also names the query's actual
-`sourceProgress`. Source ID, implementation, resolved configuration and
-instance/graph scope must agree. A new component generation may legitimately
-retain the same coordinator resource; generation zero on a resource is not a
-reason to accept a foreign source or reject every replacement.
+The paired provider node looks up the coordinator of the source its `snapshot`
+output feeds and binds each consumer query's actual progress under
+`source_progress`. Source ID, implementation, resolved configuration and
+instance/graph scope must agree. The source relays each session to its
+consumer with its own handover boundary, and holds its live stream only on a
+first start with no saved position (`StartContext::fresh_start`).
 
 The source library constructs the provider. The independent bootstrap library
 validates its pairing and transfers that original bootstrap handle, preserving
@@ -1209,6 +1210,46 @@ See the [SDK coordination contract](../../components/computation-plugin-sdk/src/
 and [recipe validation](../../components/host-sdk/src/management/bootstrap_coordination.rs).
 Do not add a second family export-token map that can retire the old provider
 before SDK validation finishes.
+
+### Bootstrap travels over bootstrap ports
+
+Ports have a `PortKind`: `Data` or `Bootstrap`. Bootstrap ports are optional,
+never take part in data admission or live delivery, and connect only to other
+bootstrap ports. `BootstrapProvider` components have one `snapshot` output.
+Sources have an optional `bootstrap` input and a `snapshot` output; queries have
+a `bootstrap` input and a `snapshot` output; native transformers with a
+bootstrap capability have a `bootstrap` input.
+
+A session is addressed: the consumer sends a typed `BootstrapRequest` control
+notification carrying a session ID, its own ID as origin and the edge it reads.
+[`BootstrapPorts`](../src/computation/v1/bootstrap_ports.rs) delivers session
+records only on the requesting edge. The stream is a begin marker, records,
+optional `State` markers for durable providers and a complete or failed marker.
+
+- `PipeBootstrapProvider` is the consumer side. It implements
+  `ComputationBootstrapProvider` over the connected bootstrap inputs, so queries
+  and transformers keep their existing prepare/stream/complete lifecycle and
+  query-owned completion state. It forwards persisted bootstrap state to the
+  provider and records returned state markers, so durable providers resume from
+  committed progress after restart.
+- `BootstrapProviderComponent` runs one provider instance per session for the
+  origin consumer.
+- `BootstrapRelay` is the source side. It forwards a request to the connected
+  provider, relays the session back to the requester and appends the source's
+  handover boundary. Without a provider it completes an empty session with the
+  boundary. On the very first start, with no saved live position, a source calls
+  `hold_live` and delivers live changes only after the first session completes; later consumers receive their
+  own snapshot and boundary and skip covered live changes.
+- `BootstrapSnapshotServer` serves a query's current result set on its
+  `snapshot` output to downstream queries.
+
+A consumer bootstraps from its inputs' `snapshot` outputs or from exactly one
+local provider connected to its `bootstrap` input; a local provider is exclusive
+and requires bootstrap to be enabled. Managed pipelines create these edges from
+`QueryConfig.bootstrapProvider` and from inputs that expose a bootstrap output;
+inputs without one keep the catalogue output bootstrap resource. See
+[`graph_bootstrap.rs`](../src/computation/v1/graph_bootstrap.rs) and
+[`pipeline.rs`](../src/computation/v1/pipeline.rs).
 
 ### Composite bootstrap retains the actual child lifecycles
 
@@ -1238,14 +1279,13 @@ flags; partial acquisition must resume acquired children on rejection and
 retain any unresolved cleanup. Do not replace this with a list of factory names
 or release children when a caller stops waiting.
 
-Host/Server `CompositeBootstrapConfig` supplies the canonical
-`{kind: "compositeBootstrap", component: <query>, providers: [<ordered IDs>]}`
-recipe. It must be a graph-owned Bootstrap resource with exactly those child
-Bootstrap dependencies, bound to the query's unchanged single `bootstrap` slot.
-See the [Host resolver and validators](../../components/host-sdk/src/management/native.rs)
-and [real static/dynamic PG/HTTP composition](../../components/host-sdk/tests/native_postgres_http_bootstrap.rs).
-This adds no execution ABI, envelope schema or extra executor, and does not
-upgrade an HTTP snapshot to a durable or globally atomic snapshot protocol.
+A graph query composes its bootstrap from any directly attached provider
+resource and its connected bootstrap edges: when both exist, it wraps them in a
+`CompositeBootstrapProvider` with the children `inputs` and `bootstrap-edges`.
+Direct Rust callers can still attach a composite with `with_bootstrap`; see the
+[real static/dynamic PG/HTTP composition](../../components/host-sdk/tests/native_postgres_http_bootstrap.rs).
+This adds no execution ABI or envelope schema and does not upgrade an HTTP
+snapshot to a durable or globally atomic snapshot protocol.
 
 ### Timer notifications do not own scheduled work
 

@@ -23,17 +23,11 @@ pub(super) fn scheduled_input(time: u64, deadline: u64) -> Result<InputEnvelope>
 }
 
 fn volatile() -> Result<NativeComponentProxy> {
-    let plugin = computation::load(library())?;
-    let factory = plugin
-        .factories()
-        .iter()
-        .find(|factory| {
-            factory.metadata().implementation.name.as_ref() == "drasi.experimental/volatile-query"
-        })
-        .context("missing volatile query factory")?;
-    factory.create_component(
+    factory()?.create_component_with_processing(
         component_id()?,
         json!({"query": TEMPORAL, "volatile": true}),
+        scope(1),
+        Arc::new(drasi_core::computation::InMemoryComputationProvider),
     )
 }
 
@@ -157,10 +151,12 @@ async fn volatile_due_and_cancellation() -> Result<()> {
     let mut query = volatile()?;
     query.initialize(&crate::hooks::initialize_ctx()).await?;
     query.start(&crate::hooks::start_ctx()).await?;
-    query.transform(scheduled_input(1000, 2000)?).await?;
+    let output = query.transform(scheduled_input(1000, 2000)?).await?;
+    query.delivery_completed(&output).await?;
     expired(&query, false).await?;
     let due = query.on_wakeup().await?;
     assert_eq!(due.len(), 1);
+    query.delivery_completed(&due).await?;
     expired(&query, true).await?;
     assert!(query.on_wakeup().await?.is_empty());
     query.stop(&crate::hooks::stop_ctx()).await?;
@@ -168,7 +164,8 @@ async fn volatile_due_and_cancellation() -> Result<()> {
     let mut query = volatile()?;
     query.initialize(&crate::hooks::initialize_ctx()).await?;
     query.start(&crate::hooks::start_ctx()).await?;
-    query.transform(scheduled_input(1000, 2000)?).await?;
+    let output = query.transform(scheduled_input(1000, 2000)?).await?;
+    query.delivery_completed(&output).await?;
     let deleted = query
         .transform(input(
             SourceChange::Delete {
@@ -182,6 +179,7 @@ async fn volatile_due_and_cancellation() -> Result<()> {
         )?)
         .await?;
     assert_eq!(deleted.len(), 1);
+    query.delivery_completed(&deleted).await?;
     assert!(
         query.on_wakeup().await?.is_empty(),
         "deleted input must not produce a stale expiry"
@@ -196,7 +194,8 @@ async fn volatile_due_and_cancellation() -> Result<()> {
             .duration_since(std::time::UNIX_EPOCH)?
             .as_millis(),
     )?;
-    query.transform(scheduled_input(now, now + 60_000)?).await?;
+    let output = query.transform(scheduled_input(now, now + 60_000)?).await?;
+    query.delivery_completed(&output).await?;
     assert!(
         query.on_wakeup().await?.is_empty(),
         "future work ran before its deadline"
@@ -206,55 +205,39 @@ async fn volatile_due_and_cancellation() -> Result<()> {
     Ok(())
 }
 
-async fn automatic_graph(indexed: bool) -> Result<()> {
-    let plugin = computation::load(library())?;
-    let name = if indexed {
-        "drasi.experimental/indexed-query"
-    } else {
-        "drasi.experimental/volatile-query"
-    };
-    let factory = plugin
-        .factories()
-        .iter()
-        .find(|factory| factory.metadata().implementation.name.as_ref() == name)
-        .cloned()
-        .context("missing query factory")?;
+async fn automatic_graph(persistent: bool) -> Result<()> {
+    let factory = factory()?;
     let query = ComponentId::try_new("3b0a9e84-19ac-504c-a6e5-08c3a146b322")?;
     let mut specification = factory.specification(
         query.clone(),
-        if indexed {
-            json!({"query": TEMPORAL, "stream": "query/out"})
-        } else {
-            json!({"query": TEMPORAL, "volatile": true, "stream": "query/out"})
-        },
+        json!({"query": TEMPORAL, "volatile": !persistent, "stream": "query/out"}),
     )?;
     let source = ComponentId::try_new("7a691d7b-1655-5ab0-9a77-8b816cbc6e13")?;
     let sink = ComponentId::try_new("0e82e982-d831-5004-b9fe-534f4161c9a6")?;
     let from = Endpoint::new(source.clone(), PortId::try_new("out")?);
     let output = Endpoint::new(query.clone(), PortId::try_new("out")?);
     let directory = tempfile::tempdir()?;
-    let mut builder = ComputationGraph::builder("scheduled-query");
-    if indexed {
-        let resource = ResourceId::try_new("indexes")?;
-        specification.dependencies =
-            BTreeMap::from([("processing".into(), vec![resource.clone()])]);
-        builder = builder
-            .declare_resource(ResourceSpecification {
-                id: resource.clone(),
-                role: ResourceRole::StateStore,
-                ownership: ResourceOwnership::Borrowed,
-                binding: "processing".into(),
-            })?
-            .provide_resource(
-                resource,
-                ResourceHandle::new(
-                    ResourceRole::StateStore,
-                    Arc::new(computation::NativeProcessingResource::new(provider(
-                        directory.path(),
-                    )?)),
-                ),
-            )?;
-    }
+    let resource = ResourceId::try_new("indexes")?;
+    specification.dependencies = BTreeMap::from([("processing".into(), vec![resource.clone()])]);
+    let indexes: Arc<dyn drasi_core::computation::ComputationIndexProvider> = if persistent {
+        provider(directory.path())?
+    } else {
+        Arc::new(drasi_core::computation::InMemoryComputationProvider)
+    };
+    let builder = ComputationGraph::builder("scheduled-query")
+        .declare_resource(ResourceSpecification {
+            id: resource.clone(),
+            role: ResourceRole::StateStore,
+            ownership: ResourceOwnership::Borrowed,
+            binding: "processing".into(),
+        })?
+        .provide_resource(
+            resource,
+            ResourceHandle::new(
+                ResourceRole::StateStore,
+                Arc::new(computation::NativeProcessingResource::new(indexes)),
+            ),
+        )?;
     let received = Arc::new(Mutex::new(Vec::new()));
     let notification = Arc::new(Notify::new());
     let mut graph = builder

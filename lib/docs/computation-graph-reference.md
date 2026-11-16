@@ -103,11 +103,12 @@ keys retain their own namespaces.
 
 | Execution role | Ports | Processing method |
 |---|---|---|
-| Source | Outputs only, at least one | `EnvelopeSource::next()` |
-| Transformer | At least one input and output | `Transformer::transform()` |
-| Query | Transformer-shaped | Query transformer with evaluation and recovery |
-| Sink | Inputs only, at least one | `EnvelopeSink::handle()` |
-| Service | No data ports | `ComputationService::run()` |
+| Source | Data outputs only, at least one; optional bootstrap input and outputs | `EnvelopeSource::next()` |
+| Transformer | At least one data input and output; optional bootstrap input and outputs | `Transformer::transform()` |
+| Query | Transformer-shaped, with optional `bootstrap` input and `snapshot` output | Query transformer with evaluation and recovery |
+| Sink | Data inputs only, at least one; optional bootstrap input | `EnvelopeSink::handle()` |
+| Service | No ports | `ComputationService::run()` |
+| BootstrapProvider | Bootstrap outputs only, at least one | Serves bootstrap sessions requested over the control plane |
 
 All implement the six required `ComputationComponent` lifecycle hooks
 (`initialize`, `start`, `pause`, `resume`, `stop`, `dispose`). A factory can construct an
@@ -120,7 +121,23 @@ data ports and storage live in the query's nested graph. A host-subscription
 relationship describes existing delivery; it does not add another queue.
 
 A descriptor defines the component ID and ports. Each port has a direction,
-schema and connection requirements. A factory specification adds implementation
+kind (`Data` or `Bootstrap`), schema and connection requirements. Every data
+port must be connected; bootstrap ports may stay unconnected.
+
+Bootstrap edges connect a bootstrap output to a bootstrap input through an
+ordinary point-to-point pipe. A consumer's bootstrap input connects either to
+the bootstrap outputs of producers whose data it consumes, or to exactly one
+local `BootstrapProvider` node, never both; with a local provider the
+consumer's inputs are never asked. The consumer opens one session per edge by
+sending a `BootstrapRequest` upstream over the control plane, and the producer
+replies only on that edge with `bootstrap/begin`, records and
+`bootstrap/complete` (watermarks and optional completion state) or
+`bootstrap/failed` (reason). A source relays each session from its local
+provider and completes it with its own handover watermarks, so each consumer,
+including one that joins later, gets its own snapshot while the live stream
+continues. Bootstrap nodes and edges appear in snapshots and inspection like
+any other component and relationship. Pipeline-managed queries still receive
+their initial data from bootstrap resources. A factory specification adds implementation
 identity, configuration version, configuration fields and named dependencies.
 Secret fields require unresolved references, not resolved credentials.
 

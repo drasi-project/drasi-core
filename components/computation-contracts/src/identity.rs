@@ -49,6 +49,9 @@ pub enum ComponentRole {
     Transformer,
     Sink,
     Service,
+    /// Serves bootstrap snapshots through bootstrap output ports only. It has
+    /// no data ports and answers addressed bootstrap requests per session.
+    BootstrapProvider,
 }
 
 /// A component's semantic category, separate from its port/lifecycle execution
@@ -61,6 +64,7 @@ pub enum ComponentSemanticKind {
     Sink,
     Reaction,
     Service,
+    BootstrapProvider,
 }
 
 impl From<ComponentRole> for ComponentSemanticKind {
@@ -70,6 +74,7 @@ impl From<ComponentRole> for ComponentSemanticKind {
             ComponentRole::Transformer => Self::Transformer,
             ComponentRole::Sink => Self::Sink,
             ComponentRole::Service => Self::Service,
+            ComponentRole::BootstrapProvider => Self::BootstrapProvider,
         }
     }
 }

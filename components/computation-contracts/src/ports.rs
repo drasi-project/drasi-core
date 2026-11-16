@@ -155,6 +155,26 @@ impl PipeCapabilities {
     }
 }
 
+/// What a port carries. Ports of different kinds never connect.
+///
+/// Data ports carry the live change stream: every declared data port must be
+/// connected and outputs fan out to all of their edges. Bootstrap ports carry
+/// addressed bootstrap sessions: they may stay unconnected, and an output is
+/// delivered only on the edge of the consumer that requested the session. The
+/// schema of a bootstrap port is the schema of its snapshot records.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PortKind {
+    #[default]
+    Data,
+    Bootstrap,
+}
+
+impl PortKind {
+    pub const fn is_data(&self) -> bool {
+        matches!(self, Self::Data)
+    }
+}
+
 /// Named, single-schema port with required transport guarantees.
 /// Descriptors contain no resolved configuration, secrets, or runtime contexts.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -163,6 +183,8 @@ pub struct PortDescriptor {
     direction: PortDirection,
     schema: SchemaDescriptor,
     requirements: PipeRequirements,
+    #[serde(default, skip_serializing_if = "PortKind::is_data")]
+    kind: PortKind,
 }
 
 impl PortDescriptor {
@@ -177,6 +199,7 @@ impl PortDescriptor {
             direction,
             schema,
             requirements,
+            kind: PortKind::Data,
         }
     }
 
@@ -194,6 +217,31 @@ impl PortDescriptor {
 
     pub fn requirements(&self) -> &PipeRequirements {
         &self.requirements
+    }
+
+    /// A bootstrap port with the given snapshot record schema.
+    pub fn bootstrap(
+        id: PortId,
+        direction: PortDirection,
+        schema: SchemaDescriptor,
+        requirements: PipeRequirements,
+    ) -> Self {
+        Self::new(id, direction, schema, requirements).with_kind(PortKind::Bootstrap)
+    }
+
+    pub fn with_kind(mut self, kind: PortKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    pub const fn kind(&self) -> PortKind {
+        self.kind
+    }
+
+    /// Whether the graph may leave this port unconnected. Only bootstrap ports
+    /// are optional; every data port must be connected.
+    pub const fn is_optional(&self) -> bool {
+        matches!(self.kind, PortKind::Bootstrap)
     }
 }
 
@@ -330,6 +378,12 @@ pub fn validate_connection(
             });
         }
     }
+    if output.kind != input.kind {
+        return Err(ContractError::PortKindMismatch {
+            output: output.kind,
+            input: input.kind,
+        });
+    }
     validate_schema(output.schema(), input.schema())?;
     if !pipe.supported().contains(&PipeCapability::RankedEventOrder) {
         pipe.validate(&PipeRequirements::new([PipeCapability::FifoPerStream]))?;
@@ -361,4 +415,55 @@ pub fn validate_sink_completion(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod port_kind_tests {
+    use super::*;
+
+    fn port(direction: PortDirection, kind: PortKind) -> PortDescriptor {
+        PortDescriptor::new(
+            PortId::try_new("port").unwrap(),
+            direction,
+            crate::GraphChangeCodec::schema().descriptor().clone(),
+            PipeRequirements::default(),
+        )
+        .with_kind(kind)
+    }
+
+    #[test]
+    fn data_kind_is_the_serde_default() -> anyhow::Result<()> {
+        let data = port(PortDirection::Input, PortKind::Data);
+        let encoded = serde_json::to_value(&data)?;
+        assert!(encoded.get("kind").is_none());
+        assert_eq!(serde_json::from_value::<PortDescriptor>(encoded)?, data);
+        let bootstrap = port(PortDirection::Input, PortKind::Bootstrap);
+        let encoded = serde_json::to_value(&bootstrap)?;
+        assert_eq!(encoded["kind"], "Bootstrap");
+        assert_eq!(
+            serde_json::from_value::<PortDescriptor>(encoded)?,
+            bootstrap
+        );
+        assert!(bootstrap.is_optional() && !data.is_optional());
+        Ok(())
+    }
+
+    #[test]
+    fn kinds_must_match_to_connect() {
+        let pipe = PipeCapabilities::volatile_bounded(NonZeroUsize::new(1).unwrap());
+        assert!(validate_connection(
+            &port(PortDirection::Output, PortKind::Bootstrap),
+            &port(PortDirection::Input, PortKind::Bootstrap),
+            &pipe,
+        )
+        .is_ok());
+        assert!(matches!(
+            validate_connection(
+                &port(PortDirection::Output, PortKind::Bootstrap),
+                &port(PortDirection::Input, PortKind::Data),
+                &pipe,
+            ),
+            Err(ContractError::PortKindMismatch { .. })
+        ));
+    }
 }

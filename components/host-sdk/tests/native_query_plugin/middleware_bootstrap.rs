@@ -2,8 +2,58 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
-use drasi_host_sdk::computation::{NativeOutputSnapshotsResource, OutputSelector};
-use std::net::TcpListener;
+use drasi_computation_source_sqlite::{SqliteConfig, SqliteOutput};
+use std::{
+    net::TcpListener,
+    num::{NonZeroU64, NonZeroUsize},
+};
+
+fn source_library() -> PathBuf {
+    library().with_file_name(format!(
+        "{}drasi_computation_source_sqlite{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    ))
+}
+
+fn source(path: &Path, rest_port: u16) -> Result<ComponentAddition> {
+    let plugin = computation::load(source_library())?;
+    let factory = plugin
+        .factories()
+        .iter()
+        .find(|factory| factory.metadata().implementation.name.as_ref() == "drasi.sqlite/changes")
+        .context("existing native SQLite changes factory missing")?
+        .clone();
+    let settings = SqliteConfig {
+        path: Some(path.to_owned()),
+        tables: vec!["items".into()],
+        table_keys: Vec::new(),
+        output: SqliteOutput::Changes,
+        replay: None,
+        transactions: SourceTransactionLimits {
+            max_changes: NonZeroUsize::new(64).expect("positive bound"),
+            max_bytes: NonZeroUsize::new(1 << 20).expect("positive bound"),
+            max_duration_ms: NonZeroU64::new(5000).expect("positive deadline"),
+        },
+        max_sql_bytes: NonZeroUsize::new(65536).expect("positive bound"),
+        command_capacity: NonZeroUsize::new(8).expect("positive bound"),
+        output_capacity: NonZeroUsize::new(4).expect("positive bound"),
+        shutdown_timeout_ms: NonZeroU64::new(5000).expect("positive deadline"),
+    };
+    let specification = factory.specification(
+        ComponentId::try_new("a112a85e-ae22-5dd7-a624-6080d73fbb5e")?,
+        json!({
+            "stream": "sqlite/out",
+            "settings": settings,
+            "rest_api": {"host": "127.0.0.1", "port": rest_port}
+        }),
+    )?;
+    Ok(ComponentAddition::from_specification(
+        ComponentName::try_new("sqlite")?,
+        specification,
+        factory,
+    ))
+}
 
 async fn transformed_bootstrap() -> Result<()> {
     let directory = tempfile::tempdir()?;
@@ -74,52 +124,9 @@ async fn transformed_bootstrap() -> Result<()> {
     drop(listener);
     let source = core
         .add_computation_component(
-            sqlite_live::source(&database, port)?
+            source(&database, port)?
                 .auto_start(false)
                 .bind_stream(PortId::try_new("out")?, StreamId::try_new("sqlite/out")?),
-        )
-        .await?;
-    let query_plugin = computation::load(library())?;
-    let query = query_plugin
-        .factories()
-        .iter()
-        .find(|factory| {
-            factory.metadata().implementation.name.as_ref() == "drasi.experimental/volatile-query"
-        })
-        .context("missing volatile query")?
-        .create_component_with_output_snapshots(
-            ComponentId::try_new("3559cf8e-3b46-5db6-b3d5-371e452f8fe2")?,
-            json!({"query":"MATCH (n:ReadyItem) RETURN sum(n.amount) AS total", "volatile":true,
-                "stream":"downstream/out",
-                "bootstrap":[{"component":mapper.id(),"port":"out"}]}),
-            scope,
-            Arc::new(NativeOutputSnapshotsResource::new(
-                [OutputSelector::new(
-                    mapper.id().clone(),
-                    Some(PortId::try_new("out")?),
-                )],
-                Duration::from_secs(5),
-                1,
-            )?),
-            catalogue.clone(),
-            vec![InputBinding {
-                input_port: PortId::try_new("in")?,
-                output: OutputEndpoint::new(mapper.id().clone(), PortId::try_new("out")?),
-                stream: StreamId::try_new("mapper/out")?,
-            }],
-        )?;
-    let query = core
-        .add_computation_component(
-            ComponentAddition::new(
-                drasi_lib::computation::v1::ComponentName::try_new("downstream")
-                    .expect("fixture component name"),
-                ConstructedComponent::transformer(Box::new(query)),
-            )
-            .auto_start(false)
-            .bind_stream(
-                PortId::try_new("out")?,
-                StreamId::try_new("downstream/out")?,
-            ),
         )
         .await?;
     let received = Arc::new(Mutex::new(Vec::new()));
@@ -150,10 +157,6 @@ async fn transformed_bootstrap() -> Result<()> {
             ),
             EdgeDefinition::new(
                 Endpoint::new(mapper.id().clone(), PortId::try_new("out")?),
-                Endpoint::new(query.id().clone(), PortId::try_new("in")?),
-            ),
-            EdgeDefinition::new(
-                Endpoint::new(query.id().clone(), PortId::try_new("out")?),
                 Endpoint::new(sink.id().clone(), PortId::try_new("in")?),
             ),
         ],
@@ -163,7 +166,7 @@ async fn transformed_bootstrap() -> Result<()> {
         Ok::<_, anyhow::Error>(
             catalogue
                 .resolve(&OutputEndpoint::new(
-                    query.id().clone(),
+                    mapper.id().clone(),
                     PortId::try_new("out")?,
                 ))?
                 .snapshot()
@@ -193,8 +196,8 @@ async fn transformed_bootstrap() -> Result<()> {
         sink.start().await?;
         mapper.start().await?;
         bootstrap.freeze_for_retirement()?.resume();
-        query.start().await?;
-        assert_snapshot_total(&snapshot().await?, 30.0)?;
+        let initial = snapshot().await?;
+        assert_eq!(initial.records().len(), 2);
         assert!(
             received.lock().expect("result capture poisoned").is_empty(),
             "initialization emitted intermediate results"
@@ -211,28 +214,19 @@ async fn transformed_bootstrap() -> Result<()> {
             .await?
             .error_for_status()?;
         output(0).await?;
-        assert_snapshot_total(&snapshot().await?, 32.0)?;
+        assert_eq!(snapshot().await?.records().len(), 2);
         client
             .delete(format!("{url}/2"))
             .send()
             .await?
             .error_for_status()?;
         output(1).await?;
-        assert_snapshot_total(&snapshot().await?, 12.0)?;
-        let mapped = catalogue
-            .resolve(&OutputEndpoint::new(
-                mapper.id().clone(),
-                PortId::try_new("out")?,
-            ))?
-            .snapshot()
-            .await?;
+        let mapped = snapshot().await?;
         assert_eq!(mapped.records().len(), 1);
         assert_eq!(mapped.cursor().sequence(), 2);
-        query.stop().await?;
         mapper.stop().await?;
         mapper.start().await?;
-        query.start().await?;
-        assert_snapshot_total(&snapshot().await?, 12.0)?;
+        assert_eq!(snapshot().await?.records().len(), 1);
         assert_eq!(received.lock().expect("result capture poisoned").len(), 2);
         Ok::<_, anyhow::Error>(())
     }

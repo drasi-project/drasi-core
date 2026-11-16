@@ -1121,6 +1121,14 @@ pub(super) fn preview_with_updates(
                         .and_then(|node| node.streams.get(&endpoint.port))
                         .cloned()
                 },
+                |endpoint| {
+                    nodes.get(&endpoint.component).is_some_and(|node| {
+                        super::super::specification::is_bootstrap_port(
+                            &node.descriptor,
+                            &endpoint.port,
+                        )
+                    })
+                },
             )
         };
         if bindings(&old.relationships, &old_nodes) != bindings(&desired.relationships, &new_nodes)
@@ -1499,9 +1507,23 @@ fn describe(
             let node = &nodes[ids[component]];
             super::super::validate_role(&node.descriptor, node.role, node.completion)?;
         }
-        if !nodes[ids[&edge.definition.from.component]]
-            .output_streams
-            .contains_key(&edge.definition.from.port)
+        let bootstrap = output.kind() == super::super::PortKind::Bootstrap;
+        if bootstrap
+            && !matches!(
+                edge.pipe,
+                DesiredPipe::Bounded { .. }
+                    | DesiredPipe::ByteBounded(_)
+                    | DesiredPipe::External { .. }
+            )
+        {
+            return Err(topology(
+                "bootstrap relationships use a point-to-point pipe",
+            ));
+        }
+        if !bootstrap
+            && !nodes[ids[&edge.definition.from.component]]
+                .output_streams
+                .contains_key(&edge.definition.from.port)
         {
             return Err(topology(
                 "connect an output only after binding its producer stream",
@@ -1562,6 +1584,7 @@ fn describe(
             }
         }
     }
+    validate_bootstrap_relationships(&ids, &nodes, &edges)?;
     let order = super::super::dependency_order(&ids, &edges, &desired.subscriptions)?;
     let mut resource_ids = BTreeSet::new();
     for resource in &desired.resources {
@@ -3705,6 +3728,13 @@ fn commit_desired(
         }
         let from = graph.ids[&edge.definition.from.component];
         let to = graph.ids[&edge.definition.to.component];
+        for lease in [from, to] {
+            leases
+                .get(&lease)
+                .expect("prepared edge lease")
+                .bootstrap
+                .remove_edge(index);
+        }
         let outputs = &mut leases
             .get_mut(&from)
             .expect("prepared source lease")
@@ -3752,6 +3782,7 @@ fn commit_desired(
                 new.inputs = std::mem::take(&mut old.inputs);
                 new.sink_batch = old.sink_batch.take();
                 new.outputs = std::mem::take(&mut old.outputs);
+                new.bootstrap = old.bootstrap.clone();
                 new.sequences = std::mem::take(&mut old.sequences)
                     .into_iter()
                     .filter(|(port, _)| {
@@ -4412,6 +4443,63 @@ async fn realize(
             });
             if let Some(outcome) = report.creation.get_mut(id) {
                 *outcome = CreationOutcome::Created;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A consumer bootstraps either from its data producers' bootstrap outputs or
+/// from exactly one local bootstrap provider, never both. Sources have no data
+/// producers, so their only bootstrap edge is a local provider's.
+pub(in crate::computation::v1) fn validate_bootstrap_relationships(
+    ids: &BTreeMap<ComponentId, usize>,
+    nodes: &[NodeSnapshot],
+    edges: &[EdgeSnapshot],
+) -> GraphResult<()> {
+    let is_bootstrap = |edge: &EdgeSnapshot| {
+        nodes[ids[&edge.definition.from.component]]
+            .descriptor
+            .ports()
+            .iter()
+            .any(|port| {
+                port.id() == &edge.definition.from.port
+                    && port.kind() == super::super::PortKind::Bootstrap
+            })
+    };
+    let mut consumers: BTreeMap<&ComponentId, Vec<&EdgeSnapshot>> = BTreeMap::new();
+    for edge in edges.iter().filter(|edge| is_bootstrap(edge)) {
+        consumers
+            .entry(&edge.definition.to.component)
+            .or_default()
+            .push(edge);
+    }
+    for (consumer, incoming) in consumers {
+        let local = incoming
+            .iter()
+            .filter(|edge| {
+                nodes[ids[&edge.definition.from.component]].role
+                    == super::super::ComponentRole::BootstrapProvider
+            })
+            .count();
+        if local > 0 {
+            if incoming.len() != 1 {
+                return Err(topology(format!(
+                    "{consumer} bootstraps from one local provider or from its inputs, not both"
+                )));
+            }
+            continue;
+        }
+        for edge in incoming {
+            let producer = &edge.definition.from.component;
+            if !edges.iter().any(|data| {
+                !is_bootstrap(data)
+                    && &data.definition.from.component == producer
+                    && &data.definition.to.component == consumer
+            }) {
+                return Err(topology(format!(
+                    "{consumer} can only bootstrap from {producer} when it consumes its data"
+                )));
             }
         }
     }

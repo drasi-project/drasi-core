@@ -33,7 +33,7 @@ checks every native library independently, including its build dependencies.
 | Transformer | [drasi-computation-transformer-middleware](transformers/middleware) | `drasi.standard/middleware` | Dynamic or Rust SDK |
 | Transformer | [drasi-computation-transformer-view](transformers/view) | `drasi.standard/view` | Dynamic or Rust SDK; memory-backed maintained view and snapshots |
 | Transformer | [drasi-computation-transformer-arithmetic](transformers/arithmetic) | `drasi.standard/arithmetic` | Dynamic or Rust SDK |
-| Transformer | [drasi-computation-transformer-query](transformers/query) | `drasi.experimental/volatile-query`, `drasi.experimental/indexed-query`, `drasi.experimental/provider-query` | Dynamic or Rust SDK; explicit ordinary-query adapter through Host |
+| Transformer | [drasi-computation-transformer-query](transformers/query) | `drasi.query/indexed` | Dynamic or Rust SDK; explicit ordinary-query adapter through Host |
 | Sink | [drasi-computation-sink-capture](sinks/capture) | `drasi.standard/capture` | Dynamic or Rust SDK |
 | Sink | [drasi-computation-sink-http](sinks/http) | `drasi.network/http-sink`, `drasi.network/http-delivery` | Dynamic or Rust SDK |
 | Sink | [drasi-computation-sink-grpc](sinks/grpc) | `drasi.network/grpc-sink` | Dynamic or Rust SDK |
@@ -58,8 +58,7 @@ SQLite has no legacy reaction to migrate; no new SQLite sink is implied by this
 inventory.
 
 The query plugin is the normal explicitly selected Host/Server query
-implementation; the historical `drasi.experimental` names remain stable
-identities. The separate view component maintains map/relabel projections and
+implementation; its factories use the `drasi.query` family. The separate view component maintains map/relabel projections and
 exact retractions, but does not advertise durability, replay/follow or
 transaction participation. Native `scheduled_processing` is an optional
 borrowed service, not another plugin or graph: its standalone profile requires

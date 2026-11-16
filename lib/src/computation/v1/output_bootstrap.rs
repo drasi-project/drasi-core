@@ -249,27 +249,7 @@ impl ComputationBootstrapProvider for OutputBootstrapProvider {
             records
                 .into_iter()
                 .enumerate()
-                .map(move |(index, (_, record))| {
-                    let sequence = u64::try_from(index)?
-                        .checked_add(1)
-                        .ok_or_else(|| anyhow::anyhow!("bootstrap ordinal exhausted"))?;
-                    let changes = ChangeSet::try_new(
-                        ChangeSetId::try_new(
-                            stream.as_str(),
-                            Bytes::copy_from_slice(&sequence.to_be_bytes()),
-                        )?,
-                        GraphChangeCodec::schema().descriptor().clone(),
-                        vec![ChangeOperation::Added {
-                            ordinal: 0,
-                            after: record,
-                        }],
-                    )?;
-                    Ok(ChangeEnvelope::new(
-                        emission_id(&stream, sequence)?,
-                        changes,
-                        SystemMetadata::new(stream.clone(), sequence),
-                    ))
-                })
+                .map(move |(index, (_, record))| snapshot_record(&stream, index, record))
         });
         Ok(ComputationBootstrapSnapshot {
             changes: Box::pin(futures::stream::iter(changes)),
@@ -308,4 +288,32 @@ impl ComputationBootstrapProvider for OutputBootstrapProvider {
         *self.prepared()? = None;
         Ok(())
     }
+}
+
+/// One output snapshot record as a graph-change insertion at ordinal
+/// `index + 1` of a fresh bootstrap stream.
+pub(super) fn snapshot_record(
+    stream: &StreamId,
+    index: usize,
+    record: Record,
+) -> anyhow::Result<ChangeEnvelope> {
+    let sequence = u64::try_from(index)?
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("bootstrap ordinal exhausted"))?;
+    let changes = ChangeSet::try_new(
+        ChangeSetId::try_new(
+            stream.as_str(),
+            Bytes::copy_from_slice(&sequence.to_be_bytes()),
+        )?,
+        GraphChangeCodec::schema().descriptor().clone(),
+        vec![ChangeOperation::Added {
+            ordinal: 0,
+            after: record,
+        }],
+    )?;
+    Ok(ChangeEnvelope::new(
+        emission_id(stream, sequence)?,
+        changes,
+        SystemMetadata::new(stream.clone(), sequence),
+    ))
 }

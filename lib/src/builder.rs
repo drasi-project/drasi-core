@@ -1033,6 +1033,7 @@ pub struct Query {
     recovery_policy: Option<crate::recovery::RecoveryPolicy>,
     outbox_capacity: usize,
     bootstrap_timeout_secs: u64,
+    bootstrap_provider: Option<crate::config::ComponentReference>,
 }
 
 impl Query {
@@ -1056,6 +1057,7 @@ impl Query {
             recovery_policy: None,
             outbox_capacity: crate::queries::output_state::DEFAULT_OUTBOX_CAPACITY,
             bootstrap_timeout_secs: 300,
+            bootstrap_provider: None,
         }
     }
 
@@ -1079,6 +1081,7 @@ impl Query {
             recovery_policy: None,
             outbox_capacity: crate::queries::output_state::DEFAULT_OUTBOX_CAPACITY,
             bootstrap_timeout_secs: 300,
+            bootstrap_provider: None,
         }
     }
 
@@ -1180,6 +1183,13 @@ impl Query {
         self
     }
 
+    /// Bootstrap only from the given local bootstrap provider component.
+    /// The query never asks its inputs for bootstrap data.
+    pub fn with_bootstrap_provider(mut self, provider: crate::config::ComponentReference) -> Self {
+        self.bootstrap_provider = Some(provider);
+        self
+    }
+
     /// Set the priority queue capacity.
     pub fn with_priority_queue_capacity(mut self, capacity: usize) -> Self {
         self.priority_queue_capacity = Some(capacity);
@@ -1247,6 +1257,7 @@ impl Query {
             recovery_policy: self.recovery_policy,
             outbox_capacity: self.outbox_capacity,
             bootstrap_timeout_secs: self.bootstrap_timeout_secs,
+            bootstrap_provider: self.bootstrap_provider,
         })
     }
 }

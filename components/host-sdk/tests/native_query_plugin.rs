@@ -11,6 +11,8 @@ mod durable;
 mod hooks;
 #[path = "native_query_plugin/semantics.rs"]
 mod semantics;
+#[path = "native_query_plugin/upstream_snapshot.rs"]
+mod upstream_snapshot;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -90,24 +92,31 @@ async fn run_query() -> Result<()> {
     let factory = plugin
         .factories()
         .iter()
-        .find(|factory| {
-            factory.metadata().implementation.name.as_ref() == "drasi.experimental/volatile-query"
-        })
+        .find(|factory| factory.metadata().implementation.name.as_ref() == "drasi.query/indexed")
         .context("query factory missing from loaded plugin")?;
     let configuration = json!({
         "query": "MATCH (n:Item) RETURN n.value AS value",
         "volatile": true,
         "stream": "query/out"
     });
-    assert!(factory
-        .create_component(
-            ComponentId::try_new("3283a204-e18e-5bf6-8246-51c299f70b09")?,
-            json!({"query": "MATCH (n) RETURN n", "volatile": false})
-        )
-        .is_err());
-    let mut query = factory.create_component(
+    assert!(
+        factory
+            .create_component(
+                ComponentId::try_new("3283a204-e18e-5bf6-8246-51c299f70b09")?,
+                configuration.clone(),
+            )
+            .is_err(),
+        "the query requires host-owned processing"
+    );
+    let mut query = factory.create_component_with_processing(
         ComponentId::try_new("3283a204-e18e-5bf6-8246-51c299f70b09")?,
         configuration,
+        drasi_computation_plugin_sdk::Scope {
+            instance_id: "query-test".into(),
+            graph_id: "query-test".into(),
+            generation: 1,
+        },
+        Arc::new(drasi_core::computation::InMemoryComputationProvider),
     )?;
     query.initialize(&crate::hooks::initialize_ctx()).await?;
     query.start(&crate::hooks::start_ctx()).await?;
@@ -143,6 +152,7 @@ async fn run_query() -> Result<()> {
             }
             (result, _) => anyhow::bail!("unexpected query result: {result:?}"),
         }
+        query.delivery_completed(&output).await?;
     }
     query.stop(&crate::hooks::stop_ctx()).await?;
     Ok(())
@@ -164,9 +174,7 @@ async fn separately_loaded_query_supports_gql() -> Result<()> {
     let factory = plugin
         .factories()
         .iter()
-        .find(|factory| {
-            factory.metadata().implementation.name.as_ref() == "drasi.experimental/indexed-query"
-        })
+        .find(|factory| factory.metadata().implementation.name.as_ref() == "drasi.query/indexed")
         .context("indexed query factory missing")?;
     let directory = tempfile::tempdir()?;
     let provider = Arc::new(RocksDbComputationProvider::new(
@@ -224,9 +232,7 @@ async fn separately_loaded_query_reuses_host_indexes_after_recreation() -> Resul
     let factory = plugin
         .factories()
         .iter()
-        .find(|factory| {
-            factory.metadata().implementation.name.as_ref() == "drasi.experimental/indexed-query"
-        })
+        .find(|factory| factory.metadata().implementation.name.as_ref() == "drasi.query/indexed")
         .context("indexed query factory missing")?;
     let directory = tempfile::tempdir()?;
     let provider = Arc::new(RocksDbComputationProvider::new(
@@ -314,9 +320,7 @@ async fn separately_loaded_aggregate_reuses_host_result_index() -> Result<()> {
     let factory = plugin
         .factories()
         .iter()
-        .find(|factory| {
-            factory.metadata().implementation.name.as_ref() == "drasi.experimental/indexed-query"
-        })
+        .find(|factory| factory.metadata().implementation.name.as_ref() == "drasi.query/indexed")
         .context("indexed query factory missing")?;
     let directory = tempfile::tempdir()?;
     let provider = Arc::new(RocksDbComputationProvider::new(
@@ -389,9 +393,7 @@ async fn separately_loaded_grouped_query_reuses_host_result_index() -> Result<()
     let factory = plugin
         .factories()
         .iter()
-        .find(|factory| {
-            factory.metadata().implementation.name.as_ref() == "drasi.experimental/indexed-query"
-        })
+        .find(|factory| factory.metadata().implementation.name.as_ref() == "drasi.query/indexed")
         .context("indexed query factory missing")?;
     let directory = tempfile::tempdir()?;
     let provider = Arc::new(RocksDbComputationProvider::new(
@@ -465,9 +467,7 @@ async fn separately_loaded_min_query_reuses_sorted_index() -> Result<()> {
     let factory = plugin
         .factories()
         .iter()
-        .find(|factory| {
-            factory.metadata().implementation.name.as_ref() == "drasi.experimental/indexed-query"
-        })
+        .find(|factory| factory.metadata().implementation.name.as_ref() == "drasi.query/indexed")
         .context("indexed query factory missing")?;
     let directory = tempfile::tempdir()?;
     let provider = Arc::new(RocksDbComputationProvider::new(
@@ -548,9 +548,7 @@ async fn separately_loaded_indexed_query_matches_relationships() -> Result<()> {
     let factory = plugin
         .factories()
         .iter()
-        .find(|factory| {
-            factory.metadata().implementation.name.as_ref() == "drasi.experimental/indexed-query"
-        })
+        .find(|factory| factory.metadata().implementation.name.as_ref() == "drasi.query/indexed")
         .context("indexed query factory missing")?;
     let directory = tempfile::tempdir()?;
     let provider = Arc::new(RocksDbComputationProvider::new(
@@ -715,32 +713,34 @@ fn port(name: &str, direction: PortDirection) -> Result<PortDescriptor> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn separately_loaded_query_runs_in_a_graph() -> Result<()> {
-    graph_query(false, QueryPublicationMode::Atomic).await
+    graph_query(false, QueryPublicationMode::Atomic, false).await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn separately_loaded_query_retention_update_preserves_the_live_component() -> Result<()> {
+    graph_query(false, QueryPublicationMode::Atomic, true).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn separately_loaded_indexed_query_runs_in_a_graph() -> Result<()> {
-    graph_query(true, QueryPublicationMode::Atomic).await
+    graph_query(true, QueryPublicationMode::Atomic, false).await
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn separately_loaded_non_atomic_query_uses_declared_resource_profile() -> Result<()> {
-    graph_query(true, QueryPublicationMode::NonAtomic).await
+    graph_query(true, QueryPublicationMode::NonAtomic, false).await
 }
 
-async fn graph_query(indexed: bool, publication: QueryPublicationMode) -> Result<()> {
+async fn graph_query(
+    persistent: bool,
+    publication: QueryPublicationMode,
+    update_retention: bool,
+) -> Result<()> {
     let plugin = computation::load(library())?;
     let factory = plugin
         .factories()
         .iter()
-        .find(|factory| {
-            factory.metadata().implementation.name.as_ref()
-                == if indexed {
-                    "drasi.experimental/indexed-query"
-                } else {
-                    "drasi.experimental/volatile-query"
-                }
-        })
+        .find(|factory| factory.metadata().implementation.name.as_ref() == "drasi.query/indexed")
         .context("missing query factory")?
         .clone();
     let source = ComponentId::try_new("6bd7483a-29cf-5f73-8a11-3f5b33affcdb")?;
@@ -754,49 +754,47 @@ async fn graph_query(indexed: bool, publication: QueryPublicationMode) -> Result
     let notification = Arc::new(Notify::new());
     let directory = tempfile::tempdir()?;
     let mut specification = factory.specification(
-        query,
-        if indexed {
-            json!({
-                "query":"MATCH (n:Item) RETURN n.value AS value",
-                "stream":"query/out",
-                "publication": if publication == QueryPublicationMode::Atomic { "atomic" } else { "non_atomic" },
-            })
-        } else {
-            json!({"query":"MATCH (n:Item) RETURN n.value AS value","volatile":true,"stream":"query/out"})
-        },
+        query.clone(),
+        json!({
+            "query":"MATCH (n:Item) RETURN n.value AS value",
+            "stream":"query/out",
+            "volatile": !persistent,
+            "publication": if publication == QueryPublicationMode::Atomic { "atomic" } else { "non_atomic" },
+        }),
     )?;
-    let mut builder = ComputationGraph::builder("plugin-query");
-    if indexed {
-        let resource = ResourceId::try_new("indexes")?;
-        specification
-            .dependencies
-            .insert("processing".into(), vec![resource.clone()]);
-        let provider = Arc::new(RocksDbComputationProvider::new(
+    let resource = ResourceId::try_new("indexes")?;
+    specification
+        .dependencies
+        .insert("processing".into(), vec![resource.clone()]);
+    let provider: Arc<dyn drasi_core::computation::ComputationIndexProvider> = if persistent {
+        Arc::new(RocksDbComputationProvider::new(
             directory.path(),
             RocksIndexOptions::new(
                 false,
                 false,
                 RocksDbMemoryBudget::from_total_budget_bytes(16 << 20)?,
             ),
-        ));
-        builder = builder
-            .declare_resource(ResourceSpecification {
-                id: resource.clone(),
-                role: ResourceRole::StateStore,
-                ownership: ResourceOwnership::Borrowed,
-                binding: "processing".into(),
-            })?
-            .provide_resource(
-                resource,
-                ResourceHandle::new(
-                    ResourceRole::StateStore,
-                    Arc::new(
-                        computation::NativeProcessingResource::new(provider)
-                            .with_publication(publication),
-                    ),
+        ))
+    } else {
+        Arc::new(drasi_core::computation::InMemoryComputationProvider)
+    };
+    let builder = ComputationGraph::builder("plugin-query")
+        .declare_resource(ResourceSpecification {
+            id: resource.clone(),
+            role: ResourceRole::StateStore,
+            ownership: ResourceOwnership::Borrowed,
+            binding: "processing".into(),
+        })?
+        .provide_resource(
+            resource,
+            ResourceHandle::new(
+                ResourceRole::StateStore,
+                Arc::new(
+                    computation::NativeProcessingResource::new(provider)
+                        .with_publication(publication),
                 ),
-            )?;
-    }
+            ),
+        )?;
     let mut graph = builder
         .source(
             drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1")
@@ -846,9 +844,61 @@ async fn graph_query(indexed: bool, publication: QueryPublicationMode) -> Result
         .bind_stream(source_endpoint, StreamId::try_new("source/out")?)
         .bind_stream(query_output, StreamId::try_new("query/out")?)
         .build()?;
-    tokio::time::timeout(Duration::from_secs(10), graph.start()?).await??;
-    tokio::time::timeout(Duration::from_secs(10), notification.notified()).await?;
-    graph.shutdown().await?;
+    if update_retention {
+        let run = graph.run()?;
+        let control = run.control();
+        let (result, updated) = tokio::join!(run, async {
+            control.deployment_report().await?;
+            let notified = notification.notified();
+            control
+                .start_requested(control.desired_snapshot().revision, GraphSelection::All)
+                .await?;
+            tokio::time::timeout(Duration::from_secs(10), notified).await?;
+            let before = control.configuration_snapshot()?;
+            let generation = control.observed().components[&query].generation;
+            let mut updated = before
+                .topology
+                .components
+                .iter()
+                .find(|component| component.descriptor.id() == &query)
+                .context("query missing from the desired topology")?
+                .clone();
+            let ComponentConstruction::Factory(specification) = &mut updated.construction else {
+                anyhow::bail!("query was not constructed by its factory");
+            };
+            specification.configuration.insert(
+                Arc::from("outbox_capacity"),
+                ConfigurationValue::Literal(json!(4)),
+            );
+            let preview = control
+                .preview(
+                    before.topology.revision,
+                    vec![DesiredMutation::UpdateComponent(updated)],
+                )
+                .await?;
+            control
+                .reconcile(preview, TopologyBindings::default())
+                .await?
+                .ensure_committed()?;
+            anyhow::ensure!(
+                control.configuration_snapshot()?.topology.revision > before.topology.revision,
+                "retention update was not published"
+            );
+            anyhow::ensure!(
+                control.observed().components[&query].generation == generation,
+                "retention update recreated the live query"
+            );
+            control.cancel();
+            Ok::<_, anyhow::Error>(())
+        });
+        updated?;
+        assert!(matches!(result, Err(GraphError::Cancelled)));
+        graph.dispose().await?;
+    } else {
+        tokio::time::timeout(Duration::from_secs(10), graph.start()?).await??;
+        tokio::time::timeout(Duration::from_secs(10), notification.notified()).await?;
+        graph.shutdown().await?;
+    }
     let received = received
         .lock()
         .map_err(|_| anyhow::anyhow!("query test output poisoned"))?;

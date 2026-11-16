@@ -475,6 +475,14 @@ query_configuration!(QueryConfig, QueryInputConfig {
     pub name: ComponentName,
     #[serde(default = "default_auto_start")]
     pub auto_start: bool,
+    /// Local bootstrap provider component. When set, the query bootstraps only
+    /// from this provider and never asks its inputs. Requires enabled bootstrap.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "bootstrapProvider"
+    )]
+    pub bootstrap_provider: Option<ComponentReference>,
 });
 
 query_configuration!(AssignedQueryConfig, QueryInputConfig {
@@ -483,14 +491,38 @@ query_configuration!(AssignedQueryConfig, QueryInputConfig {
     pub name: ComponentName,
     #[serde(default = "default_auto_start")]
     pub auto_start: bool,
+    /// Local bootstrap provider component. When set, the query bootstraps only
+    /// from this provider and never asks its inputs. Requires enabled bootstrap.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "bootstrapProvider"
+    )]
+    pub bootstrap_provider: Option<ComponentReference>,
 });
 
-query_configuration!(QuerySettings, QueryInputConfig {});
+query_configuration!(QuerySettings, QueryInputConfig {
+    /// Local bootstrap provider component. When set, the query bootstraps only
+    /// from this provider and never asks its inputs. Requires enabled bootstrap.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "bootstrapProvider"
+    )]
+    pub bootstrap_provider: Option<ComponentReference>,
+});
 
 query_configuration!(ResolvedQueryConfig, drasi_computation_contracts::QueryInputConfig {
     pub id: ComponentId,
     #[serde(default)]
     pub source_transactions: Option<drasi_computation_contracts::SourceTransactionLimits>,
+    /// Local bootstrap provider component.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "bootstrapProvider"
+    )]
+    pub bootstrap_provider: Option<ComponentId>,
 });
 
 macro_rules! query_configuration_methods {
@@ -513,6 +545,7 @@ macro_rules! query_configuration_methods {
                     recovery_policy: self.recovery_policy,
                     outbox_capacity: self.outbox_capacity,
                     bootstrap_timeout_secs: self.bootstrap_timeout_secs,
+                    bootstrap_provider: self.bootstrap_provider,
                 }
             }
 
@@ -539,6 +572,24 @@ macro_rules! query_configuration_methods {
                             "Query '{}' declares input '{}' more than once",
                             self.name,
                             input.component
+                        );
+                    }
+                }
+                if let Some(provider) = &self.bootstrap_provider {
+                    if !self.enable_bootstrap {
+                        anyhow::bail!(
+                            "Query '{}' declares bootstrap provider '{provider}' but bootstrap is disabled",
+                            self.name
+                        );
+                    }
+                    if self
+                        .inputs
+                        .iter()
+                        .any(|input| &input.component == provider)
+                    {
+                        anyhow::bail!(
+                            "Query '{}' bootstrap provider '{provider}' is also a data input",
+                            self.name
                         );
                     }
                 }
@@ -587,6 +638,7 @@ impl QuerySettings {
             recovery_policy: self.recovery_policy,
             outbox_capacity: self.outbox_capacity,
             bootstrap_timeout_secs: self.bootstrap_timeout_secs,
+            bootstrap_provider: self.bootstrap_provider,
         }
     }
 }
@@ -616,6 +668,16 @@ impl AssignedQueryConfig {
             recovery_policy: self.recovery_policy,
             outbox_capacity: self.outbox_capacity,
             bootstrap_timeout_secs: self.bootstrap_timeout_secs,
+            bootstrap_provider: self
+                .bootstrap_provider
+                .as_ref()
+                .map(|provider| {
+                    provider
+                        .as_id()
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!("unresolved {provider}"))
+                })
+                .transpose()?,
         })
     }
 
@@ -639,6 +701,7 @@ impl AssignedQueryConfig {
             recovery_policy: self.recovery_policy,
             outbox_capacity: self.outbox_capacity,
             bootstrap_timeout_secs: self.bootstrap_timeout_secs,
+            bootstrap_provider: self.bootstrap_provider,
         }
     }
 }
@@ -678,6 +741,7 @@ impl ResolvedQueryConfig {
             recovery_policy: self.recovery_policy,
             outbox_capacity: self.outbox_capacity,
             bootstrap_timeout_secs: self.bootstrap_timeout_secs,
+            bootstrap_provider: self.bootstrap_provider.map(ComponentReference::by_id),
         }
     }
 }

@@ -70,7 +70,7 @@ mod tests {
         assert_eq!(size_of::<PluginVTable>(), 16 + 3 * pointer);
         assert_eq!(size_of::<FactoryVTable>(), 16 + 3 * pointer);
         assert_eq!(size_of::<ComponentVTable>(), 16 + 5 * pointer);
-        assert_eq!(ABI_VERSION, "4.0.0");
-        assert_eq!(WIRE_VERSION, 4);
+        assert_eq!(ABI_VERSION, "5.0.0");
+        assert_eq!(WIRE_VERSION, 5);
     }
 }

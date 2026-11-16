@@ -829,6 +829,9 @@ impl ComputationComponent for TransactionTransformer {
     fn bind_control(&mut self, control: ComponentControl) {
         self.processor_mut().bind_control(control);
     }
+    fn bind_bootstrap(&mut self, ports: super::BootstrapPorts) {
+        self.processor_mut().bind_bootstrap(ports);
+    }
     fn control_handler(&self) -> Option<Arc<dyn ControlHandler>> {
         self.processor().control_handler()
     }

@@ -3,7 +3,6 @@
 
 use super::{
     consumer_progress::ConsumerProgressBinding, loader::PluginOwner, progress::ProgressBinding,
-    NativeFactory,
 };
 use async_trait::async_trait;
 use drasi_computation_plugin_abi::{self as abi, bootstrap_coordination::*};
@@ -13,23 +12,20 @@ use drasi_computation_plugin_sdk::{
     CreateRequest, Scope, SourceBootstrapMetadata,
 };
 use drasi_lib::computation::v1::{
-    ComponentId, ConsumerProgressSet, ImplementationIdentity, QuerySourceProgress, ResourceCleanup,
+    ComponentId, ConsumerProgressSet, OutputCatalogue, QuerySourceProgress, ResourceCleanup,
 };
 use std::{
     collections::BTreeMap,
     ffi::c_void,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock, Weak,
     },
 };
 
 #[cfg(test)]
 #[path = "bootstrap_coordination_tests.rs"]
 mod tests;
-
-/// An immutable catalogue of actual native source factories, not graph instances.
-pub type NativeSourceBootstrapFactories = BTreeMap<ImplementationIdentity, Arc<NativeFactory>>;
 
 /// Actual graph-owned progress owners retained by a source coordinator.
 pub enum NativeSourceBootstrapProgress {
@@ -139,10 +135,15 @@ struct Lifecycle {
     bindings: Option<Bindings>,
 }
 
-/// One graph-owned resource shared by the live source and query bootstrap resources.
+/// The host handle of a native source library's bootstrap coordinator.
 ///
-/// Only the source library owns the engine. The Host retains real progress owners
-/// and fences construction/open against final retirement.
+/// A coordination-capable native source creates it from its own progress owners
+/// and keeps it for its lifetime: the source coordinates every bootstrap its
+/// consumers request through its bootstrap ports. Only the source library owns
+/// the engine. The host retains real progress owners and fences construction and
+/// open against final retirement. A paired bootstrap provider node, connected to
+/// the source's bootstrap input, binds the coordinator of the source that relays
+/// its session; see [`Self::registered`].
 pub struct NativeSourceBootstrapResource {
     request: CreateRequest,
     raw: BootstrapCoordinatorHandle,
@@ -512,4 +513,120 @@ unsafe extern "C" fn open(
             .map_err(Failure::from)?;
         unsafe { transport::write_out(out, raw) }
     })
+}
+
+type DirectoryKey = (String, String, ComponentId);
+
+/// A registered coordinator and the running graph it was constructed in.
+/// Graphs in different runtimes of one process may reuse instance, graph and
+/// component IDs, so a graph-constructed coordinator is found only from the
+/// same graph.
+struct DirectoryEntry {
+    graph: Option<OutputCatalogue>,
+    coordinator: Weak<NativeSourceBootstrapResource>,
+}
+
+impl DirectoryEntry {
+    fn scoped_to(&self, graph: Option<&OutputCatalogue>) -> bool {
+        match (&self.graph, graph) {
+            (Some(entry), Some(graph)) => entry.same_graph(graph),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
+/// Coordinators of live native sources in this process, keyed by instance,
+/// graph and source component, and told apart by their running graph. This is
+/// the source library's engine handle, not a graph resource: bootstrap
+/// requests and replies still travel over the source's bootstrap edges and
+/// pipes.
+fn directory() -> &'static Mutex<BTreeMap<DirectoryKey, Vec<DirectoryEntry>>> {
+    static DIRECTORY: OnceLock<Mutex<BTreeMap<DirectoryKey, Vec<DirectoryEntry>>>> =
+        OnceLock::new();
+    DIRECTORY.get_or_init(Default::default)
+}
+
+/// Removes a source's coordinator from the directory when the source is dropped.
+pub(super) struct SourceCoordinatorRegistration {
+    key: DirectoryKey,
+    coordinator: Weak<NativeSourceBootstrapResource>,
+}
+
+impl Drop for SourceCoordinatorRegistration {
+    fn drop(&mut self) {
+        if let Ok(mut directory) = directory().lock() {
+            if let Some(entries) = directory.get_mut(&self.key) {
+                entries.retain(|entry| {
+                    !Weak::ptr_eq(&entry.coordinator, &self.coordinator)
+                        && entry.coordinator.strong_count() > 0
+                });
+                if entries.is_empty() {
+                    directory.remove(&self.key);
+                }
+            }
+        }
+    }
+}
+
+impl NativeSourceBootstrapResource {
+    /// Publishes this coordinator as its source's coordinator in `graph`. A
+    /// replacement source instance in the same graph supersedes its
+    /// predecessor's entry.
+    pub(super) fn register(
+        self: &Arc<Self>,
+        graph: Option<OutputCatalogue>,
+    ) -> anyhow::Result<SourceCoordinatorRegistration> {
+        let scope = self.request.scope.as_ref().expect("validated scope");
+        let key = (
+            scope.instance_id.clone(),
+            scope.graph_id.clone(),
+            self.request.id.clone(),
+        );
+        let coordinator = Arc::downgrade(self);
+        let mut directory = directory().lock().map_err(|_| Failure::closed())?;
+        let entries = directory.entry(key.clone()).or_default();
+        entries.retain(|entry| {
+            !entry.scoped_to(graph.as_ref()) && entry.coordinator.strong_count() > 0
+        });
+        entries.push(DirectoryEntry {
+            graph,
+            coordinator: coordinator.clone(),
+        });
+        Ok(SourceCoordinatorRegistration { key, coordinator })
+    }
+
+    /// The coordinator of the live native source `source` in `graph`, the
+    /// running graph whose output catalogue a component was constructed with.
+    pub fn registered(
+        instance: &str,
+        graph: &str,
+        source: &ComponentId,
+        running: Option<&OutputCatalogue>,
+    ) -> Option<Arc<Self>> {
+        directory()
+            .lock()
+            .ok()?
+            .get(&(instance.to_owned(), graph.to_owned(), source.clone()))?
+            .iter()
+            .rev()
+            .filter(|entry| entry.scoped_to(running))
+            .find_map(|entry| entry.coordinator.upgrade())
+    }
+
+    /// The source component this coordinator belongs to.
+    pub fn source(&self) -> &ComponentId {
+        &self.request.id
+    }
+
+    /// The actual progress owner of `consumer`, one of the source's bootstrap
+    /// consumers.
+    pub fn owner_for(&self, consumer: &ComponentId) -> Option<Arc<QuerySourceProgress>> {
+        match &self.owners {
+            NativeSourceBootstrapProgress::Single(owner) => {
+                (owner.component_id() == consumer).then(|| owner.clone())
+            }
+            NativeSourceBootstrapProgress::Shared(owners) => owners.owners().get(consumer).cloned(),
+        }
+    }
 }

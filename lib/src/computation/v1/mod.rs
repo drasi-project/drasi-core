@@ -110,6 +110,46 @@
 //! `Drop`, and arbitrary component-owned threads or blocking work cannot be
 //! assumed stopped when a run is dropped.
 //!
+//! # Bootstrap on the graph
+//!
+//! Bootstrap data travels on dedicated bootstrap edges, between ports declared
+//! with [`PortKind::Bootstrap`], through ordinary point-to-point pipes. A
+//! bootstrap output connects only to a bootstrap input. [`ComponentRole::BootstrapProvider`]
+//! nodes declare only bootstrap outputs; a component consumes bootstrap data on
+//! at most one bootstrap input, and sinks serve no snapshots. A consumer's
+//! bootstrap input is connected either to the bootstrap outputs of producers
+//! whose data it consumes, or to exactly one local bootstrap provider, never
+//! both. A source has no data inputs, so its only bootstrap edge comes from a
+//! local provider. Bootstrap edges take part in dependency ordering and cycle
+//! checks and appear in snapshots and inspection like data edges.
+//!
+//! A consumer opens one session per bootstrap input edge by sending a
+//! [`BootstrapRequest`] upstream over the control plane
+//! ([`ControlNotification::BootstrapRequest`]). The producer answers only on
+//! that consumer's edge, never by fanout: `bootstrap/begin`, records,
+//! then `bootstrap/complete` with watermarks and optional completion state, or
+//! `bootstrap/failed` with a reason (see [`BootstrapMarker`]). Components
+//! receive their bootstrap pipe ends through
+//! [`ComputationComponent::bind_bootstrap`].
+//!
+//! - [`PipeBootstrapProvider`] adapts a consumer's bootstrap edges to
+//!   [`ComputationBootstrapProvider`] and merges its sessions. Queries use it
+//!   whenever their `bootstrap` input is connected; with a local provider edge
+//!   their data inputs are never asked.
+//! - [`BootstrapProviderComponent`] is a provider node serving one provider
+//!   instance per session; stopping it fails in-flight sessions.
+//! - [`BootstrapRelay`] lets a source serve each downstream session from its
+//!   provider, completing with the source's own handover watermarks. Every
+//!   session, including one for a consumer that joins later, gets its own
+//!   snapshot and handover boundary; the live stream is not paused for it, and
+//!   the consumer skips live changes its snapshot covers. Only a source's very
+//!   first start, with no saved position for any consumer, holds its live
+//!   stream until the first boundary ([`BootstrapRelay::hold_live`]).
+//! - [`BootstrapSnapshotServer`] serves a query's output snapshot on its
+//!   `snapshot` bootstrap output. Native transformers that publish output
+//!   snapshots expose the same port, so downstream queries bootstrap from an
+//!   upstream query over an edge.
+//!
 //! # Routing and volatile boundaries
 //!
 //! Each output port explicitly binds one unique producer stream. Emissions must
@@ -119,8 +159,11 @@
 //! duplicates within a result are rejected, but there is no unbounded global ID
 //! deduplication index. [`emission_id`] is an optional stream/sequence ID convention.
 //!
-//! Every declared port must connect; sources have outputs only, sinks inputs only,
-//! and transformers both. Complete disconnected pipelines are allowed. Graph IDs
+//! Every declared data port must connect; sources have data outputs only, sinks
+//! data inputs only, and transformers both. Bootstrap ports
+//! ([`PortKind::Bootstrap`]) are optional and are described under
+//! [Bootstrap on the graph](#bootstrap-on-the-graph). Complete disconnected
+//! pipelines are allowed. Graph IDs
 //! are local, not registered process-wide. Exact duplicate edges, cycles,
 //! unbounded pipes and unsupported delivery capabilities are errors. Broadcast
 //! lag is explicit. Retained providers name their actual registered store resource
@@ -178,6 +221,8 @@ pub use super::creation::ComponentIds;
 pub use super::instance::{ComputationCleanupError, ComputationInfo};
 pub use super::instance_ops::InstanceConfigurationSnapshot;
 
+mod bootstrap_ports;
+pub use bootstrap_ports::*;
 mod binary_codec;
 mod bounded_pipe;
 mod broadcast_pipe;
@@ -258,6 +303,8 @@ pub use query_construction::{
 };
 mod query_catalog;
 pub use query_catalog::*;
+mod graph_bootstrap;
+pub use graph_bootstrap::*;
 mod output_bootstrap;
 pub use output_bootstrap::OutputBootstrapProvider;
 mod output_catalogue;

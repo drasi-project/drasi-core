@@ -2305,7 +2305,12 @@ async fn execute(
                 .context
                 .as_ref()
                 .and_then(|context| context.credentials.clone());
-            let mut context = crate::lifecycle::StartContext::new(scope.clone(), credentials);
+            let fresh_start = call
+                .context
+                .as_ref()
+                .and_then(|context| context.fresh_start);
+            let mut context = crate::lifecycle::StartContext::new(scope.clone(), credentials)
+                .with_fresh_start(fresh_start);
             let started = run_hook(&scope, component.base_mut().start(&mut context)).await;
             drop(context);
             if instance.activation_credentials_bound {

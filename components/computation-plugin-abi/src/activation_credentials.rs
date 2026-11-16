@@ -56,7 +56,7 @@ mod tests {
             size_of::<crate::FactoryVTable>(),
             16 + 3 * size_of::<usize>()
         );
-        assert_eq!(crate::ABI_VERSION, "4.0.0");
-        assert_eq!(crate::WIRE_VERSION, 4);
+        assert_eq!(crate::ABI_VERSION, "5.0.0");
+        assert_eq!(crate::WIRE_VERSION, 5);
     }
 }

@@ -277,12 +277,15 @@ impl OrdinaryComponentRecord {
             OrdinaryComponent::Source { .. } => Vec::new(),
             OrdinaryComponent::Reaction { inputs, .. } => inputs.clone(),
             OrdinaryComponent::ProcessLocal { inputs, .. } => inputs.clone(),
-            OrdinaryComponent::Query { .. } => self
-                .query_configuration()?
-                .inputs
-                .into_iter()
-                .map(|input| input.component)
-                .collect(),
+            OrdinaryComponent::Query { .. } => {
+                let configuration = self.query_configuration()?;
+                configuration
+                    .inputs
+                    .into_iter()
+                    .map(|input| input.component)
+                    .chain(configuration.bootstrap_provider)
+                    .collect()
+            }
         })
     }
 
@@ -302,6 +305,9 @@ impl OrdinaryComponentRecord {
             OrdinaryComponent::Query { configuration } => {
                 for input in &mut configuration.inputs {
                     bind(&mut input.component);
+                }
+                if let Some(provider) = &mut configuration.bootstrap_provider {
+                    bind(provider);
                 }
             }
         }

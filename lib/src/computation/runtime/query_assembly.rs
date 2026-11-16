@@ -19,7 +19,28 @@ pub(super) fn bind_inputs(
             }
         }
     }
+    if let Some(provider) = &mut config.bootstrap_provider {
+        if let Some(name) = provider.as_name() {
+            if let Some(node) = publication.desired.component_by_name(name) {
+                *provider = crate::config::ComponentReference::by_id(node.descriptor.id().clone());
+            } else {
+                waiting.push(DependencyWait::ComponentName { name: name.clone() });
+            }
+        }
+    }
     waiting
+}
+
+/// The output port on which a component serves bootstrap sessions, if any.
+fn bootstrap_output(descriptor: &ComponentDescriptor) -> Option<PortId> {
+    descriptor
+        .ports()
+        .iter()
+        .find(|port| {
+            port.kind() == drasi_computation_contracts::PortKind::Bootstrap
+                && port.direction() == PortDirection::Output
+        })
+        .map(|port| port.id().clone())
 }
 
 fn declaration_id(query: &ComponentId) -> anyhow::Result<ResourceId> {
@@ -753,8 +774,14 @@ impl Runtime {
                             PortDirection::Output,
                             explicit.as_ref(),
                         )?;
-                        builder =
-                            builder.native_source(Endpoint::new(source.id()?.clone(), port))?;
+                        let output = Endpoint::new(source.id()?.clone(), port);
+                        builder = match bootstrap_output(&component.descriptor) {
+                            Some(port) => builder.native_source_with_bootstrap(
+                                output,
+                                Endpoint::new(source.id()?.clone(), port),
+                            )?,
+                            None => builder.native_source(output)?,
+                        };
                         continue;
                     }
                 }
@@ -775,7 +802,7 @@ impl Runtime {
                     ))?;
                     continue;
                 }
-                if publication.desired.nodes.iter().any(|node| {
+                if let Some(node) = publication.desired.nodes.iter().find(|node| {
                     source.component.as_id() == Some(node.descriptor.id())
                         && node
                             .descriptor
@@ -786,7 +813,11 @@ impl Runtime {
                     let component = source.id()?.clone();
                     let explicit = source.port.clone();
                     let output = publication.output_endpoint(&component, explicit.as_ref())?;
-                    builder = builder.native_source(output)?;
+                    builder = match bootstrap_output(&node.descriptor) {
+                        Some(port) => builder
+                            .native_source_with_bootstrap(output, Endpoint::new(component, port))?,
+                        None => builder.native_source(output)?,
+                    };
                     continue;
                 }
                 anyhow::ensure!(

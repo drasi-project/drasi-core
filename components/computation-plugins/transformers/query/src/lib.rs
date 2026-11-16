@@ -1,7 +1,6 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-mod bootstrap;
 mod durable;
 mod indexed;
 mod output;
@@ -39,9 +38,7 @@ use drasi_query_common::{
     QueryOperation, QuerySchedule,
 };
 
-const IMPLEMENTATION: &str = "drasi.experimental/volatile-query";
-const INDEXED_IMPLEMENTATION: &str = "drasi.experimental/indexed-query";
-const PROVIDER_IMPLEMENTATION: &str = "drasi.experimental/provider-query";
+const INDEXED_IMPLEMENTATION: &str = "drasi.query/indexed";
 
 pub fn plugin() -> anyhow::Result<PluginDefinition> {
     plugin_with_middleware_registry(default_middleware_registry())
@@ -61,33 +58,13 @@ pub fn plugin_with_middleware_registry(
     PluginDefinition::new(
         env!("CARGO_PKG_NAME"),
         env!("CARGO_PKG_VERSION"),
-        vec![
-            Arc::new(QueryFactory::new(middleware.clone())),
-            Arc::new(IndexedQueryFactory::new(middleware.clone())),
-            Arc::new(ProviderQueryFactory::new(middleware)),
-        ],
+        vec![Arc::new(IndexedQueryFactory::new(middleware))],
         vec![GraphChangeCodec::schema()],
     )
 }
 
 #[cfg(feature = "dynamic-plugin")]
 drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
-
-pub struct QueryFactory {
-    middleware: Arc<MiddlewareTypeRegistry>,
-}
-
-impl QueryFactory {
-    pub fn new(middleware: Arc<MiddlewareTypeRegistry>) -> Self {
-        Self { middleware }
-    }
-}
-
-impl Default for QueryFactory {
-    fn default() -> Self {
-        Self::new(default_middleware_registry())
-    }
-}
 
 fn query_configuration_schema(
     fields: impl IntoIterator<Item = (&'static str, ConfigType, bool)>,
@@ -99,110 +76,7 @@ fn query_configuration_schema(
             drasi_computation_contracts::ConfigurationConstraint::query_inputs(),
         )
         .expect("query schema declares inputs");
-    if schema
-        .fields
-        .get("bootstrap")
-        .is_some_and(|field| field.value_type == ConfigType::Array)
-    {
-        schema
-            .constrain(
-                "bootstrap",
-                drasi_computation_contracts::ConfigurationConstraint::snapshot_inputs(),
-            )
-            .expect("query schema declares snapshot inputs");
-    }
     schema
-}
-
-impl Factory for QueryFactory {
-    fn metadata(&self) -> FactoryMetadata {
-        FactoryMetadata {
-            implementation: ImplementationIdentity::try_new(IMPLEMENTATION, "1")
-                .expect("constant implementation"),
-            role: ComponentRole::Transformer,
-            configuration_version: 1,
-            configuration: query_configuration_schema([
-                ("query", ConfigType::String, true),
-                ("volatile", ConfigType::Boolean, true),
-                ("language", ConfigType::String, false),
-                ("joins", ConfigType::Array, false),
-                ("inputs", ConfigType::Array, false),
-                ("middleware", ConfigType::Array, false),
-                ("result", ConfigType::Object, false),
-                ("stream", ConfigType::String, false),
-                ("outbox_capacity", ConfigType::Integer, false),
-                ("bootstrap", ConfigType::Array, false),
-            ]),
-            ports: [("in", PortDirection::Input), ("out", PortDirection::Output)]
-                .into_iter()
-                .map(|(name, direction)| {
-                    PortDescriptor::new(
-                        PortId::try_new(name).expect("constant port"),
-                        direction,
-                        GraphChangeCodec::schema().descriptor().clone(),
-                        PipeRequirements::default(),
-                    )
-                })
-                .collect(),
-            completion: None,
-            capabilities: Capabilities {
-                semantic_kind: Some(ComponentSemanticKind::Query),
-                output_progress: Some(OutputProgress::Origin),
-                binds_inputs: true,
-                output_snapshots: vec![PortId::try_new("out").expect("constant port")],
-                output_follows: vec![PortId::try_new("out").expect("constant port")],
-                output_queries: vec![PortId::try_new("out").expect("constant port")],
-                query_observations: true,
-                query_recovery_views: true,
-                continuations: true,
-                wakeups: true,
-                input_binding_updates: true,
-                management: true,
-                update_modes: vec![ComponentUpdateMode::InPlace, ComponentUpdateMode::Recreate],
-                ..Capabilities::default()
-            },
-        }
-    }
-
-    fn supports_update_planning(&self) -> bool {
-        true
-    }
-
-    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
-        update::plan(request, &self.middleware, &self.metadata()).map(Assessment::from)
-    }
-
-    fn create(
-        &self,
-        request: &CreateRequest,
-        control: ControlSender,
-    ) -> anyhow::Result<CreatedComponent> {
-        self.create_with_output_snapshots(request, control, None)
-    }
-
-    fn supports_output_snapshots(&self) -> bool {
-        true
-    }
-
-    fn create_with_output_snapshots(
-        &self,
-        request: &CreateRequest,
-        _: ControlSender,
-        snapshots: Option<NativeOutputSnapshots>,
-    ) -> anyhow::Result<CreatedComponent> {
-        anyhow::ensure!(
-            request.configuration["volatile"] == true,
-            "this experimental query transformer requires volatile: true"
-        );
-        let bootstrap = bootstrap::SnapshotBootstrap::from_request(request, snapshots)?;
-        create_query(
-            request,
-            self.metadata(),
-            None,
-            bootstrap,
-            self.middleware.clone(),
-        )
-    }
 }
 
 pub struct IndexedQueryFactory {
@@ -223,39 +97,66 @@ impl Default for IndexedQueryFactory {
 
 impl Factory for IndexedQueryFactory {
     fn metadata(&self) -> FactoryMetadata {
-        let mut metadata = QueryFactory::new(self.middleware.clone()).metadata();
-        metadata.implementation =
-            ImplementationIdentity::try_new(INDEXED_IMPLEMENTATION, "1").expect("constant");
-        metadata.configuration = query_configuration_schema([
-            ("query", ConfigType::String, true),
-            ("volatile", ConfigType::Boolean, false),
-            ("publication", ConfigType::String, false),
-            ("language", ConfigType::String, false),
-            ("joins", ConfigType::Array, false),
-            ("inputs", ConfigType::Array, false),
-            ("middleware", ConfigType::Array, false),
-            ("result", ConfigType::Object, false),
-            ("stream", ConfigType::String, false),
-            ("outbox_capacity", ConfigType::Integer, false),
-            ("bootstrap", ConfigType::Boolean, false),
-            ("source_transactions", ConfigType::Object, false),
-            ("recovery", ConfigType::String, false),
-            ("reset_configuration", ConfigType::Boolean, false),
-        ]);
-        metadata.capabilities.indexed_processing = true;
-        metadata.capabilities.volatile_processing = true;
-        metadata.capabilities.non_atomic_publication = true;
-        metadata.capabilities.committed_input_progress =
-            Some(PortId::try_new("in").expect("constant port"));
-        metadata.capabilities.durable_bootstrap =
-            Some(PortId::try_new("in").expect("constant port"));
-        metadata.capabilities.output_replays = vec![PortId::try_new("out").expect("constant port")];
-        metadata.capabilities.continuations = true;
-        metadata.capabilities.startup_continuation = true;
-        metadata.capabilities.durable_output = true;
-        metadata.capabilities.erases_owned_state = true;
-        metadata.capabilities.binds_inputs = false;
-        metadata
+        let input = || PortId::try_new("in").expect("constant port");
+        let output = || PortId::try_new("out").expect("constant port");
+        FactoryMetadata {
+            implementation: ImplementationIdentity::try_new(INDEXED_IMPLEMENTATION, "1")
+                .expect("constant implementation"),
+            role: ComponentRole::Transformer,
+            configuration_version: 1,
+            configuration: query_configuration_schema([
+                ("query", ConfigType::String, true),
+                ("volatile", ConfigType::Boolean, false),
+                ("publication", ConfigType::String, false),
+                ("language", ConfigType::String, false),
+                ("joins", ConfigType::Array, false),
+                ("inputs", ConfigType::Array, false),
+                ("middleware", ConfigType::Array, false),
+                ("result", ConfigType::Object, false),
+                ("stream", ConfigType::String, false),
+                ("outbox_capacity", ConfigType::Integer, false),
+                ("bootstrap", ConfigType::Boolean, false),
+                ("source_transactions", ConfigType::Object, false),
+                ("recovery", ConfigType::String, false),
+                ("reset_configuration", ConfigType::Boolean, false),
+            ]),
+            ports: [("in", PortDirection::Input), ("out", PortDirection::Output)]
+                .into_iter()
+                .map(|(name, direction)| {
+                    PortDescriptor::new(
+                        PortId::try_new(name).expect("constant port"),
+                        direction,
+                        GraphChangeCodec::schema().descriptor().clone(),
+                        PipeRequirements::default(),
+                    )
+                })
+                .collect(),
+            completion: None,
+            capabilities: Capabilities {
+                semantic_kind: Some(ComponentSemanticKind::Query),
+                output_progress: Some(OutputProgress::Origin),
+                output_snapshots: vec![output()],
+                output_follows: vec![output()],
+                output_queries: vec![output()],
+                output_replays: vec![output()],
+                query_observations: true,
+                query_recovery_views: true,
+                continuations: true,
+                startup_continuation: true,
+                wakeups: true,
+                input_binding_updates: true,
+                management: true,
+                update_modes: vec![ComponentUpdateMode::InPlace, ComponentUpdateMode::Recreate],
+                indexed_processing: true,
+                volatile_processing: true,
+                non_atomic_publication: true,
+                committed_input_progress: Some(input()),
+                durable_bootstrap: Some(input()),
+                durable_output: true,
+                erases_owned_state: true,
+                ..Capabilities::default()
+            },
+        }
     }
 
     fn supports_update_planning(&self) -> bool {
@@ -279,73 +180,7 @@ impl Factory for IndexedQueryFactory {
         create_query(
             request,
             self.metadata(),
-            Some(processing),
-            None,
-            self.middleware.clone(),
-        )
-    }
-}
-
-pub struct ProviderQueryFactory {
-    middleware: Arc<MiddlewareTypeRegistry>,
-}
-
-impl ProviderQueryFactory {
-    pub fn new(middleware: Arc<MiddlewareTypeRegistry>) -> Self {
-        Self { middleware }
-    }
-}
-
-impl Default for ProviderQueryFactory {
-    fn default() -> Self {
-        Self::new(default_middleware_registry())
-    }
-}
-
-impl Factory for ProviderQueryFactory {
-    fn metadata(&self) -> FactoryMetadata {
-        let mut metadata = QueryFactory::new(self.middleware.clone()).metadata();
-        metadata.implementation =
-            ImplementationIdentity::try_new(PROVIDER_IMPLEMENTATION, "1").expect("constant");
-        metadata.configuration = query_configuration_schema([
-            ("query", ConfigType::String, true),
-            ("volatile", ConfigType::Boolean, true),
-            ("language", ConfigType::String, false),
-            ("joins", ConfigType::Array, false),
-            ("inputs", ConfigType::Array, false),
-            ("middleware", ConfigType::Array, false),
-            ("result", ConfigType::Object, false),
-            ("stream", ConfigType::String, false),
-            ("outbox_capacity", ConfigType::Integer, false),
-        ]);
-        metadata.capabilities.binds_inputs = false;
-        metadata.capabilities.quiescent_bootstrap =
-            Some(PortId::try_new("in").expect("constant port"));
-        metadata
-    }
-
-    fn supports_update_planning(&self) -> bool {
-        true
-    }
-
-    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
-        update::plan(request, &self.middleware, &self.metadata()).map(Assessment::from)
-    }
-
-    fn create(
-        &self,
-        request: &CreateRequest,
-        _: ControlSender,
-    ) -> anyhow::Result<CreatedComponent> {
-        anyhow::ensure!(
-            request.configuration["volatile"] == true,
-            "this experimental provider query requires volatile: true"
-        );
-        create_query(
-            request,
-            self.metadata(),
-            None,
-            None,
+            processing,
             self.middleware.clone(),
         )
     }
@@ -414,8 +249,7 @@ fn query_configuration(
 fn create_query(
     request: &CreateRequest,
     metadata: FactoryMetadata,
-    processing: Option<NativeProcessing>,
-    bootstrap: Option<bootstrap::SnapshotBootstrap>,
+    processing: NativeProcessing,
     middleware: Arc<MiddlewareTypeRegistry>,
 ) -> anyhow::Result<CreatedComponent> {
     update::validate_creation(request)?;
@@ -425,7 +259,6 @@ fn create_query(
     let stream = definition.output_stream.clone();
     let capacity = definition.outbox_capacity;
     let language = definition.language;
-    let provider_bootstrap = metadata.capabilities.quiescent_bootstrap.is_some();
     let input_scopes = if !request.inputs.is_empty()
         && execution
             .inputs
@@ -459,37 +292,30 @@ fn create_query(
             execution: execution.clone(),
             output_stream: stream.clone(),
             outbox_capacity: capacity,
-            bootstrap: provider_bootstrap
-                || request
-                    .configuration
-                    .get("bootstrap")
-                    .is_some_and(|value| value == true || value.is_array()),
+            bootstrap: request
+                .configuration
+                .get("bootstrap")
+                .is_some_and(|value| value == true),
             auto_reset: request
                 .configuration
                 .get("recovery")
                 .and_then(serde_json::Value::as_str)
                 == Some("auto_reset"),
-            volatile: processing.is_none()
-                || request
-                    .configuration
-                    .get("volatile")
-                    .is_some_and(|value| value == true),
+            volatile: request
+                .configuration
+                .get("volatile")
+                .is_some_and(|value| value == true),
             configuration_hash: definition.configuration_hash(&execution)?,
         },
     ));
     let schedule = QuerySchedule::default();
-    let durable = processing
-        .as_ref()
-        .map(|_| {
-            durable::DurableQuery::new(
-                request,
-                &definition,
-                output.clone(),
-                &execution,
-                schedule.clone(),
-            )
-        })
-        .transpose()?;
+    let durable = durable::DurableQuery::new(
+        request,
+        &definition,
+        output.clone(),
+        &execution,
+        schedule.clone(),
+    )?;
     Ok(Component::Transformer(Box::new(QueryTransformer {
         descriptor: metadata.descriptor(id.clone())?,
         metadata,
@@ -502,13 +328,7 @@ fn create_query(
         output,
         processing,
         durable,
-        bootstrap,
-        provider_bootstrap,
-        provider_rows: None,
-        input_cursors: None,
-        evaluator: None,
         started: false,
-        sequence: 0,
         failed: false,
         schedule,
         draining_futures: false,
@@ -544,15 +364,9 @@ struct QueryTransformer {
     input_scopes: Option<QueryInputScopes>,
     projector: ResultNodeProjector,
     output: Arc<output::QueryOutput>,
-    processing: Option<NativeProcessing>,
-    durable: Option<durable::DurableQuery>,
-    bootstrap: Option<bootstrap::SnapshotBootstrap>,
-    provider_bootstrap: bool,
-    provider_rows: Option<output::Rows>,
-    input_cursors: Option<bootstrap::InputCursors>,
-    evaluator: Option<QueryEvaluator>,
+    processing: NativeProcessing,
+    durable: durable::DurableQuery,
     started: bool,
-    sequence: u64,
     failed: bool,
     schedule: QuerySchedule,
     draining_futures: bool,
@@ -595,7 +409,7 @@ impl NativeComponent for QueryTransformer {
     }
 
     fn output_readers(&self) -> OutputReaders {
-        let readers = OutputReaders::new()
+        OutputReaders::new()
             .with_snapshot(
                 PortId::try_new("out").expect("constant port"),
                 self.output.clone(),
@@ -607,15 +421,11 @@ impl NativeComponent for QueryTransformer {
             .with_query(
                 PortId::try_new("out").expect("constant port"),
                 self.output.clone(),
-            );
-        if self.durable.is_some() {
-            readers.with_replay(
+            )
+            .with_replay(
                 PortId::try_new("out").expect("constant port"),
                 self.output.clone(),
             )
-        } else {
-            readers
-        }
     }
 
     async fn initialize(&mut self, _ctx: &InitializeContext) -> LifecycleResult {
@@ -666,7 +476,7 @@ impl NativeManagement for QueryTransformer {
 impl QueryTransformer {
     async fn apply_update(&mut self, request: &ApplyUpdateRequest) -> anyhow::Result<()> {
         anyhow::ensure!(
-            self.started && !self.failed && self.provider_rows.is_none(),
+            self.started && !self.failed,
             "query update requires completed activation and a paused processing boundary"
         );
         anyhow::ensure!(
@@ -680,9 +490,7 @@ impl QueryTransformer {
         );
         let (definition, _) = query_configuration(&request.request.proposed, &self.middleware)?;
         self.output.increase_retention(definition.outbox_capacity)?;
-        if let Some(durable) = &mut self.durable {
-            durable.set_retention(definition.outbox_capacity);
-        }
+        self.durable.set_retention(definition.outbox_capacity);
         Arc::make_mut(&mut self.definition).outbox_capacity = definition.outbox_capacity;
         self.configuration = request.request.proposed.configuration.clone();
         Ok(())
@@ -693,12 +501,9 @@ impl QueryTransformer {
             !self.started,
             "query resource deletion requires completed stop"
         );
-        let processing = self
-            .processing
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("query does not own persistent state"))?;
-        let volatile = self.durable.as_ref().is_some_and(|query| query.volatile);
-        let non_atomic = self.durable.as_ref().is_some_and(|query| query.non_atomic);
+        let processing = &self.processing;
+        let volatile = self.durable.volatile;
+        let non_atomic = self.durable.non_atomic;
         if non_atomic {
             processing
                 .run(|context| async move {
@@ -732,99 +537,33 @@ impl QueryTransformer {
     }
 
     async fn start_activation(&mut self) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            !self.started && self.provider_rows.is_none(),
-            "query is already started or initializing"
-        );
+        anyhow::ensure!(!self.started, "query is already started or initializing");
         let was_failed = self.failed;
-        if self.processing.is_none() && !self.provider_bootstrap && self.bootstrap.is_none() {
-            anyhow::ensure!(
-                !self.failed,
-                "failed volatile query requires explicit reconstruction and bootstrap"
-            );
-            if let Some(evaluator) = &self.evaluator {
-                self.schedule
-                    .publish(evaluator.future_queue().peek_due_time().await?)?;
-                self.output.activate()?;
-                self.started = true;
-                return Ok(());
-            }
-        }
         self.output.begin_activation()?;
         self.schedule.publish(None)?;
         self.draining_futures = false;
         self.failed = true;
-        let mut input_cursors = None;
-        if let Some(processing) = &self.processing {
-            let reset = self
-                .durable
-                .as_ref()
-                .expect("indexed state")
-                .reset_failed_volatile(was_failed)?;
-            self.durable
-                .as_mut()
-                .expect("indexed state")
-                .start(
-                    processing,
-                    self.definition.clone(),
-                    self.execution.clone(),
-                    self.middleware.clone(),
-                    reset,
-                )
-                .await?;
-        } else {
-            let output = &self.output;
-            let evaluator = evaluator(
-                &self.definition.query,
-                self.definition.language,
-                &self.execution,
-                None,
+        let reset = self.durable.reset_failed_volatile(was_failed)?;
+        self.durable
+            .start(
+                &self.processing,
+                self.definition.clone(),
+                self.execution.clone(),
                 self.middleware.clone(),
+                reset,
             )
             .await?;
-            if self.provider_bootstrap {
-                self.evaluator = Some(evaluator);
-                self.provider_rows = Some(output::Rows::new());
-                self.input_cursors = None;
-                self.sequence = 0;
-                self.failed = false;
-                return Ok(());
-            }
-            let rows = match &self.bootstrap {
-                Some(bootstrap) => {
-                    let (cursors, rows) = bootstrap
-                        .load(&evaluator, output, self.input_scopes.as_ref())
-                        .await?;
-                    input_cursors = Some(cursors);
-                    rows
-                }
-                None => output::Rows::new(),
-            };
-            output.initialize(rows)?;
-            self.schedule
-                .publish(evaluator.future_queue().peek_due_time().await?)?;
-            self.evaluator = Some(evaluator);
-        }
-        self.input_cursors = input_cursors;
         self.started = true;
-        self.sequence = 0;
         self.failed = false;
         Ok(())
     }
 
     fn stop_activation(&mut self) -> anyhow::Result<()> {
-        if self.processing.is_some() || self.failed {
-            self.evaluator = None;
-        }
-        self.provider_rows = None;
-        self.input_cursors = None;
         self.started = false;
         self.draining_futures = false;
         self.schedule.publish(None)?;
         self.output.suspend()?;
-        if let Some(durable) = &mut self.durable {
-            durable.stop(self.failed)?;
-        }
+        self.durable.stop(self.failed)?;
         Ok(())
     }
 }
@@ -836,18 +575,11 @@ impl NativeTransformer for QueryTransformer {
             self.started && !self.failed,
             "query is not ready for delivery resumption"
         );
-        self.durable
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("query is not indexed"))?
-            .resume_delivery();
+        self.durable.resume_delivery();
         Ok(())
     }
     fn has_pending_emissions(&self) -> bool {
-        self.draining_futures
-            || self
-                .durable
-                .as_ref()
-                .is_some_and(durable::DurableQuery::has_pending_emissions)
+        self.draining_futures || self.durable.has_pending_emissions()
     }
 
     async fn continue_transform(&mut self) -> anyhow::Result<Vec<OutputEnvelope>> {
@@ -855,28 +587,15 @@ impl NativeTransformer for QueryTransformer {
             self.started && !self.failed,
             "query is not ready for continuation"
         );
-        if !self
-            .durable
-            .as_ref()
-            .is_some_and(durable::DurableQuery::has_pending_emissions)
-        {
+        if !self.durable.has_pending_emissions() {
             return if self.draining_futures {
                 self.on_wakeup().await
             } else {
                 Ok(Vec::new())
             };
         }
-        let processing = self
-            .processing
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("query has no indexed continuation"))?;
         self.failed = true;
-        let output = self
-            .durable
-            .as_mut()
-            .expect("indexed state")
-            .continue_output(processing)
-            .await?;
+        let output = self.durable.continue_output(&self.processing).await?;
         self.failed = false;
         Ok(output
             .into_iter()
@@ -888,49 +607,32 @@ impl NativeTransformer for QueryTransformer {
     }
 
     async fn delivery_completed(&mut self, outputs: &[OutputEnvelope]) -> anyhow::Result<()> {
-        if let (Some(processing), Some(durable)) = (&self.processing, &mut self.durable) {
-            anyhow::ensure!(
-                self.started && !self.failed,
-                "query is not ready for confirmation"
-            );
-            self.failed = true;
-            durable.delivery_completed(processing, outputs).await?;
-            self.failed = false;
-        }
+        anyhow::ensure!(
+            self.started && !self.failed,
+            "query is not ready for confirmation"
+        );
+        self.failed = true;
+        self.durable
+            .delivery_completed(&self.processing, outputs)
+            .await?;
+        self.failed = false;
         Ok(())
     }
 
-    fn quiescent_bootstrap_input(&self) -> Option<PortId> {
-        self.provider_bootstrap
-            .then(|| PortId::try_new("in").expect("constant port"))
-    }
-
     fn durable_bootstrap_input(&self) -> Option<PortId> {
-        self.durable
-            .as_ref()
-            .map(|_| PortId::try_new("in").expect("constant port"))
+        Some(PortId::try_new("in").expect("constant port"))
     }
 
     fn bootstrap_status(&self) -> anyhow::Result<BootstrapStatus> {
-        Ok(self
-            .durable
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("query has no durable bootstrap"))?
-            .bootstrap_status())
+        Ok(self.durable.bootstrap_status())
     }
 
     async fn reset_bootstrap(&mut self) -> anyhow::Result<()> {
         anyhow::ensure!(!self.failed, "query initialization is fenced");
-        let processing = self
-            .processing
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("query is not indexed"))?;
         self.failed = true;
         self.durable
-            .as_mut()
-            .expect("indexed state")
             .start(
-                processing,
+                &self.processing,
                 self.definition.clone(),
                 self.execution.clone(),
                 self.middleware.clone(),
@@ -949,72 +651,26 @@ impl NativeTransformer for QueryTransformer {
                 .get(&(input.port.clone(), input.envelope.system().stream().clone()))
                 .cloned()
         });
-        if let (Some(processing), Some(durable)) = (&self.processing, &self.durable) {
-            self.failed = true;
-            durable
-                .bootstrap(
-                    processing,
-                    self.definition.clone(),
-                    self.projector.clone(),
-                    input,
-                    scope,
-                )
-                .await?;
-            self.failed = false;
-            return Ok(());
-        }
-        anyhow::ensure!(
-            self.provider_bootstrap && self.provider_rows.is_some() && !self.failed,
-            "query is not accepting provider initialization"
-        );
-        anyhow::ensure!(input.port.as_str() == "in", "invalid query bootstrap input");
-        let changes = GraphChangeCodec::decode_changes(&input.envelope)?;
         self.failed = true;
-        let results = self
-            .evaluator
-            .as_ref()
-            .expect("initializing evaluator")
-            .evaluate_input_batch::<false>(
-                QueryInputBatch::new(changes, input.envelope.system().ordering())
-                    .with_optional_input_scope(scope),
+        self.durable
+            .bootstrap(
+                &self.processing,
+                self.definition.clone(),
+                self.projector.clone(),
+                input,
+                scope,
             )
             .await?;
-        self.output.apply_initial(
-            self.provider_rows.as_mut().expect("initializing rows"),
-            &results,
-        )?;
         self.failed = false;
         Ok(())
     }
 
     async fn bootstrap_completed(&mut self, completion: BootstrapCompletion) -> anyhow::Result<()> {
         anyhow::ensure!(!self.failed, "query initialization is fenced");
-        if let (Some(processing), Some(durable)) = (&self.processing, &mut self.durable) {
-            self.failed = true;
-            durable.complete_bootstrap(processing, completion).await?;
-            self.started = true;
-            self.failed = false;
-            return Ok(());
-        }
-        anyhow::ensure!(
-            completion.watermarks.is_empty() && completion.state.is_none(),
-            "volatile query cannot commit durable bootstrap completion"
-        );
-        anyhow::ensure!(
-            self.provider_bootstrap && self.provider_rows.is_some() && !self.failed,
-            "query is not awaiting provider completion"
-        );
         self.failed = true;
-        let rows = self.provider_rows.take().expect("initializing rows");
-        self.output.initialize(rows)?;
-        self.schedule.publish(
-            self.evaluator
-                .as_ref()
-                .expect("initializing evaluator")
-                .future_queue()
-                .peek_due_time()
-                .await?,
-        )?;
+        self.durable
+            .complete_bootstrap(&self.processing, completion)
+            .await?;
         self.started = true;
         self.failed = false;
         Ok(())
@@ -1028,110 +684,41 @@ impl NativeTransformer for QueryTransformer {
             && GraphChangeCodec::is_futures_due(&input.envelope);
         if futures_due {
             let progress = GraphProducerProgress::from_envelope(&input.envelope)?;
-            if progress.as_ref().is_none_or(|progress| {
-                !progress.identity().persistent()
-                    && self.durable.as_ref().is_none_or(|query| query.volatile)
-            }) {
+            if progress
+                .as_ref()
+                .is_none_or(|progress| !progress.identity().persistent() && self.durable.volatile)
+            {
                 return self.on_wakeup().await;
             }
         }
-        if let Some(processing) = &self.processing {
-            let scope = drasi_query_common::query_input_scope(self.input_scopes.as_ref(), &input)?;
-            self.failed = true;
-            let publication = self.output.processing();
-            let mut output = self
-                .durable
-                .as_mut()
-                .expect("indexed state")
-                .transform(
-                    processing,
-                    self.definition.clone(),
-                    self.projector.clone(),
-                    input,
-                    scope,
-                )
-                .await?;
-            if let Some(output) = &mut output {
-                self.output.publish(output)?;
-            }
-            publication.complete();
-            self.failed = false;
-            if futures_due {
-                return self.on_wakeup().await;
-            }
-            return Ok(output
-                .into_iter()
-                .map(|envelope| OutputEnvelope {
-                    port: PortId::try_new("out").expect("constant port"),
-                    envelope,
-                })
-                .collect());
-        }
-        let input_cursor = if let Some(cursors) = &self.input_cursors {
-            let key = (input.port.clone(), input.envelope.system().stream().clone());
-            let saved = cursors.get(&key).ok_or_else(|| {
-                anyhow::anyhow!("bootstrapped query received an undeclared input port/stream")
-            })?;
-            let progress = GraphProducerProgress::from_envelope(&input.envelope)?
-                .ok_or_else(|| anyhow::anyhow!("bootstrapped query requires producer progress"))?;
-            let cursor = OutputCursor::try_new(progress.identity().clone(), progress.sequence())?;
-            saved.ensure_same_epoch(&cursor)?;
-            if cursor.sequence() <= saved.sequence() {
-                return Ok(Vec::new());
-            }
-            Some((key, cursor))
-        } else {
-            None
-        };
-        let changes = GraphChangeCodec::decode_changes(&input.envelope)?;
         let scope = drasi_query_common::query_input_scope(self.input_scopes.as_ref(), &input)?;
         self.failed = true;
         let publication = self.output.processing();
-        let mut output = {
-            let evaluator = self.evaluator.as_ref().expect("started volatile query");
-            let operation = QueryOperation::new(&input.envelope)?;
-            let results = evaluator
-                .evaluate_input_batch::<false>(
-                    QueryInputBatch::new(changes, input.envelope.system().ordering())
-                        .with_optional_input_scope(scope),
-                )
-                .await?;
-            let sequence = QueryOperation::output_sequence(self.sequence, &results)?;
-            operation.project(&self.definition, &self.projector, sequence, &results)?
-        };
-        let core_return_ns = timestamp_ns();
-        if let Some(envelope) = &mut output {
-            QueryOperation::committed(envelope, &self.definition.id, core_return_ns)?;
-            self.output.publish(envelope)?;
+        let mut output = self
+            .durable
+            .transform(
+                &self.processing,
+                self.definition.clone(),
+                self.projector.clone(),
+                input,
+                scope,
+            )
+            .await?;
+        if let Some(output) = &mut output {
+            self.output.publish(output)?;
         }
-        self.schedule.publish(
-            self.evaluator
-                .as_ref()
-                .expect("started volatile query")
-                .future_queue()
-                .peek_due_time()
-                .await?,
-        )?;
         publication.complete();
         self.failed = false;
-        if let Some((key, cursor)) = input_cursor {
-            self.input_cursors
-                .as_mut()
-                .expect("bootstrapped input cursors")
-                .insert(key, cursor);
-        }
         if futures_due {
             return self.on_wakeup().await;
         }
-        if let Some(envelope) = output {
-            self.sequence = QueryChangeCodec::query_sequence(&envelope)?;
-            Ok(vec![OutputEnvelope {
+        Ok(output
+            .into_iter()
+            .map(|envelope| OutputEnvelope {
                 port: PortId::try_new("out").expect("constant port"),
                 envelope,
-            }])
-        } else {
-            Ok(Vec::new())
-        }
+            })
+            .collect())
     }
 
     fn wakeup_source(&self) -> Option<Arc<dyn WakeupSource>> {
@@ -1143,50 +730,21 @@ impl NativeTransformer for QueryTransformer {
             self.started && !self.failed,
             "query is not ready for scheduled work"
         );
-        if self
-            .durable
-            .as_ref()
-            .is_some_and(durable::DurableQuery::has_pending_emissions)
-        {
+        if self.durable.has_pending_emissions() {
             return self.continue_transform().await;
         }
         self.failed = true;
         let publication = self.output.processing();
-        let (mut output, now) =
-            if let (Some(processing), Some(durable)) = (&self.processing, &mut self.durable) {
-                durable
-                    .on_wakeup(processing, self.definition.clone(), self.projector.clone())
-                    .await?
-            } else {
-                let now = u64::try_from(Utc::now().timestamp_millis())?;
-                let evaluator = self.evaluator.as_ref().expect("started volatile query");
-                let next_due = evaluator.future_queue().peek_due_time().await?;
-                let output = if next_due.is_some_and(|deadline| deadline <= now) {
-                    match evaluator.evaluate_next_future().await? {
-                        Some(due) => {
-                            let sequence =
-                                QueryOperation::output_sequence(self.sequence, &due.results)?;
-                            drasi_query_common::project_due_query_output(
-                                &self.definition,
-                                &self.projector,
-                                sequence,
-                                &due,
-                            )?
-                        }
-                        None => None,
-                    }
-                } else {
-                    None
-                };
-                self.schedule
-                    .publish(evaluator.future_queue().peek_due_time().await?)?;
-                (output, now)
-            };
+        let (mut output, now) = self
+            .durable
+            .on_wakeup(
+                &self.processing,
+                self.definition.clone(),
+                self.projector.clone(),
+            )
+            .await?;
         if let Some(output) = &mut output {
             self.output.publish(output)?;
-            if self.processing.is_none() {
-                self.sequence = QueryChangeCodec::query_sequence(output)?;
-            }
         }
         self.draining_futures = self
             .schedule

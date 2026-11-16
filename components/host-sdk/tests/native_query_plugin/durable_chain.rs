@@ -33,7 +33,7 @@ impl Child {
             progress.clone(),
             Duration::from_secs(5),
         )?;
-        query.bind_bootstrap(Arc::new(NativeBootstrapResource(bootstrap)))?;
+        query.bind_bootstrap_provider(Arc::new(NativeBootstrapResource(bootstrap)))?;
         let handle = graph
             .core
             .add_computation_component(
