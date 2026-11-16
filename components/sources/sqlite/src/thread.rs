@@ -154,7 +154,7 @@ pub fn run_sqlite_thread(
     mut command_rx: mpsc::UnboundedReceiver<SqliteCommand>,
     event_tx: mpsc::UnboundedSender<ChangeEvent>,
 ) -> Result<()> {
-    let conn = if let Some(path) = config.path {
+    let mut conn = if let Some(path) = config.path {
         Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
@@ -483,11 +483,7 @@ fn query_rows(
     params: &[&dyn rusqlite::types::ToSql],
 ) -> Result<Vec<JsonRow>> {
     let mut stmt = conn.prepare(sql)?;
-    let columns = stmt
-        .column_names()
-        .iter()
-        .map(|name| (*name).to_string())
-        .collect::<Vec<_>>();
+    let columns = stmt.column_names().map(str::to_string).collect::<Vec<_>>();
 
     let mut rows = stmt.query(params)?;
     let mut result = Vec::new();

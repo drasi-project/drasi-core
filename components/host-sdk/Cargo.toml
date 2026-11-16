@@ -35,8 +35,8 @@ semver = "1.0"
 # Optional: OCI registry support
 oci-client = { version = "0.16", optional = true }
 x509-parser = { version = "0.16", optional = true }
-p256 = { version = "0.13", features = ["ecdsa"], optional = true }
-p384 = { version = "0.13", features = ["ecdsa"], optional = true }
+p256 = { version = "0.14", features = ["ecdsa"], optional = true }
+p384 = { version = "0.14", features = ["ecdsa"], optional = true }
 pem = { version = "3", optional = true }
 base64 = { version = "0.22", optional = true }
 

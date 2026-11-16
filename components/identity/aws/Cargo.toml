@@ -39,20 +39,17 @@ log = "0.4"
 tokio = { version = "1.0", features = ["rt-multi-thread", "sync"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-# Pin the AWS/smithy stack: aws-smithy-types 1.7 broke aws-smithy-json 0.61–0.63.
-aws-config = "=1.8.0"
-aws-sdk-rds = { version = "=1.133.0", default-features = false, features = [
+# Keep the AWS SDK family aligned so SigV4a uses patched crypto-bigint.
+aws-config = "=1.13.2"
+aws-sdk-rds = { version = "=1.162.0", default-features = false, features = [
     "default-https-client",
     "rt-tokio",
 ] }
-aws-sdk-sts = { version = "=1.104.0", default-features = false, features = [
+aws-sdk-sts = { version = "=1.126.0", default-features = false, features = [
     "default-https-client",
     "rt-tokio",
     "sigv4a",
 ] }
-aws-runtime = "=1.9.1"
-aws-smithy-runtime = "=1.12.1"
-aws-smithy-types = "=1.6.3"
 
 [features]
 dynamic-plugin = []
