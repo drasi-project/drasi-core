@@ -1,6 +1,6 @@
 [package]
 name = "drasi-salesforce-common"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Shared Salesforce mapping/auth/protocol primitives for Drasi source plugins"
