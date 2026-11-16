@@ -225,9 +225,9 @@ fn matches_row(diff: &ResultDiff, name: &str, email: &str) -> bool {
 /// Strategy:
 /// 1. Create a table with diverse MySQL column types
 /// 2. Insert a row BEFORE the source starts (so it's bootstrapped)
-/// 3. Start the source → bootstrap produces an Add diff
+/// 3. Start the source and read the bootstrapped row from get_query_results()
 /// 4. UPDATE only a marker column → CDC produces an Update diff
-/// 5. Compare unchanged columns between bootstrap (Add.data) and CDC (Update.after)
+/// 5. Compare unchanged columns between the bootstrap snapshot and CDC (Update.after)
 ///    - If type mappings are consistent, the values must be identical
 #[tokio::test]
 #[ignore]
@@ -290,6 +290,18 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
             enum_col ENUM('red', 'green', 'blue') NOT NULL,
             set_col SET('a', 'b', 'c') NOT NULL,
             json_col JSON NOT NULL,
+            bit_zero_col BIT(1) NOT NULL,
+            bit_one_col BIT(1) NOT NULL,
+            bit_wide_col BIT(9) NOT NULL,
+            bit_max_col BIT(64) NOT NULL,
+            blob_ascii_col BLOB NOT NULL,
+            blob_bytes_col BLOB NOT NULL,
+            blob_empty_col BLOB NOT NULL,
+            blob_null_col BLOB NULL,
+            varbinary_ascii_col VARBINARY(16) NOT NULL,
+            varbinary_bytes_col VARBINARY(16) NOT NULL,
+            varbinary_empty_col VARBINARY(16) NOT NULL,
+            varbinary_null_col VARBINARY(16) NULL,
             marker VARCHAR(10) NOT NULL DEFAULT 'v1'
         )",
     )
@@ -315,12 +327,20 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
         "INSERT INTO type_test
             (int_col, bigint_col, float_col, double_col, decimal_col, varchar_col,
              tinyint_col, bool_col, date_col, time_col, datetime_col, datetime_zero_col,
-             timestamp_col, timestamp_zero_col, year_col, enum_col, set_col, json_col, marker)
+             timestamp_col, timestamp_zero_col, year_col, enum_col, set_col, json_col,
+             bit_zero_col, bit_one_col, bit_wide_col, bit_max_col,
+             blob_ascii_col, blob_bytes_col, blob_empty_col, blob_null_col,
+             varbinary_ascii_col, varbinary_bytes_col, varbinary_empty_col, varbinary_null_col,
+             marker)
         VALUES
             (42, 9876543210, 3.14, 2.718281828, 99.95, 'hello',
              7, TRUE, '2025-06-15', '13:45:30.123456', '2025-06-15 13:45:30.123456',
              '2025-06-15 13:45:30.000000', '2025-06-15 13:45:30', '0000-00-00 00:00:00',
-             0, 'green', 'a,c', '{\"k\": 1}', 'v1')",
+             0, 'green', 'a,c', '{\"k\": 1}',
+             b'0', b'1', b'100000001', X'FFFFFFFFFFFFFFFF',
+             X'4142', X'004180FF', X'', NULL,
+             X'4142', X'004180FF', X'', NULL,
+             'v1')",
     )
     .await
     .unwrap();
@@ -382,6 +402,18 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
                 t.enum_col AS enum_col,
                 t.set_col AS set_col,
                 t.json_col AS json_col,
+                t.bit_zero_col AS bit_zero_col,
+                t.bit_one_col AS bit_one_col,
+                t.bit_wide_col AS bit_wide_col,
+                t.bit_max_col AS bit_max_col,
+                t.blob_ascii_col AS blob_ascii_col,
+                t.blob_bytes_col AS blob_bytes_col,
+                t.blob_empty_col AS blob_empty_col,
+                t.blob_null_col AS blob_null_col,
+                t.varbinary_ascii_col AS varbinary_ascii_col,
+                t.varbinary_bytes_col AS varbinary_bytes_col,
+                t.varbinary_empty_col AS varbinary_empty_col,
+                t.varbinary_null_col AS varbinary_null_col,
                 t.marker AS marker",
         )
         .from_source("mysql-type-test")
@@ -482,14 +514,60 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
         "enum_col",
         "set_col",
         "json_col",
+        "bit_zero_col",
+        "bit_one_col",
+        "bit_wide_col",
+        "bit_max_col",
+        "blob_ascii_col",
+        "blob_bytes_col",
+        "blob_empty_col",
+        "blob_null_col",
+        "varbinary_ascii_col",
+        "varbinary_bytes_col",
+        "varbinary_empty_col",
+        "varbinary_null_col",
     ];
 
     let mut mismatches = Vec::new();
     for col in &columns_to_compare {
         let bs_val = bootstrap_data.get(*col);
         let cdc_val = cdc_after.get(*col);
-        if bs_val != cdc_val {
+        if bs_val.is_none() || cdc_val.is_none() {
+            mismatches.push(format!(
+                "  {col}: missing projected column: bootstrap={bs_val:?}, cdc={cdc_val:?}"
+            ));
+        } else if bs_val != cdc_val {
             mismatches.push(format!("  {col}: bootstrap={bs_val:?}, cdc={cdc_val:?}"));
+        }
+    }
+
+    // Pin existing lossy UTF-8 representations, not lossless binary support.
+    let expected_binary_values = [
+        ("bit_zero_col", serde_json::json!("\0")),
+        ("bit_one_col", serde_json::json!("\u{1}")),
+        ("bit_wide_col", serde_json::json!("\u{1}\u{1}")),
+        (
+            "bit_max_col",
+            serde_json::json!("\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}\u{fffd}"),
+        ),
+        ("blob_ascii_col", serde_json::json!("AB")),
+        ("blob_bytes_col", serde_json::json!("\0A\u{fffd}\u{fffd}")),
+        ("blob_empty_col", serde_json::json!("")),
+        ("blob_null_col", serde_json::Value::Null),
+        ("varbinary_ascii_col", serde_json::json!("AB")),
+        (
+            "varbinary_bytes_col",
+            serde_json::json!("\0A\u{fffd}\u{fffd}"),
+        ),
+        ("varbinary_empty_col", serde_json::json!("")),
+        ("varbinary_null_col", serde_json::Value::Null),
+    ];
+    for (col, expected) in expected_binary_values {
+        let actual = bootstrap_data.get(col);
+        if actual != Some(&expected) {
+            mismatches.push(format!(
+                "  {col}: expected bootstrap={expected:?}, actual={actual:?}"
+            ));
         }
     }
 
