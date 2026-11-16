@@ -1994,11 +1994,10 @@ impl ExpressionEvaluator {
 fn resolve_slice_bound(bound: &RangeBound, len: usize, unbounded: usize) -> usize {
     match *bound {
         RangeBound::Unbounded => unbounded,
-        RangeBound::Index(index) => match usize::try_from(index) {
-            Ok(index) => index.min(len),
-            Err(_) => usize::try_from(index.unsigned_abs())
-                .map_or(0, |from_end| len.saturating_sub(from_end)),
-        },
+        RangeBound::Index(index) if index < 0 => {
+            usize::try_from(index.unsigned_abs()).map_or(0, |from_end| len.saturating_sub(from_end))
+        }
+        RangeBound::Index(index) => usize::try_from(index).map_or(len, |index| index.min(len)),
     }
 }
 

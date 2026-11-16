@@ -411,6 +411,7 @@ async fn test_list_slice_bounds() {
             &[("s", i64::MAX), ("e", i64::MIN)],
             &[],
         ),
+        ("[1,2,3][($s)..]", &[("s", i64::MAX)], &[]),
     ];
     for (expr, bounds, want) in cases {
         assert_eq!(
