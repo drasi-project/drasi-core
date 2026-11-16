@@ -53,6 +53,9 @@ pub const RUSTLS_RING_PROVIDER_MARKER: [u8; 27] = *b"drasi-rustls-provider=ring\
 pub const PLUGIN_ABI_VERSION_MARKER_PREFIX: &[u8] = b"drasi-plugin-ffi-abi=";
 
 /// Read the unique embedded ABI version from a plugin binary.
+// Avoid an externally linked copy in plugin rlibs: MinGW auto-exports it and
+// retains its search string, which would be mistaken for another ABI marker.
+#[inline]
 pub fn read_plugin_abi_version(binary: &[u8]) -> Result<&str, &'static str> {
     let mut version = None;
     for (offset, window) in binary

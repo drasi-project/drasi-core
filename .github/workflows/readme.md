@@ -254,6 +254,9 @@ Publication rejects missing markers or disagreement with the JSON metadata
 before upload, including dry runs and cross-compiled targets. The same ABI is
 included in the OCI annotation and publication report. These shared producer
 checks do not replace released-host/runtime compatibility checks.
+The shared marker reader is inline to keep its own search string out of unused
+MinGW DLL exports. Both production and nightly builds/publication and host OCI
+artifact validation still reject missing, malformed, or multiple markers.
 
 For each changed release step, either rehearse it through the same implementation
 or document why it is production-only and how it is validated separately. Do not
