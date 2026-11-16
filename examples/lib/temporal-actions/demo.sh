@@ -21,13 +21,18 @@ case "${1:-}" in
         [[ $# -eq 1 ]] || { echo "Usage: ./demo.sh $1" >&2; exit 2; }
         "${compose[@]}" exec -T worker python demo.py "$1"
         ;;
-    down)
-        [[ $# -eq 1 ]] || { echo "Usage: ./demo.sh down" >&2; exit 2; }
+    stop)
+        [[ $# -eq 1 ]] || { echo "Usage: ./demo.sh stop" >&2; exit 2; }
         "${compose[@]}" down
         echo "Stopped. Data is preserved; resuming requires retained Temporal workflow history."
         ;;
+    down)
+        [[ $# -eq 1 ]] || { echo "Usage: ./demo.sh down" >&2; exit 2; }
+        "${compose[@]}" down --volumes
+        echo "Stopped and removed this demo project's data. Run ./demo.sh up to start again."
+        ;;
     *)
-        echo "Usage: ./demo.sh up | placed | paid | shipped | delivered | down" >&2
+        echo "Usage: ./demo.sh up | placed | paid | shipped | delivered | stop | down" >&2
         exit 2
         ;;
 esac

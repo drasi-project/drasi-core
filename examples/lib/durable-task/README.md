@@ -19,6 +19,14 @@ dotnet run --project examples/lib/durable-task
 Prerequisites: a running Docker daemon, .NET SDK 10, Rust, `protoc`, Clang, and
 CMake. The first build may take several minutes.
 
+The standalone example has its own committed `Cargo.lock`, which CI checks for
+consistency. After changing its dependencies or local crate versions, refresh
+it from the repository root with:
+
+```sh
+cargo metadata --format-version 1 --manifest-path examples/lib/durable-task/Cargo.toml > /dev/null
+```
+
 The app starts everything. **Press Enter to advance each step**, or `q` / Ctrl+C
 to quit. It shows the SQL being executed and waits for the workflow to process it.
 
@@ -68,35 +76,29 @@ RETURN o.order_id AS orderId,
 
 ## Reaction setup
 
-[`reaction.json`](reaction.json) starts `OrderWorkflow` on ADD. On UPDATE,
+[`reaction.yaml`](reaction.yaml) starts `OrderWorkflow` on ADD. On UPDATE,
 `eventName: "{{after.status}}"` sends the event named by the new database value:
 `paid`, `shipped`, or `delivered`. Each targets the same order instance. Deletion
 is ignored in this demo. The app supplies the local DTS connection values.
 
-```json
-{
-	"endpoint": "${DTS_ENDPOINT}",
-	"taskHub": "${DTS_TASKHUB:-default}",
-	"producerId": "${DTS_PRODUCER_ID:-orders-example-v1}",
-	"authentication": "none",
-	"defaultTemplate": {
-		"added": {
-			"action": "start",
-			"orchestration": "OrderWorkflow",
-			"instanceId": "{{after.orderId}}",
-			"template": "{\"orderId\":{{json after.orderId}},\"status\":{{json after.status}}}"
-		},
-		"updated": {
-			"action": "raiseEvent",
-			"instanceId": "{{after.orderId}}",
-			"eventName": "{{after.status}}",
-			"template": "{\"orderId\":{{json after.orderId}},\"status\":{{json after.status}}}"
-		},
-		"deleted": {
-			"action": "ignore"
-		}
-	}
-}
+```yaml
+endpoint: "${DTS_ENDPOINT}"
+taskHub: "${DTS_TASKHUB:-default}"
+producerId: "${DTS_PRODUCER_ID:-orders-example-v1}"
+authentication: none
+defaultTemplate:
+  added:
+    action: start
+    orchestration: OrderWorkflow
+    instanceId: "{{after.orderId}}"
+    template: '{"orderId":{{json after.orderId}},"status":{{json after.status}}}'
+  updated:
+    action: raiseEvent
+    instanceId: "{{after.orderId}}"
+    eventName: "{{after.status}}"
+    template: '{"orderId":{{json after.orderId}},"status":{{json after.status}}}'
+  deleted:
+    action: ignore
 ```
 
 ## Workflow

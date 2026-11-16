@@ -279,14 +279,14 @@ internal sealed partial class DemoHost : IAsyncDisposable
     {
         for (DirectoryInfo? directory = new(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
         {
-            if (File.Exists(Path.Combine(directory.FullName, "reaction.json"))
+            if (File.Exists(Path.Combine(directory.FullName, "reaction.yaml"))
                 && File.Exists(Path.Combine(directory.FullName, "Cargo.toml")))
                 return directory.FullName;
             string example = Path.Combine(directory.FullName, "examples", "lib", "durable-task");
             if (File.Exists(Path.Combine(example, "DurableTaskExample.csproj")))
                 return example;
         }
-        throw new DirectoryNotFoundException("Cannot find the example's reaction.json and Cargo.toml");
+        throw new DirectoryNotFoundException("Cannot find the example's reaction.yaml and Cargo.toml");
     }
 
     public async ValueTask DisposeAsync()

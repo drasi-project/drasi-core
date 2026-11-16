@@ -45,6 +45,8 @@ jobs:
         .github/scripts/release-with-retry.test.sh
         python3 .github/scripts/build-test-plugins.test.py
         python3 ci/scripts/install-protoc.test.py
+        cargo metadata --locked --format-version 1 --manifest-path examples/lib/durable-task/Cargo.toml > /dev/null
+        cargo metadata --locked --format-version 1 --manifest-path examples/lib/temporal-actions/Cargo.toml > /dev/null
         cargo run -p xtask -- check-publish-dependency-cycles
         cargo test --workspace --exclude drasi-host-sdk
         make test-host-sdk
