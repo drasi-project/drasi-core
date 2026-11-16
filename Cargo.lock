@@ -2679,7 +2679,7 @@ checksum = "1435fa1053d8b2fbbe9be7e97eca7f33d37b28409959813daefc1446a14247f1"
 
 [[package]]
 name = "drasi-bootstrap-application"
-version = "0.2.16"
+version = "0.2.17"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2703,7 +2703,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-bootstrap-cloudflare-radar"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2722,7 +2722,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-bootstrap-dataverse"
-version = "0.2.16"
+version = "0.2.17"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2746,7 +2746,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-bootstrap-gtfs-rt"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2784,7 +2784,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-bootstrap-http"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2814,7 +2814,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-bootstrap-kafka"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2836,7 +2836,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-bootstrap-kubernetes"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2855,7 +2855,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-bootstrap-mssql"
-version = "0.2.16"
+version = "0.2.17"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2878,7 +2878,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-bootstrap-mysql"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2901,7 +2901,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-bootstrap-neo4j"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2921,7 +2921,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-bootstrap-noop"
-version = "0.2.16"
+version = "0.2.17"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2962,7 +2962,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-bootstrap-oracle"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2981,7 +2981,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-bootstrap-platform"
-version = "0.2.16"
+version = "0.2.17"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3006,7 +3006,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-bootstrap-postgres"
-version = "0.2.16"
+version = "0.2.17"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3033,7 +3033,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-bootstrap-scriptfile"
-version = "0.2.16"
+version = "0.2.17"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3056,7 +3056,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-bootstrap-sqlite"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3077,7 +3077,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-bootstrap-sui-deepbook"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3095,7 +3095,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-core"
-version = "0.5.11"
+version = "0.5.12"
 dependencies = [
  "approx",
  "async-recursion",
@@ -3136,18 +3136,18 @@ dependencies = [
 
 [[package]]
 name = "drasi-ffi-primitives"
-version = "0.12.0"
+version = "0.12.1"
 
 [[package]]
 name = "drasi-functions-cypher"
-version = "0.5.11"
+version = "0.5.12"
 dependencies = [
  "drasi-core",
 ]
 
 [[package]]
 name = "drasi-functions-gql"
-version = "0.5.11"
+version = "0.5.12"
 dependencies = [
  "drasi-core",
  "tokio",
@@ -3155,7 +3155,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-host-sdk"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3199,7 +3199,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-identity-aws"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3220,7 +3220,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-identity-azure"
-version = "0.2.16"
+version = "0.2.17"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3251,7 +3251,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-index-garnet"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "anyhow",
  "async-recursion",
@@ -3282,7 +3282,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-index-rocksdb"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3314,7 +3314,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-kubernetes-common"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3329,7 +3329,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-lib"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "anyhow",
  "assert_matches",
@@ -3374,7 +3374,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-middleware"
-version = "0.5.12"
+version = "0.5.13"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3392,7 +3392,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-mssql-common"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3412,7 +3412,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-mysql-common"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3428,7 +3428,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-neo4j-common"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "drasi-core",
@@ -3438,7 +3438,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-oracle-common"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "drasi-core",
@@ -3454,7 +3454,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-plugin-sdk"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3482,7 +3482,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-postgres-common"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3526,7 +3526,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-reaction-a2a"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3547,7 +3547,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-reaction-application"
-version = "0.3.14"
+version = "0.3.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3598,7 +3598,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-reaction-azure-storage"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3629,7 +3629,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-reaction-dashboard"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3658,7 +3658,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-reaction-durable-task"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3686,7 +3686,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-reaction-eventgrid"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3710,7 +3710,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-reaction-file"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3735,7 +3735,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-reaction-grpc"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3763,7 +3763,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-reaction-http"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3784,7 +3784,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-reaction-log"
-version = "0.2.10"
+version = "0.2.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3808,7 +3808,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-reaction-loki"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3832,7 +3832,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-reaction-mcp"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3860,7 +3860,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-reaction-platform"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3883,7 +3883,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-reaction-profiler"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3904,7 +3904,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-reaction-rabbitmq"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3931,7 +3931,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-reaction-snapshot-test"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3947,7 +3947,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-reaction-sse"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3978,7 +3978,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-reaction-storedproc-mssql"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4004,7 +4004,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-reaction-storedproc-mysql"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4029,7 +4029,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-reaction-storedproc-postgres"
-version = "0.3.9"
+version = "0.3.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4058,7 +4058,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-reaction-temporal"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4083,7 +4083,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-salesforce-common"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "apache-avro",
@@ -4111,7 +4111,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-secret-store-azure-keyvault"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4132,7 +4132,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-secret-store-file"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4147,7 +4147,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-secret-store-keyring"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4162,7 +4162,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-source-application"
-version = "0.2.12"
+version = "0.2.13"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4185,7 +4185,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-source-cloudflare-radar"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4209,7 +4209,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-source-dataverse"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4233,7 +4233,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-source-grpc"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4262,7 +4262,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-source-gtfs-rt"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4317,7 +4317,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-source-http"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4362,7 +4362,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-source-hyperliquid"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4388,7 +4388,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-source-kafka"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4415,7 +4415,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-source-kubernetes"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4450,7 +4450,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-source-mapping"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4464,7 +4464,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-source-mock"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4487,7 +4487,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-source-mssql"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4522,7 +4522,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-source-mysql"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4555,7 +4555,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-source-neo4j"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4608,7 +4608,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-source-oracle"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4637,7 +4637,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-source-otel"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4672,7 +4672,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-source-platform"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4696,7 +4696,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-source-postgres"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4742,7 +4742,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-source-ris-live"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4767,7 +4767,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-source-salesforce"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "apache-avro",
@@ -4802,7 +4802,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-source-sqlite"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4832,7 +4832,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-source-sui-deepbook"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4862,7 +4862,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-source-websocket"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4887,7 +4887,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-state-store-redb"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "async-trait",
  "drasi-lib",
@@ -4900,7 +4900,7 @@ dependencies = [
 
 [[package]]
 name = "drasi-wal-redb"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "async-trait",
  "bincode",

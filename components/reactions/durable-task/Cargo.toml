@@ -3,7 +3,7 @@
 
 [package]
 name = "drasi-reaction-durable-task"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Configurable Durable Task Scheduler reaction for Drasi"

@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-identity-azure"
-version = "0.2.16"
+version = "0.2.17"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Azure identity provider plugin for Drasi"

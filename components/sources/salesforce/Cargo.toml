@@ -1,6 +1,6 @@
 [package]
 name = "drasi-source-salesforce"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "Durable-first Salesforce source plugin for Drasi"

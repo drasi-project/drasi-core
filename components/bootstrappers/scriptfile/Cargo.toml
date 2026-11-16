@@ -14,7 +14,7 @@
 
 [package]
 name = "drasi-bootstrap-scriptfile"
-version = "0.2.16"
+version = "0.2.17"
 edition = "2021"
 authors = ["Drasi Project"]
 description = "ScriptFile bootstrap plugin for Drasi"
