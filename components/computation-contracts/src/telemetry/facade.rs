@@ -6,8 +6,8 @@
 //! module installs no globals and is not a native-plugin callback transport.
 
 use super::{
-    MetricKind, MetricRegistration, MetricRegistrationState, MetricUnit, RegistrationLimits,
-    ResolvedTelemetry, Result, TelemetryError, TelemetryScope,
+    MetricKind, MetricRegistration, MetricRegistrationGuard, MetricRegistrationState, MetricUnit,
+    RegistrationLimits, ResolvedTelemetry, Result, TelemetryError, TelemetryScope,
 };
 use metrics::{Counter, Gauge, Histogram, Key, Label, Level, Metadata, Recorder, Unit};
 use std::sync::Arc;
@@ -71,6 +71,8 @@ struct Context {
 /// recorder. Constructing another context is not a way to bypass conflicts.
 /// Raw registration retains recorder semantics. Component code uses
 /// `ScopedMetricEmitter` for generation-local accounting and revocation.
+/// An optional host guard applies at the same shared acceptance boundary for
+/// framework metrics and scoped plugin registrations, including native handles.
 #[derive(Clone)]
 pub struct MetricRegistrationContext(Arc<Context>);
 
@@ -84,6 +86,7 @@ impl std::fmt::Debug for MetricRegistrationContext {
 }
 
 impl MetricRegistrationContext {
+    /// Creates a context with built-in validation only and no host guard.
     pub fn new(
         recorder: Arc<dyn Recorder + Send + Sync>,
         limits: RegistrationLimits,
@@ -91,6 +94,21 @@ impl MetricRegistrationContext {
         Ok(Self(Arc::new(Context {
             recorder,
             registrations: MetricRegistrationState::new(limits)?,
+        })))
+    }
+
+    /// Creates a context with a host-owned acceptance policy. Guard rejection
+    /// leaves registration capacity unchanged and invokes no recorder callbacks.
+    /// The guard runs under the registry lock as specified by
+    /// [`MetricRegistrationGuard`]; recorder callbacks run only after release.
+    pub fn new_with_guard(
+        recorder: Arc<dyn Recorder + Send + Sync>,
+        limits: RegistrationLimits,
+        guard: Arc<dyn MetricRegistrationGuard>,
+    ) -> Result<Self> {
+        Ok(Self(Arc::new(Context {
+            recorder,
+            registrations: MetricRegistrationState::new_with_guard(limits, guard)?,
         })))
     }
 
@@ -170,7 +188,9 @@ impl MetricRegistrationContext {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{RootSampling, TelemetryProfile, TelemetrySettings};
+    use super::super::{
+        PluginMetricRegistration, RootSampling, TelemetryProfile, TelemetrySettings,
+    };
     use super::*;
     use crate::{ComponentId, ComponentRole, ComponentSemanticKind};
     use metrics::{CounterFn, GaugeFn, HistogramFn, KeyName, SharedString};
@@ -292,6 +312,261 @@ mod tests {
         )
         .unwrap();
         (binding, lifetime, diagnostics)
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingGuard {
+        calls: AtomicUsize,
+        names: Mutex<std::collections::BTreeMap<String, String>>,
+    }
+
+    impl MetricRegistrationGuard for RecordingGuard {
+        fn validate_and_commit(&self, registration: &MetricRegistration) -> Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let projected = registration.name().replace('.', "_");
+            let mut names = self.names.lock().map_err(|_| TelemetryError::Poisoned)?;
+            if names
+                .get(&projected)
+                .is_some_and(|existing| existing != registration.name())
+            {
+                return Err(TelemetryError::Conflict(registration.name().into()));
+            }
+            names.insert(projected, registration.name().into());
+            Ok(())
+        }
+    }
+
+    fn request(leaf: &str) -> PluginMetricRegistration {
+        PluginMetricRegistration {
+            leaf: leaf.into(),
+            kind: MetricKind::Counter,
+            unit: MetricUnit::One,
+            description: "Received".into(),
+            labels: vec![],
+        }
+    }
+
+    #[test]
+    fn guard_rejection_is_atomic() -> Result<()> {
+        let recorder = Arc::new(Recording::default());
+        let guard = Arc::new(RecordingGuard::default());
+        let context = MetricRegistrationContext::new_with_guard(
+            recorder.clone(),
+            RegistrationLimits {
+                definitions: 2,
+                series: 2,
+                ..Default::default()
+            },
+            guard.clone(),
+        )?;
+        let (binding, _, _) = scoped(&context, 1, true, 2);
+        let _ = binding
+            .emitter()
+            .counter("received.total", MetricUnit::One, "Received")?;
+        let state = context.registrations();
+        let before_counts = state.counts()?;
+        let backend_registration_calls = &recorder.registrations;
+        let before_calls = backend_registration_calls.load(Ordering::SeqCst);
+        let before_guard = guard.names.lock().unwrap().clone();
+        let rejected = binding.register_handle(&request("received_total"));
+        assert!(matches!(rejected, Err(TelemetryError::Conflict(_))));
+        assert_eq!(state.counts()?, before_counts);
+        assert_eq!(
+            backend_registration_calls.load(Ordering::SeqCst),
+            before_calls
+        );
+        assert_eq!(*guard.names.lock().unwrap(), before_guard);
+        assert_eq!(recorder.descriptions.lock().unwrap().len(), 1);
+        assert_eq!(binding.handle_count()?, 1);
+        binding.register_handle(&request("other"))?.unwrap();
+        assert_eq!(state.counts()?, (2, 2));
+        assert_eq!(binding.handle_count()?, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn capacity_failure_does_not_commit_guard() -> Result<()> {
+        for (definitions, series, leaf, region, capacity) in [
+            (1, 2, "other", "west", "instrument definitions"),
+            (2, 1, "received", "east", "metric series"),
+        ] {
+            let recorder = Arc::new(Recording::default());
+            let guard = Arc::new(RecordingGuard::default());
+            let context = MetricRegistrationContext::new_with_guard(
+                recorder.clone(),
+                RegistrationLimits {
+                    definitions,
+                    series,
+                    ..Default::default()
+                },
+                guard.clone(),
+            )?;
+            let (binding, _, _) = scoped(&context, 1, true, 4);
+            let _ = binding
+                .emitter()
+                .with_labels([("region".into(), "west".into())])
+                .counter("received", MetricUnit::One, "Received")?;
+            let mut rejected = request(leaf);
+            rejected.labels = vec![("region".into(), region.into())];
+            assert_eq!(
+                binding.register_handle(&rejected),
+                Err(TelemetryError::Capacity(capacity))
+            );
+            assert_eq!(guard.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(guard.names.lock().unwrap().len(), 1);
+            assert_eq!(context.registrations().counts()?, (1, 1));
+            assert_eq!(recorder.registrations.load(Ordering::SeqCst), 1);
+            assert_eq!(binding.handle_count()?, 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn built_in_rejections_do_not_call_guard() -> Result<()> {
+        let recorder = Arc::new(Recording::default());
+        let guard = Arc::new(RecordingGuard::default());
+        let context = MetricRegistrationContext::new_with_guard(
+            recorder.clone(),
+            RegistrationLimits {
+                description_bytes: 8,
+                ..Default::default()
+            },
+            guard.clone(),
+        )?;
+        let (first, _, _) = scoped(&context, 1, true, 1);
+        first.register_handle(&request("received"))?.unwrap();
+        let (second, _, _) = scoped(&context, 2, true, 1);
+        let mut invalid = request("received");
+        invalid.description = "Too long!".into();
+        assert!(matches!(
+            second.register_handle(&invalid),
+            Err(TelemetryError::Invalid(_))
+        ));
+        let mut conflicting = request("received");
+        conflicting.kind = MetricKind::Gauge;
+        assert!(matches!(
+            second.register_handle(&conflicting),
+            Err(TelemetryError::Conflict(_))
+        ));
+        conflicting = request("received");
+        conflicting.unit = MetricUnit::Seconds;
+        assert!(matches!(
+            second.register_handle(&conflicting),
+            Err(TelemetryError::Conflict(_))
+        ));
+        conflicting = request("received");
+        conflicting.labels = vec![("region".into(), "west".into())];
+        assert!(matches!(
+            second.register_handle(&conflicting),
+            Err(TelemetryError::Conflict(_))
+        ));
+        assert_eq!(guard.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(guard.names.lock().unwrap().len(), 1);
+        assert_eq!(context.registrations().counts()?, (1, 1));
+        assert_eq!(recorder.registrations.load(Ordering::SeqCst), 1);
+        assert_eq!(second.handle_count()?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn repeated_registration_is_idempotent() -> Result<()> {
+        let recorder = Arc::new(Recording::default());
+        let guard = Arc::new(RecordingGuard::default());
+        let context = MetricRegistrationContext::new_with_guard(
+            recorder.clone(),
+            RegistrationLimits {
+                definitions: 1,
+                series: 1,
+                ..Default::default()
+            },
+            guard.clone(),
+        )?;
+        let (first, _, _) = scoped(&context, 1, true, 1);
+        let request = request("received");
+        let handle = first.register_handle(&request)?.unwrap();
+        assert_eq!(first.register_handle(&request)?, Some(handle));
+        first
+            .emitter()
+            .counter("received", MetricUnit::One, "Received")?
+            .increment(2);
+        let (second, _, _) = scoped(&context.clone(), 2, true, 1);
+        let replacement = second.register_handle(&request)?.unwrap();
+        assert_ne!(replacement, handle);
+        second
+            .emitter()
+            .counter("received", MetricUnit::One, "Received")?
+            .increment(3);
+        assert_eq!(guard.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(guard.names.lock().unwrap().len(), 1);
+        assert_eq!(context.registrations().counts()?, (1, 1));
+        assert_eq!(recorder.registrations.load(Ordering::SeqCst), 2);
+        assert_eq!(recorder.values.counter.load(Ordering::SeqCst), 5);
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_guard_conflict_has_one_winner() -> Result<()> {
+        let recorder = Arc::new(Recording::default());
+        let guard = Arc::new(RecordingGuard::default());
+        let context = MetricRegistrationContext::new_with_guard(
+            recorder.clone(),
+            Default::default(),
+            guard.clone(),
+        )?;
+        let (first, _, _) = scoped(&context, 1, true, 1);
+        let (second, _, _) = scoped(&context, 2, true, 1);
+        let barrier = std::sync::Barrier::new(2);
+        let concurrent_results = std::thread::scope(|threads| {
+            let a = threads.spawn(|| {
+                barrier.wait();
+                first
+                    .emitter()
+                    .counter("received.total", MetricUnit::One, "Received")
+                    .map(|_| ())
+            });
+            let b = threads.spawn(|| {
+                barrier.wait();
+                second
+                    .register_handle(&request("received_total"))
+                    .map(|_| ())
+            });
+            [a.join().unwrap(), b.join().unwrap()]
+        });
+        assert_eq!(concurrent_results.iter().filter(|r| r.is_ok()).count(), 1);
+        assert_eq!(
+            concurrent_results
+                .iter()
+                .filter(|r| matches!(r, Err(TelemetryError::Conflict(_))))
+                .count(),
+            1
+        );
+        assert_eq!(context.registrations().counts()?, (1, 1));
+        assert_eq!(guard.names.lock().unwrap().len(), 1);
+        assert_eq!(recorder.registrations.load(Ordering::SeqCst), 1);
+        assert_eq!(first.handle_count()? + second.handle_count()?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn unguarded_context_preserves_existing_behavior() -> Result<()> {
+        let recorder = Arc::new(Recording::default());
+        let context = MetricRegistrationContext::new(recorder.clone(), Default::default())?;
+        let (binding, _, _) = scoped(&context, 1, true, 2);
+        binding
+            .emitter()
+            .counter("received.total", MetricUnit::One, "Received")?
+            .increment(2);
+        binding
+            .register_handle(&request("received_total"))?
+            .unwrap();
+        binding
+            .emitter()
+            .counter("received_total", MetricUnit::One, "Received")?
+            .increment(3);
+        assert_eq!(context.registrations().counts()?, (2, 2));
+        assert_eq!(recorder.registrations.load(Ordering::SeqCst), 2);
+        assert_eq!(recorder.values.counter.load(Ordering::SeqCst), 5);
+        Ok(())
     }
 
     #[test]

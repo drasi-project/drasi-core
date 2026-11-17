@@ -1832,6 +1832,14 @@ impl Runtime {
         }
         Ok(())
     }
+
+    pub(crate) async fn shutdown_completion(&self) -> crate::ShutdownCompletion {
+        match self.parent.get() {
+            Some(parent) => parent.shutdown_completion().await,
+            None => crate::ShutdownCompletion::Complete,
+        }
+    }
+
     pub(crate) async fn source(&self, id: &str) -> anyhow::Result<Arc<dyn Source>> {
         if !self.current_records().await?.contains_key(id) {
             self.component_observation_at(&self.control()?.registry_snapshot(), id, "source")?;

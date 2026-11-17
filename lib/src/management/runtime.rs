@@ -103,6 +103,7 @@ pub(crate) struct Management {
 struct ManagementTask {
     driver: tokio::task::JoinHandle<()>,
     close: CloseProgress,
+    close_acknowledged: bool,
 }
 
 enum CloseProgress {
@@ -117,6 +118,7 @@ impl ManagementTask {
         Self {
             driver,
             close: CloseProgress::Open,
+            close_acknowledged: false,
         }
     }
 
@@ -134,7 +136,10 @@ impl ManagementTask {
                     }
                 },
                 CloseProgress::Requested(receive) => match receive.await {
-                    Ok(Ok(())) => self.close = CloseProgress::Joining(None),
+                    Ok(Ok(())) => {
+                        self.close_acknowledged = true;
+                        self.close = CloseProgress::Joining(None);
+                    }
                     Ok(Err(error)) => {
                         // The driver still owns the store and permits another close attempt.
                         self.close = CloseProgress::Open;
@@ -587,6 +592,18 @@ impl Management {
     }
     pub(crate) async fn close(&self) -> Result<()> {
         self.task.lock().await.close(&self.commands).await
+    }
+
+    pub(crate) async fn close_with_outcome(&self) -> (crate::ShutdownCompletion, Result<()>) {
+        let mut task = self.task.lock().await;
+        let result = task.close(&self.commands).await;
+        let completion =
+            if task.close_acknowledged && matches!(&task.close, CloseProgress::Complete(_)) {
+                crate::ShutdownCompletion::Complete
+            } else {
+                crate::ShutdownCompletion::Incomplete
+            };
+        (completion, result)
     }
 }
 
@@ -1365,7 +1382,23 @@ impl Driver {
                     let _ = reply.send(result);
                 }
                 Command::Close(reply) => {
-                    let result = self.store.close().await;
+                    let result = async {
+                        if self.shutdown.load(Ordering::Acquire) {
+                            // Earlier admitted commands may have retained owners
+                            // after the shutdown caller's processing check.
+                            let graph = self.graph.shutdown_completion().await?;
+                            let adapters = self.runtime.shutdown_completion().await;
+                            anyhow::ensure!(
+                                graph == crate::ShutdownCompletion::Complete
+                                    && adapters == crate::ShutdownCompletion::Complete,
+                                crate::DrasiError::invalid_state(
+                                    "Instance shutdown cleanup remains unconfirmed"
+                                )
+                            );
+                        }
+                        self.store.close().await
+                    }
+                    .await;
                     let closed = result.is_ok();
                     let _ = reply.send(result);
                     if closed {

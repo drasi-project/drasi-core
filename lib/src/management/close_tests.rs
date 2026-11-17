@@ -7,6 +7,9 @@ use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 use tokio::sync::{Mutex, Notify};
 
+#[path = "shutdown_outcome_tests.rs"]
+mod shutdown_outcome_tests;
+
 struct Completion(Arc<AtomicUsize>);
 
 impl Drop for Completion {

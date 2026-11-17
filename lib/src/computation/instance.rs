@@ -413,6 +413,17 @@ impl Entry {
         }
         Ok(())
     }
+
+    async fn shutdown_completion(&self) -> crate::ShutdownCompletion {
+        let _cleanup = self.cleanup.lock().await;
+        // Published only after the actual driver join and successful disposal
+        // of the graph and its owned resources, independently of driver errors.
+        if self.disposed.load(Ordering::Acquire) && self.task.read().await.is_none() {
+            crate::ShutdownCompletion::Complete
+        } else {
+            crate::ShutdownCompletion::Incomplete
+        }
+    }
 }
 
 impl Drop for Entry {
@@ -523,6 +534,10 @@ impl ComputationHandle {
     }
     pub(crate) async fn shutdown(&self) -> Result<()> {
         self.entry.shutdown(&[]).await
+    }
+
+    pub(crate) async fn shutdown_completion(&self) -> crate::ShutdownCompletion {
+        self.entry.shutdown_completion().await
     }
 }
 
@@ -802,6 +817,30 @@ impl InstanceGraph {
             }
         }
         Ok(())
+    }
+
+    pub(crate) async fn shutdown_completion(&self) -> anyhow::Result<crate::ShutdownCompletion> {
+        if self.startup_task.read().await.is_some() {
+            return Ok(crate::ShutdownCompletion::Incomplete);
+        }
+        let entry = self
+            .entry
+            .lock()
+            .map_err(|_| DrasiError::invalid_state("instance graph ownership poisoned"))?
+            .clone();
+        if self
+            .pending
+            .lock()
+            .map_err(|_| DrasiError::invalid_state("component cleanup ownership poisoned"))?
+            .iter()
+            .any(|batch| !batch.complete())
+        {
+            return Ok(crate::ShutdownCompletion::Incomplete);
+        }
+        Ok(match entry {
+            Some(entry) => entry.shutdown_completion().await,
+            None => crate::ShutdownCompletion::Complete,
+        })
     }
 }
 
@@ -1095,6 +1134,55 @@ mod tests {
     async fn shutdown_after_cancel_awaits_terminal_result_on_multiple_threads() -> anyhow::Result<()>
     {
         shutdown_after_external_cancellation().await
+    }
+
+    async fn shutdown_outcome_joins_failed_graph_driver() -> anyhow::Result<()> {
+        let core = crate::DrasiLib::builder()
+            .with_shutdown_timeout_secs(2)
+            .build()
+            .await?;
+        let entry = core.instance_graph.entry.lock().unwrap().clone().unwrap();
+        {
+            let task = entry.task.read().await;
+            task.as_ref().unwrap().abort();
+        }
+        let outcome = core.shutdown_with_outcome().await;
+        assert!(matches!(
+            outcome.completion,
+            crate::ShutdownCompletion::Complete
+        ));
+        let error = outcome.result.unwrap_err();
+        assert!(error
+            .downcast_ref::<tokio::task::JoinError>()
+            .expect("preserve the actual graph driver join failure")
+            .is_cancelled());
+        assert!(entry.task.read().await.is_none());
+        assert!(entry.graph.0.lock().unwrap().is_none());
+        let outcome = core.shutdown_with_outcome().await;
+        assert!(matches!(
+            outcome.completion,
+            crate::ShutdownCompletion::Complete
+        ));
+        core.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_outcome_failed_graph_driver_current_thread() -> anyhow::Result<()> {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            shutdown_outcome_joins_failed_graph_driver(),
+        )
+        .await?
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_outcome_failed_graph_driver_multi_thread() -> anyhow::Result<()> {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            shutdown_outcome_joins_failed_graph_driver(),
+        )
+        .await?
     }
 
     #[test]
