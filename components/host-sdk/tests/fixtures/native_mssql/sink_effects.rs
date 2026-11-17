@@ -3,7 +3,7 @@
 
 //! Authored, not yet qualified (CW-78): the native SQL Server sink is an
 //! external consumer whose operations each commit with a destination cursor
-//! row in `<schema>.DrasiDeliveryProgress`. The fixture must pre-create that
+//! row in `<schema>.drasi_delivery_progress`. The fixture must pre-create that
 //! table and grant the application login SELECT, INSERT, UPDATE and DELETE on
 //! it before these scenarios can run.
 
@@ -223,7 +223,7 @@ pub(super) async fn parameters_and_failure(dynamic: bool) -> Result<()> {
     ensure!(db.sql("SET NOCOUNT ON; SELECT COUNT(*) FROM {{schema}}.Effects WHERE operation=N'BEFORE-ERROR' AND id=91")?=="0",
         "the failed procedure's effect escaped its transaction");
     ensure!(
-        db.sql("SET NOCOUNT ON; SELECT COUNT(*) FROM {{schema}}.DrasiDeliveryProgress WHERE completed > 0")? == "0",
+        db.sql("SET NOCOUNT ON; SELECT COUNT(*) FROM {{schema}}.drasi_delivery_progress WHERE completed > 0")? == "0",
         "the cursor advanced for a failed operation"
     );
     failing.stop(&crate::hooks::stop_ctx()).await?;
@@ -244,7 +244,7 @@ pub(super) async fn retained_work(dynamic: bool) -> Result<()> {
         factory,
         id("retained"),
         crate::sink_settings(&db, json!({
-            "outputs":{"q":{"component":"q","port":"out"}},"commandTimeoutMs":15000,"retryBudgetMs":0,
+            "outputs":{"q":{"component":"q","port":"out"}},"commandTimeoutMs":15000,"shutdownTimeoutMs":5000,
             "defaultTemplate":{"added":{"template":db.scoped_sql("EXEC {{schema}}.DelayedEffect {{param after.id}}")}}
         })),
     )

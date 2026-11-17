@@ -26,6 +26,9 @@ fn max_concurrent_streams() -> usize {
 fn stream_idle_timeout_ms() -> u64 {
     300_000
 }
+fn header_read_timeout_ms() -> u64 {
+    10_000
+}
 
 /// Settings for one native gRPC source.
 ///
@@ -60,6 +63,10 @@ pub struct GrpcSourceConfig {
     /// A streaming RPC that sends nothing for this long is closed.
     #[serde(default = "stream_idle_timeout_ms")]
     pub stream_idle_timeout_ms: u64,
+    /// Deadline for a client to finish the TLS handshake and send the HTTP/2
+    /// connection preface; named and bounded like the HTTP source's setting.
+    #[serde(default = "header_read_timeout_ms")]
+    pub header_read_timeout_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_token: Option<SecretString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,6 +98,7 @@ impl GrpcSourceConfig {
         fields.extend([
             Field::new("maxConcurrentStreams", Integer, false, "Maximum simultaneously open streaming RPCs (StreamEvents), separate from unary request slots.").default(max_concurrent_streams()).minimum(1).maximum(MAX_CONCURRENT_STREAMS as u64),
             Field::new("streamIdleTimeoutMs", Integer, false, "A streaming RPC that sends no message for this many milliseconds is closed.").default(stream_idle_timeout_ms()).minimum(1),
+            Field::new("headerReadTimeoutMs", Integer, false, "Deadline in milliseconds for a client to finish the TLS handshake and send the HTTP/2 connection preface; bounds idle connections holding maxConnections slots.").default(header_read_timeout_ms()).minimum(1).maximum(600_000),
         ]);
         ConfigDefinition::try_new(fields)
             .unwrap_or_else(|error| unreachable!("constant gRPC source configuration: {error}"))
@@ -109,6 +117,10 @@ impl GrpcSourceConfig {
             "maxConcurrentStreams must be in 1..=65536"
         );
         shared::duration(self.stream_idle_timeout_ms, "streamIdleTimeoutMs")?;
+        ensure!(
+            (1..=600_000).contains(&self.header_read_timeout_ms),
+            "headerReadTimeoutMs must be in 1..=600000"
+        );
         Ok(())
     }
 
@@ -158,7 +170,7 @@ mod tests {
                 "port":50051, "timeoutMs":60000, "ingressCapacity":1024,
                 "maxMessageBytes":4194304, "maxConnections":1024,
                 "maxConcurrentStreams":64, "streamIdleTimeoutMs":300000,
-                "allowUnauthenticated":false
+                "headerReadTimeoutMs":10000, "allowUnauthenticated":false
             })
         );
         Ok(())
@@ -173,6 +185,8 @@ mod tests {
             json!({"ingressCapacity":0}),
             json!({"maxConcurrentStreams":0}),
             json!({"streamIdleTimeoutMs":0}),
+            json!({"headerReadTimeoutMs":0}),
+            json!({"headerReadTimeoutMs":600001}),
             json!({"timeoutMs":0}),
             json!({"host":"localhost"}),
             json!({"authToken":"short"}),

@@ -482,6 +482,9 @@ async fn native_snapshot_reused_binlog_contents_fail_before_live_admission() -> 
     query.stop(&lifecycle_ctx::stop()).await?;
     drop(query);
     drop(source);
+    // A boundary proves its file's identity by the format description's
+    // creation time, which has one-second resolution (documented in DESIGN).
+    tokio::time::sleep(Duration::from_millis(1100)).await;
     let reset = if database.admin.version >= (8, 4, 0) {
         "RESET BINARY LOGS AND GTIDS"
     } else {
@@ -695,6 +698,84 @@ async fn native_snapshot_process_exit_recovers_completed_state_and_explicitly_re
         query.stop(&lifecycle_ctx::stop()).await?;
         database.admin.close().await?;
     }
+    Ok(())
+}
+
+/// A snapshot boundary behind a large binlog prefix is proven and resumed in
+/// constant time: neither the provider nor a restarted source re-reads the
+/// file within `ioTimeoutMs`. A selected table whose name contains a
+/// backtick is scanned through a properly quoted identifier.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires Docker"]
+async fn native_snapshot_boundary_behind_a_large_binlog_prefix_resumes_within_the_io_timeout(
+) -> Result<()> {
+    let mut database = Database::new(MySqlRetention::UntilProcessed).await?;
+    database
+        .admin
+        .execute(
+            "CREATE TABLE filler(id INT AUTO_INCREMENT PRIMARY KEY, payload LONGBLOB NOT NULL)",
+        )
+        .await?;
+    // About 128 MiB of unrelated history in the boundary's binlog file.
+    for _ in 0..8 {
+        database
+            .admin
+            .execute(
+                "INSERT INTO filler(payload) WITH RECURSIVE n(i) AS \
+                 (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<32) \
+                 SELECT REPEAT('x',524288) FROM n",
+            )
+            .await?;
+    }
+    database
+        .admin
+        .execute("CREATE TABLE `odd``items`(id INT PRIMARY KEY, value VARCHAR(80) NOT NULL)")
+        .await?;
+    database
+        .admin
+        .execute("INSERT INTO `odd``items` VALUES (7,'quoted')")
+        .await?;
+    database
+        .admin
+        .execute("INSERT INTO items VALUES (1,'initial')")
+        .await?;
+    let mut config = settings(&database);
+    config.tables.push("odd`items".into());
+    config.io_timeout_ms = NonZeroU64::new(1000).unwrap();
+    let path = tempfile::tempdir()?;
+    let owner = progress()?;
+    let (source, bootstrap) = paired(config.clone(), owner.clone())?;
+    let mut query = query(path.path(), owner).await?.with_bootstrap(bootstrap);
+    query.start(&lifecycle_ctx::start()).await?;
+    assert_eq!(
+        rows(&query)?,
+        vec![serde_json::json!({"id":1,"value":"initial"})]
+    );
+    query.stop(&lifecycle_ctx::stop()).await?;
+    drop(query);
+    drop(source);
+    database
+        .admin
+        .execute("INSERT INTO items VALUES (2,'offline')")
+        .await?;
+    let owner = progress()?;
+    let (mut source, bootstrap) = paired(config, owner.clone())?;
+    let mut query = super::query(path.path(), owner)
+        .await?
+        .with_bootstrap(bootstrap);
+    query.start(&lifecycle_ctx::start()).await?;
+    source.start(&lifecycle_ctx::start()).await?;
+    apply(&mut query, next(&mut source).await?).await?;
+    assert_eq!(
+        rows(&query)?,
+        vec![
+            serde_json::json!({"id":1,"value":"initial"}),
+            serde_json::json!({"id":2,"value":"offline"}),
+        ]
+    );
+    source.stop(&lifecycle_ctx::stop()).await?;
+    query.stop(&lifecycle_ctx::stop()).await?;
+    database.admin.close().await?;
     Ok(())
 }
 

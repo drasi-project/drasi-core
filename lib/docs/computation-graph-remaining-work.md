@@ -338,7 +338,10 @@ far.
   objects; resource handles created without `with_capabilities` stay
   undeclared and satisfy no requirement.
 - Most sources declare their own progress persistence as `Undeclared`;
-  declare it where a requirement needs it.
+  declare it where a requirement needs it. The PostgreSQL and SQLite sources
+  declare theirs and require a durable progress binding
+  (`source_progress`/`consumer_progress`) for the modes whose cursors must
+  survive a restart.
 - The further facts identified by the compatibility audit (recovery and
   control messages, ordering, bootstrap capabilities, archive and atomic
   publication support, credential kinds) belong in this model rather than in
@@ -417,8 +420,9 @@ keep the old stack for them.
 
 **Constraints:** keep what already works natively: HTTP bootstrap, adaptive
 batching, multi-item gRPC delivery, output templates, SSE snapshot readers,
-gRPC TLS/mTLS, HTTP/gRPC ingress authentication and durable admission, and the
-PostgreSQL/MySQL/SQLite slices. HTTP REST bootstrap does not establish an
+gRPC TLS/mTLS, HTTP/gRPC ingress authentication and durable admission (graceful
+stop finishes in-flight commits and answers them; admission waits on a full
+mailbox or journal), and the PostgreSQL/MySQL/SQLite slices. HTTP REST bootstrap does not establish an
 atomic snapshot/live cut, and event-only sinks must not advertise replacement
 or completion guarantees they do not implement. Port each family as a separate,
 reviewable change. This work adds no public DrasiLib SQL API.
@@ -1757,9 +1761,14 @@ be split into bounded calls, each with a timeout.
 **Kind:** Improvement. **Priority:** Low (P2). **Effort:** Medium.
 
 Handlebars setup and helpers are repeated across the HTTP, gRPC and log sinks
-and several common crates. The SQL parameter-only rule is already shared:
-`drasi_reaction_common::sql_template` is used by the three native
-stored-procedure sinks (the legacy SQL Server reaction is [SMS-08](#sms-08)).
+and several common crates, and the three stored-procedure sinks each keep
+their own parameter-binding SQL renderer (PostgreSQL a thread-local
+parameter buffer in `postgres-common/src/sql/template.rs`, MySQL a mutex
+buffer in `mysql-common/src/storedproc/render.rs`, SQL Server
+`mssql-common/src/sql/template.rs`). The SQL parameter-only rule and the
+template context (`drasi_computation_storedproc_common::OperationContext`,
+including `deliveryId`) are already shared (the legacy SQL Server reaction is
+[SMS-08](#sms-08)).
 
 **What remains:** one renderer with the standard helpers in `reaction-common`,
 used by the native sinks. This overlaps NI-03 in [CW-101](#cw-101).
@@ -1769,7 +1778,10 @@ used by the native sinks. This overlaps NI-03 in [CW-101](#cw-101).
 **Evidence:** `drasi-core/components/computation-plugins/sinks/http/src/render.rs`;
 `drasi-core/components/computation-plugins/sinks/grpc/src/render.rs`;
 `drasi-core/components/computation-plugins/sinks/log/src/render.rs`;
-`drasi-core/components/reaction-common/src/sql_template.rs`.
+`drasi-core/components/reaction-common/src/sql_template.rs`;
+`drasi-core/components/postgres-common/src/sql/template.rs`;
+`drasi-core/components/mysql-common/src/storedproc/render.rs`;
+`drasi-core/components/mssql-common/src/sql/template.rs`.
 
 **Done when:** native sinks use the shared renderer, with the existing
 template tests moved to it.
@@ -1796,7 +1808,11 @@ plugins cannot publish counters through the Host.
 ready because the sink dropped its `ControlSender`.
 
 **Evidence:** `drasi-core/components/computation-plugins/sinks/grpc/src/lib.rs:98`;
-`drasi-core/components/computation-plugins/sources/postgres/src/lib.rs:158`;
+`drasi-core/components/computation-plugins/sources/postgres/src/lib.rs:196`;
+the three stored-procedure sinks discard theirs in `Factory::create`
+(`drasi-core/components/computation-plugins/sinks/storedproc-{postgres,mysql,mssql}/src/lib.rs`)
+and report Ready while their database is down, failing deliveries
+transiently instead;
 `drasi-core/components/computation-plugin-sdk/src/control.rs`.
 
 **Done when:** connected plugins report readiness; the SDK exposes metrics with
@@ -1982,9 +1998,9 @@ Each source has its own section. Work shared by every plugin is under
 
 #### Pair the source and its initial-data providers through the coordinator (PG-13)
 
-**Kind:** Improvement. **Priority:** Medium. **Effort:** Medium.
+**Kind:** Improvement. **Priority:** High. **Effort:** Medium.
 
-The source and its coordinated and shared bootstrap providers share one configuration shape and derived slot identity, but are configured and validated separately. An operator can give them different databases or publications, and the host cannot check that they belong together.
+The source and its coordinated and shared bootstrap providers share one configuration shape and derived slot identity, but are configured and validated separately. An operator can give them different databases or publications, and the host cannot check that they belong together. The coupling is hidden state: a provider whose `source` names another source's ID creates slots in that source's managed namespace, which that source's erase then drops (or which pin WAL until it does), and no edge or declaration lets the graph refuse it. PostgreSQL is the only coordinated native source that does not use the ABI 5 pairing.
 
 **What remains:**
 
@@ -2003,13 +2019,13 @@ The source and its coordinated and shared bootstrap providers share one configur
 
 **Kind:** Improvement. **Priority:** Low. **Effort:** Medium.
 
-A publication that publishes TRUNCATE is refused at start, and a TRUNCATE published later fails the source with a typed `Unsupported`. The legacy source tolerated TRUNCATE. Operators must recreate publications without TRUNCATE, which the default `CREATE PUBLICATION` does not do.
+A publication that publishes TRUNCATE is refused at start. A TRUNCATE of a selected table published later (after `ALTER PUBLICATION`) fails the source with a typed `SourceFailure::Unsupported` before anything of its transaction is published; a TRUNCATE of only unselected tables is ignored. The legacy source tolerated TRUNCATE (and silently diverged). Operators must recreate publications without TRUNCATE, which the default `CREATE PUBLICATION` does not do. The graph has no typed source reset that would let downstream queries rebuild from a fresh snapshot.
 
-**What remains:** emit a typed reset on TRUNCATE that forces downstream queries to rebuild from a fresh snapshot, then allow publications that publish TRUNCATE.
+**What remains:** a typed source reset in the graph contracts that forces downstream queries to rebuild from a fresh snapshot; emit it on TRUNCATE, then allow publications that publish TRUNCATE.
 
 **Example:** `CREATE PUBLICATION p FOR TABLE orders` (default `publish` includes truncate) is refused until it is recreated `WITH (publish = 'insert, update, delete')`.
 
-**Evidence:** "Unsupported" section of `drasi-core/components/computation-plugins/sources/postgres/DESIGN.md:167-176`.
+**Evidence:** "Unsupported" section of `drasi-core/components/computation-plugins/sources/postgres/DESIGN.md`; `drasi-core/components/postgres-common/src/replication/transaction.rs` (`WalMessage::Truncate`); live test `postgres_runtime_truncate_fails_typed_without_partial_publication`.
 
 **Done when:** a TRUNCATE on a published table produces a reset that rebuilds affected queries, covered by a live test.
 
@@ -2064,7 +2080,7 @@ The source logs through `log` but reports no metrics, and its factories drop the
 
 **Example:** during a 30-second reconnect loop the instance status stays "running" with no indication it is retrying.
 
-**Evidence:** `_control: ControlSender` unused at `drasi-core/components/computation-plugins/sources/postgres/src/lib.rs:158,189`.
+**Evidence:** `_control: ControlSender` unused at `drasi-core/components/computation-plugins/sources/postgres/src/lib.rs:196,227,259,293`.
 
 **Done when:** retry status and the metrics appear for a running source and are covered by a test.
 
@@ -2083,18 +2099,6 @@ A `Mode` enum drives configuration and planning, but the component still holds `
 **Evidence:** `drasi-core/components/computation-plugins/sources/postgres/src/component.rs:71-72,603`; `drasi-core/components/computation-plugins/sources/postgres/src/lib.rs:83,87`.
 
 **Done when:** the invalid-binding branch and metadata `expect`s are gone.
-
-<a id="pg-40"></a>
-
-#### Fix stale ABI text in the PostgreSQL bootstrapper README (PG-40)
-
-**Kind:** Issue. **Priority:** Low. **Effort:** Small.
-
-The source docs are current, but the bootstrapper README still says ABI `2.0.0`; the ABI is `4.0.0`.
-
-**Evidence:** `drasi-core/components/computation-plugins/bootstrappers/postgres/README.md:3-6`; `drasi-core/components/computation-plugin-abi/src/lib.rs:26`.
-
-**Done when:** the README states the current ABI or omits the version.
 
 <a id="plugin-source-mysql"></a>
 
@@ -2122,7 +2126,7 @@ Readiness changes (streaming, reconnecting, failed), retries, skipped tables and
 
 **Kind:** Improvement. **Priority:** Low. **Effort:** Medium.
 
-GTIDs are used only for the initial start position; checkpoints store file/offset bound to `@@server_uuid`, so a reconnect to a different server fails with `SourceFailure::Unsupported` and a failover needs a new source. The legacy source tracked `current_gtid`.
+GTIDs are used only for the initial start position; checkpoints store file/offset bound to `@@server_uuid`, so a reconnect to a different server fails with `SourceFailure::Unsupported` and a failover needs a new source. This is a new capability, not parity: the legacy source stored one transaction's GTID (`uuid:gno`) as its "GTID set" and resumed with it, which the server treats as the executed set and would have resent almost every retained transaction. Refusing a failover is the safer current behaviour.
 
 **What remains:** store the GTID set with each checkpoint and resume by GTID when the server UUID changes.
 
@@ -2134,13 +2138,27 @@ GTIDs are used only for the initial start position; checkpoints store file/offse
 
 #### Pair the MySQL source and bootstrapper through the coordinator (MY-16)
 
-**Kind:** Improvement. **Priority:** Low. **Effort:** Medium.
+**Kind:** Issue. **Priority:** High. **Effort:** Medium.
 
-The source and `drasi-core/components/computation-plugins/bootstrappers/mysql` take the same flat settings and share committed progress, but are not paired through the SDK bootstrap coordinator. Use `supports_bootstrap_coordination`/`create_bootstrap_coordinator` as SQLite does.
+The source and `drasi-core/components/computation-plugins/bootstrappers/mysql` take the same flat settings and share committed progress, but are not paired through the SDK bootstrap coordinator. The provider names its source in a free `source` field and repeats the source's `stream`, `tables`, `tableKeys` and connection settings; nothing checks the pairing at wiring. A provider with `tables: [a, b]` beside a source with `[a]` loads both tables and only then the source refuses to start (binding differs); a wrong `source` records the watermark under another ID and the real source fails forever with "no complete consumer-owned boundary". Compatibility is thus discovered at start, after expensive work. Use `supports_bootstrap_coordination`/`create_bootstrap_coordinator` as SQLite does, so the provider receives the source's settings and binding and mismatches are refused when the edge is bound. The SQL Server source and provider have the same gap (their `barrierTable`, `tables` and `source` are duplicated too).
 
 **Evidence:** `drasi-core/components/computation-plugins/sources/mysql/DESIGN.md:277-279`.
 
 **Done when:** coordinated MySQL providers are created through the source's coordinator and mismatches are refused.
+
+<a id="my-38"></a>
+
+#### Give the MySQL bootstrap providers activation credentials (MY-38)
+
+**Kind:** Issue. **Priority:** Medium. **Effort:** Medium.
+
+The MySQL source can take its login from activation credentials, but the bootstrap providers connect with their literal `user` and `password` only. A source that uses an identity provider therefore cannot be paired with a password-less provider. This is the MySQL counterpart of [MS-22](#ms-22) and needs the same SDK and Host change.
+
+**What remains:** pass activation credentials to bootstrap providers, or document that MySQL initial loading needs a literal login even when the source uses an identity provider. The SDK and Host already pass freshly resolved activation credentials to an erasing dispose (`DisposeContext::credentials`); any MySQL source or provider erase that connects should use them, as the PostgreSQL source does.
+
+**Evidence:** `drasi-core/components/computation-plugins/bootstrappers/mysql/src/config.rs` (`user`, `password`; no credential context).
+
+**Done when:** a provider authenticates with provider-supplied credentials in a test, or the limit is documented in the source and bootstrapper docs.
 
 <a id="my-17"></a>
 <a id="my-18"></a>
@@ -2257,27 +2275,13 @@ The engine sits behind a database seam with typed failures, but readiness, recon
 
 The source can take its login from activation credentials, including a Microsoft Entra ID token, but bootstrap factories receive no activation credentials. The paired providers therefore always need a literal `user` and `password` (a secret reference), and a provider configured without them is refused.
 
-**What remains:** pass activation credentials to bootstrap providers (an SDK and Host change shared with the other database bootstrappers), or document that bootstrap needs a SQL login even when the source uses an identity provider.
+**What remains:** pass activation credentials to bootstrap providers (an SDK and Host change shared with the other database bootstrappers, including the PostgreSQL providers), or document that bootstrap needs a SQL login even when the source uses an identity provider. The SDK and Host already pass freshly resolved activation credentials to an erasing dispose (`DisposeContext::credentials`); the SQL Server source's erase should connect with them, as the PostgreSQL source does.
 
 **Example:** an Azure SQL database with SQL authentication disabled can stream changes through the source with an Entra ID token, but its initial data cannot be loaded.
 
 **Evidence:** `drasi-core/components/computation-plugins/bootstrappers/mssql/src/lib.rs:198-199`; `drasi-core/components/computation-plugins/bootstrappers/mssql/README.md:20-22`.
 
 **Done when:** a provider authenticates with provider-supplied credentials in a test, or the limit is documented in the source and bootstrapper docs.
-
-<a id="ms-23"></a>
-
-#### Keep SQL Server cursors valid across long idle periods (MS-23)
-
-**Kind:** Issue. **Priority:** Low. **Effort:** Small to medium.
-
-Committed cursors advance only with emitted changes. If every selected table stays idle for longer than CDC retention (three days by default), a restart reports `PositionUnavailable` although nothing was lost.
-
-**What remains:** advance the committed position over empty intervals (for example by committing the maximum LSN a poll proved empty), or keep the documented advice to size retention above the longest idle period plus downtime.
-
-**Evidence:** `drasi-core/components/computation-plugins/sources/mssql/DESIGN.md:181-192`.
-
-**Done when:** a restart after an idle period longer than retention resumes without error, in a test.
 
 <a id="ms-30"></a>
 <a id="ms-31"></a>
@@ -2379,7 +2383,7 @@ The linked plugin runs the SDK conformance kit on both Tokio flavours, and tests
 
 ### Shared network source runtime
 
-`drasi-core/components/computation-plugins/common/network` (`SourceRuntime`/`Ingress`, shared by the HTTP and gRPC sources). Pause gating, StopMode-aware stop, authentication, TLS, rate and connection limits, managed updates and server-sequenced durable admission are implemented; the items below remain.
+`drasi-core/components/computation-plugins/common/network` (`SourceRuntime`/`Ingress`, shared by the HTTP and gRPC sources). Pause gating of data admission (producer metadata stays available, also from the host while the source is parked), StopMode-aware stop (Drain lets in-flight durable commits finish and answers them; Abort interrupts them as uncertain), back-pressured durable admission (`NativeAdmission::admit_wait`, with the committed prefix of a non-atomic batch always reported), authentication, TLS, rate, connection and handshake limits, managed updates and server-sequenced durable admission are implemented; the items below remain.
 
 <a id="net-08"></a>
 <a id="source-d-12"></a>
@@ -2459,23 +2463,23 @@ Both admission paths serialize requests per source. Volatile admission holds the
 <a id="net-07"></a>
 <a id="net-14"></a>
 
-#### Report listener failure and publish ingress metrics (NET-07, NET-14)
+#### Report readiness and recovery and publish ingress metrics (NET-07, NET-14)
 
 **Kind:** Improvement. **Priority:** Low. **Effort:** Medium.
 
-If the listener dies after start, nothing tells the Host: both factories drop the `ControlSender`. There are also no metrics, so operators cannot see request rates, rejections or queue pressure.
+Listener death is already reported: the listener task catches a panic or error, cancels the activation, reports the failure to the graph through `report_failure` in durable mode, and makes `next()` return the error in volatile mode. What is missing is readiness and recovery reporting, because both factories drop the `ControlSender`, and metrics, so operators cannot see request rates, rejections or queue pressure.
 
 **What remains:**
 
-- Keep the `ControlSender` and report listener death and recovery through it.
+- Keep the `ControlSender` and report readiness (listener bound) and recovery through it.
 - Publish metrics using the shared names from [CW-26](#cw-26): requests, admitted events, rejections by kind (auth, rate limit, size, paused), rate-limited clients, queue occupancy and durable commit latency.
 - Logs from a loaded plugin reach the Host only after the native logging bridge in [CW-24](#cw-24) exists; until then `diag!` writes warnings and errors to stderr and drops lower levels.
 
-**Example:** a listener task that panics leaves the source reported as running while every connection is refused.
+**Example:** a host cannot tell when a volatile HTTP source's listener is bound and accepting, other than by probing the port.
 
-**Evidence:** `drasi-core/components/computation-plugins/sources/http/src/lib.rs:111` and `drasi-core/components/computation-plugins/sources/grpc/src/lib.rs:115` (`_control`); `drasi-core/components/computation-plugins/common/network/src/lib.rs:44-53` (`diag!`).
+**Evidence:** `drasi-core/components/computation-plugins/sources/http/src/lib.rs:111` and `drasi-core/components/computation-plugins/sources/grpc/src/lib.rs:115` (`_control`); `drasi-core/components/computation-plugins/common/network/src/ingress.rs` (`SourceRuntime::start`, failure reporting); `drasi-core/components/computation-plugins/common/network/src/lib.rs` (`diag!`).
 
-**Done when:** listener failure appears in component status, and the metric set is emitted and documented for both sources.
+**Done when:** readiness and recovery appear in component status, and the metric set is emitted and documented for both sources.
 
 <a id="plugin-source-http"></a>
 
@@ -2499,7 +2503,9 @@ Webhook HMAC and bearer secrets can only name environment variables. The Host re
 
 **Example:** `"auth": { "bearer": { "tokenEnv": "GITHUB_HOOK_TOKEN" } }` works only if the Server process has `GITHUB_HOOK_TOKEN` set; it cannot point at a secret store entry.
 
-**Evidence:** `drasi-core/components/http-common/src/webhook/config.rs:123,148` (`secret_env`, `token_env`); `drasi-core/components/computation-plugins/sources/http/src/config.rs:216-235` (presence check at initialize); `drasi-core/components/http-common/src/webhook/auth.rs:128` (SHA1 always accepted).
+Secrets named by environment variable are already resolved once per accepted configuration (construction, assess and apply), so a missing variable refuses the configuration or update; this item is only about secret-store references and signature hardening.
+
+**Evidence:** `drasi-core/components/http-common/src/webhook/config.rs` (`secret_env`, `token_env`); `drasi-core/components/http-common/src/webhook/auth.rs` (`ResolvedAuth::resolve`; SHA1 always accepted); `drasi-core/components/computation-plugins/sources/http/src/webhook.rs` (`Webhooks::new`).
 
 **Done when:** a webhook secret can be a secret reference resolved by the Host, replay tolerance and SHA1 refusal are configurable and tested, and `CONFIGURATION.md` documents them.
 
@@ -2526,12 +2532,13 @@ Tools that read the factory schema see `webhooks` only as an opaque `Object`, so
 
 **Kind:** Qualification. **Priority:** Low. **Effort:** Medium.
 
-The ordinary HTTP source's webhook end-to-end and integration suites test only the ordinary plugin. The native webhook handler and the durable HTTP adapter have no unit tests of their own.
+The ordinary HTTP source's webhook end-to-end and integration suites test only the ordinary plugin. The native webhook handler and the durable HTTP adapter have no unit tests of their own. Loaded-library tests now cover durable webhooks across a restart with explicit-session retry deduplication, durable pause (metadata answered, data refused without commit, sequence resumed), graceful stop with in-flight commits, and back-pressure; the volatile refusal of session headers has a crate test.
 
 **What remains:**
 
 - Port `webhook_e2e.rs` and `webhook_integration.rs` to native construction.
-- Add unit tests for each `errorBehavior` and the explicit-session durable header paths in `webhook.rs`, and for `durable_http.rs`.
+- Add unit tests for each `errorBehavior` in `webhook.rs` and for the `durable_http.rs` error-to-status mapping.
+- Test `effectiveFrom` being required for explicit-session webhook requests.
 - Add a CORS preflight test on the fallback (unmatched) route; the existing preflight test covers a configured webhook route.
 - Loaded-library conformance and rejection-has-no-graph-effect coverage are in [CW-41](#cw-41).
 
@@ -3544,12 +3551,24 @@ undecided whether it should publish through the SDK metric facility instead.
 The three stored-procedure sinks (`drasi.postgres/storedproc`,
 `drasi.mysql/storedproc`, `drasi.mssql/storedproc`) are production-ready
 External consumers. Each procedure call commits in one destination transaction
-with its row in a per-sink progress table (format 2, identical across the
-three, with a per-owner `maxStreams` limit and idempotent erase). They share
-one parameter-only template rule (`drasi_reaction_common::sql_template`), keep
-one connection per activation with budgeted reconnect, honour deadlines and
-Drain/Abort, plan updates field by field, and publish flat configuration with
-only credentials secret. Behaviour is in each sink's `DESIGN.md` and
+with its row in a per-sink progress table (format 4, identical across the
+three, with a per-owner `maxStreams` limit and idempotent erase). The cursor
+protocol is implemented once (`drasi-core/components/computation-plugins/common/storedproc`)
+over a per-database `Session`, with one protocol table run against an
+in-memory session and live PostgreSQL and MySQL. They share: one attempt per
+operation with the graph owning retries (no in-plugin retry budget); definite
+commit errors classified, only a lost COMMIT reply "outcome unknown" and
+resolved from the cursor; procedures that commit or roll back refused
+permanently and never re-run (a `pending` mark); query resets rolling the
+stream's row over (output generation in the position) instead of adding rows;
+`onPermanentFailure: skip` recorded in a dead-letter table in the same
+transaction as the cursor advance; `deliveryId` in every template context;
+`host`, `port`, `database` and `progressTable` unsupported in place; and
+secure-by-default TLS (MySQL now refuses remote plaintext like PostgreSQL).
+They share one parameter-only template rule
+(`drasi_reaction_common::sql_template`), keep one connection per activation,
+honour deadlines and Drain/Abort, plan updates field by field, and publish
+flat configuration with only credentials secret. Behaviour is in each sink's `DESIGN.md` and
 `CONFIGURATION.md`. Decisions Sink D-3 (consumer plus destination cursor),
 Sink D-10 (configurable, per-owner progress table) and Sink D-15 (Entra ID
 tokens) are implemented. The items below are what remains; the first is a
@@ -3689,15 +3708,43 @@ which stream and operation it last completed without querying the database.
 **Done when:** a consumer's delivery progress is readable through management
 for all three sinks.
 
+<a id="sp-14"></a>
+
+#### Document and tool destination-cursor recovery (SP-14)
+
+**Kind:** Improvement. **Priority:** Low. **Effort:** Small.
+
+A cursor that is ahead of the host's ledger (the graph's storage restored from
+an older backup) or rows from an escaped procedure commit stall the stream
+with a permanent, never-skipped error ("receipt expired", "unfinished
+operations", "an earlier attempt … ended the delivery transaction"). The
+owner digest omits the construction scope, so two instances with the same
+graph and component IDs on one database share a `maxStreams` budget and an
+Erase; and `ComponentDescription` declares `ProgressPersistence::Durable` for
+consumers even under `atLeastOnce`.
+
+**What remains:** a runbook (and optionally a management command) that resets
+one stream's cursor for an owner; decide whether the owner digest includes the
+construction scope (a format bump) or document that graph IDs must be
+globally unique; declare consumer progress persistence per guarantee.
+
+**Evidence:** `drasi-core/components/computation-plugins/common/storedproc/src/cursor.rs`
+(`owner`, `decide`); `drasi-core/components/computation-plugin-sdk/src/wire.rs`
+(`DescribeRequest::consumer`).
+
+**Done when:** each stalled-cursor error names its recovery and the owner
+scope is decided.
+
 <a id="sink-x-11-storedproc"></a>
 
 #### Add delivery metrics (Sink X-11)
 
 **Kind:** Improvement. **Priority:** Medium. **Effort:** Small.
 
-All three sinks log retries, reconnects and failures with sanitized fields,
-but none reports metrics. An operator cannot chart retries, cursor lag or
-delivery latency.
+All three sinks log failures, reconnects and skips with sanitized fields, but
+none reports metrics or readiness (each discards its `ControlSender`; see
+[Source X-07 and Sink X-11](#source-x-07)). An operator cannot chart retries,
+skips, cursor lag or delivery latency.
 
 **What remains:** report the shared sink metrics (deliveries, operations,
 retries by class, reconnects, failures, duration, stream count against
@@ -3722,13 +3769,20 @@ The PostgreSQL and MySQL live tests now cover erase twice, the per-owner
 stream limit, reconnect after the session is killed, recovery and retry
 without Stop/Start (including through the host proxy), partial failure with
 replay against a fresh ledger, Abort with rollback, large inputs and template
-rejection. They are `#[ignore]`d and need Podman, and no CI job runs them.
+rejection. Each sink crate also has a live `tests/live.rs`: the shared
+protocol table (including skip, transaction control, generations and query
+resets against `maxStreams`), a COMMIT whose reply is lost (a proxy), and for
+PostgreSQL a commit-time deferred-constraint failure and a backend terminated
+during COMMIT, for MySQL an InnoDB deadlock. They are `#[ignore]`d and need
+Podman, and no CI job runs them.
 
 **What remains:**
 
 - Run `drasi-source-postgres --test native_transactions` (the `storedproc`
-  module) and `drasi-host-sdk --test native_mysql_components`
-  (`native_mysql_storedproc_*`) in named CI jobs ([CW-85](#cw-85)).
+  module), `drasi-host-sdk --test native_mysql_components`
+  (`native_mysql_storedproc_*`) and
+  `drasi-computation-sink-storedproc-{postgres,mysql} --test live` in named CI
+  jobs ([CW-85](#cw-85)).
 - Add the scenarios still missing: a database container restart during a
   delivery (not only a killed session), credential rotation once
   [SP-10](#sp-10) lands, and pause during delivery.
@@ -3803,7 +3857,9 @@ its progress reporting on [SP-13](#sp-13) and its CI run on [SP-08](#sp-08).
 
 `postgres-common` keeps the format-1 `PostgresDeliveryHandler` and its
 database-wide `public.drasi_delivery_stream_v1` table unchanged, because the
-legacy `drasi-reaction-storedproc-postgres` still uses it. The legacy table
+legacy `drasi-reaction-storedproc-postgres` crate still exposes it as an
+opt-in Rust API (its public `delivery` module and `tests/delivery.rs`); the
+legacy reaction runtime itself never uses it. The legacy table
 keeps its 4,096-stream database-wide cap and is never erased.
 
 **What remains:** remove the format-1 handler and its table when the legacy
@@ -3815,7 +3871,7 @@ has two progress tables with different formats.
 **Evidence:** `drasi-core/components/postgres-common/src/delivery.rs`;
 `drasi-core/components/reactions/storedproc-postgres/src/executor.rs`.
 
-**Done when:** only the format-2 progress table remains in `postgres-common`.
+**Done when:** only the format-4 progress table remains in `postgres-common`.
 
 <a id="plugin-sink-storedproc-mysql"></a>
 
@@ -3833,8 +3889,8 @@ The shared items above apply; [SP-10](#sp-10) is a regression for this sink.
 
 **Kind:** Improvement. **Priority:** Low. **Effort:** Small.
 
-`retry_attempts` is renamed `connectRetryAttempts` and the binlog settings are
-no longer exposed in the sink configuration. The shared MySQL connection
+`retry_attempts` is gone (the graph retries) and the binlog settings are no
+longer exposed in the sink configuration. The shared MySQL connection
 struct still requires a `server_id` and heartbeat, so the sink sets
 placeholder values in one private place.
 
@@ -3868,14 +3924,18 @@ regression for this sink.
 The sink has 39 unit tests, including the cursor protocol through a
 database-free seam, and 4 database-free host tests. Nothing has run against a
 real SQL Server: live qualification is deferred by the owner
-([CW-78](#cw-78)). The live tests compile, and the fixture's `setup.sql` and
-`cleanup.sql` create and grant `<schema>.DrasiDeliveryProgress`.
+([CW-78](#cw-78)). The shared protocol it uses is qualified live on
+PostgreSQL and MySQL and against the in-memory session. The live tests
+compile, and the fixture's `setup.sql` and `cleanup.sql` create and grant
+`<schema>.drasi_delivery_progress` and its dead-letter table (format 4).
 
 **What remains:** once the CW-78 environment exists, run the live cases:
-per-operation transactions, exactly-once replay, `@@TRANCOUNT` detection of a
-procedure that changes the transaction, Abort dropping the connection, erase
-twice, the 2,098-parameter limit, Azure redirect handling and Entra ID tokens
-(after [SP-10](#sp-10)).
+the shared protocol table against `TiberiusSession`, per-operation
+transactions, exactly-once replay, `@@TRANCOUNT`/266 detection of a procedure
+that commits or rolls back (and no re-run after an escaped commit), a skipped
+operation's dead-letter row, a definite versus lost COMMIT reply, Abort
+dropping the connection, erase twice, the 2,098-parameter limit, Azure
+redirect handling and Entra ID tokens (after [SP-10](#sp-10)).
 
 **Evidence:** `drasi-core/components/host-sdk/tests/native_mssql_components.rs`;
 `drasi-core/components/host-sdk/tests/fixtures/native_mssql/sink_effects.rs`;

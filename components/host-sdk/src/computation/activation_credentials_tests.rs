@@ -431,12 +431,93 @@ async fn cancellation_matrix() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// An erasing dispose of a credential-bound component receives freshly
+/// resolved credentials even when the object never started (as after a
+/// process restart); a preserving dispose and an unbound component receive
+/// none.
+async fn erase_without_start_matrix() -> anyhow::Result<()> {
+    for fixture in fixtures()? {
+        (fixture.reset)();
+        let factory = &fixture.plugin.factories()[0];
+        let provider = Provider::new();
+        let mut never_started = factory.create_component_with_identity(
+            id(),
+            fixture::configuration(),
+            provider.resource(),
+        )?;
+        never_started
+            .initialize(&crate::computation::test_hooks::initialize_ctx())
+            .await?;
+        never_started
+            .dispose(&crate::computation::test_hooks::erase_ctx())
+            .await?;
+        assert_eq!((fixture.probe)(fixture::ERASED), 1);
+        assert_eq!(provider.reads.load(Ordering::SeqCst), 1);
+        assert_eq!((fixture.probe)(fixture::AUTHENTICATED), 0);
+
+        let mut preserved = factory.create_component_with_identity(
+            id(),
+            fixture::configuration(),
+            provider.resource(),
+        )?;
+        preserved
+            .initialize(&crate::computation::test_hooks::initialize_ctx())
+            .await?;
+        preserved
+            .dispose(&crate::computation::test_hooks::dispose_ctx())
+            .await?;
+        assert_eq!(
+            provider.reads.load(Ordering::SeqCst),
+            1,
+            "preserve resolves nothing"
+        );
+
+        let mut literal = fixture::configuration();
+        literal["user"] = json!("literal-user");
+        let mut unbound = factory.create_component(id(), literal)?;
+        unbound
+            .initialize(&crate::computation::test_hooks::initialize_ctx())
+            .await?;
+        unbound
+            .dispose(&crate::computation::test_hooks::erase_ctx())
+            .await?;
+        assert_eq!((fixture.probe)(fixture::ERASED), 1);
+        assert_eq!((fixture.probe)(fixture::UNEXPECTED_DISPOSE_CREDENTIALS), 0);
+
+        provider.failed.store(true, Ordering::SeqCst);
+        let mut failing = factory.create_component_with_identity(
+            id(),
+            fixture::configuration(),
+            provider.resource(),
+        )?;
+        failing
+            .initialize(&crate::computation::test_hooks::initialize_ctx())
+            .await?;
+        let error = failing
+            .dispose(&crate::computation::test_hooks::erase_ctx())
+            .await
+            .unwrap_err();
+        assert!(!format!("{error:#}").contains("first-secret"));
+        provider.failed.store(false, Ordering::SeqCst);
+        failing
+            .dispose(&crate::computation::test_hooks::erase_ctx())
+            .await?;
+        assert_eq!(
+            (fixture.probe)(fixture::ERASED),
+            2,
+            "a failed resolution is retried"
+        );
+    }
+    Ok(())
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial(activation_credentials)]
 async fn activation_credentials_current_thread() -> anyhow::Result<()> {
     refresh_and_failure_matrix().await?;
     cancellation_matrix().await?;
     configured_identity_matrix().await?;
+    erase_without_start_matrix().await?;
     graph_binding_matrix().await
 }
 
@@ -446,6 +527,7 @@ async fn activation_credentials_multi_thread() -> anyhow::Result<()> {
     refresh_and_failure_matrix().await?;
     cancellation_matrix().await?;
     configured_identity_matrix().await?;
+    erase_without_start_matrix().await?;
     graph_binding_matrix().await
 }
 

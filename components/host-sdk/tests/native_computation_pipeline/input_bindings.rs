@@ -274,7 +274,6 @@ async fn separately_loaded_consumer_receives_input_bindings_case() -> Result<()>
                 scope: RecoveryScope::Failure(FailureMode::ProcessRestart),
                 max_streams: NonZeroUsize::new(2).expect("nonzero stream limit"),
                 receipts_per_stream: NonZeroUsize::new(2).expect("nonzero receipt limit"),
-                retry: DeliveryRetryPolicy::default(),
             },
         )
         .await?;

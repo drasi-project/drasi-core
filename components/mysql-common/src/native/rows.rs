@@ -23,6 +23,43 @@ use std::{
     },
 };
 
+/// Least quiet time before a row source commits a transaction without
+/// selected rows as a progress record.
+pub const IDLE_PROGRESS: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A progress-only row record at the completed `position`, with the next
+/// logical sequence.
+pub fn progress_record(
+    position: Position,
+    source: &ComponentId,
+    stream: &StreamId,
+    sequence: &AtomicU64,
+) -> Result<OutputEnvelope> {
+    let sequence = sequence
+        .fetch_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .map_err(|_| anyhow::anyhow!("MySQL row sequence exhausted"))?
+        + 1;
+    let row = RowPosition {
+        version: 1,
+        position,
+        offset: None,
+        count: 0,
+        sequence,
+    };
+    Ok(OutputEnvelope {
+        port: PortId::try_new("out")?,
+        envelope: GraphChangeCodec::encode_source_progress(
+            source,
+            stream.clone(),
+            sequence,
+            row.encode()?,
+            chrono::Utc::now(),
+        )?,
+    })
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Options {
     pub persistent: bool,
@@ -52,9 +89,16 @@ impl RowPosition {
                     && self.sequence > 0,
                 "invalid MySQL transaction row offset/count"
             ),
+            // A snapshot boundary (version 2, published by a provider), or a
+            // progress record: a transaction without selected rows (version
+            // 1) or a fresh group's origin (version 3).
             None => anyhow::ensure!(
-                self.position.version == 2 && self.count == 0 && self.sequence == 0,
-                "invalid MySQL after-commit row snapshot boundary"
+                self.count == 0
+                    && match self.position.version {
+                        2 => self.sequence == 0,
+                        _ => self.sequence > 0,
+                    },
+                "invalid MySQL after-commit row boundary"
             ),
         }
         Ok(())
@@ -186,6 +230,18 @@ impl Emission {
         })
     }
 }
+impl Emission {
+    /// Whether the transaction touched no selected table.
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// The transaction's end as a progress record.
+    pub fn progress_record(self) -> Result<OutputEnvelope> {
+        progress_record(self.position, &self.source, &self.stream, &self.sequence)
+    }
+}
+
 impl Iterator for Emission {
     type Item = Result<OutputEnvelope>;
     fn next(&mut self) -> Option<Self::Item> {
@@ -263,8 +319,9 @@ pub fn minimum<'a>(
                 compare(position, &previous)?;
             }
         }
+        // The minimum committed cursor; a member without one joins there.
         let earlier = match (&selected, &position) {
-            (None, _) | (Some((_, Some(_))), None) => true,
+            (None, _) | (Some((_, None)), Some(_)) => true,
             (Some((_, Some(previous))), Some(position)) => {
                 compare(position, previous)? == Ordering::Less
             }
@@ -366,6 +423,13 @@ impl Updates {
     }
     pub async fn changed(&mut self) -> Result<()> {
         self.updates.changed().await
+    }
+
+    /// Whether every member has committed a cursor.
+    pub fn initialized(&self) -> bool {
+        self.members
+            .values()
+            .all(|member| member.position.is_some())
     }
 }
 

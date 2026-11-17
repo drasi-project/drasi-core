@@ -4,18 +4,17 @@
 //! Update planning: every configuration field is classified.
 //!
 //! * Pause (in place): anything read per delivery: `routes`,
-//!   `defaultTemplate`, `maxStreams`, `commandTimeoutMs` (applied to the
-//!   session before the next command), `reconnectBudgetMs`,
-//!   `shutdownTimeoutMs`.
-//! * Stop (restart): the connection: `host`, `port`, `database`, `user`,
-//!   `password`, `sslMode`, `allowRemotePlaintext`, the TLS material,
-//!   and `connectTimeoutMs`.
-//! * Replace (recreate, data preserved): `outputs`, the incoming edges and
-//!   `deliveryGuarantee` (it is declared on the input port, so the graph
-//!   re-checks every producer).
-//! * Unsupported: `progressTable` and the graph identity. They change the
-//!   destination cursor's identity, so committed operations would no longer
-//!   be recognised. Remove the component (Erase) and add a new one instead.
+//!   `defaultTemplate`, `maxStreams`, `commandTimeoutMs` (the next operation
+//!   reconnects with it), `connectTimeoutMs`, `shutdownTimeoutMs`.
+//! * Stop (restart): the login and transport: `user`, `password`, `sslMode`,
+//!   `allowRemotePlaintext` and the TLS material.
+//! * Replace (recreate, data preserved): `outputs`, the incoming edges,
+//!   `deliveryGuarantee` and `onPermanentFailure` (both are declared in the
+//!   description the graph checks).
+//! * Unsupported: `host`, `port`, `database`, `progressTable` and the graph
+//!   identity. They locate the destination cursor, so changing them would
+//!   move every stream's cursor. Remove the component (Erase) and add a new
+//!   one instead.
 
 use crate::config::PostgresStoredProcConfig;
 use anyhow::{Context, Result};
@@ -25,6 +24,7 @@ use drasi_computation_plugin_sdk::{
     update_planning::{ensure_same_component, inputs_changed, BoundaryPlanner},
     UpdateRequest,
 };
+use drasi_computation_storedproc_common::settings;
 
 /// Classifies every field of `current` against `proposed`.
 pub fn plan(
@@ -34,18 +34,24 @@ pub fn plan(
 ) -> Assessment {
     use UpdateBoundary::*;
     let (c, p) = (current, proposed);
-    if c.progress_table != p.progress_table {
-        return Assessment::unsupported(
-            "progressTable is the destination cursor identity; remove the component with Erase \
-             and add a new one to change it",
-        );
+    for (field, changed) in [
+        ("host", c.host != p.host),
+        ("port", c.port != p.port),
+        ("database", c.database != p.database),
+        ("progressTable", c.table().ok() != p.table().ok()),
+    ] {
+        if changed {
+            return Assessment::unsupported(settings::cursor_identity_changed(field));
+        }
     }
     let mut planner = BoundaryPlanner::default();
     planner.field("inputs", inputs_changed, Replace);
     planner.field("outputs", c.outputs != p.outputs, Replace);
-    planner.field("host", c.host != p.host, Stop);
-    planner.field("port", c.port != p.port, Stop);
-    planner.field("database", c.database != p.database, Stop);
+    planner.field(
+        "onPermanentFailure",
+        c.on_permanent_failure != p.on_permanent_failure,
+        Replace,
+    );
     planner.field("user", c.user != p.user, Stop);
     planner.field("password", c.password != p.password, Stop);
     planner.field("sslMode", c.ssl_mode != p.ssl_mode, Stop);
@@ -68,7 +74,7 @@ pub fn plan(
     planner.field(
         "connectTimeoutMs",
         c.connect_timeout_ms != p.connect_timeout_ms,
-        Stop,
+        Pause,
     );
     planner.field(
         "deliveryGuarantee",
@@ -85,11 +91,6 @@ pub fn plan(
     planner.field(
         "commandTimeoutMs",
         c.command_timeout_ms != p.command_timeout_ms,
-        Pause,
-    );
-    planner.field(
-        "reconnectBudgetMs",
-        c.reconnect_budget_ms != p.reconnect_budget_ms,
         Pause,
     );
     planner.field(

@@ -37,8 +37,11 @@ impl BridgeFactoryDefinition {
             ("namespace", Object, true),
             ("transport", Object, true),
             ("limits", Object, false),
+            // The `onPermanentFailure` setting every sink has.
+            ("onPermanentFailure", String, false),
         ]
         .into_iter()
+        .filter(|(name, _, _)| !source || *name != "onPermanentFailure")
         .map(|(name, value_type, required)| {
             (
                 Arc::from(name),

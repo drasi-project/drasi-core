@@ -330,7 +330,7 @@ impl Database {
     }
     pub(crate) fn sink_settings(&self) -> Value {
         json!({
-            "hostname":"127.0.0.1","port":self.port,"database":"test","user":"root","password":"native-test",
+            "host":"127.0.0.1","sslMode":"disable","port":self.port,"database":"test","user":"root","password":"native-test",
             "outputs":{"left":{"component":fixture_id("left"),"port":"out"},"right":{"component":fixture_id("right"),"port":"out"}},
             "defaultTemplate":{
                 "added":{"template":"CALL effect({{param output.alias}},{{param operation}},{{param after.id}},{{param after.value}})"},

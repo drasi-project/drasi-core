@@ -8,13 +8,22 @@ transformer or query ([sink input contract](../../SINKS.md)).
 - **Delivery:** an external consumer of the host `DeliveryRunner`. Each
   operation runs in its own MySQL transaction that commits the procedure
   effect together with this component's row in a destination cursor table
-  (`drasi_delivery_progress`, format version 2). Replays and retries do not
-  repeat committed effects, so delivery is exactly-once per operation unless
-  the procedure commits or rolls back on its own (then at-least-once).
+  (`drasi_delivery_progress`, format version 4), through the protocol shared
+  with the PostgreSQL and SQL Server sinks
+  ([storedproc-common](../../common/storedproc/README.md)). Replays and
+  retries do not repeat committed effects, so delivery is exactly-once per
+  operation. A procedure that commits or rolls back on its own is detected
+  and refused (permanent); the cursor never advances outside the delivery
+  transaction. With `onPermanentFailure: skip`, an undeliverable operation is
+  recorded in `drasi_delivery_progress_dead_letter` atomically with the
+  cursor advance.
 - **Templates:** Handlebars with `{{param <path>}}` only, bound as positional
   `?` parameters; compiled at construction.
-- **Connection:** one persistent session per activation, bounded jittered
-  reconnect, and session retirement with a verified KILL before any retry.
+- **Connection:** one persistent session per activation, verified TLS by
+  default (`sslMode: require`; plaintext only to loopback unless
+  `allowRemotePlaintext`), and session retirement with a verified KILL before
+  any retry. Each operation is one attempt; the graph retries transient
+  failures (deadlocks, lock waits, lost sessions).
 - **Configuration:** flat camelCase fields; `password` is the only secret.
 
 ```sh
@@ -39,4 +48,6 @@ Minimal configuration:
   secrecy and update boundaries, examples, template reference, grants and the
   pre-created table, update matrix, Erase runbook and the legacy mapping.
 
-Live tests (Podman): `make test-native-mysql`.
+Live tests (Podman): `make test-native-mysql` and
+`cargo test -p drasi-computation-sink-storedproc-mysql --test live -- --ignored --test-threads=1`
+(the shared protocol table, a lost COMMIT reply and an InnoDB deadlock).

@@ -29,8 +29,6 @@ use tokio::time::Instant;
 /// by `commandTimeoutMs` (and every connect by `connectTimeoutMs`) around the
 /// call instead, so those settings can change in place.
 const SESSION_IO_TIMEOUT: Duration = Duration::from_secs(86_400);
-const BACKOFF_BASE: Duration = Duration::from_millis(100);
-const BACKOFF_CAP: Duration = Duration::from_secs(5);
 
 /// The account and transport of one activation. Retained after Stop so
 /// cleanup and `Erase` can reach the destination; never serialized.
@@ -43,15 +41,14 @@ pub struct Endpoint {
 impl Endpoint {
     pub fn new(config: &MySqlStoredProcConfig, user: String, password: String) -> Result<Self> {
         let connection = MySqlConnectionConfig {
-            host: config.hostname.clone(),
+            host: config.host.clone(),
             port: config.port,
             database: config.database.clone(),
             user,
             password,
-            ssl_mode: if config.ssl {
-                MySqlTlsMode::RequireVerifyFull
-            } else {
-                MySqlTlsMode::Disabled
+            ssl_mode: match config.ssl_mode {
+                super::config::SslMode::Require => MySqlTlsMode::RequireVerifyFull,
+                super::config::SslMode::Disable => MySqlTlsMode::Disabled,
             },
             tls_ca_pem: config.tls_ca_pem.clone(),
             tls_client_cert_pem: None,
@@ -69,43 +66,29 @@ impl Endpoint {
     }
 }
 
-/// Connect retry settings read per attempt.
-#[derive(Debug, Clone, Copy)]
-pub struct ConnectPolicy {
-    pub connect_timeout: Duration,
-    pub retries: u32,
-    pub budget: Duration,
-}
-
-impl ConnectPolicy {
-    pub fn from_config(config: &MySqlStoredProcConfig) -> Self {
-        Self {
-            connect_timeout: Duration::from_millis(config.connect_timeout_ms),
-            retries: config.connect_retry_attempts,
-            budget: Duration::from_millis(config.reconnect_budget_ms),
-        }
-    }
-}
-
 /// Connection failures worth another attempt: transport errors and timeouts,
 /// server overload (1040 too many connections, 1203 user connection limit),
 /// server shutdown (1053). Authentication and authorization fail at once.
 /// Shared with the native source in [`crate::native::errors`].
 pub use crate::native::errors::connect_retryable;
 
-/// Full-jitter exponential backoff: uniform in `[0, min(cap, base * 2^n)]`.
-pub fn backoff(attempt: u32) -> Duration {
-    let ceiling = BACKOFF_BASE
-        .saturating_mul(1u32 << attempt.min(16))
-        .min(BACKOFF_CAP);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.subsec_nanos())
-        .unwrap_or(0);
-    let mixed = u64::from(nanos)
-        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-        .rotate_left(17);
-    ceiling.mul_f64((mixed % 10_000) as f64 / 10_000.0)
+/// A failed connection attempt, classified by [`connect_retryable`].
+#[derive(Debug)]
+pub struct ConnectFailure {
+    pub retryable: bool,
+    pub source: anyhow::Error,
+}
+
+impl std::fmt::Display for ConnectFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "MySQL connection failed: {:#}", self.source)
+    }
+}
+
+impl std::error::Error for ConnectFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
 }
 
 /// An established, ownership-verified session and its server identity.
@@ -115,85 +98,61 @@ pub struct Live {
     /// Set before a command is sent and cleared once its reply was read. A
     /// dropped `handle` leaves it set, so the session is retired before reuse.
     pub busy: bool,
-    /// Reused since the last completed operation (a dead idle session may be
-    /// replaced once without retrying the operation through the host).
-    pub idle: bool,
 }
 
-/// Opens one session with bounded, jittered retries within the policy
-/// budget, the optional deadline and the optional cancellation.
+/// Opens one ownership-verified session: one attempt, bounded by
+/// `connect_timeout`, the optional deadline and the optional cancellation.
+/// The graph (for delivery) or the host lifecycle policy (for Start)
+/// retries a retryable [`ConnectFailure`].
 pub async fn connect(
     endpoint: &Endpoint,
-    policy: ConnectPolicy,
+    connect_timeout: Duration,
     cancellation: Option<&CancellationToken>,
     deadline: Option<Instant>,
 ) -> Result<Live> {
-    let budget_end = Instant::now() + policy.budget;
-    let end = deadline.map_or(budget_end, |deadline| deadline.min(budget_end));
-    let mut attempt = 0u32;
-    loop {
-        let remaining = end.saturating_duration_since(Instant::now());
-        anyhow::ensure!(
-            !remaining.is_zero(),
-            "MySQL connection budget (reconnectBudgetMs or the lifecycle deadline) expired"
-        );
-        let attempt_future = async {
-            let mut connection = crate::native::session::connect(
-                &endpoint.connection,
-                endpoint.max_bytes,
-                SESSION_IO_TIMEOUT,
-            )
-            .await?;
-            match server_id(&mut connection).await {
-                Ok(server) => Ok(Live {
-                    connection,
-                    server,
-                    busy: false,
-                    idle: false,
-                }),
-                Err(error) => {
-                    let _ = tokio::time::timeout(Duration::from_secs(1), connection.close()).await;
-                    Err(error)
-                }
+    let limit = deadline.map_or(connect_timeout, |deadline| {
+        connect_timeout.min(deadline.saturating_duration_since(Instant::now()))
+    });
+    let attempt = async {
+        let mut connection = crate::native::session::connect(
+            &endpoint.connection,
+            endpoint.max_bytes,
+            SESSION_IO_TIMEOUT,
+        )
+        .await?;
+        match server_id(&mut connection).await {
+            Ok(server) => Ok(Live {
+                connection,
+                server,
+                busy: false,
+            }),
+            Err(error) => {
+                let _ = tokio::time::timeout(Duration::from_secs(1), connection.close()).await;
+                Err(error)
             }
-        };
-        let bounded = tokio::time::timeout(policy.connect_timeout.min(remaining), attempt_future);
-        let result = match cancellation {
-            Some(token) => tokio::select! {
-                biased;
-                _ = token.cancelled() => anyhow::bail!("MySQL connection cancelled"),
-                result = bounded => result,
-            },
-            None => bounded.await,
-        };
-        let error = match result.context("MySQL connection attempt timed out") {
-            Ok(Ok(live)) => return Ok(live),
-            Ok(Err(error)) | Err(error) => error,
-        };
-        if !connect_retryable(&error) || attempt >= policy.retries {
-            return Err(error.context(format!(
-                "MySQL connection to {}:{} failed after {} attempt(s)",
-                endpoint.connection.host,
-                endpoint.connection.port,
-                attempt + 1
-            )));
         }
-        let delay = backoff(attempt).min(end.saturating_duration_since(Instant::now()));
-        log::warn!(
-            "MySQL stored-procedure sink connection attempt {} failed; retrying in {:?}: {error:#}",
-            attempt + 1,
-            delay
-        );
-        match cancellation {
-            Some(token) => tokio::select! {
-                biased;
-                _ = token.cancelled() => anyhow::bail!("MySQL connection cancelled"),
-                _ = tokio::time::sleep(delay) => {}
-            },
-            None => tokio::time::sleep(delay).await,
-        }
-        attempt += 1;
-    }
+    };
+    let bounded = tokio::time::timeout(limit, attempt);
+    let result = match cancellation {
+        Some(token) => tokio::select! {
+            biased;
+            _ = token.cancelled() => anyhow::bail!("MySQL connection cancelled"),
+            result = bounded => result,
+        },
+        None => bounded.await,
+    };
+    let error = match result.context("MySQL connection attempt timed out (connectTimeoutMs)") {
+        Ok(Ok(live)) => return Ok(live),
+        Ok(Err(error)) | Err(error) => error,
+    };
+    let retryable = connect_retryable(&error);
+    Err(anyhow::Error::new(ConnectFailure {
+        retryable,
+        source: error.context(format!(
+            "connecting to {}:{}",
+            endpoint.connection.host, endpoint.connection.port
+        )),
+    }))
 }
 
 /// The activation's session plus any retired sessions not yet proven gone.
@@ -219,9 +178,14 @@ impl Sessions {
     /// Moves the live session to the retiring set.
     pub fn retire_live(&mut self) {
         if let Some(live) = self.live.take() {
-            self.server = Some(live.server);
-            self.retiring.push(live.connection);
+            self.retire_session(live);
         }
+    }
+
+    /// Adds a session to the retiring set.
+    pub fn retire_session(&mut self, live: Live) {
+        self.server = Some(live.server);
+        self.retiring.push(live.connection);
     }
 
     /// Proves every retiring session gone (KILL through a control session
@@ -287,15 +251,6 @@ impl Sessions {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn backoff_is_bounded_full_jitter() {
-        for attempt in 0..40 {
-            let delay = backoff(attempt);
-            assert!(delay <= BACKOFF_CAP, "{attempt}: {delay:?}");
-            assert!(delay <= BACKOFF_BASE.saturating_mul(1 << attempt.min(16)));
-        }
-    }
 
     #[test]
     fn connect_classification_is_by_kind_and_code() {

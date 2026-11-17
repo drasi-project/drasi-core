@@ -17,7 +17,7 @@ const SINK_ID: &str = "ada6c229-bc29-54e3-ae61-b603c07a41b2";
 
 fn settings() -> Value {
     json!({
-        "hostname": "no-connection-at-construction", "database": "test",
+        "host": "no-connection-at-construction", "database": "test",
         "user": "user", "password": "secret",
         "outputs": {"db.people": {"component": OUTPUT_COMPONENT_ID, "port": "out"}},
         "defaultTemplate": {"added": {"template": "CALL added({{param after.id}},{{param after}})"}},
@@ -85,7 +85,9 @@ fn factory_is_an_external_consumer_with_flat_published_configuration() -> Result
         "routes",
         "defaultTemplate",
         "user",
-        "hostname",
+        "host",
+        "sslMode",
+        "onPermanentFailure",
         "tlsCaPem",
         "deliveryGuarantee",
     ] {
@@ -105,7 +107,8 @@ fn configuration_round_trips_with_published_defaults() -> Result<()> {
     let metadata = factory.metadata();
     let details = factory.configuration_details().context("details")?;
     let mut full = settings();
-    full["ssl"] = json!(true);
+    full["sslMode"] = json!("require");
+    full["onPermanentFailure"] = json!("skip");
     full["tlsCaPem"] = json!("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n");
     full["progressTable"] = json!("custom_progress");
     full["maxStreams"] = json!(8);
@@ -144,10 +147,13 @@ fn construction_rejects_unsafe_templates_and_invalid_settings() {
             json!({"bad id": {"component": OUTPUT_COMPONENT_ID}}),
         ),
         ("port", json!(0)),
-        ("connectRetryAttempts", json!(33)),
+        ("connectRetryAttempts", json!(3)),
+        ("reconnectBudgetMs", json!(1000)),
+        ("hostname", json!("localhost")),
+        ("sslMode", json!("disable")),
         ("commandTimeoutMs", json!(0)),
         ("shutdownTimeoutMs", json!(0)),
-        ("tlsCaPem", json!("CA-without-TLS")),
+        ("tlsCaPem", json!("")),
         ("progressTable", json!("drasi`; DROP TABLE x; --")),
         ("maxStreams", json!(0)),
         (
@@ -189,9 +195,9 @@ fn construction_rejects_unsafe_templates_and_invalid_settings() {
 
 #[test]
 fn owner_is_derived_from_graph_and_component() -> Result<()> {
-    let expected = owner_id("graph", SINK_ID);
+    let expected = owner("graph", SINK_ID);
     assert_eq!(expected.len(), 64);
-    assert_ne!(expected, owner_id("other-graph", SINK_ID));
+    assert_ne!(expected, owner("other-graph", SINK_ID));
     let sink = MySqlStoredProcSink::new(
         ComponentId::try_new(SINK_ID)?,
         MySqlStoredProcConfig::parse(settings())?,
@@ -237,17 +243,16 @@ fn assess_classifies_every_field() -> Result<()> {
         (with("commandTimeoutMs", json!(1000)), Some(Pause)),
         (with("connectTimeoutMs", json!(1000)), Some(Pause)),
         (with("shutdownTimeoutMs", json!(1000)), Some(Pause)),
-        (with("connectRetryAttempts", json!(1)), Some(Pause)),
-        (with("reconnectBudgetMs", json!(1000)), Some(Pause)),
-        (with("hostname", json!("db.example")), Some(Stop)),
-        (with("port", json!(3307)), Some(Stop)),
-        (with("database", json!("other")), Some(Stop)),
+        (with("host", json!("db.example")), None),
+        (with("port", json!(3307)), None),
+        (with("database", json!("other")), None),
         (with("user", json!("other")), Some(Stop)),
         (with("password", json!("rotated")), Some(Stop)),
-        (with("ssl", json!(true)), Some(Stop)),
+        (with("allowRemotePlaintext", json!(true)), Some(Stop)),
+        (with("onPermanentFailure", json!("skip")), Some(Replace)),
         (
             {
-                let mut proposed = with("ssl", json!(true));
+                let mut proposed = with("sslMode", json!("require"));
                 proposed["tlsCaPem"] =
                     json!("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n");
                 proposed

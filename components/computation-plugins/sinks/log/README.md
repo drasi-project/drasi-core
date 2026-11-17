@@ -1,10 +1,11 @@
 # Native log sink
 
 `drasi-computation-sink-log` provides `drasi.standard/log` (implementation `1`,
-configuration version `1`, native ABI 4.0). It writes each standard graph
+configuration version `1`, native ABI 5.0). It writes each standard graph
 change as one line, rendered by a per-output Handlebars template or formatted
-as JSON or the legacy compact form, to the process `log` facade, stdout or
-stderr. Each input completes (`Handled`) after its lines are emitted.
+as JSON or the legacy compact form, to the host's logger (also when loaded as a
+plugin library, through the SDK's logging bridge), stdout or stderr. Each input
+completes (`Handled`) after its lines are emitted.
 
 ```sh
 cargo build -p drasi-computation-sink-log --features dynamic-plugin

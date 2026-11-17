@@ -20,6 +20,13 @@
 //!   this worker, so nothing is lost or replayed; after a restart the source
 //!   resumes at the members' committed minimum instead. Typed permanent
 //!   failures never reconnect.
+//! - **Progress records:** a start that finds a member without a cursor
+//!   first emits a progress-only record at the group's origin and holds
+//!   every change until each member has committed a cursor, so the origin is
+//!   durable before anything is published. While the selected tables are
+//!   idle, an empty page's boundary is emitted as a progress record at most
+//!   once per `idle_progress` interval, so committed cursors follow CDC
+//!   retention instead of stranding at the last change.
 
 use crate::progress::Membership;
 use anyhow::{Context, Result};
@@ -55,12 +62,22 @@ pub(crate) enum Shutdown {
     Abort,
 }
 
+/// Least time between two idle progress records.
+pub(crate) const IDLE_PROGRESS: Duration = Duration::from_secs(30);
+
 /// State shared by the component, its worker and its schema reader.
 pub(crate) struct Shared {
     /// The live settings; in-place updates change the polling fields.
     pub settings: RwLock<NativeSettings>,
     /// The last logical sequence allocated, across activations.
     pub sequence: AtomicU64,
+}
+
+/// One queued emission.
+pub(crate) enum Output {
+    Change(Change),
+    /// A progress-only record at a position that holds no further change.
+    Progress(Cursor),
 }
 
 impl Shared {
@@ -91,7 +108,14 @@ pub(crate) struct Worker {
     /// The read cursor: everything at or before it is queued or emitted.
     /// `None` reads from each capture instance's retained minimum.
     pub cursor: Option<Cursor>,
-    pub queue: VecDeque<Change>,
+    pub queue: VecDeque<Output>,
+    /// Holds polling until every member has committed a cursor (after an
+    /// origin record).
+    pub holding: bool,
+    /// The last position emitted, change or progress record.
+    pub emitted: Option<Cursor>,
+    pub last_emission: tokio::time::Instant,
+    pub idle_progress: Duration,
     pub pause: PauseGate,
     pub shutdown: watch::Receiver<Shutdown>,
     pub port: PortId,
@@ -129,8 +153,8 @@ impl Worker {
                     _ = self.pause.requested.changed() => {}
                     permit = sender.reserve() => {
                         let permit = permit.context("SQL Server output closed")?;
-                        let change = self.queue.pop_front().context("queued SQL Server change")?;
-                        permit.send(self.encode(change)?);
+                        let output = self.queue.pop_front().context("queued SQL Server change")?;
+                        permit.send(self.encode(output)?);
                     }
                 }
                 continue;
@@ -149,14 +173,28 @@ impl Worker {
                 continue;
             }
             waiting_for_members = false;
+            if self.holding {
+                if observation.missing > 0 {
+                    self.idle(settings.poll_interval()).await;
+                    continue;
+                }
+                self.holding = false;
+                log::info!("SQL Server consumers committed the origin; streaming changes");
+            }
             match self.poll(&settings).await {
                 Ok(page) => {
-                    self.cursor = Some(page.boundary);
                     if page.changes.is_empty() {
-                        self.idle(settings.poll_interval()).await;
+                        if self.idle_progress_due(&page.boundary)? {
+                            self.queue
+                                .push_back(Output::Progress(page.boundary.clone()));
+                        } else {
+                            self.idle(settings.poll_interval()).await;
+                        }
                     } else {
-                        self.queue.extend(page.changes);
+                        self.queue
+                            .extend(page.changes.into_iter().map(Output::Change));
                     }
+                    self.cursor = Some(page.boundary);
                 }
                 Err(error) if is_transient(&error) => self.reconnect(error).await?,
                 Err(error) => return Err(error),
@@ -263,15 +301,60 @@ impl Worker {
         }
     }
 
-    fn encode(&self, change: Change) -> Result<OutputEnvelope> {
+    /// Whether an empty page's `boundary` should be committed: it is past
+    /// the last emitted position and the selected tables have been quiet for
+    /// at least `idle_progress`.
+    fn idle_progress_due(&self, boundary: &Cursor) -> Result<bool> {
+        if self.last_emission.elapsed() < self.idle_progress {
+            return Ok(false);
+        }
+        Ok(match &self.emitted {
+            Some(emitted) => boundary.compare(emitted)? == std::cmp::Ordering::Greater,
+            None => true,
+        })
+    }
+
+    fn encode(&mut self, output: Output) -> Result<OutputEnvelope> {
         let sequence = self
             .shared
             .sequence
             .fetch_add(1, Ordering::AcqRel)
             .checked_add(1)
             .context("SQL Server sequence exhausted")?;
-        envelope(&self.source, &self.stream, &self.port, sequence, change)
+        self.last_emission = tokio::time::Instant::now();
+        match output {
+            Output::Change(change) => {
+                self.emitted = Some(change.position.clone());
+                envelope(&self.source, &self.stream, &self.port, sequence, change)
+            }
+            Output::Progress(cursor) => {
+                let envelope =
+                    progress_envelope(&self.source, &self.stream, &self.port, sequence, &cursor)?;
+                self.emitted = Some(cursor);
+                Ok(envelope)
+            }
+        }
     }
+}
+
+/// Encodes a progress-only record at `cursor`.
+pub(crate) fn progress_envelope(
+    source: &ComponentId,
+    stream: &StreamId,
+    port: &PortId,
+    sequence: u64,
+    cursor: &Cursor,
+) -> Result<OutputEnvelope> {
+    Ok(OutputEnvelope {
+        port: port.clone(),
+        envelope: GraphChangeCodec::encode_source_progress(
+            source,
+            stream.clone(),
+            sequence,
+            cursor.encode()?.into(),
+            chrono::Utc::now(),
+        )?,
+    })
 }
 
 /// Encodes one change with its CDC position and, for updates and deletes,

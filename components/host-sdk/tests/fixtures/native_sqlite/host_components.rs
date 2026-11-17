@@ -708,22 +708,30 @@ async fn transaction_graph(
         specification
             .dependencies
             .insert("consumer_progress".into(), vec![resource.clone()]);
-        Some(ResourceHandle::new(
-            ResourceRole::Checkpoint,
-            Arc::new(ConsumerProgressSet::new(
-                ComponentBatch::GRAPH_ID,
-                id("source"),
-                owners.clone(),
-            )?),
-        ))
+        // The journal factories require durable progress: the queries'
+        // persistent indexes.
+        Some(
+            ResourceHandle::new(
+                ResourceRole::Checkpoint,
+                Arc::new(ConsumerProgressSet::new(
+                    ComponentBatch::GRAPH_ID,
+                    id("source"),
+                    owners.clone(),
+                )?),
+            )
+            .with_capabilities(ResourceCapabilities::DURABLE),
+        )
     } else if mode == TransactionMode::Replay {
         specification
             .dependencies
             .insert("source_progress".into(), vec![resource.clone()]);
-        Some(ResourceHandle::new(
-            ResourceRole::Checkpoint,
-            Arc::new(QuerySourceProgressResource(owners[0].clone())),
-        ))
+        Some(
+            ResourceHandle::new(
+                ResourceRole::Checkpoint,
+                Arc::new(QuerySourceProgressResource(owners[0].clone())),
+            )
+            .with_capabilities(ResourceCapabilities::DURABLE),
+        )
     } else {
         None
     };

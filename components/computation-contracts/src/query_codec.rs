@@ -2398,6 +2398,51 @@ mod volatile_delivery_tests {
         assert_ne!(other.item(0).unwrap().id, item.id);
     }
 
+    fn durable(generation: u64) -> ChangeEnvelope {
+        let mut envelope = encode(
+            None,
+            "query",
+            &projector("query/dataset"),
+            &[adding("a", 1)],
+        );
+        QueryRecoveryIdentity::try_new("graph", component("query"), 7, None)
+            .unwrap()
+            .annotate(&mut envelope, &component("query"))
+            .unwrap();
+        QueryChangeCodec::set_generation(&mut envelope, &component("query"), generation).unwrap();
+        envelope
+    }
+
+    #[test]
+    fn durable_query_generations_share_one_stream_and_carry_their_generation() {
+        let codec = codec();
+        let batch =
+            |generation| DeliveryBatch::new(scope(), input(durable(generation)), &codec).unwrap();
+        let (first, reset) = (batch(1), batch(2));
+        assert_eq!(first.identity().stream(), reset.identity().stream());
+        assert_eq!(first.identity().generation(), Some(1));
+        assert_eq!(reset.identity().generation(), Some(2));
+        let item = reset.item(0).unwrap();
+        item.position.validate().unwrap();
+        assert_eq!(item.position.generation(), Some(2));
+        assert_eq!(item.batch_identity().unwrap(), *reset.identity());
+        assert_ne!(
+            first.item(0).unwrap().id,
+            item.id,
+            "operation keys stay per generation"
+        );
+        let (old, new) = (
+            Candidate::new(&durable(1), &codec).unwrap(),
+            Candidate::new(&durable(2), &codec).unwrap(),
+        );
+        assert!(new.producer.supersedes(&old.producer));
+        assert!(!old.producer.supersedes(&new.producer));
+        assert!(!new.producer.supersedes(&new.producer));
+        let volatile = Candidate::new_volatile(&volatile(1, 3), &codec).unwrap();
+        assert!(!volatile.producer.supersedes(&old.producer));
+        assert_eq!(volatile.generation(), None);
+    }
+
     #[test]
     fn exactly_once_consumers_refuse_volatile_output_permanently() {
         let error = DeliveryBatch::new_with_guarantee(

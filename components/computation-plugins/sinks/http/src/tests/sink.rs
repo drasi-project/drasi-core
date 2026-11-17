@@ -172,7 +172,7 @@ fn configuration_round_trips() -> Result<()> {
         json!({"url": url}),
         json!({"url": url, "token": "secret-token", "secretHeaders": {"x-api-key": "k"},
             "headers": {"x-tenant": "t"}, "successStatusCodes": [200, 202],
-            "retryBudgetMs": 1000, "maxRetries": 0, "failurePolicy": "skip"}),
+            "retryBudgetMs": 1000, "maxRetries": 0, "onPermanentFailure": "skip"}),
         json!({"baseUrl": "http://127.0.0.1:9", "batchEndpoint": "/batch",
             "adaptive": {"adaptiveMinBatchSize": 1, "adaptiveMaxBatchSize": 10,
                 "adaptiveWindowSize": 10, "adaptiveBatchTimeoutMs": 50}}),
@@ -202,7 +202,7 @@ fn assessment_matrix() -> Result<()> {
             (case(json!({"token": "t"})), Some(UpdateBoundary::Pause)),
             (case(json!({"maxRetries": 0})), Some(UpdateBoundary::Pause)),
             (case(json!({"retryBudgetMs": 10})), Some(UpdateBoundary::Pause)),
-            (case(json!({"failurePolicy": "skip"})), Some(UpdateBoundary::Pause)),
+            (case(json!({"onPermanentFailure": "skip"})), Some(UpdateBoundary::Replace)),
             (case(json!({"successStatusCodes": [202]})), Some(UpdateBoundary::Pause)),
             (case(json!({"maxRequestBytes": 10})), Some(UpdateBoundary::Pause)),
             (
@@ -396,9 +396,16 @@ async fn retry_after_beyond_the_budget_stops_retrying() -> Result<()> {
     ))
     .await?;
     let started_at = Instant::now();
-    assert!(sink.handle(input(1)?).await.is_err());
+    let error = sink.handle(input(1)?).await.unwrap_err();
     assert!(started_at.elapsed() < Duration::from_secs(2));
     assert_eq!(server.state.requests().len(), 1);
+    // The graph retries the input in place no sooner than the receiver asked.
+    assert_eq!(
+        drasi_computation_contracts::delivery_failure_class(&error)
+            .and_then(|class| class.retry_after()),
+        Some(Duration::from_secs(30)),
+        "{error:#}"
+    );
     Ok(())
 }
 
@@ -409,11 +416,13 @@ async fn permanent_rejections_are_not_retried() -> Result<()> {
     let mut sink = started(with(base(&server), json!({"maxRetries": 3}))).await?;
     let error = sink.handle(input(1)?).await.err().context("400 fails")?;
     let status = error
-        .downcast_ref::<crate::StatusError>()
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<crate::StatusError>())
         .context("typed status error")?;
     assert_eq!(status.status.as_u16(), 400);
     assert!(!status.retryable);
     assert_eq!(status.body, "bad\\nrequest", "the body is sanitized");
+    assert!(permanent(&error), "{error:#}");
     assert_eq!(server.state.requests().len(), 1);
     Ok(())
 }
@@ -509,7 +518,7 @@ async fn templates_render_url_method_headers_and_body() -> Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn render_failures_follow_the_failure_policy() -> Result<()> {
+async fn render_failures_follow_on_permanent_failure() -> Result<()> {
     let server = Server::start().await?;
     // The delete renders a URL off the configured origin.
     let templates = json!({"defaultTemplate": {
@@ -517,18 +526,32 @@ async fn render_failures_follow_the_failure_policy() -> Result<()> {
         "deleted": {"url": "{{#if before}}/ok{{else}}http://elsewhere.example/{{identity.id}}{{/if}}"}
     }});
     let changes = [insert("r1", "one"), delete("r1")];
-    let mut strict =
+    let mut stall =
         started(json!({"baseUrl": server.url(""), "outputTemplates": templates})).await?;
-    assert!(strict.handle(envelope(1, &changes)?).await.is_err());
+    let error = stall.handle(envelope(1, &changes)?).await.unwrap_err();
+    assert!(permanent(&error), "{error:#}");
     assert_eq!(server.state.requests().len(), 1, "the add was delivered");
+    // Under skip the input's other changes are still delivered and the input
+    // completes as permanently failed, so the graph counts it as skipped.
+    let changes = [delete("r1"), insert("r2", "two")];
     let mut skip = started(
         json!({"baseUrl": server.url(""), "outputTemplates": templates,
-        "failurePolicy": "skip"}),
+        "onPermanentFailure": "skip"}),
     )
     .await?;
-    skip.handle(envelope(2, &changes)?).await?;
-    assert_eq!(server.state.requests().len(), 2, "the delete was skipped");
+    let error = skip.handle(envelope(2, &changes)?).await.unwrap_err();
+    assert!(permanent(&error), "{error:#}");
+    assert_eq!(
+        server.state.requests().len(),
+        2,
+        "the delete was skipped and the later add delivered"
+    );
     Ok(())
+}
+
+fn permanent(error: &anyhow::Error) -> bool {
+    drasi_computation_contracts::delivery_failure_class(error)
+        .is_some_and(|class| class.is_permanent())
 }
 
 fn batch_config(server: &Server, extra: Value) -> Value {
@@ -540,7 +563,7 @@ fn batch_config(server: &Server, extra: Value) -> Value {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn batch_template_failures_follow_the_failure_policy() -> Result<()> {
+async fn batch_template_failures_follow_on_permanent_failure() -> Result<()> {
     let server = Server::start().await?;
     let templates = json!({"defaultTemplate": {
         "added": {"template": "{\"id\":{{json identity.id}}}"},
@@ -558,10 +581,14 @@ async fn batch_template_failures_follow_the_failure_policy() -> Result<()> {
     assert!(server.state.requests().is_empty());
     let mut skip = started(batch_config(
         &server,
-        json!({"outputTemplates": templates, "failurePolicy": "skip"}),
+        json!({"outputTemplates": templates, "onPermanentFailure": "skip"}),
     ))
     .await?;
-    skip.handle_batch(vec![envelope(2, &changes)?]).await?;
+    let error = skip
+        .handle_batch(vec![envelope(2, &changes)?])
+        .await
+        .unwrap_err();
+    assert!(permanent(&error), "{error:#}");
     let requests = server.state.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].path, "/batch");

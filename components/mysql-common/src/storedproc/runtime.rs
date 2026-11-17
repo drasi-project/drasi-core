@@ -5,44 +5,43 @@
 //!
 //! The sink is a host `DeliveryRunner` consumer (`ConsumerMode::External`).
 //! Each operation of an input runs in its own MySQL transaction that commits
-//! the procedure effect together with the operation's destination cursor row
-//! (see [`super::delivery`]). One activation-owned session carries every
-//! operation; a session that may still run an unfinished command is retired
-//! with the session KILL proof before any replacement runs.
+//! the procedure effect together with the operation's destination cursor row,
+//! through the protocol shared by every stored-procedure sink
+//! (`drasi_computation_storedproc_common::driver`) over a [`MySqlSession`].
+//! One activation-owned session carries every operation; a session that may
+//! still run an unfinished command is retired with the session KILL proof
+//! before any replacement runs.
 
 use super::{
     config::MySqlStoredProcConfig,
-    delivery::{self, Effect, Failure, MySqlDeliveryError, Operation, ProgressTable},
+    delivery::{
+        self, CleanupPending, Effect, MySqlConnector, MySqlSession, ProgressTable, Timeouts,
+    },
     render::Commands,
-    session::{self, ConnectPolicy, Endpoint, Sessions},
+    session::{self, Endpoint},
 };
 use crate::storedproc;
 use anyhow::{Context, Result};
 use drasi_computation_contracts::{
     lifecycle::{CancellationToken, StopMode},
-    ChangeRoute, ComponentDescriptor, ComponentId, DeliveryBatch, DeliveryGuarantee, DeliveryItem,
+    ComponentDescriptor, ComponentId, DeliveryBatch, DeliveryGuarantee, DeliveryItem,
     DeliveryScope, EnvelopeCodec, GraphChangeBatch, GraphChangeCodec, InputBinding, InputEnvelope,
     PipeRequirements, PortDescriptor, PortDirection, PortId, SinkOutputs,
 };
-use drasi_reaction_common::OperationType;
+use drasi_computation_storedproc_common::{
+    driver::{Delivery, Session},
+    OperationContext, Position,
+};
 use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 use tokio::time::Instant;
 
 /// Bound used when the sink itself splits a whole input (direct use only).
 const MAX_MESSAGE_BYTES: usize = 64 << 20;
 
-/// Stop or Dispose could not prove an owned session gone before its
-/// deadline; the owner keeps it and the hook may be retried.
-#[derive(Debug)]
-pub struct CleanupPending(pub anyhow::Error);
-
-impl std::fmt::Display for CleanupPending {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "MySQL session cleanup is pending: {:#}", self.0)
-    }
-}
-
-impl std::error::Error for CleanupPending {}
+/// A template that failed to render for this change (permanent).
+#[derive(Debug, thiserror::Error)]
+#[error("MySQL command template failed to render: {0:#}")]
+pub struct RenderError(pub anyhow::Error);
 
 /// Native MySQL stored-procedure consumer runtime.
 pub struct MySqlStoredProcSink {
@@ -57,10 +56,11 @@ pub struct MySqlStoredProcSink {
     /// The last activation's account, kept in memory (never serialized) so
     /// cleanup and `Erase` can reach the destination after Stop.
     endpoint: Option<Endpoint>,
-    sessions: Sessions,
+    /// The activation's delivery engine. Kept after Stop while a retired
+    /// session's KILL is not yet proven, so cleanup can finish later.
+    delivery: Option<Delivery<MySqlConnector>>,
     started: bool,
     paused: bool,
-    table_ready: bool,
 }
 
 impl MySqlStoredProcSink {
@@ -90,11 +90,11 @@ impl MySqlStoredProcSink {
         let outputs = SinkOutputs::from_inputs(inputs, &config.outputs)?;
         config.validate_outputs(&outputs)?;
         let commands = Commands::compile(&config)?;
-        let owner = delivery::owner_id(scope.graph(), id.as_str());
+        let owner = drasi_computation_storedproc_common::owner(scope.graph(), id.as_str());
         let table = config.progress()?;
         log::debug!(
             "MySQL stored-procedure sink {id} owns cursor rows with owner {owner} in {}",
-            table.quoted()
+            delivery::quoted(&table, &config.database)
         );
         Ok(Self {
             descriptor: Self::describe(id)?,
@@ -106,10 +106,9 @@ impl MySqlStoredProcSink {
             commands,
             activation_credentials_bound,
             endpoint: None,
-            sessions: Sessions::default(),
+            delivery: None,
             started: false,
             paused: false,
-            table_ready: false,
         })
     }
 
@@ -151,12 +150,12 @@ impl MySqlStoredProcSink {
         self.paused
     }
 
-    fn policy(&self) -> ConnectPolicy {
-        ConnectPolicy::from_config(&self.config)
-    }
-
-    fn command_timeout(&self) -> Duration {
-        Duration::from_millis(self.config.command_timeout_ms)
+    fn timeouts(config: &MySqlStoredProcConfig) -> Timeouts {
+        Timeouts {
+            connect: Duration::from_millis(config.connect_timeout_ms),
+            command: Duration::from_millis(config.command_timeout_ms),
+            shutdown: Duration::from_millis(config.shutdown_timeout_ms),
+        }
     }
 
     fn shutdown_timeout(&self) -> Duration {
@@ -169,9 +168,33 @@ impl MySqlStoredProcSink {
         })
     }
 
-    /// Opens the activation session and creates/verifies the cursor table,
-    /// within the start deadline and cancellation. Nothing stays open when it
-    /// fails or is cancelled.
+    fn delivery(&self, endpoint: Endpoint) -> Result<Delivery<MySqlConnector>> {
+        Ok(Delivery::new(
+            MySqlConnector::new(
+                endpoint,
+                self.owner.clone(),
+                self.config.database.clone(),
+                self.table.clone(),
+                Self::timeouts(&self.config),
+            )?,
+            self.config.max_streams,
+            self.config.on_permanent_failure,
+        ))
+    }
+
+    /// Proves sessions retired by an earlier activation gone.
+    async fn finish_cleanup(&mut self, budget: Duration) -> Result<()> {
+        if let Some(delivery) = self.delivery.as_mut() {
+            if delivery.connector().cleanup_pending() {
+                delivery.connector_mut().retire(budget).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Opens the activation session and creates/verifies the cursor tables:
+    /// one attempt within `connectTimeoutMs`, the start deadline and
+    /// cancellation. Nothing stays open when it fails or is cancelled.
     pub async fn start(
         &mut self,
         credentials: Option<(String, String)>,
@@ -179,17 +202,10 @@ impl MySqlStoredProcSink {
         deadline: Option<Instant>,
     ) -> Result<()> {
         anyhow::ensure!(!self.started, "MySQL sink is already started");
-        if self.sessions.cleanup_pending() {
-            let endpoint = self
-                .endpoint
-                .clone()
-                .context("MySQL sink has pending cleanup without an endpoint")?;
-            let budget = self.cleanup_budget(deadline);
-            self.sessions
-                .retire(&endpoint, budget)
-                .await
-                .context("MySQL sink requires completed cleanup before restart")?;
-        }
+        let budget = self.cleanup_budget(deadline);
+        self.finish_cleanup(budget)
+            .await
+            .context("MySQL sink requires completed cleanup before restart")?;
         let endpoint = match (self.activation_credentials_bound, credentials) {
             (true, Some((user, password))) => Endpoint::new(&self.config, user, password)?,
             (true, None) => anyhow::bail!("MySQL sink requires its bound activation credentials"),
@@ -200,36 +216,22 @@ impl MySqlStoredProcSink {
                 self.config.password.clone(),
             )?,
         };
-        let opened = async {
-            let mut live =
-                session::connect(&endpoint, self.policy(), Some(cancellation), deadline).await?;
-            let ensured =
-                delivery::ensure_table(&mut live.connection, &self.table, self.command_timeout());
-            let ensured = match deadline {
-                Some(deadline) => tokio::time::timeout_at(deadline, ensured)
+        let mut delivery = self.delivery(endpoint.clone())?;
+        let prepared = async {
+            match deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, delivery.prepare())
                     .await
-                    .context("MySQL sink start deadline expired")
-                    .and_then(|result| result),
-                None => ensured.await,
-            };
-            match ensured {
-                Ok(()) => Ok(live),
-                Err(error) => {
-                    let _ =
-                        tokio::time::timeout(Duration::from_secs(1), live.connection.close()).await;
-                    Err(error)
-                }
+                    .context("MySQL sink start deadline expired")?,
+                None => delivery.prepare().await,
             }
         };
-        let mut live = tokio::select! {
+        tokio::select! {
             biased;
             _ = cancellation.cancelled() => anyhow::bail!("MySQL sink start was cancelled"),
-            result = opened => result?,
-        };
-        live.idle = true;
-        self.sessions.live = Some(live);
+            result = prepared => result?,
+        }
+        self.delivery = Some(delivery);
         self.endpoint = Some(endpoint);
-        self.table_ready = true;
         self.started = true;
         self.paused = false;
         Ok(())
@@ -252,31 +254,35 @@ impl MySqlStoredProcSink {
     pub async fn stop(&mut self, mode: StopMode, deadline: Option<Instant>) -> Result<()> {
         self.started = false;
         self.paused = false;
-        if self.sessions.live.as_ref().is_some_and(|live| live.busy) {
-            log::debug!("MySQL sink stop ({mode:?}) retires a session left mid-command");
-            self.sessions.retire_live();
-        }
         let budget = self.cleanup_budget(deadline);
-        if self.sessions.cleanup_pending() {
-            let endpoint = self
-                .endpoint
-                .clone()
-                .context("MySQL sink has pending cleanup without an endpoint")?;
-            self.sessions
-                .retire(&endpoint, budget)
-                .await
-                .map_err(|error| anyhow::Error::new(CleanupPending(error)))?;
+        let Some(delivery) = self.delivery.as_mut() else {
+            return Ok(());
+        };
+        if delivery.abandoned() {
+            log::debug!("MySQL sink stop ({mode:?}) retires a session left mid-command");
         }
-        self.sessions
-            .close_idle(budget.min(Duration::from_secs(5)))
-            .await;
+        if let Err(error) = delivery.close(budget.min(Duration::from_secs(5))).await {
+            log::debug!("MySQL session close reported: {error:#}");
+        }
+        if delivery.connector().cleanup_pending() {
+            delivery.connector_mut().retire(budget).await?;
+        }
+        self.delivery = None;
         Ok(())
     }
 
-    /// Final disposal. With `erase`, deletes this owner's cursor rows
-    /// (idempotent; an absent table has nothing to erase) before closing.
+    /// Final disposal. With `erase`, deletes this owner's cursor and
+    /// dead-letter rows (idempotent; absent tables have nothing to erase)
+    /// before closing.
     pub async fn dispose(&mut self, erase: bool, deadline: Option<Instant>) -> Result<()> {
         let budget = self.cleanup_budget(deadline);
+        self.finish_cleanup(budget).await?;
+        if let Some(mut delivery) = self.delivery.take() {
+            let _ = delivery.close(budget.min(Duration::from_secs(5))).await;
+            if delivery.connector().cleanup_pending() {
+                delivery.connector_mut().retire(budget).await?;
+            }
+        }
         if erase {
             let endpoint = match &self.endpoint {
                 Some(endpoint) => endpoint.clone(),
@@ -291,53 +297,20 @@ impl MySqlStoredProcSink {
                     self.owner
                 ),
             };
-            if self.sessions.live.as_ref().is_some_and(|live| live.busy) {
-                self.sessions.retire_live();
-            }
-            self.sessions
-                .retire(&endpoint, budget)
+            let mut delivery = self.delivery(endpoint)?;
+            let erased = tokio::time::timeout(budget, delivery.erase())
                 .await
-                .map_err(|error| anyhow::Error::new(CleanupPending(error)))?;
-            let mut live = match self.sessions.live.take() {
-                Some(live) => live,
-                None => {
-                    session::connect(
-                        &endpoint,
-                        self.policy(),
-                        None,
-                        Some(Instant::now() + budget),
-                    )
-                    .await?
-                }
-            };
-            let erased = delivery::erase(
-                &mut live.connection,
-                &self.table,
-                &self.owner,
-                self.command_timeout(),
-            )
-            .await;
-            let _ = tokio::time::timeout(Duration::from_secs(5), live.connection.close()).await;
+                .context("erasing this component's delivery cursor rows timed out")
+                .and_then(|result| result);
+            let _ = delivery.close(Duration::from_secs(5)).await;
             erased.context("erasing this component's delivery cursor rows")?;
         }
-        if self.sessions.live.as_ref().is_some_and(|live| live.busy) {
-            self.sessions.retire_live();
-        }
-        if let Some(endpoint) = self.endpoint.clone() {
-            self.sessions
-                .retire(&endpoint, budget)
-                .await
-                .map_err(|error| anyhow::Error::new(CleanupPending(error)))?;
-        }
-        self.sessions
-            .close_idle(budget.min(Duration::from_secs(5)))
-            .await;
         self.started = false;
         Ok(())
     }
 
     /// Replaces the configuration at a host-established boundary. Templates,
-    /// routes, timeouts and retry settings apply to the next operation;
+    /// routes, timeouts and `maxStreams` apply to the next operation;
     /// connection settings apply at the next Start.
     pub fn reconfigure(&mut self, config: MySqlStoredProcConfig) -> Result<()> {
         config.validate_with_activation_credentials(self.activation_credentials_bound)?;
@@ -347,13 +320,14 @@ impl MySqlStoredProcSink {
         );
         config.validate_outputs(&self.outputs)?;
         self.commands = Commands::compile(&config)?;
+        if let Some(delivery) = self.delivery.as_mut() {
+            delivery.set_max_streams(config.max_streams);
+            delivery
+                .connector_mut()
+                .set_timeouts(Self::timeouts(&config));
+        }
         self.config = Arc::new(config);
         Ok(())
-    }
-
-    /// Host retry classification for a failed operation.
-    pub fn retryable(&self, error: &anyhow::Error) -> bool {
-        delivery::retryable(error)
     }
 
     /// The configured guarantee; only `AtLeastOnce` accepts in-memory queries.
@@ -363,29 +337,26 @@ impl MySqlStoredProcSink {
 
     /// The rendered command for one operation; `None` when no template is
     /// configured or a condition excluded the command.
-    fn effect(&self, item: &DeliveryItem<'_>) -> Result<Option<Effect>> {
-        let output = self.outputs.output_for(item.envelope.system().stream())?;
-        let notification =
-            GraphChangeBatch::operation_notification(item.envelope, item.operation, output)?;
-        let operation = match notification.change().route() {
-            ChangeRoute::Added => OperationType::Add,
-            ChangeRoute::Updated => OperationType::Update,
-            ChangeRoute::Deleted => OperationType::Delete,
-        };
-        let Some(template) = self.config.template(output.alias, operation) else {
+    fn effect(
+        config: &MySqlStoredProcConfig,
+        outputs: &SinkOutputs,
+        commands: &Commands,
+        item: &DeliveryItem<'_>,
+    ) -> Result<Option<Effect>> {
+        let input = OperationContext::new(item, outputs)?;
+        let Some(template) = config.template(&input.alias, input.operation) else {
             log::debug!(
-                "MySQL sink: no {operation:?} command configured for output {}",
-                output.alias
+                "MySQL sink: no {:?} command configured for output {}",
+                input.operation,
+                input.alias
             );
             return Ok(None);
         };
-        let rendered = notification
-            .to_json()
-            .map_err(anyhow::Error::from)
-            .and_then(|context| self.commands.render(template, &context))
-            .map_err(|error| anyhow::Error::new(MySqlDeliveryError::Render(error)))?;
+        let rendered = commands
+            .render(template, &input.context)
+            .map_err(|error| anyhow::Error::new(RenderError(error)))?;
         if rendered.sql.is_empty() {
-            log::debug!("MySQL command condition excluded output {}", output.alias);
+            log::debug!("MySQL command condition excluded output {}", input.alias);
             return Ok(None);
         }
         Ok(Some(Effect {
@@ -398,54 +369,10 @@ impl MySqlStoredProcSink {
         }))
     }
 
-    async fn retire(&mut self) -> Result<()> {
-        self.sessions.retire_live();
-        let endpoint = self
-            .endpoint
-            .clone()
-            .context("MySQL sink has no active endpoint")?;
-        let budget = self.shutdown_timeout();
-        self.sessions.retire(&endpoint, budget).await
-    }
-
-    /// Retires the live session after a session-level failure and types the
-    /// failure for the host: retryable only once the session is proven gone.
-    async fn session_failure(
-        &mut self,
-        error: anyhow::Error,
-        wrap: fn(anyhow::Error) -> MySqlDeliveryError,
-    ) -> anyhow::Error {
-        match self.retire().await {
-            Ok(()) => anyhow::Error::new(wrap(error)),
-            Err(cleanup) => anyhow::Error::new(MySqlDeliveryError::CleanupPending(cleanup))
-                .context(format!("{error:#}")),
-        }
-    }
-
-    async fn release(&mut self, admission: Option<String>) {
-        let Some(name) = admission else { return };
-        let timeout = self.command_timeout();
-        let released = match self.sessions.live.as_mut() {
-            Some(live) => {
-                delivery::bounded(
-                    timeout,
-                    live.connection
-                        .execute(&format!("DO RELEASE_LOCK('{name}')")),
-                )
-                .await
-            }
-            None => return,
-        };
-        if let Err(error) = released {
-            log::warn!("MySQL admission lock release failed; retiring the session: {error:#}");
-            if let Err(error) = self.retire().await {
-                log::warn!("MySQL session cleanup is pending: {error:#}");
-            }
-        }
-    }
-
-    /// Delivers one operation exactly once when the procedure does not end
-    /// the transaction itself.
+    /// Delivers one operation in one transaction with its cursor row: one
+    /// attempt, classified for the graph, which retries transient failures
+    /// (deadlocks, lock waits, lost sessions); under `onPermanentFailure:
+    /// skip` a content failure is settled as skipped.
     pub async fn handle(&mut self, item: DeliveryItem<'_>) -> Result<()> {
         anyhow::ensure!(self.started, "MySQL sink is not running");
         anyhow::ensure!(item.port.as_str() == "in", "unknown MySQL sink input port");
@@ -460,125 +387,17 @@ impl MySqlStoredProcSink {
                 .into(),
             );
         }
-        let effect = self.effect(&item)?;
-        if self.sessions.live.as_ref().is_some_and(|live| live.busy) {
-            self.sessions.retire_live();
-        }
-        if self.sessions.cleanup_pending() {
-            let endpoint = self
-                .endpoint
-                .clone()
-                .context("MySQL sink has no active endpoint")?;
-            let budget = self.shutdown_timeout();
-            self.sessions
-                .retire(&endpoint, budget)
-                .await
-                .map_err(|error| anyhow::Error::new(MySqlDeliveryError::CleanupPending(error)))?;
-        }
-        for attempt in 0..2 {
-            if self.sessions.live.is_none() {
-                let endpoint = self
-                    .endpoint
-                    .clone()
-                    .context("MySQL sink has no active endpoint")?;
-                let mut live = session::connect(&endpoint, self.policy(), None, None).await?;
-                if !self.table_ready {
-                    delivery::ensure_table(
-                        &mut live.connection,
-                        &self.table,
-                        self.command_timeout(),
-                    )
-                    .await?;
-                    self.table_ready = true;
-                }
-                self.sessions.live = Some(live);
-            }
-            let operation = Operation {
-                table: &self.table,
-                owner: &self.owner,
-                max_streams: self.config.max_streams,
-                command_timeout: Duration::from_millis(self.config.command_timeout_ms),
-            };
-            let live = self
-                .sessions
-                .live
-                .as_mut()
-                .context("MySQL session missing")?;
-            let reused = live.idle;
-            live.busy = true;
-            live.idle = false;
-            let mut admission = None;
-            let result = operation
-                .run(&mut live.connection, &item, effect.as_ref(), &mut admission)
-                .await;
-            match result {
-                Ok(_) => {
-                    live.busy = false;
-                    self.release(admission).await;
-                    if let Some(live) = self.sessions.live.as_mut() {
-                        live.idle = true;
-                    }
-                    return Ok(());
-                }
-                Err(Failure::NotStarted(error)) if delivery::breaks_session(&error) => {
-                    let lost = self
-                        .session_failure(error, MySqlDeliveryError::ConnectionLost)
-                        .await;
-                    if reused && attempt == 0 && !self.sessions.cleanup_pending() {
-                        log::info!("MySQL idle session was gone; reconnecting: {lost:#}");
-                        continue;
-                    }
-                    return Err(lost);
-                }
-                Err(Failure::NotStarted(error)) => {
-                    live.busy = false;
-                    live.idle = true;
-                    return Err(error);
-                }
-                Err(Failure::InTransaction(error)) if delivery::breaks_session(&error) => {
-                    let wrap = if delivery::timed_out(&error) {
-                        MySqlDeliveryError::CommandTimeout
-                    } else {
-                        MySqlDeliveryError::ConnectionLost
-                    };
-                    return Err(self.session_failure(error, wrap).await);
-                }
-                Err(Failure::InTransaction(error)) => {
-                    let rolled_back = delivery::bounded(
-                        operation.command_timeout,
-                        live.connection.execute("ROLLBACK"),
-                    )
-                    .await;
-                    match rolled_back {
-                        Ok(()) => {
-                            live.busy = false;
-                            live.idle = true;
-                            self.release(admission).await;
-                            return Err(error);
-                        }
-                        Err(rollback) => {
-                            log::warn!("MySQL ROLLBACK failed; retiring the session: {rollback:#}");
-                            return match self.retire().await {
-                                Ok(()) => {
-                                    Err(error
-                                        .context("the session was retired after ROLLBACK failed"))
-                                }
-                                Err(cleanup) => Err(anyhow::Error::new(
-                                    MySqlDeliveryError::CleanupPending(cleanup),
-                                )
-                                .context(format!("{error:#}"))),
-                            };
-                        }
-                    }
-                }
-                Err(Failure::Commit(error)) => {
-                    return Err(self
-                        .session_failure(error, MySqlDeliveryError::CommitUnknown)
-                        .await);
-                }
-            }
-        }
-        anyhow::bail!("MySQL operation was not delivered")
+        let position = Position::from_item(&item)?;
+        let Self {
+            config,
+            outputs,
+            commands,
+            delivery,
+            ..
+        } = self;
+        let delivery = delivery.as_mut().context("MySQL sink is not running")?;
+        let mut render = || Self::effect(config, outputs, commands, &item);
+        delivery.deliver(&position, &mut render).await.map(drop)
     }
 
     /// Delivers every operation of one input in order (direct use outside a
@@ -601,11 +420,20 @@ impl MySqlStoredProcSink {
         }
         Ok(())
     }
+
+    /// Classifies a delivery error the way the protocol does.
+    pub fn classify(error: &anyhow::Error) -> drasi_computation_storedproc_common::ErrorClass {
+        MySqlSession::classify(error)
+    }
 }
 
 impl Drop for MySqlStoredProcSink {
     fn drop(&mut self) {
-        if self.sessions.abandoned() {
+        if self
+            .delivery
+            .as_ref()
+            .is_some_and(|delivery| delivery.abandoned() || delivery.connector().cleanup_pending())
+        {
             log::warn!("MySQL stored-procedure sink dropped with an unproven session cleanup");
         }
     }
@@ -636,11 +464,11 @@ mod tests {
         MySqlStoredProcSink::new(
             id.clone(),
             MySqlStoredProcConfig::parse(json!({
-                "hostname": "no-connection-at-construction", "database": "d",
+                "host": "no-connection-at-construction", "database": "d",
                 "user": "u", "password": "p",
                 "outputs": {"facilities-db": {"component": OUTPUT_COMPONENT_ID, "port": "out"}},
                 "defaultTemplate": {
-                    "added": {"template": "CALL a({{param operation}},{{param identity.id}},{{param after.name}})"},
+                    "added": {"template": "CALL a({{param operation}},{{param identity.id}},{{param after.name}},{{param deliveryId}})"},
                     "updated": {"template": "CALL u({{param operation}},{{param after.name}})"},
                     "deleted": {"template": "CALL d({{param identity.id}},{{param after.name}})"}
                 }
@@ -707,7 +535,14 @@ mod tests {
         let operations = input.envelope.changes().operations().len();
         let batch = DeliveryBatch::new(sink.scope.clone(), input, &codec)?;
         (0..operations)
-            .map(|index| Ok(sink.effect(&batch.item(index)?)))
+            .map(|index| {
+                Ok(MySqlStoredProcSink::effect(
+                    &sink.config,
+                    &sink.outputs,
+                    &sink.commands,
+                    &batch.item(index)?,
+                ))
+            })
             .collect()
     }
 
@@ -720,8 +555,8 @@ mod tests {
             .map_err(|e| anyhow::anyhow!("{e:#}"))?
             .as_ref()
             .unwrap();
-        assert_eq!(first.sql, "CALL a(?,?,?)");
-        assert_eq!(first.parameters.len(), 3);
+        assert_eq!(first.sql, "CALL a(?,?,?,?)");
+        assert_eq!(first.parameters.len(), 4);
         let second = effects[1]
             .as_ref()
             .map_err(|e| anyhow::anyhow!("{e:#}"))?
@@ -733,11 +568,7 @@ mod tests {
             .as_ref()
             .err()
             .context("expected render failure")?;
-        assert!(matches!(
-            error.downcast_ref::<MySqlDeliveryError>(),
-            Some(MySqlDeliveryError::Render(_))
-        ));
-        assert!(!sink.retryable(error));
+        assert!(error.downcast_ref::<RenderError>().is_some());
         Ok(())
     }
 
@@ -747,7 +578,10 @@ mod tests {
         assert!(effects(&sink, input("other/out")?)?
             .iter()
             .all(Result::is_err));
-        assert_eq!(sink.owner(), delivery::owner_id("graph", SINK_ID));
+        assert_eq!(
+            sink.owner(),
+            drasi_computation_storedproc_common::owner("graph", SINK_ID)
+        );
         Ok(())
     }
 

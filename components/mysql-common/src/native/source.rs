@@ -233,6 +233,8 @@ pub struct MySqlSource {
     schema: Arc<super::schema::Publication>,
     positional: bool,
     disposed: bool,
+    /// Least quiet time before a row source commits a progress record.
+    idle_progress: Duration,
 }
 
 impl MySqlSource {
@@ -460,6 +462,7 @@ impl MySqlSource {
             published_snapshot: false,
             rows,
             positional: false,
+            idle_progress: rows::IDLE_PROGRESS,
         })
     }
 
@@ -589,8 +592,11 @@ impl MySqlSource {
                         Starting::Single(snapshot) => snapshot.reset_generation,
                         _ => 0,
                     },
-                    output: VecDeque::new(),
+                    holding: prepared.origin.is_some(),
+                    output: prepared.origin.into_iter().collect(),
                     emission: None,
+                    last_emission: Instant::now(),
+                    idle_progress: self.idle_progress,
                     pause: PauseGate {
                         requested: self.pause.subscribe(),
                         acknowledged: self.paused.clone(),
@@ -646,19 +652,17 @@ impl MySqlSource {
         } else {
             None
         };
-        let anchor = if self.rows.is_some() {
-            let mut missing = 0;
-            let mut initialized = 0;
+        // A group mixing fresh and resumed members resumes at its minimum:
+        // fresh members join there. Only a group with no cursor at all needs
+        // an origin, which is committed before any row is published.
+        let fresh = self.rows.is_some() && {
+            let mut fresh = true;
             for state in starting.states() {
-                match rows::checkpoint(state, self.descriptor.id(), binding)? {
-                    Some(_) => initialized += 1,
-                    None => missing += 1,
-                }
+                fresh &= rows::checkpoint(state, self.descriptor.id(), binding)?.is_none();
             }
-            anyhow::ensure!(
-                missing == 0 || initialized == 0 || matches!(config.start, MySqlStartPosition::Position { .. }),
-                "mixed MySQL row group has uninitialized consumers; an explicit snapshot or retained initial position is required"
-            );
+            fresh
+        };
+        let anchor = if self.rows.is_some() {
             row_anchor.as_ref().map(|row| row.position.clone())
         } else {
             snapshot
@@ -697,7 +701,9 @@ impl MySqlSource {
             self.snapshot.is_some()
                 || !self.consumer_snapshots.is_empty()
                 || self.published_snapshot
-                || anchor.as_ref().is_none_or(|position| position.version == 1),
+                || anchor
+                    .as_ref()
+                    .is_none_or(|position| matches!(position.version, 1 | 3)),
             "snapshot cursor requires its paired bootstrap provider"
         );
         let confirmed = anchor
@@ -728,7 +734,9 @@ impl MySqlSource {
         let (file, offset) = match &anchor {
             Some(position) => (
                 position.file.clone(),
-                if position.version == 2 || row_anchor.as_ref().is_some_and(|row| row.completed()) {
+                if matches!(position.version, 2 | 3)
+                    || row_anchor.as_ref().is_some_and(|row| row.completed())
+                {
                     position.end
                 } else {
                     position.start
@@ -784,8 +792,27 @@ impl MySqlSource {
             self.verify_consumer_history(config, &server, &tables, &logs, group, binding)
                 .await?;
         }
+        // A fresh row group starting at the end records that end as a
+        // progress boundary, proven like a snapshot boundary.
+        let origin = if fresh && matches!(config.start, MySqlStartPosition::End) {
+            Some(Position {
+                version: 3,
+                binding,
+                file: file.clone(),
+                start: 4,
+                end: offset,
+                digest: self.boundary_digest(config, &server, &file, offset).await?,
+            })
+        } else {
+            None
+        };
+        let anchor = anchor.or_else(|| origin.clone());
+        let confirmed = match &origin {
+            Some(origin) => origin.sequence()?,
+            None => confirmed,
+        };
         let start = match (&anchor, gtid) {
-            (Some(position), _) if position.version == 2 => StartPoint::History {
+            (Some(position), _) if matches!(position.version, 2 | 3) => StartPoint::History {
                 file: file.clone(),
                 boundary: offset,
                 digest: position.digest,
@@ -820,12 +847,18 @@ impl MySqlSource {
             self.config.output == MySqlOutput::Changes,
         )
         .await?;
+        let origin = origin
+            .map(|position| {
+                rows::progress_record(position, self.descriptor.id(), &self.stream, &self.sequence)
+            })
+            .transpose()?;
         Ok(Prepared {
             decoder,
             binding,
             confirmed,
             server,
             start,
+            origin,
         })
     }
 
@@ -892,6 +925,49 @@ impl MySqlSource {
         Ok(())
     }
 
+    /// The file identity of `file` read at `boundary` through a separate,
+    /// finite history connection.
+    async fn boundary_digest(
+        &self,
+        config: &MySqlConfig,
+        server: &str,
+        file: &str,
+        boundary: u32,
+    ) -> Result<[u8; 32]> {
+        let mut connection = Connection::connect(
+            &config.connection,
+            config.max_protocol_bytes.get(),
+            config.timeout(),
+        )
+        .await?;
+        let proof = async {
+            anyhow::ensure!(
+                super::session::server_id(&mut connection).await? == server,
+                "MySQL origin history reached another server"
+            );
+            Binlog::boundary_identity(
+                &mut connection,
+                config,
+                file,
+                boundary,
+                super::binlog::HistoryMode::Verify,
+            )
+            .await
+            .map(|(_, digest)| digest)
+        }
+        .await;
+        let cleanup = connection.close().await;
+        match (proof, cleanup) {
+            (Ok(digest), Ok(())) => Ok(digest),
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+            (Err(error), Err(cleanup)) => Err(OperationFailures::new(
+                "MySQL origin history and close failed",
+                vec![error, cleanup],
+            )
+            .into()),
+        }
+    }
+
     async fn verify_consumer_history(
         &self,
         config: &MySqlConfig,
@@ -934,8 +1010,8 @@ impl MySqlSource {
                     identity.values.len() == 1 && field(&identity.values[0], 0)? == server,
                     "MySQL consumer history reached another server"
                 );
-                if position.version == 2 {
-                    let (_, digest) = Binlog::snapshot_history(
+                if matches!(position.version, 2 | 3) {
+                    let (_, digest) = Binlog::boundary_identity(
                         &mut connection,
                         config,
                         &position.file,
@@ -1010,6 +1086,8 @@ struct Prepared {
     confirmed: u64,
     server: String,
     start: StartPoint,
+    /// A fresh row group's origin record, emitted before any row.
+    origin: Option<OutputEnvelope>,
 }
 
 /// What a fresh decoder needs besides its configuration.
@@ -1091,7 +1169,7 @@ async fn open_decoder_with(
             confirmed,
         } => {
             let (format, found) =
-                Binlog::snapshot_history(connection, config, file, *boundary, HistoryMode::Live)
+                Binlog::boundary_identity(connection, config, file, *boundary, HistoryMode::Live)
                     .await
                     .map_err(errors::classify_dump_error)?;
             anyhow::ensure!(
@@ -1227,6 +1305,13 @@ impl MySqlSource {
     pub fn is_paused(&self) -> bool {
         *self.paused.borrow()
     }
+    /// Overrides the least quiet time before a row source commits a
+    /// transaction without selected rows as progress (tests).
+    #[doc(hidden)]
+    pub fn set_idle_progress(&mut self, interval: Duration) {
+        self.idle_progress = interval;
+    }
+
     /// Applies a new `reconnectBudgetMs` to the running worker's next
     /// transport failure.
     pub fn set_reconnect_budget(&mut self, millis: u64) {
@@ -1653,6 +1738,13 @@ struct Worker {
     confirmed: u64,
     /// Decoded envelopes not yet admitted by the host.
     output: VecDeque<OutputEnvelope>,
+    /// Holds rows until every member committed the origin record.
+    holding: bool,
+    /// When the worker last admitted an envelope.
+    last_emission: Instant,
+    /// Least quiet time before a transaction without selected rows is
+    /// committed as a progress record.
+    idle_progress: Duration,
     /// Rows of one decoded transaction, expanded as they are admitted.
     emission: Option<rows::Emission>,
     pause: PauseGate,
@@ -1986,6 +2078,20 @@ impl Worker {
             if !paused {
                 self.pause.acknowledged.send_replace(false);
             }
+            if self.holding && !self.has_output() {
+                if self
+                    .row_progress
+                    .as_ref()
+                    .is_some_and(rows::Updates::initialized)
+                {
+                    self.holding = false;
+                    log::info!("MySQL consumers committed the origin; streaming rows");
+                } else {
+                    // Events read meanwhile are buffered as during a pause.
+                    self.paused_wait().await?;
+                    continue;
+                }
+            }
             let has_output = self.has_output();
             if !has_output && self.buffered.is_empty() && self.connection.is_none() {
                 return Err(anyhow::Error::new(PausedClose));
@@ -2007,6 +2113,7 @@ impl Worker {
                     let permit = permit.context("MySQL output receiver closed")?;
                     if let Some(envelope) = self.take_output()? {
                         self.row_admitted = self.row_admitted.max(envelope.envelope.system().sequence());
+                        self.last_emission = Instant::now();
                         permit.send(envelope);
                     }
                 }
@@ -2084,13 +2191,21 @@ impl Worker {
                     self.emission.is_none(),
                     "MySQL row emission overlaps another transaction"
                 );
-                self.emission = Some(rows::Emission::new(
+                let emission = rows::Emission::new(
                     envelope,
                     self.source.clone(),
                     self.stream.clone(),
                     self.sequence.clone(),
                     self.limits,
-                )?);
+                )?;
+                if !emission.is_empty() {
+                    self.emission = Some(emission);
+                } else if self.last_emission.elapsed() >= self.idle_progress {
+                    // A transaction without selected rows: while the selected
+                    // tables are quiet, commit its end so cursors follow
+                    // binlog retention.
+                    self.output.push_back(emission.progress_record()?);
+                }
             } else {
                 self.output.push_back(envelope);
             }

@@ -2,7 +2,7 @@
 
 `drasi-computation-source-postgres` streams a PostgreSQL logical-replication
 publication (pgoutput, protocol 1) into a ComputationGraph. It is a native
-plugin (ABI 4.0) with four factories, each at implementation and
+plugin (ABI 5.0.0) with four factories, each at implementation and
 configuration version `1`. Connection handling, SCRAM, TLS, pgoutput
 decoding, key mapping, bounded transaction assembly, slot management and the
 source binding live in `drasi-postgres-common`, shared with the PostgreSQL
@@ -15,12 +15,26 @@ Field reference, prerequisites and runbook: [CONFIGURATION.md](CONFIGURATION.md)
 | Factory | Emits | Progress | Guarantee |
 |---|---|---|---|
 | `drasi/postgres-transactions` | One `SourceTransactionCodec` envelope per committed transaction | One atomic persistent query (`source_progress`) | Whole commits; a rejected or incomplete commit never publishes a prefix |
-| `drasi.postgres/changes` | One `GraphChangeCodec` envelope per row change | One query, memory or persistent (`source_progress`) | Intermediate changes visible; partial transactions resume at the unhandled suffix |
+| `drasi.postgres/changes` | One `GraphChangeCodec` envelope per row change | One query, memory or persistent (`source_progress`) | Intermediate changes visible; partial transactions resume at the unhandled suffix; transactions of any size |
 | `drasi.postgres/shared-changes` | Row changes | A fixed consumer set (`consumer_progress`) | One slot feeds many queries; each filters covered input independently |
 | `drasi.postgres/shared-transactions` | Whole commits | A fixed set of atomic persistent queries | As above, per commit |
 
-Factory identity selects the contract; no option changes another factory's
-schema, cursor format or guarantee.
+Factory identity selects the output and cursor format; `persistent` (row
+factories) and `coordinatedSnapshot` select whether cursors must survive a
+process restart, and the description declares it.
+
+### Declared description
+
+Outputs carry only source replay progress (`untracked` identity, no
+replay of their own). The progress resource is a declared dependency:
+`source_progress` for the single-owner factories, `consumer_progress` for the
+shared ones. Transactions modes, persistent or coordinated rows and
+persistent shared rows declare durable progress and require that resource
+to declare durability, so the graph refuses wiring them to volatile (or
+undeclared) progress as an `Incompatible` binding before the source exists.
+Volatile row modes declare volatile progress and accept any resource. The
+source does not check durability itself at start or feedback. The in-process
+wrapper in `drasi-source-postgres` declares the same description.
 
 ### Cursors and feedback
 
@@ -33,7 +47,11 @@ acceptance or the read position. The worker sends standby status every
 - **Rows:** each row carries its commit LSN, offset and count within the
   commit, the previous complete commit and a stable logical sequence. Replay
   after a partial transaction emits only the unhandled suffix; feedback never
-  crosses a transaction until all its rows are handled.
+  crosses a transaction until all its rows are handled. A commit is buffered
+  while it fits `maxTransactionChanges` and `maxTransactionBytes`; a larger
+  one streams its rows as they decode, with an unknown count (`count` 0),
+  and its commit emits a progress record that completes it. A crash in the
+  middle resumes after the last committed row, whatever the limits are then.
 - **Shared rows:** replay starts at the members' minimum *WAL position*
   (commit LSN, then offset), not their logical counters. Feedback is the
   minimum complete-commit floor of every member. Snapshot boundaries between
@@ -46,11 +64,41 @@ acceptance or the read position. The worker sends standby status every
   `commit_lsn` and a logical `sequence` (zero only for a snapshot). Replay
   and feedback use the minimum physical boundary of every member.
 
-A fresh group starts at its configured or slot boundary; a group mixing
-handled and missing cursors fails rather than starting the missing member at
-the read position. Failed, reset, removed or rebound members fence progress.
-Membership is immutable per binding: late enrollment uses Core's ordered
-stop, drain, group replacement and restart.
+### Progress records
+
+A progress record is an output without changes that consumers commit as this
+source's cursor: a `RowPosition` without an offset and with a logical
+sequence for row outputs (`GraphChangeCodec::encode_source_progress`), an
+empty committed transaction for whole-transaction outputs. The source emits
+one at a position proven to hold no unhandled change:
+
+- **Quiet publications.** Feedback follows committed cursors only, so while
+  the selected tables are quiet and the database is busy the slot would
+  retain WAL without bound. Once nothing is open or queued and nothing has
+  been emitted for 30 seconds, a commit without selected changes (other
+  published tables, or empty transactions before PostgreSQL 15) becomes a
+  record at its commit LSN, and a primary keepalive becomes a record at its
+  WAL end minus one. Every commit before a keepalive's WAL end has already
+  been sent, and every later commit is at or after it, so nothing is
+  skipped. Other empty commits are dropped. Consumers commit the record and
+  feedback, and the slot, follow.
+- **Streamed transactions.** The commit of a transaction that outgrew the
+  buffering limits (rows outputs).
+- **Group join points.** A shared group in which a member has no cursor
+  first emits a record at its join point and reads nothing further until
+  every member has committed a cursor: a fresh group's origin (`startLsn` or
+  the slot's confirmed position), or the slowest member's cursor for a group
+  mixing fresh and resumed members. A crash before or between the members'
+  first commits therefore restarts at the committed join point; nothing is
+  retained in process memory. A member may join only while it has neither
+  completed a bootstrap nor consumed this stream; a member that handled
+  input never loses its cursor. Failed, reset, removed or rebound members
+  fence progress. Membership is immutable per binding: late enrollment uses
+  Core's ordered stop, drain, group replacement and restart.
+
+A single owner needs no join record: the slot's confirmed position (or
+`startLsn`) is server-side state, and feedback never passes the committed
+cursor.
 
 ### Binding
 
@@ -100,10 +148,25 @@ derive the same names.
 
 ## Worker
 
-One owned worker per activation reads CopyData, assembles complete commits
-with bounded `SourceTransactionBuilder`s, and pushes envelopes into a
+One owned worker per activation reads CopyData and decodes each pgoutput
+message once into the changes of unhandled transactions. Whole-transaction
+outputs assemble a bounded `SourceTransactionBuilder`; row outputs encode
+rows directly, so no transaction is encoded twice. Envelopes go into a
 capacity-one channel that `next` drains. Under backpressure it keeps sending
-feedback and enforces the transaction deadline.
+feedback and enforces the transaction deadline (row outputs apply it only
+while buffering a commit).
+
+### Transaction size
+
+- **Whole-transaction outputs** keep atomicity: a commit beyond
+  `maxTransactionChanges`, `maxTransactionBytes` or
+  `maxTransactionDurationMs` fails the source with a typed
+  `SourceTransactionError::Limit` (or `Deadline`) before any of it is
+  published or acknowledged, so the slot retains its WAL from that commit.
+  Raising the limit and restarting replays it whole.
+- **Row outputs** stream a commit beyond the size limits (see Cursors); size
+  never stops them, as the legacy source streamed transactions of any
+  size.
 
 ### Reconnection
 
@@ -121,7 +184,9 @@ retention and the binding, then resumes at the committed cursor:
 Output after the cursor is replayed, exactly as after a restart; consumers
 deduplicate by committed position (single owner) or input-position policy
 (shared). Permanent failures (`PostgresCdcError`, decoding errors, fenced or
-reset owners, exceeded limits) never reconnect.
+reset owners, exceeded limits) never reconnect. Host-name resolution
+failures (`AddressUnresolved`) are transient: a restarting server behind a
+headless Kubernetes Service returns NXDOMAIN for a while.
 
 ## Lifecycle
 
@@ -129,10 +194,10 @@ reset owners, exceeded limits) never reconnect.
 |---|---|
 | `initialize` | Validates the resolved configuration. No I/O. |
 | `start` | Takes activation credentials if supplied, connects, ensures the slot, validates retention and the binding, checks the cursor is still retained, and starts streaming, all within the smaller of `ioTimeoutMs` and the host deadline, and abandoned on cancellation. After a failed start the source requires a stop before it starts again. |
-| `pause` | Asks the worker to stop at the next transaction boundary: an open commit is assembled first and held, nothing more is read or emitted, and feedback continues so `wal_sender_timeout` does not disconnect. Returns once the worker acknowledges, within the deadline; on timeout or cancellation the pause is withdrawn. A reconnecting worker counts as paused. |
+| `pause` | Asks the worker to stop at the next transaction boundary: an open commit is assembled first and held (a streaming row transaction stops at once, its rows carry partial cursors), nothing more is read or emitted, and feedback continues so `wal_sender_timeout` does not disconnect. Returns once the worker acknowledges, within the deadline; on timeout or cancellation the pause is withdrawn. A reconnecting worker counts as paused. |
 | `resume` | Lifts the gate; held output is emitted. |
-| `stop` | `Drain`: final feedback at the committed cursor, then CopyDone and Terminate. `Abort`: the worker is cancelled. Both honour the host deadline and keep the worker owned on timeout, so a later stop can finish cleanup. A replication failure already reported through `next` does not make stop fail. |
-| `dispose` | Requires a stopped source. `Preserve` does nothing. `Erase` drops this source's managed slots (see above). |
+| `stop` | `Drain`: final feedback at the committed cursor, then CopyDone and Terminate. `Abort`: the worker is cancelled. Both honour the host deadline and keep the worker owned on timeout, so a later stop can finish cleanup. A replication failure already reported through `next` does not make stop fail. The activation's credentials end with it. |
+| `dispose` | Requires a stopped source. `Preserve` does nothing. `Erase` drops this source's managed slots (see above), connecting with the dispose's activation credentials when the host supplies them, so a source reconstructed after a restart and removed without starting can still log in. |
 
 ## Management
 
@@ -153,25 +218,32 @@ assessment's fingerprint names that fact, and apply re-assesses).
   handshake. SCRAM-SHA-256, MD5 and cleartext password authentication are
   supported; use TLS with the latter two.
 - `password` is a top-level secret field; `Debug` output redacts it.
-  Activation credentials replace `user` and `password` per activation.
+  Activation credentials replace `user` and `password` per activation (and
+  per erasing dispose); they are never retained after stop.
 - Catalog queries quote every literal and identifier; slot names are
   restricted to lowercase letters, digits and underscores.
 
 ## Schema discovery
 
-`source_schema_reader` opens a short-lived ordinary connection and describes
-the selected publication tables: labels as emitted, property types matching
+`source_schema_reader` opens a short-lived ordinary connection, with the
+current activation's credentials (schema reads run only while started), and
+describes the selected publication tables: labels as emitted, property types matching
 the decoder's values (integers, floats and numerics as numbers, booleans,
 timestamps; dates, times, JSON, UUID and bytea as strings; arrays untyped).
 
 ## Unsupported
 
-- TRUNCATE (refused at start; decision D-9). A typed reset that forces a
-  rebuild is the planned follow-up.
+- TRUNCATE (decision D-9). A publication that publishes it is refused at
+  start. A TRUNCATE of a selected table published later (after `ALTER
+  PUBLICATION`) fails the source with a typed `Unsupported` before anything
+  of its transaction is published; a TRUNCATE of only unselected tables is
+  ignored. The graph has no typed source reset to express a TRUNCATE, so
+  removal with erase and re-addition rebuilds the queries.
 - Tables without a usable key (decision D-10).
 - PostgreSQL 12 and older; coordinated snapshots need 15.
-- Two-phase and streamed in-progress transactions, failover slots and
-  timeline changes.
+- Two-phase transactions and pgoutput protocol 2 streaming of in-progress
+  transactions (rows outputs stream committed transactions themselves),
+  failover slots and timeline changes.
 - Automatic recovery from a lost slot or a schema change: both need removal
   with erase and re-addition.
 
@@ -182,7 +254,9 @@ timestamps; dates, times, JSON, UUID and bytea as strings; arrays untyped).
 | Per-field `ConfigValue` references | One secret field (`password`) plus activation credentials |
 | Create-or-reuse slot by name, default `drasi_slot` | Explicit managed or external ownership; managed names are derived |
 | Reconnect on any error, fixed delay | Transport failures only, jittered backoff within a budget, every mode |
-| TRUNCATE logged and ignored | Refused at start |
+| TRUNCATE logged and ignored | Refused at start; a runtime TRUNCATE of a selected table fails typed |
+| Transactions of any size | Rows outputs stream any size; whole-transaction outputs are bounded and fail typed |
+| Label `table` in every schema | `schema.table` outside `public` |
 | DDL tolerated | Non-key changes tolerated; key, identity and publication changes fail typed |
 | Keyless tables got random IDs | Rejected |
 | Element ID `table:k1_k2` | `pg:v1:[…]` |

@@ -28,6 +28,10 @@ pub mod wire;
 
 #[doc(hidden)]
 pub use log;
+/// The TLS acceptor used by the shared listener, for transports that run
+/// their own accept loop with the same rustls configuration.
+#[cfg(feature = "listener")]
+pub use tokio_rustls;
 
 pub mod proto {
     #[cfg(feature = "grpc-sink")]

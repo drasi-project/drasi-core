@@ -134,7 +134,9 @@ pub struct TransactionProgressMinimum {
 }
 
 /// Select an actual member's physical boundary without replacing any member or
-/// interpreting its independent logical counter as WAL order.
+/// interpreting its independent logical counter as WAL order. A member without
+/// a cursor joins the group at this minimum, so it does not fence it; `None`
+/// means the group is fenced or no member has a cursor.
 pub fn minimum_checkpoint(
     snapshot: &ConsumerProgressSnapshot,
     expected: &BTreeSet<ComponentId>,
@@ -152,7 +154,6 @@ pub fn minimum_checkpoint(
             format!("invalid PostgreSQL transaction progress for consumer {consumer}")
         })?
         else {
-            fenced = true;
             continue;
         };
         if minimum
@@ -228,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_positions_and_missing_members_do_not_invent_a_checkpoint() -> Result<()> {
+    fn bounded_positions_and_missing_members_join_at_the_minimum() -> Result<()> {
         let binding = transaction_binding([1; 32]);
         let position = SharedTransactionPosition::commit(binding, 100, 7)?;
         let mut snapshot = ConsumerProgressSnapshot {
@@ -246,7 +247,9 @@ mod tests {
                 ..Default::default()
             }),
         );
-        assert!(minimum_checkpoint(&snapshot, &expected, &id("source"), binding)?.is_none());
+        let minimum = minimum_checkpoint(&snapshot, &expected, &id("source"), binding)?
+            .context("a member without a cursor joins at the minimum")?;
+        assert_eq!(minimum.position, position);
         let key = SourceProgressKey::Source(id("source").clone());
         let mut invalid = state(position.clone());
         Arc::make_mut(&mut invalid).checkpoints.insert(

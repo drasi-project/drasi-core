@@ -1,20 +1,21 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! One activation-owned PostgreSQL connection and its driver task.
+//! Opens the activation's PostgreSQL sessions.
 
 use crate::config::{PostgresStoredProcConfig, SslMode};
 use anyhow::Context;
-use drasi_postgres_common::delivery::progress::{DeliveryError, PreparedProgress, ProgressStore};
+use async_trait::async_trait;
+use drasi_computation_storedproc_common::driver::Connector;
+pub use drasi_postgres_common::delivery::progress::ConnectError;
+use drasi_postgres_common::delivery::progress::{Driver, PgSession};
 use std::{fmt, time::Duration};
-use tokio::task::JoinHandle;
 use tokio_postgres::{Client, NoTls};
 
 /// The fixed `application_name`, so operators can find the sink's sessions.
 pub const APPLICATION_NAME: &str = "drasi-native-storedproc-postgres";
 
 pub(crate) type DriverResult = Result<(), tokio_postgres::Error>;
-pub(crate) type Driver = JoinHandle<DriverResult>;
 
 /// A user/password pair used for this activation: the configured one, or
 /// host activation credentials that replace it.
@@ -30,97 +31,50 @@ impl fmt::Debug for Login {
     }
 }
 
-/// A failed connection attempt.
-#[derive(Debug)]
-pub struct ConnectError {
-    permanent: bool,
-    source: anyhow::Error,
+/// Opens sessions for one activation: the configuration's endpoint with
+/// the activation's login, bound to this sink's owner and progress table.
+pub(crate) struct PgConnector {
+    config: PostgresStoredProcConfig,
+    login: Login,
+    owner: String,
 }
 
-impl ConnectError {
-    fn permanent(source: impl Into<anyhow::Error>) -> Self {
+impl PgConnector {
+    pub(crate) fn new(config: PostgresStoredProcConfig, login: Login, owner: String) -> Self {
         Self {
-            permanent: true,
-            source: source.into(),
+            config,
+            login,
+            owner,
         }
     }
 
-    fn transient(source: impl Into<anyhow::Error>) -> Self {
-        Self {
-            permanent: false,
-            source: source.into(),
-        }
+    /// Settings read per connection (in-place updates).
+    pub(crate) fn set_config(&mut self, config: PostgresStoredProcConfig) {
+        self.config = config;
     }
 
-    /// Whether another attempt can succeed without configuration changes.
-    pub fn retryable(&self) -> bool {
-        !self.permanent
-    }
-}
-
-impl fmt::Display for ConnectError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "connecting to PostgreSQL failed: {:#}", self.source)
-    }
-}
-
-impl std::error::Error for ConnectError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.source.as_ref())
-    }
-}
-
-/// Classifies a connection failure by SQLSTATE: authentication, a missing
-/// database and missing privileges are permanent; everything else (refused,
-/// unreachable, starting up, too many connections, TLS I/O) is transient.
-fn classify_connect(error: tokio_postgres::Error) -> ConnectError {
-    match error.code().map(|code| code.code()) {
-        Some(code) if code.starts_with("28") || code == "3D000" || code == "42501" => {
-            ConnectError::permanent(error)
-        }
-        _ => ConnectError::transient(error),
-    }
-}
-
-/// An open connection. Dropping it aborts the driver task; [`Self::close`]
-/// and [`Self::discard`] hand the driver to the caller to join.
-pub(crate) struct Connection {
-    pub client: Client,
-    driver: Option<Driver>,
-    pub prepared: Option<PreparedProgress>,
-    statement_timeout_ms: u64,
-    /// Set while a delivery attempt uses the connection. Still set on entry
-    /// means the host dropped the previous attempt mid-transaction, so the
-    /// connection state is unknown and it is replaced.
-    pub in_flight: bool,
-}
-
-impl Connection {
-    /// One connection attempt, bounded by `connectTimeoutMs` and `deadline`.
-    pub async fn connect(
-        config: &PostgresStoredProcConfig,
-        login: &Login,
-        deadline: Option<tokio::time::Instant>,
-    ) -> Result<Self, ConnectError> {
+    /// One connection attempt, bounded by `connectTimeoutMs`.
+    async fn open(&self) -> Result<(Client, Driver), ConnectError> {
+        let config = &self.config;
         let mut settings = tokio_postgres::Config::new();
         settings
             .host(&config.host)
             .port(config.port)
             .dbname(&config.database)
-            .user(&login.user)
-            .password(&login.password)
+            .user(&self.login.user)
+            .password(&self.login.password)
             .application_name(APPLICATION_NAME)
             .options(format!(
                 "-c statement_timeout={}",
                 config.command_timeout_ms
             ));
-        let limit = bounded(config.connect_timeout(), deadline);
+        let limit = config.connect_timeout();
         let timed_out = || {
             ConnectError::transient(anyhow::anyhow!(
-                "no connection within {limit:?} (connectTimeoutMs or the lifecycle deadline)"
+                "no connection within {limit:?} (connectTimeoutMs)"
             ))
         };
-        let (client, driver): (Client, Driver) = match config.ssl_mode {
+        Ok(match config.ssl_mode {
             SslMode::Require => {
                 settings.ssl_mode(tokio_postgres::config::SslMode::Require);
                 let mut tls = native_tls::TlsConnector::builder();
@@ -147,7 +101,7 @@ impl Connection {
                 let (client, connection) = tokio::time::timeout(limit, settings.connect(connector))
                     .await
                     .map_err(|_| timed_out())?
-                    .map_err(classify_connect)?;
+                    .map_err(ConnectError::classify)?;
                 (client, tokio::spawn(drive(connection)))
             }
             SslMode::Disable => {
@@ -155,72 +109,26 @@ impl Connection {
                 let (client, connection) = tokio::time::timeout(limit, settings.connect(NoTls))
                     .await
                     .map_err(|_| timed_out())?
-                    .map_err(classify_connect)?;
+                    .map_err(ConnectError::classify)?;
                 (client, tokio::spawn(drive(connection)))
             }
-        };
-        Ok(Self {
-            client,
-            driver: Some(driver),
-            prepared: None,
-            statement_timeout_ms: config.command_timeout_ms,
-            in_flight: false,
         })
-    }
-
-    /// Whether the connection can carry another attempt.
-    pub fn usable(&self) -> bool {
-        !self.in_flight
-            && !self.client.is_closed()
-            && self
-                .driver
-                .as_ref()
-                .is_some_and(|driver| !driver.is_finished())
-    }
-
-    /// Prepares the cursor statements once and applies an in-place change of
-    /// `commandTimeoutMs` to this session.
-    pub async fn ready(
-        &mut self,
-        store: &ProgressStore,
-        config: &PostgresStoredProcConfig,
-        limit: Duration,
-    ) -> Result<(), DeliveryError> {
-        if self.prepared.is_none() {
-            self.prepared = Some(store.prepare(&self.client, Some(limit)).await?);
-        }
-        if self.statement_timeout_ms != config.command_timeout_ms {
-            let statement = format!("SET statement_timeout = {}", config.command_timeout_ms);
-            match tokio::time::timeout(limit, self.client.batch_execute(&statement)).await {
-                Ok(result) => result.map_err(DeliveryError::Database)?,
-                Err(_) => return Err(DeliveryError::Timeout(limit)),
-            }
-            self.statement_timeout_ms = config.command_timeout_ms;
-        }
-        Ok(())
-    }
-
-    /// Closes the client gracefully and returns the driver, which finishes
-    /// once the server has answered any command still running.
-    pub fn close(mut self) -> Option<Driver> {
-        self.driver.take()
-    }
-
-    /// Drops the connection without waiting for the server and joins the
-    /// aborted driver.
-    pub async fn discard(self) {
-        if let Some(driver) = self.close() {
-            driver.abort();
-            let _ = driver.await;
-        }
     }
 }
 
-impl Drop for Connection {
-    fn drop(&mut self) {
-        if let Some(driver) = self.driver.take() {
-            driver.abort();
-        }
+#[async_trait]
+impl Connector for PgConnector {
+    type Session = PgSession;
+
+    async fn connect(&mut self) -> anyhow::Result<PgSession> {
+        let (client, driver) = self.open().await?;
+        PgSession::new(
+            client,
+            driver,
+            self.owner.clone(),
+            self.config.table()?,
+            self.config.client_command_timeout(),
+        )
     }
 }
 

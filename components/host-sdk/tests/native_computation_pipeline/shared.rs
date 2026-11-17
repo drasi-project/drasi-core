@@ -469,7 +469,6 @@ async fn native_consumers_resume_partial_fanout_with_shared_and_separate_journal
                                 scope: RecoveryScope::Failure(FailureMode::ProcessRestart),
                                 max_streams: NonZeroUsize::new(2).unwrap(),
                                 receipts_per_stream: NonZeroUsize::new(2).unwrap(),
-                                retry: DeliveryRetryPolicy::default(),
                             },
                         )
                         .await?;

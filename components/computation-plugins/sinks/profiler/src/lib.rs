@@ -13,7 +13,7 @@ use drasi_computation_plugin_sdk::{
 };
 use std::sync::Arc;
 
-pub use component::ProfilerSinkConfig;
+pub use component::{ProfilerSinkConfig, REPORT_TARGET};
 
 pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
 pub const PROFILER_SINK: &str = "drasi.standard/profiler";
@@ -38,7 +38,8 @@ impl Factory for ProfilerSinkFactory {
         &self,
         request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
     ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.unkeyed_sink())
+        let config = ProfilerSinkConfig::parse(request.request.configuration.clone())?;
+        Ok(request.unkeyed_sink(config.on_permanent_failure))
     }
     fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
         Some(component::configuration_definition().details())

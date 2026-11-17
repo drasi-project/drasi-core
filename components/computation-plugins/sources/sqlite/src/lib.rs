@@ -110,6 +110,23 @@ fn metadata(mode: Mode) -> FactoryMetadata {
     }
 }
 
+/// The declared description (shared with the in-process wrapper): the
+/// journal factories require durable progress; the others keep none.
+pub fn describe(
+    mode: Mode,
+    descriptor: &drasi_computation_contracts::ComponentDescriptor,
+) -> drasi_computation_plugin_sdk::ComponentDescription {
+    use drasi_sqlite_common::native::SqliteProgress;
+    drasi_sqlite_common::native::description(
+        match mode {
+            Mode::Replay => SqliteProgress::Single,
+            Mode::Shared => SqliteProgress::Group,
+            Mode::Changes | Mode::Transactions => SqliteProgress::None,
+        },
+        descriptor,
+    )
+}
+
 impl SqliteFactory {
     /// Parses and validates a request for this factory. No I/O.
     fn configuration(&self, request: &CreateRequest) -> Result<SourceConfig> {
@@ -138,15 +155,11 @@ impl SqliteFactory {
 }
 
 impl Factory for SqliteFactory {
-    /// Outputs carry only source replay progress unless published through a Host admission channel.
     fn describe(
         &self,
         request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
     ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.source_description(
-            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
-            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
-        ))
+        Ok(describe(self.0, &request.descriptor))
     }
     fn metadata(&self) -> FactoryMetadata {
         metadata(self.0)

@@ -20,6 +20,7 @@ mod configuration_constraint;
 mod consumer_progress;
 #[doc(hidden)]
 pub mod delivery;
+mod delivery_failure;
 mod description;
 mod element_image;
 mod element_patch;
@@ -73,6 +74,9 @@ pub use component_update::*;
 pub use configuration_constraint::ConfigurationConstraint;
 pub use consumer_progress::*;
 pub use data::*;
+pub use delivery_failure::{
+    delivery_failure_class, DeliveryFailure, DeliveryFailureClass, PermanentFailurePolicy,
+};
 pub use description::*;
 pub use drasi_core_types::{profiling, schema};
 pub use element_image::{ElementImage, ElementImageError};

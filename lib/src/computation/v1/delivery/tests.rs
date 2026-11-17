@@ -16,6 +16,7 @@ use drasi_core::{
     models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
 };
 use drasi_index_rocksdb::RocksDbIndexProvider;
+use std::time::Duration;
 use std::{
     collections::HashSet,
     path::Path,
@@ -34,7 +35,6 @@ fn exhausted_delivery_budget_cannot_be_reset_by_graph_failure_classification() {
         .expect("valid delivery batch");
     let error = anyhow::Error::new(DeliveryError::Handling {
         id: batch.item(0).expect("operation").id,
-        attempts: 3,
         source: drasi_core::interface::IndexError::IOError.into(),
     })
     .context("native consumer");
@@ -53,7 +53,6 @@ fn options() -> DeliveryOptions {
         scope: RecoveryScope::Failure(FailureMode::ProcessRestart),
         max_streams: size(2),
         receipts_per_stream: size(2),
-        retry: DeliveryRetryPolicy::default(),
     }
 }
 
@@ -143,22 +142,27 @@ struct Handler {
     attempts: Vec<(u64, String)>,
     effects: HashSet<String>,
     fail: Option<u64>,
-    transient: bool,
     fail_once: bool,
     hold: Option<Arc<Notify>>,
     arm_commit: Option<Arc<AtomicBool>>,
     record_effect: Option<std::path::PathBuf>,
+    /// The ordinal the handler settles as skipped.
+    skip: Option<u64>,
 }
 
 #[async_trait]
 impl DeliveryHandler for Handler {
-    fn retryable(&self, _: &anyhow::Error) -> bool {
-        self.transient
-    }
-
     async fn handle(&mut self, item: DeliveryItem<'_>) -> anyhow::Result<()> {
         let ordinal = item.operation.ordinal();
         self.attempts.push((ordinal, item.id.to_string()));
+        if self.skip == Some(ordinal) {
+            return Err(
+                drasi_computation_contracts::DeliveryFailure::skipped(anyhow::anyhow!(
+                    "destination rejected the operation; skip recorded"
+                ))
+                .into(),
+            );
+        }
         if self.fail == Some(ordinal) {
             if self.fail_once {
                 self.fail = None;
@@ -181,6 +185,121 @@ impl DeliveryHandler for Handler {
         }
         Ok(())
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn settled_skips_advance_the_ledger_once_and_report_a_permanent_failure() -> anyhow::Result<()>
+{
+    let directory = tempfile::tempdir()?;
+    let mut delivery = runner(directory.path()).await;
+    let identity = producer("source/out");
+    let batch = input(&identity, 1, 3);
+    let skipped = batch.envelope.changes().operations()[1].ordinal();
+    let mut handler = Handler {
+        skip: Some(skipped),
+        ..Handler::default()
+    };
+    let error = delivery.deliver(&batch, &mut handler).await.unwrap_err();
+    assert_eq!(
+        drasi_computation_contracts::delivery_failure_class(&error),
+        Some(drasi_computation_contracts::DeliveryFailureClass::Permanent)
+    );
+    assert!(matches!(
+        error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<DeliveryError>()),
+        Some(DeliveryError::Skipped { skipped: 1, .. })
+    ));
+    assert_eq!(
+        handler.effects.len(),
+        2,
+        "the input's other operations are delivered"
+    );
+    let progress = delivery.progress().await?;
+    assert_eq!(progress[0].completed_operations, 3);
+    assert_eq!(progress[0].handled_sequence, 1);
+    // A replay of the acknowledged input repeats neither the skip nor effects.
+    let attempts = handler.attempts.len();
+    delivery.deliver(&batch, &mut handler).await?;
+    assert_eq!(handler.attempts.len(), attempts);
+    delivery
+        .deliver(&input(&identity, 2, 1), &mut handler)
+        .await?;
+    assert_eq!(handler.effects.len(), 3);
+    delivery.shutdown().await?;
+    Ok(())
+}
+
+fn query_output(generation: u64, sequence: u64) -> InputEnvelope {
+    use drasi_computation_contracts::{
+        QueryChangeCodec, QueryOutputMetadata, QueryRecoveryIdentity, ResultNodeProjector,
+        SystemMetadata,
+    };
+    use drasi_core::evaluation::{
+        context::QueryPartEvaluationContext, variable_value::VariableValue,
+    };
+    let query = crate::test_helpers::component_id(611);
+    let mut envelope = QueryChangeCodec::encode_evaluation(
+        None,
+        &query,
+        SystemMetadata::new(
+            StreamId::try_new(format!("{query}/out")).expect("stream"),
+            sequence,
+        ),
+        &ResultNodeProjector::try_new("test/delivery-query/out", None).expect("projector"),
+        &[QueryPartEvaluationContext::Adding {
+            after: [("id".into(), VariableValue::Integer(sequence.into()))].into(),
+            row_signature: sequence,
+        }],
+        QueryOutputMetadata {
+            query_id: query.clone(),
+            input_origin: None,
+            timestamp: chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("timestamp"),
+            metadata: Default::default(),
+            profiling: None,
+        },
+    )
+    .expect("query output")
+    .expect("nonempty output");
+    QueryRecoveryIdentity::try_new("graph", query.clone(), 7, None)
+        .expect("identity")
+        .with_construction_scope("scope")
+        .expect("scope")
+        .annotate(&mut envelope, &query)
+        .expect("annotated");
+    QueryChangeCodec::set_generation(&mut envelope, &query, generation).expect("generation");
+    InputEnvelope {
+        port: PortId::try_new("in").expect("port"),
+        envelope,
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_newer_query_generation_rolls_its_stream_over_and_an_older_one_is_refused(
+) -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let mut delivery = runner(directory.path()).await;
+    let mut handler = Handler::default();
+    delivery.deliver(&query_output(1, 5), &mut handler).await?;
+    // A reset restarts the sequence space under a new generation; the stream
+    // (and its destination cursor) is reused, not added.
+    delivery.deliver(&query_output(2, 1), &mut handler).await?;
+    delivery.deliver(&query_output(2, 2), &mut handler).await?;
+    assert_eq!(handler.effects.len(), 3);
+    let progress = delivery.progress().await?;
+    assert_eq!(progress.len(), 1);
+    assert_eq!(progress[0].handled_sequence, 2);
+    assert_eq!(
+        delivery
+            .deliver(&query_output(1, 6), &mut handler)
+            .await
+            .unwrap_err()
+            .downcast_ref::<ReplayRejection>(),
+        Some(&ReplayRejection::ProducerChanged)
+    );
+    assert_eq!(handler.effects.len(), 3);
+    delivery.shutdown().await?;
+    Ok(())
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -357,33 +476,26 @@ async fn receipts_reject_changed_expired_or_foreign_outputs_without_effects() ->
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn retry_is_explicit_bounded_and_cancellation_keeps_the_same_id() -> anyhow::Result<()> {
+async fn failed_operations_are_redelivered_with_the_same_id_and_never_skipped() -> anyhow::Result<()>
+{
     let directory = tempfile::tempdir()?;
     let mut delivery = runner(directory.path()).await;
-    delivery.options.retry = DeliveryRetryPolicy {
-        max_attempts: size(3),
-        delay: Duration::from_millis(1),
-    };
     let batch = input(&producer("out"), 1, 1);
     let ordinal = batch.envelope.changes().operations()[0].ordinal();
     let mut handler = Handler {
         fail: Some(ordinal),
-        transient: true,
         ..Default::default()
     };
-    let error = delivery.deliver(&batch, &mut handler).await.unwrap_err();
-    assert!(matches!(
-        error.downcast_ref::<DeliveryError>(),
-        Some(DeliveryError::Handling { attempts: 3, .. })
-    ));
-    assert_eq!(handler.attempts.len(), 3);
-    assert!(handler
-        .attempts
-        .windows(2)
-        .all(|pair| pair[0].1 == pair[1].1));
-    handler.transient = false;
-    assert!(delivery.deliver(&batch, &mut handler).await.is_err());
-    assert_eq!(handler.attempts.len(), 4);
+    for attempt in 1..=2 {
+        let error = delivery.deliver(&batch, &mut handler).await.unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<DeliveryError>(),
+            Some(DeliveryError::Handling { .. })
+        ));
+        assert_eq!(handler.attempts.len(), attempt, "one attempt per deliver");
+    }
+    assert_eq!(handler.attempts[0].1, handler.attempts[1].1);
+    assert_eq!(delivery.progress().await?[0].completed_operations, 0);
 
     handler.fail = None;
     let entered = Arc::new(Notify::new());
@@ -408,7 +520,10 @@ async fn retry_is_explicit_bounded_and_cancellation_keeps_the_same_id() -> anyho
         1,
         "idempotent destination must not repeat the cancelled effect"
     );
-    assert_eq!(handler.attempts[0].1, handler.attempts[5].1);
+    assert_eq!(
+        handler.attempts[0].1,
+        handler.attempts.last().expect("attempts").1
+    );
     delivery.shutdown().await?;
     Ok(())
 }
@@ -983,8 +1098,7 @@ fn operation_keys_cover_scope_port_producer_sequence_and_ordinal_not_transport(
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn empty_batches_limits_and_retry_delay_cancellation_preserve_progress() -> anyhow::Result<()>
-{
+async fn empty_batches_and_stream_limits_preserve_progress() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let mut delivery = runner(directory.path()).await;
     let mut handler = Handler::default();
@@ -1005,20 +1119,6 @@ async fn empty_batches_limits_and_retry_delay_cancellation_preserve_progress() -
             .downcast_ref(),
         Some(DeliveryError::StreamCapacity)
     ));
-    delivery.options.retry = DeliveryRetryPolicy {
-        max_attempts: size(3),
-        delay: Duration::from_secs(60),
-    };
-    let batch = input(&identity, 2, 1);
-    handler.fail = Some(0);
-    handler.transient = true;
-    assert!(tokio::time::timeout(
-        Duration::from_millis(20),
-        delivery.deliver(&batch, &mut handler)
-    )
-    .await
-    .is_err());
-    assert_eq!(handler.attempts.len(), 1);
     assert_eq!(delivery.progress().await?[0].handled_sequence, 1);
     assert_eq!(delivery.progress().await?[0].completed_operations, 0);
     delivery.shutdown().await?;
@@ -1026,12 +1126,10 @@ async fn empty_batches_limits_and_retry_delay_cancellation_preserve_progress() -
 }
 
 #[test]
-fn delivery_settings_enforce_exact_retention_retry_and_identifier_limits() -> anyhow::Result<()> {
+fn delivery_settings_enforce_exact_retention_and_identifier_limits() -> anyhow::Result<()> {
     let mut config = options();
     config.max_streams = size(256);
     config.receipts_per_stream = size(16);
-    config.retry.max_attempts = size(32);
-    config.retry.delay = Duration::from_secs(60);
     config.validate()?;
     config.receipts_per_stream = size(17);
     assert!(config.validate().is_err());
@@ -1042,12 +1140,6 @@ fn delivery_settings_enforce_exact_retention_retry_and_identifier_limits() -> an
     config.receipts_per_stream = size(1024);
     config.validate()?;
     config.receipts_per_stream = size(1025);
-    assert!(config.validate().is_err());
-    config.receipts_per_stream = size(1);
-    config.retry.max_attempts = size(33);
-    assert!(config.validate().is_err());
-    config.retry.max_attempts = size(1);
-    config.retry.delay += Duration::from_nanos(1);
     assert!(config.validate().is_err());
     bounded_identifier(&"x".repeat(256))?;
     assert!(bounded_identifier(&"x".repeat(257)).is_err());

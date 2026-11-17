@@ -179,7 +179,14 @@ providers when `coordinatedSnapshot` is true.
 - Journal factories take an exclusive lock: no other process may open the
   file while the source runs. With `walMode`, other processes may read.
 - Transaction factories need a transaction-enabled query
-  (`source_transactions`); journal factories need persistent query storage.
+  (`source_transactions`). Journal factories declare that their progress
+  binding must be durable: bind the progress of queries with persistent
+  storage. The graph refuses a volatile or undeclared progress resource
+  before the source starts.
+- Schema changes: adding tables or columns, and indexes, views and triggers,
+  are allowed through the source and with other tools while it is stopped.
+  Dropping or renaming a captured table, or changing its key columns, is
+  refused (see [DESIGN.md](DESIGN.md#capture-identity-and-schema-evolution)).
 
 ## Updates
 
@@ -209,7 +216,9 @@ journal-owned database".
 | `an in-memory SQLite source (no path) needs initSql or sqlApi` | Set `path`, or add `initSql`/`sqlApi`. |
 | `restHost … is not a loopback address` | Add `authToken` or `allowUnauthenticated: true`. |
 | `cannot disable replay on a journal-owned database` | The file still has a journal; remove the old journal source with erase. |
-| `SchemaChanged: the SQLite schema changed outside the source` | The file was altered externally. Remove the source with erase and add it again (with `coordinatedSnapshot` if the tables have rows). |
+| `SchemaChanged: captured table '…' was dropped or renamed` or `the identity columns of captured table '…' changed` | Through the source: the DDL rolled back; leave the table and its keys as they are. At start: the file was altered while stopped; restore the table, or remove the source with erase and add it again (with `coordinatedSnapshot` if the tables have rows). |
+| `the journal records a capture identity this version cannot read` | The journal was written by another version. Remove the source with erase and add it again. |
+| `Incompatible … dependency 'source_progress' requires Durable resources` | A journal factory was wired to volatile progress. Use a query with persistent storage. |
 | `journal belongs to a different source, stream, consumer or table selection` | An identity field changed, or another source used the file. Remove with erase, or restore the configuration. |
 | `replay cannot adopt existing rows without coordinated bootstrap` | Set `coordinatedSnapshot: true` and pair the bootstrap provider. |
 | `retained journal exceeds configured limits` | A journal limit was lowered externally; raise it back. |

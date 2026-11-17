@@ -88,18 +88,16 @@ impl Updates {
     }
 }
 
-/// Waits for the single persistent owner and returns its reader and first
+/// Waits for the single owner and returns its reader and first
 /// snapshot, advancing `sequence` past the owner's last transport sequence.
 pub async fn prepare_single(
     reader: SourceProgressView,
     stream: &drasi_computation_contracts::StreamId,
     sequence: &std::sync::atomic::AtomicU64,
 ) -> Result<(Reader, Observed)> {
+    // The factory declares that this progress must be durable; the graph
+    // refuses a volatile binding before the source is constructed.
     let snapshot = reader.wait_ready().await?;
-    anyhow::ensure!(
-        snapshot.persistent,
-        "native SQLite replay requires persistent source progress"
-    );
     sequence.fetch_max(
         snapshot
             .transport_sequences
@@ -129,8 +127,8 @@ pub async fn prepare_group(
     }
     for (consumer, state) in &snapshot.consumers {
         anyhow::ensure!(
-            state.persistent && state.recovered,
-            "native SQLite replay requires persistent recovered progress for consumer {consumer}"
+            state.recovered,
+            "native SQLite replay requires recovered progress for consumer {consumer}"
         );
         sequence.fetch_max(
             state.transport_sequences.get(stream).copied().unwrap_or(0),

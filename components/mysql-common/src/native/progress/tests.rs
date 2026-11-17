@@ -171,7 +171,7 @@ fn physical_cursor_order_preserves_snapshot_boundaries_and_rejects_contradictory
     contradictory.binding = [9; 32];
     assert!(compare(&transaction, &contradictory).is_err());
     contradictory = transaction.clone();
-    contradictory.version = 3;
+    contradictory.version = 4;
     assert!(compare(&transaction, &contradictory).is_err());
     let mut next_file = position(1, 20);
     next_file.file = "mysql-bin.000002".into();

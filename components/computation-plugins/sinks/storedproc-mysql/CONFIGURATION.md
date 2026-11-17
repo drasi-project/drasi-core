@@ -13,32 +13,33 @@ limits are gone. There is no migration path; re-create the component.
 
 | Field | Type | Default | Range / rule | Secret | Update |
 |---|---|---|---|---|---|
-| `hostname` | string | `localhost` | nonempty | no | Restart |
-| `port` | integer | `3306` | 1..=65535 | no | Restart |
-| `database` | string | required | letters, digits, `_`; at most 64 | no | Restart |
+| `host` | string | `localhost` | nonempty | no | Unsupported |
+| `port` | integer | `3306` | 1..=65535 | no | Unsupported |
+| `database` | string | required | letters, digits, `_`; at most 64 | no | Unsupported |
 | `user` | string | empty | required unless activation credentials are bound | no | Restart |
 | `password` | string | empty | ignored with activation credentials | **yes** | Restart |
-| `ssl` | boolean | `false` | `true` = TLS with certificate and host-name verification | no | Restart |
-| `tlsCaPem` | string | none | PEM, at most 64 KiB; requires `ssl: true` | no | Restart |
+| `sslMode` | string | `require` | `require` (TLS with certificate chain and host-name verification), `disable` (plaintext; refused for a non-loopback `host` unless `allowRemotePlaintext`) | no | Restart |
+| `allowRemotePlaintext` | boolean | `false` | permits `sslMode: disable` to a host other than `localhost` or a loopback address | no | Restart |
+| `tlsCaPem` | string | none | PEM, at most 64 KiB; requires `sslMode: require` | no | Restart |
 | `outputs` | object | `{}` | alias → `{component, port?}` | no | Replace |
 | `routes` | object | `{}` | alias → `{added?, updated?, deleted?}`; each `{template}`; keys must match an output | no | In place |
 | `defaultTemplate` | object | none | `{added?, updated?, deleted?}` | no | In place |
-| `progressTable` | string | `drasi_delivery_progress` | identifier, at most 64; in `database` | no | Unsupported |
-| `maxStreams` | integer | `4096` | 1..=1048576 | no | In place |
+| `progressTable` | string | `drasi_delivery_progress` | `table` (in `database`) or `schema.table`, lowercase identifiers (schema ≤ 63 bytes, table ≤ 51 bytes); the dead-letter table `<table>_dead_letter` sits beside it | no | Unsupported |
+| `maxStreams` | integer | `4096` | 1..=1000000 | no | In place |
 | `deliveryGuarantee` | string | `exactlyOnce` | `exactlyOnce`, `atLeastOnce` (see Delivery guarantee) | no | Replace |
-| `commandTimeoutMs` | integer | `30000` | 1..=86400000 | no | In place |
-| `connectTimeoutMs` | integer | `5000` | 1..=86400000 | no | In place |
-| `shutdownTimeoutMs` | integer | `10000` | 1..=86400000 | no | In place |
-| `connectRetryAttempts` | integer | `5` | 0..=32 | no | In place |
-| `reconnectBudgetMs` | integer | `30000` | 1..=86400000 | no | In place |
+| `onPermanentFailure` | string | `stall` | `stall`, `skip` (see Permanent failures) | no | Replace |
+| `commandTimeoutMs` | integer | `30000` | 1..=3600000 | no | In place |
+| `connectTimeoutMs` | integer | `10000` | 1..=3600000 | no | In place |
+| `shutdownTimeoutMs` | integer | `10000` | 1..=3600000 | no | In place |
 | `maxProtocolBytes` | integer | `8388608` | 4096..=67108864 | no | Restart |
 
 At least one command template (in `routes` or `defaultTemplate`) is required.
 
 - `commandTimeoutMs` bounds each statement of an operation, including the
   `CALL`. On expiry the session is KILLed and the operation rolls back.
-- `connectTimeoutMs` bounds one connection attempt; `connectRetryAttempts`
-  and `reconnectBudgetMs` bound a connect sequence at Start and on reconnect.
+- `connectTimeoutMs` bounds one connection attempt. There is no retry
+  budget: a failed attempt is retried by the graph (delivery) or the host
+  lifecycle policy (Start), as are deadlocks, lock waits and lost sessions.
 - `shutdownTimeoutMs` bounds session cleanup in Stop and Dispose when the
   host gives no deadline, and retiring a failed session during delivery.
 - `maxProtocolBytes` is the largest MySQL packet: one command with its
@@ -79,11 +80,10 @@ Literal credentials (resolve `password` through a secret reference):
 
 ```json
 {
-  "hostname": "mysql.internal",
+  "host": "mysql.internal",
   "database": "application",
   "user": "drasi_procedures",
   "password": "<secret reference>",
-  "ssl": true,
   "outputs": {"people": {"component": "people-query", "port": "out"}},
   "defaultTemplate": {
     "added":   {"template": "CALL add_person({{param after.id}}, {{param after.name}})"},
@@ -145,7 +145,8 @@ Per-output routes and a conditional command:
 GRANT EXECUTE ON application.* TO 'drasi_procedures'@'%';
 -- cursor rows
 GRANT SELECT, INSERT, UPDATE, DELETE ON application.drasi_delivery_progress TO 'drasi_procedures'@'%';
--- only if the sink should create the table at Start
+GRANT SELECT, INSERT, UPDATE, DELETE ON application.drasi_delivery_progress_dead_letter TO 'drasi_procedures'@'%';
+-- only if the sink should create the tables at Start
 GRANT CREATE ON application.* TO 'drasi_procedures'@'%';
 ```
 
@@ -164,43 +165,78 @@ CREATE TABLE application.drasi_delivery_progress (
   operations BIGINT NOT NULL,
   completed BIGINT NOT NULL,
   epoch VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  generation BIGINT NOT NULL,
+  pending BIGINT NOT NULL,
   PRIMARY KEY (owner, stream_key),
-  CHECK (version = 3),
+  CHECK (version = 4),
   CHECK (operations > 0),
-  CHECK (completed >= 0 AND completed <= operations)
+  CHECK (completed >= 0 AND completed <= operations),
+  CHECK (pending >= -1 AND pending < operations)
+) ENGINE=InnoDB;
+CREATE TABLE application.drasi_delivery_progress_dead_letter (
+  owner CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  delivery_id VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  stream_key VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  sequence VARCHAR(20) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  operation BIGINT NOT NULL,
+  epoch VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  generation BIGINT NOT NULL,
+  error TEXT NOT NULL,
+  recorded_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (owner, delivery_id)
 ) ENGINE=InnoDB;
 ```
 
-Start verifies the table: InnoDB, exactly these columns in this order with
-these types, and `PRIMARY KEY (owner, stream_key)`. Without `CREATE` and
+Start verifies both tables: InnoDB and exactly these columns in this order
+with these types. Without `CREATE` and
 without the table, Start fails with a message naming the missing privilege.
 Many components (and graphs) may share one table; rows are separated by
 `owner`, and each owner's stream count is bounded by its `maxStreams`.
-This is format version 3 (it adds `epoch`). A format 2 table is refused at
-Start, not migrated: drop it (after its streams have drained) or configure
-another `progressTable`.
+This is format version 4 (it adds `generation`, `pending` and the
+dead-letter table). An earlier format is refused at Start, not migrated: drop
+it (after its streams have drained) or configure another `progressTable`.
+
+### Permanent failures
+
+`onPermanentFailure` decides what happens to an operation that can never be
+delivered (the procedure `SIGNAL`s or violates a constraint, the template does
+not render, or the procedure ends the transaction):
+
+- `stall` (default): the sink returns a permanent failure and the graph stalls
+  the node until an operator acts.
+- `skip`: the sink records the operation (delivery ID, stream, sequence,
+  operation, the error and the time) in `<progressTable>_dead_letter` and
+  advances the cursor past it in one transaction, then reports it as skipped;
+  the graph acknowledges the input, delivers its other operations and counts
+  the skip. A replay never repeats it. A cursor rejection (gap, conflict,
+  expired receipt, capacity) is never skipped.
+
+Procedures must not `COMMIT`, `ROLLBACK` or cause an implicit commit: the sink
+detects the ended transaction and fails permanently (the cursor is never
+advanced in autocommit). Bind `{{param deliveryId}}` to deduplicate effects
+outside MySQL.
 
 ## Updates
 
 | Boundary | Fields |
 |---|---|
-| In place (Pause) | `routes`, `defaultTemplate`, `maxStreams`, `commandTimeoutMs`, `connectTimeoutMs`, `shutdownTimeoutMs`, `connectRetryAttempts`, `reconnectBudgetMs` |
-| Restart (Stop) | `hostname`, `port`, `database`, `user`, `password`, `ssl`, `tlsCaPem`, `maxProtocolBytes` |
-| Replace | `outputs`, changed incoming edges, `deliveryGuarantee` (declared on the input port) |
-| Unsupported | `progressTable` (the receipt identity; remove with Erase and add again) |
+| In place (Pause) | `routes`, `defaultTemplate`, `maxStreams`, `commandTimeoutMs`, `connectTimeoutMs`, `shutdownTimeoutMs` |
+| Restart (Stop) | `user`, `password`, `sslMode`, `allowRemotePlaintext`, `tlsCaPem`, `maxProtocolBytes` |
+| Replace | `outputs`, changed incoming edges, `deliveryGuarantee`, `onPermanentFailure` (declared in the description) |
+| Unsupported | `host`, `port`, `database`, `progressTable` (they locate the receipts; remove with Erase and add again) |
 
 An unchanged configuration is an in-place no-op. A proposed configuration that
 fails validation is rejected.
 
 ## Lifecycle and removal
 
-- Start opens the session and creates or verifies the cursor table. A
-  database that is unreachable within the start deadline or
-  `reconnectBudgetMs` fails Start (retryable by the host).
+- Start opens the session and creates or verifies the cursor and dead-letter
+  tables. A database that is unreachable within `connectTimeoutMs` or the
+  start deadline fails Start (retryable by the host).
 - Stop closes the session; a session left mid-command (Abort) is KILLed.
-- Removal (`Dispose` with `Erase`) deletes only this component's rows:
-  `DELETE FROM <progressTable> WHERE owner = '<owner>'`. It is idempotent and
-  never drops the table or touches business data. Disposal with `Preserve`
+- Removal (`Dispose` with `Erase`) deletes only this component's rows from
+  the cursor and dead-letter tables (`WHERE owner = '<owner>'`). It is
+  idempotent and never drops the tables or touches business data. Disposal with `Preserve`
   keeps the rows, so a re-created component with the same graph and
   component ID resumes its receipts.
 
@@ -221,6 +257,10 @@ fails validation is rejected.
   or different batch for the stream than the host delivers (for example the
   host's state was restored from an older backup). Investigate before deleting
   the stream's row; deleting it makes the next batch re-apply.
+- **Skipped operations:**
+  `SELECT delivery_id, stream_key, sequence, operation, error, recorded_at FROM drasi_delivery_progress_dead_letter WHERE owner = '<owner>';`
+- **"the command ended the delivery transaction":** remove `COMMIT`,
+  `ROLLBACK` and statements that commit implicitly from the procedure.
 - **Stuck Stop:** a retryable Stop error means a retired session could not be
   proven gone in time; retry Stop. Check `information_schema.PROCESSLIST` for
   the account's sessions.
@@ -229,11 +269,14 @@ fails validation is rejected.
 
 | Legacy reaction field | Native field |
 |---|---|
-| `hostname`, `port`, `database`, `user`, `password`, `ssl` | same names (`password` is a secret field) |
+| `hostname` | `host` |
+| `port`, `database`, `user`, `password` | same names (`password` is a secret field) |
+| `ssl` | `sslMode` (`require` is the default; `disable` only to loopback unless `allowRemotePlaintext`) |
 | `identityProvider` | activation credentials (identity resource) |
 | `routes`, `defaultTemplate` | same, keyed by **output alias** instead of query ID |
 | `commandTimeoutMs` | `commandTimeoutMs` (per statement) |
-| `retryAttempts` (command retries) | none: the host retries classified failures; `connectRetryAttempts` covers connecting only |
+| `retryAttempts` (command retries) | none: the graph retries transient failures (including connection failures) in place with backoff |
+| log-and-skip of failed commands | `onPermanentFailure: skip` (recorded in the dead-letter table) |
 | template context `query_id`, `query_name` | `output.alias`, `output.component` |
 | template context `data` | `after` / `before` |
 | `{{json x}}` inline | not allowed; use `{{param x}}` (objects bind as JSON text) |

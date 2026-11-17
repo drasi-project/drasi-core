@@ -47,8 +47,8 @@ impl Position {
         anyhow::ensure!(
             self.start >= 4
                 && self.end > self.start
-                && matches!(self.version, 1 | 2)
-                && (self.version != 2 || self.start == 4),
+                && matches!(self.version, 1..=3)
+                && (self.version == 1 || self.start == 4),
             "invalid MySQL transaction cursor"
         );
         Ok((u64::from(file_number(&self.file)?) << 32) | u64::from(self.end))
@@ -307,48 +307,52 @@ impl Binlog {
         &self.tables
     }
 
-    /// Reads exactly the captured file prefix, leaving replication positioned at its
-    /// end. Hashing is bounded-memory and happens after releasing the global lock.
-    pub async fn snapshot_history(
+    /// Proves a snapshot boundary in constant time, independent of the binlog
+    /// file's size: starts the dump at `boundary` and hashes the identity of
+    /// the file the server sends (its format description's creation time,
+    /// originating server and body). Replication is left positioned at the
+    /// boundary, and the server refuses an offset beyond the file; the first
+    /// event read afterwards must start exactly there (an offset inside an
+    /// event fails the decoder's contiguity and checksum checks). The cursor's
+    /// binding already ties it to `@@server_uuid`.
+    pub async fn boundary_identity(
         connection: &mut super::connection::Connection,
         config: &MySqlConfig,
         file: &str,
         boundary: u32,
         mode: HistoryMode,
     ) -> Result<(FormatDescriptionEvent<'static>, [u8; 32])> {
+        anyhow::ensure!(boundary > 4, "invalid snapshot history boundary");
         connection
             .execute("SET @master_binlog_checksum='CRC32'")
             .await?;
         match mode {
             HistoryMode::Live => {
                 connection
-                    .start_binlog(config.connection.server_id.get(), file, 4)
+                    .start_binlog(config.connection.server_id.get(), file, boundary)
                     .await?;
             }
-            HistoryMode::Verify => connection.start_binlog_history(file, 4).await?,
+            HistoryMode::Verify => connection.start_binlog_history(file, boundary).await?,
         }
         let mut format = FormatDescriptionEvent::new(BinlogVersion::Version4).with_footer(
             BinlogEventFooter::new(BinlogChecksumAlg::BINLOG_CHECKSUM_ALG_CRC32),
         );
-        let mut offset = 4;
-        let mut described = false;
         let mut rotated = false;
-        let mut hash = Sha256::new();
-        while offset < boundary {
+        loop {
             let raw = connection.event().await?;
             let event = frame(&format, &raw, config.max_protocol_bytes.get())?;
             match event.header().event_type()? {
-                EventType::ROTATE_EVENT if !described && !rotated => {
+                EventType::ROTATE_EVENT if !rotated => {
                     let rotate: mysql_common::binlog::events::RotateEvent<'_> =
                         event.read_event()?;
                     anyhow::ensure!(
-                        rotate.name_raw() == file.as_bytes() && rotate.position() == 4,
+                        rotate.name_raw() == file.as_bytes()
+                            && rotate.position() == u64::from(boundary),
                         "MySQL snapshot history file changed"
                     );
                     rotated = true;
-                    continue;
                 }
-                EventType::FORMAT_DESCRIPTION_EVENT if !described => {
+                EventType::FORMAT_DESCRIPTION_EVENT if rotated => {
                     let found: FormatDescriptionEvent<'_> = event.read_event()?;
                     anyhow::ensure!(
                         found.binlog_version() == BinlogVersion::Version4
@@ -356,30 +360,11 @@ impl Binlog {
                         "unsupported snapshot binlog format"
                     );
                     format = found.into_owned().with_footer(event.footer());
-                    described = true;
-                    // The in-use flag/checksum change when MySQL closes a binlog file.
-                    hash.update(&raw[19..raw.len() - 4]);
+                    return Ok((format, file_identity(&raw)));
                 }
-                _ => {
-                    anyhow::ensure!(described, "snapshot history has no format");
-                    hash.update(&raw);
-                }
+                _ => anyhow::bail!("MySQL snapshot boundary is unavailable"),
             }
-            anyhow::ensure!(
-                event.header().log_pos()
-                    == offset
-                        .checked_add(event.header().event_size())
-                        .context("binlog position overflow")?
-                    && event.header().log_pos() <= boundary,
-                "MySQL snapshot boundary is unavailable or not an event boundary"
-            );
-            offset = event.header().log_pos();
         }
-        anyhow::ensure!(
-            described && offset == boundary,
-            "invalid snapshot history boundary"
-        );
-        Ok((format, hash.finalize().into()))
     }
 
     pub async fn verify_positional_catalog_history(
@@ -1022,6 +1007,22 @@ pub fn envelope_bytes(envelope: &ChangeEnvelope) -> Result<usize> {
             .context("MySQL decoded batch size overflow")?;
     }
     Ok(total)
+}
+
+/// The identity of a binlog file from its format description event: the
+/// header's creation time, type and originating server, and the body (server
+/// version, header lengths, checksum algorithm). Excluded are what the server
+/// rewrites when it closes the file or sends it from an offset: the header's
+/// size, position and flags (the in-use flag), the body's `created` field and
+/// the checksum.
+fn file_identity(raw: &[u8]) -> [u8; 32] {
+    const HEADER: usize = 19;
+    const CREATED: std::ops::Range<usize> = HEADER + 52..HEADER + 56;
+    let mut hash = Sha256::new();
+    hash.update(&raw[..9]);
+    hash.update(&raw[HEADER..CREATED.start]);
+    hash.update(&raw[CREATED.end..raw.len() - 4]);
+    hash.finalize().into()
 }
 
 fn frame(format: &FormatDescriptionEvent<'_>, raw: &[u8], limit: usize) -> Result<Event> {

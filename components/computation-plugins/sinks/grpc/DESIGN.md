@@ -40,7 +40,7 @@ The legacy `drasi.v1.ReactionService` is not used.
            │
            ▼
    project every change: templates (render.rs) ─► protobuf Change ─► request metadata
-           │                                      per-change failure ─► failurePolicy
+           │                                      per-change failure ─► permanent
            ▼
    group: same output and metadata, ≤ item limit, ≤ maxRequestBytes (incl. delivery id)
            │
@@ -71,12 +71,13 @@ is a failure:
 | Response | Handling |
 |---|---|
 | `success=true`, exact count | Complete; the next request is sent |
-| `success=true`, other count (zero, partial or excessive) | Incomplete. Not retried locally (a resend would repeat the processed part); governed by `failurePolicy` |
-| `success=false` | Permanent rejection. Not retried locally; governed by `failurePolicy`. The receiver's `error` is logged sanitized |
+| `success=true`, other count (zero, partial or excessive) | Incomplete. Permanent: not retried (a resend would repeat the processed part); governed by `onPermanentFailure` |
+| `success=false` | Permanent rejection. Not retried; governed by `onPermanentFailure`. The receiver's `error` is logged sanitized |
 | gRPC status | Classified below |
 
 `handle` returns `Ok` only after every request of the input has completed, or
-been deliberately skipped under `failurePolicy: skip`. The receiver must not
+been permanently rejected under `onPermanentFailure: skip`, in which case the
+input then fails permanently and the graph counts it as skipped. The receiver must not
 acknowledge before its effect is durable if the deployment relies on
 `Handled`.
 
@@ -98,8 +99,8 @@ input privately or acknowledges it early.
   request metadata per request, at most the item limit, and at most
   `maxRequestBytes` encoded including the delivery-id entry. A change of output
   or rendered metadata starts a new request; order is never changed.
-- A single change larger than `maxRequestBytes` is a per-change failure under
-  `failurePolicy`.
+- A single change larger than `maxRequestBytes` is a permanent failure of
+  that change.
 - `handle_batch` accepts any nonempty batch, including one collected under a
   previous policy, because requests are split by the current limits.
 
@@ -138,8 +139,8 @@ and in the request's `metadata` map:
 `component`/`port` name the real producing output, `sequence` is the
 producer's logical sequence and `ordinal` the change's position within it.
 The identity is built by `common/network::config::delivery_id`; it contains no
-transport, retry or configuration identity, so local retries, host retries
-and replays of the same changes carry the same value. A receiver deduplicates
+transport, retry or configuration identity, so local retries, the graph's
+in-place retries and replays of the same changes carry the same value. A receiver deduplicates
 by remembering processed ids (or the highest `(sequence, ordinal)` per
 `component/port`). If the batching settings change between an attempt and its
 replay, the same changes can be grouped differently and carry different range
@@ -208,14 +209,14 @@ receiver that is down is visible as failing deliveries and warning logs.
 `component::plan` classifies every field by the weakest safe boundary:
 
 - **Pause (in place):** `metadata`, `secretMetadata`, `timeoutMs`,
-  `maxRetries`, `retryBudgetMs`, `failurePolicy`, batching (`batchSize`,
+  `maxRetries`, `retryBudgetMs`, batching (`batchSize`,
   `batchFlushTimeoutMs`, `batching`, `maxBatchBytes`), `outputTemplates`,
   `outputFormat`, and `requireConnectedAtStart` (read only by the next Start).
   These are read per delivery and are swapped as one set.
 - **Stop (restart):** `endpoint`, TLS fields, `connectTimeoutMs`,
   `keepaliveIntervalMs`, `keepaliveTimeoutMs`, `compression`,
   `maxRequestBytes`. These are bound into the channel and client at Start.
-- **Replace:** `outputs` aliases, and any change to the bound inputs
+- **Replace:** `outputs` aliases, `onPermanentFailure`, and any change to the bound inputs
   (`update::inputs_changed`; live rebinding is a host decision, CW-94).
 
 The factory and the live object use the same pure assessment. `apply`
@@ -254,10 +255,10 @@ unchanged.
 
 ## Observability
 
-Logging uses the `log` facade through `common/network`'s `diag!` when the host
-installed a logger; a dynamically loaded library without one writes warnings
-and errors to standard error. Retries log at warning level with the attempt
-number and the sanitized status; skips under `failurePolicy: skip` log at
+Logging uses the `log` facade through `common/network`'s `diag!`; loaded as a
+library, the SDK's logging bridge forwards records to the host's logger.
+Retries log at warning level with the attempt number and the sanitized status;
+skips under `onPermanentFailure: skip` log at
 warning level with the output, sequence and sanitized error. There are no
 metrics yet (X-11).
 
@@ -290,6 +291,6 @@ metrics yet (X-11).
   receiver hints; `GOAWAY` and broken connections are handled by rebuilding the
   channel.
 - Exact acknowledgement and an idempotency key on every request.
-- Template render failures follow `failurePolicy` instead of falling back to
-  the canonical payload (D-5).
+- Template render failures are permanent failures under
+  `onPermanentFailure` instead of falling back to the canonical payload (D-5).
 - Different defaults; see the migration section of CONFIGURATION.md.

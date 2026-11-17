@@ -889,18 +889,27 @@ async fn http_sink_awaits_delivery_retries_exact_body_and_reports_explicit_skip(
         );
     }
     receiver.state.failures.store(10, Ordering::Release);
+    let transient = |error: &anyhow::Error| {
+        matches!(
+            drasi_computation_contracts::delivery_failure_class(error),
+            Some(drasi_computation_contracts::DeliveryFailureClass::Transient { .. })
+        )
+    };
+    let error = sink.handle(result_input(2)?).await.unwrap_err();
     assert!(
-        sink.handle(result_input(2)?).await.is_err(),
-        "strict retry exhaustion fails"
+        transient(&error),
+        "retry exhaustion is transient: {error:#}"
     );
     sink.stop(&crate::hooks::stop_ctx()).await?;
+    // `skip` applies only to permanent failures: an outage is never skipped.
     let mut config = base;
-    config["failurePolicy"] = json!("skip");
+    config["onPermanentFailure"] = json!("skip");
     config["maxRetries"] = json!(0);
     let mut skip = component(HTTP_SINK, "00000000-0000-0000-0000-000000000604", config)?;
     skip.initialize(&crate::hooks::initialize_ctx()).await?;
     skip.start(&crate::hooks::start_ctx()).await?;
-    skip.handle(result_input(3)?).await?;
+    let error = skip.handle(result_input(3)?).await.unwrap_err();
+    assert!(transient(&error), "{error:#}");
     skip.stop(&crate::hooks::stop_ctx()).await?;
     skip.dispose(&crate::hooks::dispose_ctx()).await?;
     receiver.state.failures.store(0, Ordering::Release);

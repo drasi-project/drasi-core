@@ -8,7 +8,7 @@ mod retirement;
 pub(crate) use retirement::DeliveryRetirement;
 pub use retirement::{ConsumerDeliveryResource, DeliveryRetirementState};
 
-use std::{collections::VecDeque, num::NonZeroUsize, time::Duration};
+use std::{collections::VecDeque, num::NonZeroUsize};
 
 use async_trait::async_trait;
 use drasi_core::{
@@ -33,24 +33,7 @@ pub use drasi_computation_contracts::{
     DeliveryBatch, DeliveryBatchIdentity, DeliveryHandler, DeliveryId, DeliveryItem,
     DeliveryPosition, DeliveryScope,
 };
-
-/// Retries per operation in one deliver call, including the first attempt.
-/// Only errors explicitly classified by the handler are retried.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DeliveryRetryPolicy {
-    pub max_attempts: NonZeroUsize,
-    pub delay: Duration,
-}
-
-impl Default for DeliveryRetryPolicy {
-    fn default() -> Self {
-        Self {
-            max_attempts: NonZeroUsize::MIN,
-            delay: Duration::ZERO,
-        }
-    }
-}
+use drasi_computation_contracts::{DeliveryFailure, DeliveryFailureClass};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -58,7 +41,6 @@ pub struct DeliveryOptions {
     pub scope: RecoveryScope,
     pub max_streams: NonZeroUsize,
     pub receipts_per_stream: NonZeroUsize,
-    pub retry: DeliveryRetryPolicy,
 }
 
 impl DeliveryOptions {
@@ -70,10 +52,6 @@ impl DeliveryOptions {
                 && self.max_streams.get() * self.receipts_per_stream.get() <= 4096,
             "delivery progress supports at most 256 streams and 4096 total receipts"
         );
-        anyhow::ensure!(
-            self.retry.max_attempts.get() <= 32 && self.retry.delay <= Duration::from_secs(60),
-            "delivery retry policy supports at most 32 attempts and 60 seconds between attempts"
-        );
         Ok(())
     }
 }
@@ -82,12 +60,10 @@ impl DeliveryOptions {
 /// Use only the borrowed context for mutable business state: no external effects,
 /// nested transactions, independent writes, workers, or commit-sensitive mutable
 /// fields on the handler. Atomicity is per operation, not the entire input batch.
+/// Failures are classified with [`drasi_computation_contracts::DeliveryFailure`]
+/// and retried by the graph, never by the runner.
 #[async_trait]
 pub trait TransactionalDeliveryHandler: Send + Sync {
-    fn retryable(&self, _error: &anyhow::Error) -> bool {
-        false
-    }
-
     async fn handle(
         &self,
         item: DeliveryItem<'_>,
@@ -121,18 +97,17 @@ impl DeliveryTarget<'_> {
             Self::Transactional(_) => DeliveryMode::Transactional,
         }
     }
-
-    fn retryable(&self, error: &anyhow::Error) -> bool {
-        match self {
-            Self::External(handler) => handler.retryable(error),
-            Self::Transactional(handler) => handler.retryable(error),
-        }
-    }
 }
 
 enum DeliveryAttempt {
     Complete,
     Failed(anyhow::Error),
+}
+
+/// Whether a handler settled its failed operation as skipped.
+fn settled_skip(error: &anyhow::Error) -> bool {
+    drasi_computation_contracts::delivery_failure_class(error)
+        == Some(DeliveryFailureClass::Skipped)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -149,12 +124,26 @@ pub enum DeliveryError {
     StreamCapacity,
     #[error("logical output {sequence} still has unfinished operations")]
     Pending { sequence: u64 },
-    #[error("operation {id} did not complete after {attempts} attempt(s): {source}")]
+    /// The handler failed and the runner kept only the completed operation
+    /// prefix; delivering the same input again resumes at `id`.
+    #[error("operation {id} did not complete: {source}")]
     Handling {
         id: DeliveryId,
-        attempts: usize,
         #[source]
         source: anyhow::Error,
+    },
+    /// The handler settled `skipped` operations as skipped
+    /// ([`DeliveryFailureClass::Skipped`]); the runner advanced past them
+    /// and delivered the rest of the input. Carried in a permanent
+    /// [`DeliveryFailure`] so the graph applies the sink's skip policy.
+    #[error(
+        "{} of the input's operations were skipped; the first: {first}",
+        skipped
+    )]
+    Skipped {
+        skipped: usize,
+        #[source]
+        first: anyhow::Error,
     },
 }
 
@@ -284,7 +273,15 @@ impl Ledger {
         };
         let stream = &mut self.streams[index];
         if stream.producer != candidate.producer {
-            return Err(ReplayRejection::ProducerChanged.into());
+            if !candidate.producer.supersedes(&stream.producer) {
+                return Err(ReplayRejection::ProducerChanged.into());
+            }
+            // A later output generation of the same durable query (a reset or
+            // recreation) starts a fresh sequence space on the same stream;
+            // the reset discarded the earlier generation's obligations.
+            stream.producer = candidate.producer.clone();
+            stream.handled = 0;
+            stream.receipts.clear();
         }
         if let Some(receipt) = stream
             .receipts
@@ -517,7 +514,6 @@ impl DeliveryRunner {
         item: DeliveryItem<'_>,
         handler: &dyn TransactionalDeliveryHandler,
         ledger: &Ledger,
-        attempt: usize,
     ) -> anyhow::Result<DeliveryAttempt> {
         let bytes = self.encode_ledger(ledger)?;
         let resources = self.transaction.resources();
@@ -532,7 +528,6 @@ impl DeliveryRunner {
         let failed = |source| {
             IndexError::other(DeliveryError::Handling {
                 id: id.clone(),
-                attempts: attempt,
                 source,
             })
         };
@@ -585,6 +580,7 @@ impl DeliveryRunner {
             self.save(ledger).await?;
         }
         let identity = batch_identity(&self.scope, input, &candidate)?;
+        let mut skipped: Option<(usize, anyhow::Error)> = None;
         for (index, operation) in input
             .envelope
             .changes()
@@ -601,35 +597,28 @@ impl DeliveryRunner {
             if receipt.completed == receipt.operations {
                 progress.handled = receipt.sequence;
             }
-            for attempt in 1..=self.options.retry.max_attempts.get() {
-                let item =
-                    delivery_item(input, &candidate, &identity, index, operation, id.clone());
-                let outcome = match &mut target {
-                    DeliveryTarget::External(handler) => match handler.handle(item).await {
-                        Ok(()) => DeliveryAttempt::Complete,
-                        Err(error) => DeliveryAttempt::Failed(error),
-                    },
-                    DeliveryTarget::Transactional(handler) => {
-                        self.transactional_attempt(item, *handler, &next, attempt)
-                            .await?
-                    }
-                };
-                match outcome {
-                    DeliveryAttempt::Complete => break,
-                    DeliveryAttempt::Failed(source) => {
-                        if attempt == self.options.retry.max_attempts.get()
-                            || !target.retryable(&source)
-                        {
-                            return Err(DeliveryError::Handling {
-                                id,
-                                attempts: attempt,
-                                source,
-                            }
-                            .into());
-                        }
-                        log::warn!("Retrying delivery {id} after attempt {attempt}: {source:#}");
-                        tokio::time::sleep(self.options.retry.delay).await;
-                    }
+            let item = delivery_item(input, &candidate, &identity, index, operation, id.clone());
+            let outcome = match &mut target {
+                DeliveryTarget::External(handler) => match handler.handle(item).await {
+                    Ok(()) => DeliveryAttempt::Complete,
+                    Err(error) => DeliveryAttempt::Failed(error),
+                },
+                DeliveryTarget::Transactional(handler) => {
+                    self.transactional_attempt(item, *handler, &next).await?
+                }
+            };
+            if let DeliveryAttempt::Failed(source) = outcome {
+                // An external handler that settled the operation as skipped
+                // has recorded the skip with any destination progress, so the
+                // ledger advances past it like a completed operation.
+                if self.mode == DeliveryMode::External && settled_skip(&source) {
+                    tracing::warn!(%id, error = %format!("{source:#}"), "delivery operation skipped");
+                    skipped = Some(match skipped {
+                        Some((count, first)) => (count + 1, first),
+                        None => (1, source),
+                    });
+                } else {
+                    return Err(DeliveryError::Handling { id, source }.into());
                 }
             }
             match self.mode {
@@ -637,7 +626,12 @@ impl DeliveryRunner {
                 DeliveryMode::Transactional => self.ledger = Some(next),
             }
         }
-        Ok(())
+        match skipped {
+            None => Ok(()),
+            Some((skipped, first)) => {
+                Err(DeliveryFailure::permanent(DeliveryError::Skipped { skipped, first }).into())
+            }
+        }
     }
 
     /// Validate and identify a batch without changing progress or invoking effects.

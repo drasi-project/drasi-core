@@ -4,7 +4,7 @@
 use super::*;
 use crate::component::LogSink;
 use crate::config::{LogFormat, LogLevel, LogOutput};
-use crate::output::{write_lines, Emitter};
+use crate::output::{write_lines, Emitter, StreamWriter};
 use crate::render::{format_plain, resolve_routes};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -344,6 +344,7 @@ fn full_configuration() -> Value {
             "target": "custom.target",
             "output": "stderr",
             "renderFailurePolicy": "strict",
+            "onPermanentFailure": "skip",
         }),
     )
 }
@@ -397,6 +398,11 @@ fn assessment_matrix() -> Result<()> {
             (
                 with(json!({"renderFailurePolicy": "strict"})),
                 Some(UpdateBoundary::Pause),
+            ),
+            // The policy is part of the description captured at construction.
+            (
+                with(json!({"onPermanentFailure": "skip"})),
+                Some(UpdateBoundary::Replace),
             ),
             (aliased("renamed", json!({})), Some(UpdateBoundary::Replace)),
             (json!({}), Some(UpdateBoundary::Replace)),
@@ -727,7 +733,12 @@ async fn render_failure_strict_fails_and_fallback_emits_the_format() -> Result<(
         &inputs(),
     )?;
     sink.start(&mut contexts::start()).await?;
-    assert!(sink.handle(insert(1)?).await.is_err());
+    let error = sink.handle(insert(1)?).await.unwrap_err();
+    assert_eq!(
+        drasi_computation_contracts::delivery_failure_class(&error),
+        Some(drasi_computation_contracts::DeliveryFailureClass::Permanent),
+        "a strict render failure is permanent, so onPermanentFailure applies"
+    );
     assert!(records("test.strict").is_empty(), "strict emits nothing");
 
     let fallback = aliased(
@@ -893,8 +904,8 @@ fn header_line_precedes_indented_changes() -> Result<()> {
 
 // ------------------------------------------------------------ output (LG-03)
 
-#[test]
-fn level_and_target_are_honoured() -> Result<()> {
+#[tokio::test(flavor = "current_thread")]
+async fn level_and_target_are_honoured() -> Result<()> {
     install_logger();
     for (level, expected) in [
         (LogLevel::Error, log::Level::Error),
@@ -909,7 +920,8 @@ fn level_and_target_are_honoured() -> Result<()> {
             level,
             target: target.clone(),
         }
-        .emit(&["line".into()])?;
+        .emit(&["line".into()])
+        .await?;
         assert_eq!(records(&target), [(expected, "line".to_owned())]);
     }
     Ok(())
@@ -935,27 +947,46 @@ fn stream_output_writes_complete_flushed_lines() -> Result<()> {
         writes: Vec::new(),
         flushed: false,
     };
-    write_lines(&mut recorder, &["a".into(), "b c".into()])?;
+    write_lines(&mut recorder, b"a\nb c\n")?;
     assert_eq!(recorder.writes, [b"a\nb c\n".to_vec()]);
     assert!(recorder.flushed);
+    Ok(())
+}
 
-    struct Broken;
-    impl std::io::Write for Broken {
-        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+/// A stdout or stderr pipe that stops draining blocks only the writer
+/// thread: the runtime keeps running, the waiting input can be cancelled,
+/// and queued writes complete in order once the stream drains (LGA-4).
+#[tokio::test(flavor = "current_thread")]
+async fn a_blocked_stream_never_blocks_the_runtime() -> Result<()> {
+    use std::sync::{Condvar, Mutex};
+    static OPEN: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+    static WRITTEN: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+    struct Gate;
+    impl std::io::Write for Gate {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let (open, changed) = &OPEN;
+            let _open = changed
+                .wait_while(open.lock().unwrap(), |open| !*open)
+                .unwrap();
+            WRITTEN.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
     }
-    assert!(write_lines(&mut Broken, &["a".into()]).is_err());
-
-    // The real stderr path succeeds.
-    Emitter {
-        output: LogOutput::Stderr,
-        level: LogLevel::Info,
-        target: "unused".into(),
-    }
-    .emit(&["log sink stderr smoke test".into()])?;
+    let writer = StreamWriter::spawn("log-sink-test-gate", || Box::new(Gate))?;
+    // The blocked write leaves the current-thread runtime free to run timers,
+    // and the input waiting for it is cancelled by dropping the wait.
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(50),
+        writer.write(b"first\n".to_vec())
+    )
+    .await
+    .is_err());
+    *OPEN.0.lock().unwrap() = true;
+    OPEN.1.notify_all();
+    writer.write(b"second\n".to_vec()).await?;
+    assert_eq!(WRITTEN.lock().unwrap().as_slice(), b"first\nsecond\n");
     Ok(())
 }

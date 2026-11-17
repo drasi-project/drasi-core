@@ -1108,7 +1108,6 @@ Names below are definition-site paths, not duplicate public re-export paths. Blo
 - `drasi_lib::computation::v1::delivery::DeliveryMode` — enum; [source](../../lib/src/computation/v1/delivery.rs#L98).
 - `drasi_lib::computation::v1::delivery::DeliveryOptions` — struct; [source](../../lib/src/computation/v1/delivery.rs#L55).
 - `drasi_lib::computation::v1::delivery::DeliveryProgress` — struct; [source](../../lib/src/computation/v1/delivery.rs#L180).
-- `drasi_lib::computation::v1::delivery::DeliveryRetryPolicy` — struct; [source](../../lib/src/computation/v1/delivery.rs#L37).
 - `drasi_lib::computation::v1::delivery::DeliveryRunner` — struct; [source](../../lib/src/computation/v1/delivery.rs#L328).
 - `drasi_lib::computation::v1::delivery::DeliveryTarget` — enum; [source](../../lib/src/computation/v1/delivery.rs#L112).
 - `drasi_lib::computation::v1::delivery::Ledger` — struct; [source](../../lib/src/computation/v1/delivery.rs#L190).

@@ -737,6 +737,9 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
         unsafe { library.get::<abi::management::ManagementFn>(abi::management::SYMBOL) }
             .ok()
             .map(|symbol| *symbol);
+    let logging = unsafe { library.get::<abi::logging::InstallFn>(abi::logging::SYMBOL) }
+        .ok()
+        .map(|symbol| *symbol);
     if metadata.is_none()
         && entry.is_none()
         && services.is_none()
@@ -761,6 +764,10 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
     // Retaining only successful handles is insufficient: metadata/entry code can
     // have retained callbacks or initialized I/O before reporting an error.
     std::mem::forget(library);
+    // Before any other plugin code runs, so its diagnostics reach this host.
+    if let Some(install) = logging {
+        super::logging::install(install)?;
+    }
     let metadata =
         metadata.ok_or_else(|| anyhow::anyhow!("native computation metadata symbol is missing"))?;
     let entry =
@@ -1631,6 +1638,35 @@ mod bootstrap_coordination_tests {
             result.is_err(),
             "a malformed capability cannot silently opt out"
         );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod services_tests {
+    use super::super::tests::consumer_progress_fixture;
+    use super::*;
+
+    /// The service version is checked exactly at load, so a host and plugin
+    /// built on different sides of a service wire change are refused there.
+    #[test]
+    fn service_extension_requires_the_exact_service_version() -> anyhow::Result<()> {
+        let export = drasi_computation_plugin_sdk::ExportedPlugin::new(
+            drasi_computation_plugin_sdk::PluginDefinition::new(
+                "fixture/services-version",
+                "1",
+                consumer_progress_fixture::factories(),
+                vec![drasi_lib::computation::v1::GraphChangeCodec::schema()],
+            )?,
+        )?;
+        let table = unsafe { *export.services() };
+        assert_eq!(table.version, abi::services::VERSION);
+        assert!(unsafe { read_services(Some(&table))? }.is_some());
+        for version in [abi::services::VERSION - 1, abi::services::VERSION + 1] {
+            let mut other = table;
+            other.version = version;
+            assert!(unsafe { read_services(Some(&other)) }.is_err(), "{version}");
+        }
         Ok(())
     }
 }

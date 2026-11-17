@@ -240,8 +240,17 @@ impl SqliteSource {
 
 #[async_trait]
 impl ComputationComponent for SqliteSource {
+    /// The loaded plugin's declaration for the same recovery model.
     fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
-        drasi_lib::computation::v1::ComponentDescription::undeclared()
+        use drasi_sqlite_common::native::SqliteProgress;
+        drasi_sqlite_common::native::description(
+            match (&self.progress, &self.consumer_progress) {
+                (Some(_), _) => SqliteProgress::Single,
+                (None, Some(_)) => SqliteProgress::Group,
+                (None, None) => SqliteProgress::None,
+            },
+            &self.descriptor,
+        )
     }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor

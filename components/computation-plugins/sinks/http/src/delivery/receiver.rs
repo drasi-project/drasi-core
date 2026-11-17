@@ -179,7 +179,10 @@ async fn deliver(
         Ok(()) => Json(identity).into_response(),
         Err(error) => {
             let status = match error.downcast_ref::<DeliveryError>() {
-                Some(DeliveryError::Handling { source, .. }) if !handler.retryable(source) => {
+                Some(DeliveryError::Handling { source, .. })
+                    if drasi_computation_contracts::delivery_failure_class(source)
+                        .is_some_and(|class| class.is_permanent()) =>
+                {
                     StatusCode::UNPROCESSABLE_ENTITY
                 }
                 Some(

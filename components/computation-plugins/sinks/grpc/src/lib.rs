@@ -27,7 +27,7 @@ use drasi_computation_plugin_sdk::{
 };
 use std::sync::Arc;
 
-pub use config::{Compression, FailurePolicy, GrpcSinkConfig, OutputFormat};
+pub use config::{Compression, GrpcSinkConfig, OutputFormat, PermanentFailurePolicy};
 pub use drasi_computation_network_common::proto;
 
 pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
@@ -55,7 +55,8 @@ impl Factory for GrpcSinkFactory {
         &self,
         request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
     ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.unkeyed_sink())
+        let config = GrpcSinkConfig::parse(request.request.configuration.clone())?;
+        Ok(request.unkeyed_sink(config.on_permanent_failure))
     }
     fn supports_sink_batching(&self) -> bool {
         true

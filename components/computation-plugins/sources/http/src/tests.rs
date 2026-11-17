@@ -480,17 +480,58 @@ async fn webhook_auth_failure_is_always_a_generic_401() -> Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn initialize_reports_missing_webhook_secrets() -> Result<()> {
-    let config = webhook_config(
+async fn volatile_webhooks_refuse_producer_session_headers() -> Result<()> {
+    let port = free_port();
+    let mut source = started(webhook_config(port, Value::Null)).await?;
+    let refused = client()
+        .post(format!("http://127.0.0.1:{port}/hook"))
+        .header(
+            "x-drasi-producer-session",
+            json!({"incarnation":"00000000-0000-0000-0000-000000000001",
+                   "producer":"00000000-0000-0000-0000-000000000603","epoch":1})
+            .to_string(),
+        )
+        .header("x-drasi-first-sequence", "1")
+        .json(&json!({"id":"a","value":1}))
+        .send()
+        .await?;
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    let body: Value = refused.json().await?;
+    assert_eq!(body["error"]["kind"], "NotEnabled", "{body}");
+    assert_eq!(body["receipts"], json!([]));
+    source.stop(&contexts::stop(StopMode::Drain)).await?;
+    Ok(())
+}
+
+#[test]
+fn missing_webhook_secrets_are_refused_at_configuration_and_update() -> Result<()> {
+    let id = drasi_computation_contracts::ComponentId::try_new(ID)?;
+    let missing = webhook_config(
         free_port(),
         json!({"bearer":{"tokenEnv":"DRASI_HTTP_SOURCE_TEST_UNSET_TOKEN_93f"}}),
     );
-    let mut source = create_source(
+    assert!(create_source(&HttpSourceFactory, &id, missing.clone()).is_err());
+    // An in-place update that adds a route whose secret is unset is refused
+    // when assessed, not discovered on the first delivery.
+    let current = webhook_config(free_port(), Value::Null);
+    let mut proposed = missing;
+    proposed["port"] = current["port"].clone();
+    let mut source = create_source(&HttpSourceFactory, &id, current.clone())?;
+    let request = drasi_computation_plugin_sdk::testing::update_request(
         &HttpSourceFactory,
-        &drasi_computation_contracts::ComponentId::try_new(ID)?,
-        config,
-    )?;
-    assert!(source.initialize(&contexts::initialize()).await.is_err());
+        &id,
+        current,
+        proposed,
+    );
+    let error = source
+        .management()
+        .context("management")?
+        .assess(&request)
+        .expect_err("unset webhook secret");
+    assert!(
+        format!("{error:#}").contains("DRASI_HTTP_SOURCE_TEST_UNSET_TOKEN_93f"),
+        "{error:#}"
+    );
     Ok(())
 }
 

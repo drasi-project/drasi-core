@@ -32,7 +32,7 @@ pub(super) fn rotation(factory: &computation::NativeFactory) -> Result<()> {
         FixedIdentity,
     )));
     let mut settings = json!({
-        "hostname": "127.0.0.1", "database": "test",
+        "host": "127.0.0.1", "sslMode": "disable", "database": "test",
         "outputs": {"left": {"component": id("left").as_str(), "port": "out"}},
         "defaultTemplate": {"added": {"template": "CALL credential_effect({{param output.alias}})"}}
     });

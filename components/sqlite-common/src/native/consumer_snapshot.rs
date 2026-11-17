@@ -402,8 +402,8 @@ impl SqliteConsumerSnapshot {
         state.durability().require(FailureMode::ProcessRestart)?;
         let progress = self.member.owner.snapshot()?;
         anyhow::ensure!(
-            progress.recovered && progress.persistent && progress.failure.is_none(),
-            "SQLite shared snapshot requires recovered persistent consumer progress"
+            progress.recovered && progress.failure.is_none(),
+            "SQLite shared snapshot requires recovered consumer progress"
         );
         let handover = state
             .read()

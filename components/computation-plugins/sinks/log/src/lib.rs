@@ -4,11 +4,13 @@
 //! Native ComputationGraph log sink (`drasi.standard/log`).
 //!
 //! Renders each standard graph change with a per-output Handlebars template
-//! (or as JSON / the legacy compact form) and emits it to the process `log`
-//! facade, stdout or stderr. Each input completes (`Handled`) only after all
-//! of its lines were emitted and, for stdout/stderr, flushed. Templates are
-//! compiled and validated at construction; render failures follow an
-//! explicit `fallback` or `strict` policy; most settings update in place.
+//! (or as JSON / the legacy compact form) and emits it to the host's logger
+//! (through the SDK's logging bridge when loaded as a library), stdout or
+//! stderr. Each input completes (`Handled`) only after all of its lines were
+//! emitted and, for stdout/stderr, flushed by a writer thread, so a blocked
+//! stream never blocks the async runtime. Templates are compiled and validated
+//! at construction; render failures follow an explicit `fallback` or `strict`
+//! policy; most settings update in place.
 //!
 //! See `DESIGN.md` and `CONFIGURATION.md` in this crate.
 
@@ -54,7 +56,8 @@ impl Factory for LogSinkFactory {
         &self,
         request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
     ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.unkeyed_sink())
+        let config = LogSinkConfig::parse(request.request.configuration.clone())?;
+        Ok(request.unkeyed_sink(config.on_permanent_failure))
     }
     fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
         Some(LogSinkConfig::definition().details())

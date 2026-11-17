@@ -164,16 +164,34 @@ parameters.
 
 ## Consumers and recovery
 
-Replay starts at the members' minimum committed cursor. A fresh group starts
-at `startPosition` (`current`: the maximum LSN when it first starts, kept in
-memory as the activation origin; `beginning`: each capture instance's
-retained minimum). A group mixing fresh and resumed members needs that
-origin, so it works only within the process that started the group or with
-the coordinated bootstrap. Failed, reset, regressed or rebound members fence
-the source. A member that is momentarily **not ready** (a consumer
-restarting) holds polling and emission instead of failing the source
-(MS-11). Membership is fixed per binding; changing it is a host-level
-replacement.
+Replay starts at the members' minimum committed cursor; a member without a
+cursor joins there. A group in which no member has a cursor starts at
+`startPosition`:
+
+- `current` resolves the maximum LSN and emits it as a **progress-only
+  record** (an empty change set carrying the source position,
+  `GraphChangeCodec::encode_source_progress`) before anything else. Polling
+  is held until every member has committed a cursor, so the origin is durable
+  before any change is published: a restart, even with a new source object,
+  resumes there and delivers changes made while the process was down. A
+  restart before every member committed the record re-resolves `current`,
+  which loses nothing because nothing was published.
+- `beginning` is each capture instance's retained minimum; it needs no record.
+
+A crash between two members' first commits therefore restarts: the member
+that committed holds the origin (or a later change), and the other joins at
+the group minimum. Failed, reset, regressed or rebound members fence the
+source. A member that is momentarily **not ready** (a consumer restarting)
+holds polling and emission instead of failing the source (MS-11). Membership
+is fixed per binding; changing it is a host-level replacement.
+
+While the selected tables are idle, an empty page's boundary (the maximum LSN
+the poll proved empty) is emitted as a progress record when the database's
+maximum LSN has moved past the last emitted position, at most once every 30
+seconds of quiet. Committed cursors therefore follow CDC retention, and a
+restart after the cleanup job removed the rows before that boundary resumes
+instead of reporting `PositionUnavailable`. This is the principle the MySQL
+transaction factories follow with empty committed transactions.
 
 Logical sequences stay above every member's checkpoint and transport
 sequence and above this object's earlier allocations.
@@ -183,19 +201,17 @@ sequence and above this object's earlier allocations.
 The source declares `consumer_replay_retention = LOCAL_PROCESS_RESTART`.
 CDC change tables do survive power loss, but that does not make a stronger
 claim true: the cleanup job purges change rows by age (three days by
-default), so recovery after any outage is conditional on retention, and the
-activation origin of a fresh group lives in process memory. A known
-limitation follows: committed cursors advance only with emitted changes, so
-if every selected table stays idle for longer than the retention period, a
-restart reports `PositionUnavailable` although nothing was lost; size CDC
-retention above the longest expected idle period plus downtime. Persisting
-the activation origin is CW-14.
+default), so recovery after an outage longer than retention (while the
+process is down, no record advances the cursor) is conditional on it.
 
 ## Snapshot handover and markers (decision D-1, MS-03)
 
-The coordinated provider takes table locks, commits a marker row into the
-administrator-provisioned `barrierTable`, waits for it in the barrier's
-change table and returns that LSN as the cut. Each marker's `token` is a
+The coordinated provider briefly takes shared table locks, fixes a
+SNAPSHOT-isolation view while no selected-table write can commit, commits a
+marker row into the administrator-provisioned `barrierTable` in the
+transaction that releases the locks, waits for it in the barrier's change
+table and returns that LSN as the cut. The scan reads row versions and never
+blocks writers (see the bootstrapper README). Each marker's `token` is a
 `uniqueidentifier` whose first 64 bits derive from the graph and **this
 source** (`SHA-256("drasi.mssql/marker/v1", graph, source)`), with 64 random
 bits after. The provider deletes its marker after every attempt; a crash or
@@ -285,10 +301,9 @@ worker failure. Errors keep their causes and typed `SourceFailure` variants.
 ## Known limitations
 
 - Live qualification is deferred (above); MS-15 shapes are unverified.
-- Idle selected tables longer than CDC retention fail after a restart (see
-  replay retention).
-- Mixed fresh/resumed groups need the in-memory origin or the coordinated
-  bootstrap.
+- A process that stays down for longer than CDC retention fails on restart
+  with `PositionUnavailable` (see replay retention); while it runs, idle
+  progress records keep cursors inside retention.
 - No column-exclusion list; bulky columns are always read.
 - Tiberius has no ATTENTION; see Lifecycle.
 - Windows integrated authentication is not supported.

@@ -330,29 +330,33 @@ async fn database_snapshot(
     let mut marker_attempted = false;
     let result = async {
         check_cancel(&cancel)?;
+        ensure_snapshot_isolation(&mut session).await?;
         let catalog = if coordinated {
             Some(read_catalog(&mut session, &settings, false).await?)
         } else {
             None
         };
-        let isolation = if coordinated { "SERIALIZABLE" } else { "SNAPSHOT" };
-        session
-            .client_mut()
-            .simple_query(format!(
-                "SET LOCK_TIMEOUT {}; SET TRANSACTION ISOLATION LEVEL {isolation}; BEGIN TRANSACTION",
-                i32::try_from(settings.command_timeout_ms)?
-            ))
-            .await?
-            .into_results()
-            .await?;
-        let catalog = match catalog {
-            Some(catalog) => catalog,
-            None => read_snapshot_catalog(&mut session, &settings).await?,
-        };
-        let boundary = if let (Some(marker), Some(token)) = (marker.as_mut(), token.as_deref()) {
+        let lock_timeout = i32::try_from(settings.command_timeout_ms)?;
+        // The coordinated cut: the marker session locks every selected table
+        // (waiting for in-flight writers), the reader establishes its
+        // SNAPSHOT view while no selected-table write can commit, and the
+        // marker's insert commits in the same transaction that releases the
+        // locks. The view therefore holds exactly the changes committed
+        // before the marker's LSN. Writers wait only for that short window,
+        // never for the scan, the CDC capture or downstream backpressure.
+        if let (Some(marker), Some(catalog)) = (marker.as_mut(), catalog.as_ref()) {
+            marker
+                .client_mut()
+                .simple_query(format!(
+                    "SET LOCK_TIMEOUT {lock_timeout}; \
+                     SET TRANSACTION ISOLATION LEVEL READ COMMITTED; BEGIN TRANSACTION"
+                ))
+                .await?
+                .into_results()
+                .await?;
             for table in &catalog.tables {
                 check_cancel(&cancel)?;
-                session
+                marker
                     .client_mut()
                     .simple_query(format!(
                         "SELECT TOP (1) 1 AS locked FROM {} WITH (TABLOCK, HOLDLOCK)",
@@ -362,6 +366,31 @@ async fn database_snapshot(
                     .into_results()
                     .await?;
             }
+        }
+        session
+            .client_mut()
+            .simple_query(format!(
+                "SET LOCK_TIMEOUT {lock_timeout}; \
+                 SET TRANSACTION ISOLATION LEVEL SNAPSHOT; BEGIN TRANSACTION"
+            ))
+            .await?
+            .into_results()
+            .await?;
+        let catalog = match catalog {
+            Some(catalog) => catalog,
+            None => read_snapshot_catalog(&mut session, &settings).await?,
+        };
+        // A SNAPSHOT transaction's view starts at its first data access.
+        for table in &catalog.tables {
+            check_cancel(&cancel)?;
+            session
+                .client_mut()
+                .simple_query(format!("SELECT TOP (1) 1 AS seen FROM {}", table.sql()))
+                .await?
+                .into_results()
+                .await?;
+        }
+        let boundary = if let (Some(marker), Some(token)) = (marker.as_mut(), token.as_deref()) {
             let barrier = settings.barrier()?.context("barrierTable missing")?;
             marker_table = Some(barrier.sql());
             let captures = marker
@@ -386,6 +415,12 @@ async fn database_snapshot(
                     ),
                     &[&token],
                 )
+                .await?;
+            marker
+                .client_mut()
+                .simple_query("COMMIT TRANSACTION")
+                .await?
+                .into_results()
                 .await?;
             let deadline = tokio::time::Instant::now() + settings.command_timeout();
             let boundary = loop {
@@ -418,8 +453,16 @@ async fn database_snapshot(
         } else {
             None
         };
-        stream_tables(&mut session, &settings, &source, &labels, &catalog, &sender, &cancel)
-            .await?;
+        stream_tables(
+            &mut session,
+            &settings,
+            &source,
+            &labels,
+            &catalog,
+            &sender,
+            &cancel,
+        )
+        .await?;
         let verified = if coordinated {
             read_catalog(&mut session, &settings, false).await?
         } else {
@@ -465,6 +508,16 @@ async fn database_snapshot(
     }
     .await;
     let cleanup = async {
+        // A failure inside the cut leaves the marker session's table locks
+        // held; release them before anything else.
+        if let Some(marker) = marker.as_mut() {
+            marker
+                .client_mut()
+                .simple_query("IF @@TRANCOUNT>0 ROLLBACK TRANSACTION")
+                .await?
+                .into_results()
+                .await?;
+        }
         if marker_attempted {
             marker
                 .as_mut()
@@ -502,6 +555,33 @@ async fn database_snapshot(
             cleanup_error,
         },
     }
+}
+
+/// Both snapshot modes read under SNAPSHOT isolation, which the database
+/// must allow; refuse with the fix instead of SQL Server's generic error.
+async fn ensure_snapshot_isolation(session: &mut TiberiusSession) -> Result<()> {
+    let rows = session
+        .client_mut()
+        .simple_query(
+            "SELECT snapshot_isolation_state, DB_NAME() FROM sys.databases WHERE database_id = DB_ID()",
+        )
+        .await?
+        .into_first_result()
+        .await?;
+    let row = rows
+        .first()
+        .context("SQL Server database metadata missing")?;
+    let state = row
+        .try_get::<u8, _>(0)?
+        .context("snapshot isolation state missing")?;
+    let database = row.try_get::<&str, _>(1)?.unwrap_or_default();
+    ensure!(
+        state == 1,
+        "SQL Server initial loading reads under SNAPSHOT isolation, which database {database} \
+         does not allow; run ALTER DATABASE {} SET ALLOW_SNAPSHOT_ISOLATION ON",
+        quoted(database)
+    );
+    Ok(())
 }
 
 async fn stream_tables(

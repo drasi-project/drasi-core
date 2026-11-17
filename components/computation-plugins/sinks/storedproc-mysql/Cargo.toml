@@ -25,6 +25,7 @@ kind = "sink-storedproc-mysql"
 [dependencies]
 drasi-computation-contracts.workspace = true
 drasi-computation-plugin-sdk.workspace = true
+drasi-computation-storedproc-common.workspace = true
 drasi-core-types.workspace = true
 drasi-mysql-common = { workspace = true, features = ["native", "storedproc"] }
 drasi-reaction-common.workspace = true
@@ -37,6 +38,9 @@ tokio = { version = "1", features = ["sync", "rt", "time", "macros"] }
 
 [dev-dependencies]
 drasi-computation-plugin-sdk = { workspace = true, features = ["test-support"] }
+drasi-computation-storedproc-common = { workspace = true, features = ["conformance"] }
+mysql_common = "0.37"
+testcontainers = "0.27"
 tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "time", "macros"] }
 
 [lints]

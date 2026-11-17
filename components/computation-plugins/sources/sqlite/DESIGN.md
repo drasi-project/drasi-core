@@ -1,7 +1,7 @@
 # Native SQLite source: design
 
 `drasi-computation-source-sqlite` is a native ComputationGraph source (ABI
-4.0) that owns one SQLite connection. Every write that reaches the database
+5.0.0) that owns one SQLite connection. Every write that reaches the database
 through the source (its REST API, or a Rust `SqliteHandle` when the crate is
 linked) runs on that connection, under an authorizer, and is captured by
 SQLite's pre-update hook inside the same transaction. A committed transaction
@@ -29,6 +29,15 @@ processes write: writes made by another connection are never captured (see
 All factories use implementation and configuration version `1`. The output
 port is `out`.
 
+The description is declared: outputs carry only source replay progress.
+The journal factories require their progress binding (`source_progress` or
+`consumer_progress`) to declare durability, so the graph refuses wiring them
+to volatile or undeclared progress (an `Incompatible` binding failure on the
+source node) before the database is opened; the source does not check
+durability itself. The volatile factories keep no progress. The in-process
+wrapper in `drasi-source-sqlite` declares the same description
+(`drasi_sqlite_common::native::description`).
+
 - **changes** emits each committed transaction's row changes as one graph
   change envelope. Nothing is retained: output not taken by the host before
   Stop is lost (and reported, see [Stop](#stop)).
@@ -47,7 +56,7 @@ The journal factories own four tables in the user's database file:
 
 | Table | Content |
 |---|---|
-| `__drasi_native_state_v1` | binding (source, stream, graph, owner, tables, keys), journal epoch, head, retired position, retained bytes, captured schema |
+| `__drasi_native_state_v1` | binding (source, stream, graph, owner, tables, keys), journal epoch, head, retired position, retained bytes, capture identity |
 | `__drasi_native_outbox_v1` | retained transactions (sequence, timestamp, payload) |
 | `__drasi_native_consumers_v1` | shared mode: per-consumer boundary and position |
 | `__drasi_native_bootstrap_v1` | coordinated mode: the snapshot epoch |
@@ -110,10 +119,10 @@ Rust handle ────┘  (one connection,     └─► journal (replay mode
 ### Authorizer
 
 Application statements (REST, `/api/sql`, Rust handle) run under an
-authorizer that allows reads and DML on non-reserved tables and additive
-schema objects, and denies:
+authorizer that allows reads, DML and DDL on non-reserved tables and schema
+objects, and denies:
 
-- `ALTER TABLE`, `DROP TABLE`, virtual tables;
+- virtual tables;
 - every `PRAGMA`;
 - `BEGIN`/`COMMIT`/`ROLLBACK` (the source owns transaction boundaries);
   `SAVEPOINT` is allowed only inside a scope and is tracked by capture;
@@ -121,12 +130,30 @@ schema objects, and denies:
 - `load_extension`;
 - any statement naming a `__drasi_` object.
 
-`CREATE TABLE`, `CREATE INDEX`, `CREATE VIEW`, `CREATE TRIGGER` and the
-matching `DROP INDEX/VIEW/TRIGGER` are allowed for non-reserved names. A new
-table is picked up by capture at the next statement (the worker re-reads the
-schema when `schema_version` changes) and, in journal modes, the recorded
-schema is updated in the same transaction. Destructive DDL is denied because
-it would invalidate capture and recorded identities.
+### Capture identity and schema evolution
+
+The source binds only what element identity needs, as PostgreSQL's binding
+covers only key columns (decision D-7): for each captured table, the columns
+its element IDs are derived from (configured keys, the primary key, or the
+rowid). Every commit that changed the schema is checked against it:
+
+- **Allowed** (identity extended): new tables, `ALTER TABLE … ADD COLUMN`,
+  dropping or renaming a non-key column, indexes, views and triggers, and
+  any DDL on a table the source does not capture. Capture re-reads the
+  schema when `schema_version` changes, so later changes carry the new
+  columns. Run a column change in its own transaction: a write in the same
+  transaction as the `ALTER` is refused.
+- **Refused** (identity broken): dropping or renaming a captured table, or
+  changing its key columns, would orphan the element IDs queries hold. Through
+  the source the transaction rolls back with `SourceFailure::SchemaChanged`
+  and the source keeps running.
+
+In journal modes the capture identity is recorded in the state table and
+updated in the same transaction as the DDL. DDL applied with another tool
+while the source is stopped is checked the same way at the next start: an
+extension is recorded and replay continues, a broken identity fails start
+with `SourceFailure::SchemaChanged`. Volatile modes check DDL through the
+source the same way.
 
 ### `initSql`
 
@@ -139,8 +166,8 @@ not captured. It must leave no transaction open.
 
 It makes an in-memory source usable through a loaded library, where no Rust
 handle exists. For a file database make it idempotent (`CREATE TABLE IF NOT
-EXISTS`); in journal modes it must not change the schema or add rows after
-the first start, because the recorded schema is checked on every start.
+EXISTS`); in journal modes it must not add rows after the first start, and
+any schema change it makes must keep the capture identity (see above).
 
 ### `/api/sql`
 
@@ -174,7 +201,7 @@ Output follows commit order on the single connection. Volatile modes number
 envelopes with a transport sequence starting after the owner's last observed
 sequence. Journal modes identify each transaction by `(epoch, sequence)`
 (JSON, version 1); the query's committed checkpoint carries that position.
-On start the worker validates the binding, the recorded schema, the journal
+On start the worker validates the binding, the recorded capture identity, the journal
 accounting and the consumer cursor, then replays from the cursor. Feedback
 from consumer progress retires handled records. The journal is bounded by
 `maxJournalTransactions` and `maxJournalBytes`; writes fail while it is full.
@@ -310,15 +337,17 @@ exclusive lock prevents it. If the file is changed externally between runs:
 
 - rows changed externally are not emitted, and the queries diverge from the
   table until they are re-initialized;
-- a schema change (DDL) to a captured table is detected in journal modes at
-  the next start by comparing the recorded schema, and fails with
+- DDL is checked against the capture identity at the next start in journal
+  modes: additive changes are recorded and replay continues; dropping a
+  captured table or changing its key columns fails with
   `SourceFailure::SchemaChanged`. Remove the source with erase and add it
   again (with `coordinatedSnapshot` if the tables have rows);
 - in volatile modes the worker re-reads the schema per transaction, so added
   columns appear in later changes; a dropped key column fails capture of that
   table's writes.
 
-DDL through the source is restricted by the authorizer as listed above.
+DDL through the source is checked at commit as described in
+[Capture identity](#capture-identity-and-schema-evolution).
 
 ## WAL mode
 
@@ -332,7 +361,8 @@ refuse `walMode`: they keep `DELETE` mode with an exclusive lock.
 | Failure | Behaviour |
 |---|---|
 | Invalid configuration | Refused at construction (`from_value`), with the field named. |
-| Database open, `initSql`, journal or schema check fails | Start fails; workers are signalled to exit; Stop joins. Schema change in journal modes is `SourceFailure::SchemaChanged`. |
+| Database open, `initSql`, journal or capture identity check fails | Start fails; workers are signalled to exit; Stop joins. A broken capture identity is `SourceFailure::SchemaChanged`. |
+| DDL through the source breaks the capture identity | That transaction rolls back with `SourceFailure::SchemaChanged`; the source keeps running. |
 | REST bind fails | Start fails. |
 | Listener or worker ends after start | Reported once through `next()`; the source withdraws readiness (`ControlSender::not_ready`). Stop, then start again. |
 | Commit outcome uncertain | The worker stops (fenced) rather than guess; the failure surfaces through `next()`. |
@@ -373,7 +403,7 @@ through a loaded library.
 
 | Legacy (`drasi-source-sqlite`) | Native |
 |---|---|
-| Ordinary Source-plugin ABI; hostname allowed for REST host | ComputationGraph ABI 4.0; literal IP |
+| Ordinary Source-plugin ABI; hostname allowed for REST host | ComputationGraph ABI 5.0.0; literal IP |
 | Nested snake_case configuration | Flat camelCase, defaults for every bound |
 | Unauthenticated REST, unbounded `GET /api/tables/{table}` | Optional bearer/TLS, body and time limits, paging |
 | Arbitrary SQL, DDL and transaction callbacks through Rust APIs | REST, `/api/sql` (authorizer applies) and `initSql`; Rust handle when linked |

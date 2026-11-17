@@ -10,7 +10,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use axum::http::StatusCode;
 use drasi_computation_contracts::{
-    DeliveryBatchIdentity, DeliveryHandler, DeliveryItem, EnvelopeCodec, PortId,
+    DeliveryBatchIdentity, DeliveryFailure, DeliveryHandler, DeliveryItem, EnvelopeCodec,
+    PermanentFailurePolicy, PortId,
 };
 use drasi_computation_network_common::config::{sanitize, SecretString, DELIVERY_ID_HEADER};
 use serde::{Deserialize, Serialize};
@@ -63,6 +64,10 @@ pub struct HttpDeliveryHandler {
     timeout: Duration,
     authorization: Option<reqwest::header::HeaderValue>,
     confirmed: Option<DeliveryBatchIdentity>,
+    policy: PermanentFailurePolicy,
+    /// The last batch the endpoint rejected permanently under `skip`, with
+    /// the rejection: its remaining operations are skipped without resending.
+    rejected: Option<(DeliveryBatchIdentity, String)>,
 }
 
 impl HttpDeliveryHandler {
@@ -85,9 +90,21 @@ impl HttpDeliveryHandler {
             timeout,
             authorization: None,
             confirmed: None,
+            policy: PermanentFailurePolicy::Stall,
+            rejected: None,
         };
         handler.set_options(max_message_bytes, timeout, None)?;
         Ok(handler)
+    }
+
+    /// The declared permanent-failure policy. Under `skip`, a batch the
+    /// endpoint rejects permanently is settled as skipped
+    /// ([`DeliveryFailure::skipped`]): the host `DeliveryRunner`'s ledger,
+    /// this consumer's only progress, records each of its operations as
+    /// completed, atomically, so the skip is never repeated on replay.
+    pub fn with_permanent_failure(mut self, policy: PermanentFailurePolicy) -> Self {
+        self.policy = policy;
+        self
     }
 
     /// Replaces the per-request settings, keeping the client, endpoint and
@@ -118,28 +135,67 @@ impl HttpDeliveryHandler {
     }
 }
 
-/// Whether a delivery failure may succeed when the runner retries it:
-/// transport failures (connect, timeout, in flight) and 408, 425, 429 and
-/// 5xx rejections. A confirmation mismatch or another rejection is permanent.
-pub fn retryable(error: &anyhow::Error) -> bool {
-    match error.downcast_ref::<HttpDeliveryError>() {
+/// Classifies a failed batch delivery with the same rules as the HTTP sink
+/// ([`crate::transport::transient_status`]): transport failures and 5xx, 408,
+/// 409, 425 and 429 rejections are transient, honouring `Retry-After`;
+/// another rejection or a confirmation mismatch is permanent.
+fn classify(error: anyhow::Error, requested: Option<Duration>) -> anyhow::Error {
+    let transient = match error.downcast_ref::<HttpDeliveryError>() {
         Some(HttpDeliveryError::Rejected { status, .. }) => {
-            status.is_server_error() || matches!(status.as_u16(), 408 | 425 | 429)
+            crate::transport::transient_status(*status)
         }
         Some(HttpDeliveryError::ConfirmationMismatch) => false,
         None => error
             .downcast_ref::<reqwest::Error>()
-            .is_some_and(crate::transport::transport_retryable),
-    }
+            .is_none_or(crate::transport::transport_retryable),
+    };
+    let failure = match (transient, requested) {
+        (true, Some(delay)) => DeliveryFailure::transient_after(error, delay),
+        (true, None) => DeliveryFailure::transient(error),
+        (false, _) => DeliveryFailure::permanent(error),
+    };
+    failure.into()
 }
 
 #[async_trait]
 impl DeliveryHandler for HttpDeliveryHandler {
-    fn retryable(&self, error: &anyhow::Error) -> bool {
-        retryable(error)
-    }
-
     async fn handle(&mut self, item: DeliveryItem<'_>) -> Result<()> {
+        let identity = item.batch_identity()?;
+        if let Some((rejected, reason)) = &self.rejected {
+            if *rejected == identity {
+                return Err(DeliveryFailure::skipped(anyhow::anyhow!(
+                    "the delivery endpoint rejected this batch: {reason}"
+                ))
+                .into());
+            }
+        }
+        let result = self.send(item).await;
+        match result {
+            Err(error)
+                if self.policy == PermanentFailurePolicy::Skip
+                    && matches!(
+                        error
+                            .downcast_ref::<DeliveryFailure>()
+                            .map(DeliveryFailure::class),
+                        Some(drasi_computation_contracts::DeliveryFailureClass::Permanent)
+                    )
+                    && error.chain().any(|cause| {
+                        matches!(
+                            cause.downcast_ref(),
+                            Some(HttpDeliveryError::Rejected { .. })
+                        )
+                    }) =>
+            {
+                self.rejected = Some((identity, format!("{error:#}")));
+                Err(DeliveryFailure::skipped(error).into())
+            }
+            result => result,
+        }
+    }
+}
+
+impl HttpDeliveryHandler {
+    async fn send(&mut self, item: DeliveryItem<'_>) -> Result<()> {
         let identity = item.batch_identity()?;
         if self.confirmed.as_ref() == Some(&identity) {
             return Ok(());
@@ -173,15 +229,19 @@ impl DeliveryHandler for HttpDeliveryHandler {
             .body(bytes)
             .send()
             .await
-            .map_err(reqwest::Error::without_url)?;
+            .map_err(|error| classify(error.without_url().into(), None))?;
         let status = response.status();
         if status != StatusCode::OK {
+            let requested = crate::transport::requested_delay(&response);
             let body = crate::transport::read_capped(response, MAX_RESPONSE_BYTES).await;
-            return Err(HttpDeliveryError::Rejected {
-                status,
-                message: sanitize(&String::from_utf8_lossy(&body)),
-            }
-            .into());
+            return Err(classify(
+                HttpDeliveryError::Rejected {
+                    status,
+                    message: sanitize(&String::from_utf8_lossy(&body)),
+                }
+                .into(),
+                requested,
+            ));
         }
         let mut bytes = Vec::new();
         while let Some(chunk) = response
@@ -195,10 +255,13 @@ impl DeliveryHandler for HttpDeliveryHandler {
             );
             bytes.extend_from_slice(&chunk);
         }
-        let confirmed: DeliveryBatchIdentity =
-            serde_json::from_slice(&bytes).map_err(|_| HttpDeliveryError::ConfirmationMismatch)?;
+        let confirmed: DeliveryBatchIdentity = serde_json::from_slice(&bytes)
+            .map_err(|_| classify(HttpDeliveryError::ConfirmationMismatch.into(), None))?;
         if confirmed != identity {
-            return Err(HttpDeliveryError::ConfirmationMismatch.into());
+            return Err(classify(
+                HttpDeliveryError::ConfirmationMismatch.into(),
+                None,
+            ));
         }
         self.confirmed = Some(confirmed);
         Ok(())

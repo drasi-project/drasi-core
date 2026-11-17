@@ -44,6 +44,10 @@ enum Recipe {
     QueryCatalog {},
     SourceProgress {
         component: ComponentId,
+        /// The owning query's index resource. The query commits its
+        /// checkpoints there, so the progress resource declares exactly the
+        /// durability that resource declares.
+        indexes: ResourceId,
     },
     Indexes {
         provider: String,
@@ -217,8 +221,6 @@ pub struct NativeConsumerConfig {
     pub failure_scope: drasi_core::interface::FailureMode,
     pub max_streams: NonZeroUsize,
     pub receipts_per_stream: NonZeroUsize,
-    #[serde(default)]
-    pub retry: DeliveryRetryPolicy,
 }
 impl NativeConsumerConfig {
     pub fn options(&self) -> DeliveryOptions {
@@ -226,7 +228,6 @@ impl NativeConsumerConfig {
             scope: RecoveryScope::Failure(self.failure_scope),
             max_streams: self.max_streams,
             receipts_per_stream: self.receipts_per_stream,
-            retry: self.retry.clone(),
         }
     }
     pub fn validate(&self, specification: &ResourceSpecification) -> Result<()> {
@@ -368,6 +369,25 @@ impl HostConfigurationResolver {
     }
 }
 
+/// A `sourceProgress` recipe is a Checkpoint resource whose only dependency
+/// is the owning query's index resource.
+fn validate_source_progress(
+    specification: &ResourceSpecification,
+    indexes: &ResourceId,
+    dependencies: &BTreeMap<ResourceId, ResourceRole>,
+) -> Result<()> {
+    anyhow::ensure!(
+        specification.role == ResourceRole::Checkpoint,
+        "source progress requires a Checkpoint resource declaration"
+    );
+    anyhow::ensure!(
+        dependencies.len() == 1
+            && dependencies.get(indexes) == Some(&ResourceRole::IndexBackend),
+        "source progress must declare exactly its query's IndexBackend resource `{indexes}` as its dependency"
+    );
+    Ok(())
+}
+
 fn reference(key: &str) -> Result<(&str, &str)> {
     let (kind, name) = key
         .split_once(':')
@@ -435,6 +455,9 @@ impl ManagementResourceResolver for HostManagementResources {
                     config.validate(resource, &dependencies)?
                 }
                 Recipe::ConsumerProgress(config) => config.validate(resource, &dependencies)?,
+                Recipe::SourceProgress { indexes, .. } => {
+                    validate_source_progress(resource, &indexes, &dependencies)?
+                }
                 Recipe::NativeIdentity(config) => config.validate(resource, &dependencies)?,
                 Recipe::SourceTimeMergeStorage(config) => {
                     config.validate(resource, &dependencies)?;
@@ -515,6 +538,27 @@ impl ManagementResourceResolver for HostManagementResources {
         if let Recipe::ConsumerProgress(config) = recipe {
             return config.resolve(graph, specification, dependencies);
         }
+        if let Recipe::SourceProgress { component, indexes } = recipe {
+            validate_source_progress(
+                specification,
+                &indexes,
+                &dependencies
+                    .iter()
+                    .map(|(id, handle)| (id.clone(), handle.role()))
+                    .collect(),
+            )?;
+            let capabilities = dependencies
+                .get(&indexes)
+                .context("source progress index dependency is unavailable")?
+                .capabilities();
+            return Ok(ResourceHandle::new(
+                ResourceRole::Checkpoint,
+                Arc::new(QuerySourceProgressResource(Arc::new(
+                    QuerySourceProgress::new(graph, component)?,
+                ))),
+            )
+            .with_capabilities(capabilities));
+        }
         if let Recipe::NativeIdentity(config) = recipe {
             return config.resolve(
                 instance,
@@ -538,12 +582,6 @@ impl ManagementResourceResolver for HostManagementResources {
             Recipe::QueryCatalog {} => ResourceHandle::new(
                 ResourceRole::QueryCatalog,
                 Arc::new(QueryResultsCatalog::new(graph)?),
-            ),
-            Recipe::SourceProgress { component } => ResourceHandle::new(
-                ResourceRole::Checkpoint,
-                Arc::new(QuerySourceProgressResource(Arc::new(
-                    QuerySourceProgress::new(graph, component)?,
-                ))),
             ),
             Recipe::Indexes {
                 provider,
@@ -600,6 +638,9 @@ impl ManagementResourceResolver for HostManagementResources {
                 unreachable!("consumer progress resolved with dependencies")
             }
             Recipe::NativeIdentity(_) => unreachable!("native identity resolved with dependencies"),
+            Recipe::SourceProgress { .. } => {
+                unreachable!("source progress resolved with dependencies")
+            }
             Recipe::Middleware => ResourceHandle::new(
                 ResourceRole::Middleware,
                 Arc::new(MiddlewareRegistryResource(self.middleware.clone())),
@@ -1012,53 +1053,172 @@ mod tests {
         Ok(())
     }
 
+    /// Progress resources take their durability from the query's actual
+    /// index resource, never from the recipe: a durable PostgreSQL or SQLite
+    /// source can be wired only to progress whose query stores its
+    /// checkpoints durably.
     #[tokio::test(flavor = "current_thread")]
-    async fn progress_recipes_create_distinct_actual_owners_and_reject_forged_state() -> Result<()>
-    {
+    async fn progress_recipes_create_distinct_owners_with_their_index_durability() -> Result<()> {
+        use drasi_computation_contracts::ResourceCapabilities;
         let resolver = HostManagementResources::new(
             &crate::PluginRegistry::new(),
             Arc::new(drasi_core::middleware::MiddlewareTypeRegistry::new()),
             None,
         )?;
-        let specification = ResourceSpecification {
-            id: ResourceId::try_new("progress")?,
-            role: ResourceRole::Checkpoint,
-            ownership: ResourceOwnership::Graph,
-            binding: "progress".into(),
+        let checkpoint = |id: &str| -> Result<ResourceSpecification> {
+            Ok(ResourceSpecification {
+                id: ResourceId::try_new(id)?,
+                role: ResourceRole::Checkpoint,
+                ownership: ResourceOwnership::Graph,
+                binding: id.into(),
+            })
         };
+        let indexes = |capabilities| {
+            ResourceHandle::new(
+                ResourceRole::IndexBackend,
+                Arc::new(drasi_lib::computation::v1::QueryIndexProviderResource(
+                    Arc::new(drasi_core::computation::InMemoryComputationProvider),
+                )),
+            )
+            .with_capabilities(capabilities)
+        };
+        let durable_indexes = ResourceId::try_new("durable-indexes")?;
+        let volatile_indexes = ResourceId::try_new("volatile-indexes")?;
+        let index_deps =
+            |id: &ResourceId, capabilities| BTreeMap::from([(id.clone(), indexes(capabilities))]);
+        let specification = checkpoint("progress")?;
         let query = component_id(46);
-        let recipe = json!({"kind":"sourceProgress","component":query.as_str()});
+        let recipe = |indexes: &ResourceId| json!({"kind":"sourceProgress","component":query.as_str(),"indexes":indexes.as_str()});
+        let durable_deps = index_deps(&durable_indexes, ResourceCapabilities::DURABLE);
+        let volatile_deps = index_deps(&volatile_indexes, ResourceCapabilities::VOLATILE);
         let first = resolver
-            .resolve("first", "instance", &specification, &recipe)
+            .resolve_with_dependencies(
+                "first",
+                "instance",
+                &specification,
+                &recipe(&durable_indexes),
+                &durable_deps,
+            )
             .await?;
         let second = resolver
-            .resolve("second", "instance", &specification, &recipe)
+            .resolve_with_dependencies(
+                "second",
+                "instance",
+                &specification,
+                &recipe(&volatile_indexes),
+                &volatile_deps,
+            )
             .await?;
-        let first = first.get::<QuerySourceProgressResource>()?;
-        let second = second.get::<QuerySourceProgressResource>()?;
-        assert_eq!(first.0.graph_id(), "instance");
-        assert_eq!(first.0.query_id(), &query);
-        assert!(!Arc::ptr_eq(&first.0, &second.0));
-        for recipe in [
-            json!({"kind":"sourceProgress","component":""}),
-            json!({"kind":"sourceProgress","component":query.as_str(),"persistent":true}),
-            json!({"kind":"sourceProgress","component":query.as_str(),"ready":true}),
-            json!({"kind":"sourceProgress","component":query.as_str(),"graph":"other"}),
-            json!({"kind":"sourceProgress","component":query.as_str(),"checkpoints":{}}),
+        assert_eq!(first.capabilities(), ResourceCapabilities::DURABLE);
+        assert_eq!(second.capabilities(), ResourceCapabilities::VOLATILE);
+        let first_owner = first.get::<QuerySourceProgressResource>()?;
+        let second_owner = second.get::<QuerySourceProgressResource>()?;
+        assert_eq!(first_owner.0.graph_id(), "instance");
+        assert_eq!(first_owner.0.query_id(), &query);
+        assert!(!Arc::ptr_eq(&first_owner.0, &second_owner.0));
+
+        // Durability claims, forged state and a missing or wrong index
+        // dependency are all refused.
+        for forged in [
+            json!({"kind":"sourceProgress","component":"","indexes":"durable-indexes"}),
+            json!({"kind":"sourceProgress","component":query.as_str()}),
+            json!({"kind":"sourceProgress","component":query.as_str(),"indexes":"durable-indexes","persistent":true}),
+            json!({"kind":"sourceProgress","component":query.as_str(),"indexes":"durable-indexes","ready":true}),
+            json!({"kind":"sourceProgress","component":query.as_str(),"indexes":"durable-indexes","checkpoints":{}}),
+            recipe(&volatile_indexes),
         ] {
             assert!(resolver
-                .resolve("first", "instance", &specification, &recipe)
+                .resolve_with_dependencies(
+                    "first",
+                    "instance",
+                    &specification,
+                    &forged,
+                    &durable_deps
+                )
                 .await
                 .is_err());
         }
-        let wrong_role = ResourceSpecification {
-            role: ResourceRole::StateStore,
-            ..specification
-        };
         assert!(resolver
-            .resolve("first", "instance", &wrong_role, &recipe)
+            .resolve(
+                "first",
+                "instance",
+                &specification,
+                &recipe(&durable_indexes)
+            )
             .await
             .is_err());
+        let wrong_role = ResourceSpecification {
+            role: ResourceRole::StateStore,
+            ..specification.clone()
+        };
+        assert!(resolver
+            .resolve_with_dependencies(
+                "first",
+                "instance",
+                &wrong_role,
+                &recipe(&durable_indexes),
+                &durable_deps,
+            )
+            .await
+            .is_err());
+
+        // A consumer-progress set is durable only when every member is.
+        let other = component_id(47);
+        let other_durable = resolver
+            .resolve_with_dependencies(
+                "first",
+                "instance",
+                &checkpoint("other-progress")?,
+                &json!({"kind":"sourceProgress","component":other.as_str(),"indexes":"durable-indexes"}),
+                &durable_deps,
+            )
+            .await?;
+        let set = |members: [(&ComponentId, &str, &ResourceHandle); 2]| {
+            let recipe = json!({
+                "kind":"consumerProgress",
+                "producer": component_id(48).as_str(),
+                "consumers": members
+                    .iter()
+                    .map(|(component, resource, _)| (component.as_str().to_string(), json!(resource)))
+                    .collect::<serde_json::Map<_, _>>(),
+            });
+            let dependencies = members
+                .iter()
+                .map(|(_, resource, handle)| {
+                    Ok((ResourceId::try_new(*resource)?, (*handle).clone()))
+                })
+                .collect::<Result<BTreeMap<_, _>>>();
+            (recipe, dependencies)
+        };
+        let set_specification = checkpoint("consumers")?;
+        let (recipe, dependencies) = set([
+            (&query, "progress", &first),
+            (&other, "other-progress", &other_durable),
+        ]);
+        let durable_set = resolver
+            .resolve_with_dependencies(
+                "first",
+                "instance",
+                &set_specification,
+                &recipe,
+                &dependencies?,
+            )
+            .await?;
+        assert_eq!(durable_set.capabilities(), ResourceCapabilities::DURABLE);
+        let (recipe, dependencies) = set([
+            (&query, "progress", &second),
+            (&other, "other-progress", &other_durable),
+        ]);
+        let mixed_set = resolver
+            .resolve_with_dependencies(
+                "first",
+                "instance",
+                &set_specification,
+                &recipe,
+                &dependencies?,
+            )
+            .await?;
+        assert_eq!(mixed_set.capabilities(), ResourceCapabilities::VOLATILE);
         Ok(())
     }
 

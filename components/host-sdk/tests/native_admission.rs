@@ -274,16 +274,29 @@ async fn native_admission_uses_graph_commit_and_revokes_retained_callbacks() -> 
             .unwrap()
             .take()
             .expect("injected native service");
+        // Producer metadata is served while the source is not yet active, so
+        // a client can resolve an uncertain outcome during a Pause, but no
+        // input is admitted without an activation.
+        let parked = service
+            .register_producer(&ComponentId::try_new(
+                "e1b1c4a6-0f3b-5d8e-9c1a-3b7d2f4e6a80",
+            )?)
+            .await?;
+        let early = ChangeEnvelope::new(
+            EnvelopeId::try_new("input", bytes::Bytes::from_static(b"early"))?,
+            ChangeSet::try_new(
+                ChangeSetId::try_new("input", bytes::Bytes::from_static(b"early"))?,
+                GraphChangeCodec::schema().descriptor().clone(),
+                vec![],
+            )?,
+            SystemMetadata::new(definition.stream.clone(), 1),
+        );
         assert_eq!(
-            service
-                .register_producer(&ComponentId::try_new(
-                    "5ddadfa1-268c-5a36-80fa-e43b8baac458"
-                )?)
-                .await
-                .unwrap_err()
-                .kind,
+            service.admit(&parked, 1, &early).await.unwrap_err().kind,
             sdk::AdmissionErrorKind::Closed
         );
+        assert_eq!(service.admission_receipt(&parked, 1).await?, None);
+        service.retire_producer(&parked).await?;
         let started = control
             .start_components(GraphRevision(1), GraphSelection::All)
             .await?;

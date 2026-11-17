@@ -70,6 +70,10 @@ pub struct SourceAdmission {
     activation_changed: Notify,
     failure: StdMutex<Option<String>>,
     failed: Notify,
+    /// The graph's runtime. Producer metadata served while no activation is
+    /// bound runs here, so channel storage never runs under a caller's
+    /// (for example a native plugin's) runtime.
+    runtime: tokio::runtime::Handle,
 }
 
 #[derive(Default)]
@@ -187,6 +191,7 @@ impl SourceAdmission {
             activation_changed: Notify::new(),
             failure: StdMutex::new(None),
             failed: Notify::new(),
+            runtime: tokio::runtime::Handle::current(),
         }))
     }
 
@@ -433,20 +438,28 @@ impl SourceAdmission {
         }
     }
 
+    /// Producer metadata (register, retire, status, receipt) is answered
+    /// whenever the channel is open, including while the source is parked or
+    /// stopped: a client must be able to resolve an uncertain outcome during a
+    /// managed-update Pause. Only `admit` and `admit_wait` need an activation.
     pub async fn register_producer(
         &self,
         producer: ComponentId,
     ) -> Result<ProducerSession, PipeError> {
-        self.submit(
-            |reply| Ok(Request::Register(producer, reply)),
+        let direct = producer.clone();
+        self.metadata(
+            |reply| Request::Register(producer, reply),
+            |channel| async move { channel.register_producer(direct).await },
             metadata_unknown,
         )
         .await
     }
 
     pub async fn retire_producer(&self, session: &ProducerSession) -> Result<(), PipeError> {
-        self.submit(
-            |reply| Ok(Request::Retire(session.clone(), reply)),
+        let direct = session.clone();
+        self.metadata(
+            |reply| Request::Retire(session.clone(), reply),
+            |channel| async move { channel.retire_producer(&direct).await },
             metadata_unknown,
         )
         .await
@@ -456,8 +469,10 @@ impl SourceAdmission {
         &self,
         session: &ProducerSession,
     ) -> Result<ProducerStatus, PipeError> {
-        self.submit(
-            |reply| Ok(Request::Status(session.clone(), reply)),
+        let direct = session.clone();
+        self.metadata(
+            |reply| Request::Status(session.clone(), reply),
+            |channel| async move { channel.producer_status(&direct).await },
             || PipeError::Closed,
         )
         .await
@@ -468,11 +483,48 @@ impl SourceAdmission {
         session: &ProducerSession,
         sequence: u64,
     ) -> Result<Option<AdmissionReceipt>, PipeError> {
-        self.submit(
-            |reply| Ok(Request::Receipt(session.clone(), sequence, reply)),
+        let direct = session.clone();
+        self.metadata(
+            |reply| Request::Receipt(session.clone(), sequence, reply),
+            |channel| async move { channel.admission_receipt(&direct, sequence).await },
             || PipeError::Closed,
         )
         .await
+    }
+
+    /// While an activation's mailbox is bound, metadata is ordered with
+    /// admissions through it. Otherwise (parked, starting or stopped) nothing
+    /// processes the mailbox, so the request is served from the channel on the
+    /// graph's runtime; the channel serializes it with its own state lock.
+    async fn metadata<T, F>(
+        &self,
+        request: impl FnOnce(Reply<T>) -> Request,
+        direct: impl FnOnce(Arc<QosChannel>) -> F,
+        lost_response: impl FnOnce() -> PipeError,
+    ) -> Result<T, PipeError>
+    where
+        T: Send + 'static,
+        F: std::future::Future<Output = Result<T, PipeError>> + Send + 'static,
+    {
+        self.channel.check()?;
+        let bound = {
+            let binding = self
+                .binding
+                .lock()
+                .map_err(|_| backend("source admission binding poisoned"))?;
+            Self::check_binding(&binding)?;
+            binding
+                .requests
+                .as_ref()
+                .is_some_and(|sender| !sender.is_closed())
+        };
+        if bound {
+            return self.submit(|reply| Ok(request(reply)), lost_response).await;
+        }
+        self.runtime
+            .spawn(direct(self.channel.clone()))
+            .await
+            .map_err(|_| lost_response())?
     }
 
     async fn submit<T>(
@@ -777,6 +829,7 @@ mod tests {
             activation_changed: Notify::new(),
             failure: StdMutex::new(None),
             failed: Notify::new(),
+            runtime: tokio::runtime::Handle::current(),
         })
     }
 
@@ -947,6 +1000,7 @@ mod tests {
                 activation_changed: Notify::new(),
                 failure: StdMutex::new(None),
                 failed: Notify::new(),
+                runtime: tokio::runtime::Handle::current(),
             })
         };
         let first = service();

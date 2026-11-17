@@ -65,6 +65,9 @@ DISPOSE carries `DisposeRequest { reason, intent, attempt }`. `reason` is
 `erase` is permanent removal of state the component owns, requested only of
 factories declaring `erases_owned_state`; there is no separate deletion opcode.
 Retries repeat the same reason and intent, so erasure must be idempotent.
+For a factory bound to activation credentials, an `erase` DISPOSE also carries
+`credentials`, resolved anew for that attempt, because erasing may need the
+external system even when the object never started in this process.
 
 `FactoryVTable::assess` is the pure factory planner:
 `unsafe extern "C" fn(*mut c_void, BorrowedBytes) -> Reply`. Its input is JSON
@@ -106,13 +109,16 @@ complete cleanup, and cannot authorize restart. Retained cleanup can be retried.
 Disposal fences and settles independent calls/readers; synchronous release is not
 its replacement.
 
-## Optional services, version 1
+## Optional services, version 2
 
 `drasi_computation_plugin_services_v1` is an optional, independently versioned
 extension. The two base entry points, base vtables, ABI version, wire version and
 strict base metadata remain unchanged. Matching wire-version-4 libraries may omit
 this symbol; loading does not grant recovery support.
 An extension without the base entry points is malformed, not a legacy plugin.
+The table's `version` (and each factory's capability reply) must equal the
+host's exactly; version 2 adds the `wait` flag to admission ADMIT requests, so a
+version-1 library is refused at load rather than failing per request.
 
 `PluginServicesV1` has a checked header, version/reserved fields, per-factory
 capability discovery and a service-aware create callback. Only single-output
@@ -123,8 +129,12 @@ the table before returning from creation. All data crosses as bounded
 MessagePack or, for a failure reason, at most 4096 UTF-8 bytes.
 
 Admission, producer registration/retirement, status and receipt lookup share the
-host graph's bounded service. At most 16 native operation handles are outstanding;
-cancelling/dropping a handle releases its slot. Listener failure reporting is
+host graph's bounded service. At most 16 native operation handles are outstanding
+(`MAX_OUTSTANDING_REQUESTS`; the SDK's `NativeAdmission` queues its callers below
+it); cancelling/dropping a handle releases its slot. An ADMIT with `wait` waits
+for graph activation, mailbox and journal capacity instead of answering `Busy` or
+`CapacityExhausted`. Producer metadata is answered even while the source has no
+activation (parked or stopped); only ADMIT requires one. Listener failure reporting is
 independent of those slots and preserves the first unobserved failure. Requests
 perform no host storage work under a plugin runtime: the host graph validates
 and commits into its actual outgoing QoS channel. Replacement revokes retained
@@ -201,8 +211,17 @@ It reuses component lifecycle handles and the existing revocable transaction
 request layout. The Host owns progress and commit; the plugin cannot acknowledge
 upstream transport. A full batch uses the existing 64 MiB wire bound, while each
 subsequent generation/index/key request is limited to 4096 bytes. Batch release
-rejects stale generations or active calls. Explicit retryable handler failures use
-the extension's `RETRYABLE` status, not an empty success response.
+rejects stale generations or active calls. A handler failure crosses as an ordinary
+failure status whose JSON carries the sink's delivery-failure class (`delivery`:
+transient with an optional retry-after, or permanent), never an empty success
+response.
+
+`drasi_computation_plugin_logging_v1` (optional, `logging::HostLoggerV1`) is
+called once by the host right after loading a library. The plugin SDK installs
+a `log` logger that forwards each enabled record (level, target, message) to
+the host's callback, so a loaded library's diagnostics reach the host's logger.
+The table carries the host's level at load time; it is host-owned and valid for
+the process lifetime.
 
 Both extensions leave base tables, strict metadata, ABI 5.0 and wire 5 unchanged.
 Only negotiated, bound factories may use them; missing services never imply

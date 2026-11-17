@@ -11,7 +11,6 @@ pub const SYMBOL: &[u8] = b"drasi_computation_plugin_consumer_v1\0";
 pub const VERSION: u32 = 1;
 pub const BEGIN_BATCH: u32 = 1;
 pub const HANDLE: u32 = 2;
-pub const RETRYABLE: u32 = 0x1001;
 pub const MAX_CONTROL_BYTES: usize = 4096;
 pub type ConsumerFn = unsafe extern "C" fn() -> *const PluginConsumerV1;
 

@@ -12,7 +12,10 @@ use drasi_computation_contracts::{
 };
 use drasi_computation_plugin_sdk::lifecycle::{DisposeReason, OperationScope, StateIntent};
 use drasi_core_types::interface::SourceCheckpoint;
-use drasi_mssql_common::native::memory::{lsn, MemoryDatabase};
+use drasi_mssql_common::native::{
+    memory::{lsn, MemoryDatabase},
+    Cursor,
+};
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -164,6 +167,39 @@ async fn next(source: &mut MsSqlSource) -> OutputEnvelope {
     step(source.next()).await.unwrap().expect("an envelope")
 }
 
+/// The CDC cursor of a progress-only record.
+fn progress_cursor(envelope: &OutputEnvelope) -> Cursor {
+    assert!(
+        envelope.envelope.changes().operations().is_empty(),
+        "expected a progress record"
+    );
+    Cursor::decode(
+        envelope
+            .envelope
+            .system()
+            .source_position()
+            .expect("record position"),
+    )
+    .unwrap()
+}
+
+/// Commits `cursors` for A and B, as their queries would.
+fn commit(f: &Fixture, cursors: [Option<Cursor>; 2]) {
+    let [a, b] = cursors;
+    f.progress
+        .state
+        .send_replace(snapshot([(true, a), (true, b)]));
+}
+
+/// Starts a fresh group and commits its origin record for both members, as
+/// their queries would; changes flow only after that.
+async fn start_streaming(f: &mut Fixture) -> Cursor {
+    step(f.source.start(&mut start_ctx())).await.unwrap();
+    let origin = progress_cursor(&next(&mut f.source).await);
+    commit(f, [Some(origin.clone()), Some(origin.clone())]);
+    origin
+}
+
 async fn quiet(source: &mut MsSqlSource) -> bool {
     tokio::time::timeout(Duration::from_millis(100), source.next())
         .await
@@ -173,7 +209,7 @@ async fn quiet(source: &mut MsSqlSource) -> bool {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn streams_every_change_once_across_pages_and_restarts_with_one_connection() {
     let mut f = fixture();
-    step(f.source.start(&mut start_ctx())).await.unwrap();
+    let _origin = start_streaming(&mut f).await;
     assert!(
         step(f.source.start(&mut start_ctx())).await.is_err(),
         "second start refused"
@@ -232,7 +268,7 @@ async fn binding(f: &Fixture) -> [u8; 32] {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pause_waits_for_the_in_flight_page_then_reads_nothing_until_resume() {
     let mut f = fixture();
-    step(f.source.start(&mut start_ctx())).await.unwrap();
+    let _origin = start_streaming(&mut f).await;
     f.db.block();
     step(f.db.wait_blocked()).await;
     // The in-flight key read cannot finish before this deadline: the pause
@@ -266,7 +302,7 @@ async fn pause_waits_for_the_in_flight_page_then_reads_nothing_until_resume() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn drain_stop_times_out_while_a_query_is_in_flight_and_a_retry_completes_it() {
     let mut f = fixture();
-    step(f.source.start(&mut start_ctx())).await.unwrap();
+    let _origin = start_streaming(&mut f).await;
     f.db.block();
     step(f.db.wait_blocked()).await;
     let error = step(
@@ -291,7 +327,7 @@ async fn drain_stop_times_out_while_a_query_is_in_flight_and_a_retry_completes_i
 #[tokio::test]
 async fn abort_stop_drops_the_connection_promptly_even_mid_query() {
     let mut f = fixture();
-    step(f.source.start(&mut start_ctx())).await.unwrap();
+    let _origin = start_streaming(&mut f).await;
     f.db.block();
     step(f.db.wait_blocked()).await;
     step(f.source.stop(&stop_ctx(StopMode::Abort, STEP)))
@@ -347,7 +383,7 @@ async fn cancelled_and_expired_starts_leave_nothing_running() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transport_failures_reconnect_without_loss_and_permanent_failures_do_not() {
     let mut f = fixture();
-    step(f.source.start(&mut start_ctx())).await.unwrap();
+    let _origin = start_streaming(&mut f).await;
     f.db.change(7, 11, 1, 2, 1, 0);
     next(&mut f.source).await;
     f.db.with(|s| {
@@ -387,7 +423,7 @@ async fn transport_failures_reconnect_without_loss_and_permanent_failures_do_not
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_zero_reconnect_budget_reports_the_transport_failure() {
     let mut f = fixture_with(json!({"reconnectBudgetMs": 0}), false);
-    step(f.source.start(&mut start_ctx())).await.unwrap();
+    let _origin = start_streaming(&mut f).await;
     f.db.with(|s| s.failing_queries = 1);
     let error = step(f.source.next()).await.unwrap_err();
     assert!(
@@ -402,19 +438,21 @@ async fn a_zero_reconnect_budget_reports_the_transport_failure() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_restarting_consumer_holds_polling_instead_of_failing_the_source() {
     let mut f = fixture();
-    step(f.source.start(&mut start_ctx())).await.unwrap();
-    f.progress
-        .state
-        .send_replace(snapshot([(true, None), (false, None)]));
+    let origin = start_streaming(&mut f).await;
+    f.progress.state.send_replace(snapshot([
+        (true, Some(origin.clone())),
+        (false, Some(origin.clone())),
+    ]));
     tokio::time::sleep(Duration::from_millis(30)).await;
     f.db.change(7, 20, 1, 2, 1, 0);
     assert!(
         quiet(&mut f.source).await,
         "held while a member is not ready"
     );
-    f.progress
-        .state
-        .send_replace(snapshot([(true, None), (true, None)]));
+    f.progress.state.send_replace(snapshot([
+        (true, Some(origin.clone())),
+        (true, Some(origin)),
+    ]));
     next(&mut f.source).await;
     step(f.source.stop(&stop_ctx(StopMode::Drain, STEP)))
         .await
@@ -614,15 +652,7 @@ fn membership_uses_the_slowest_consumer_and_fences_failures_resets_and_regressio
     let mixed = fresh
         .observe(&snapshot([(true, at(3)), (true, None)]))
         .unwrap();
-    assert!(
-        fresh.resume(&mixed, None).is_err(),
-        "mixed fresh/resumed needs an origin"
-    );
-    let origin = Cursor::boundary([7; 32], lsn(1));
-    assert_eq!(
-        fresh.resume(&mixed, Some(&origin)).unwrap().unwrap().lsn,
-        lsn(1)
-    );
+    assert_eq!((mixed.missing, mixed.minimum.unwrap().lsn), (1, lsn(3)));
     let not_ready = fresh
         .observe(&snapshot([(false, at(3)), (true, at(3))]))
         .unwrap();
@@ -647,4 +677,135 @@ fn membership_uses_the_slowest_consumer_and_fences_failures_resets_and_regressio
         fresh.observe(&foreign).is_err(),
         "cursors under another binding"
     );
+}
+
+/// A new source object over the same database and committed progress, as
+/// after a process restart.
+fn restarted(f: &Fixture, extra: serde_json::Value) -> MsSqlSource {
+    MsSqlSource::new(
+        ComponentId::try_new(SOURCE_ID).unwrap(),
+        config(extra),
+        ConsumerProgressView::new(f.progress.clone()),
+        &[
+            ComponentId::try_new(CONSUMER_A).unwrap(),
+            ComponentId::try_new(CONSUMER_B).unwrap(),
+        ],
+        false,
+        connectors(&f.db),
+    )
+    .unwrap()
+}
+
+fn lsn_of(envelope: &OutputEnvelope) -> [u8; 10] {
+    Cursor::decode(
+        envelope
+            .envelope
+            .system()
+            .source_position()
+            .expect("position"),
+    )
+    .unwrap()
+    .lsn
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_origin_is_committed_first_and_survives_a_restart_with_a_new_source_object() {
+    let mut f = fixture();
+    f.db.with(|s| s.max_lsn = lsn(10));
+    step(f.source.start(&mut start_ctx())).await.unwrap();
+    let origin = progress_cursor(&next(&mut f.source).await);
+    assert_eq!(
+        origin.lsn,
+        lsn(10),
+        "startPosition current resolves the maximum LSN"
+    );
+    f.db.change(7, 11, 1, 2, 1, 0);
+    assert!(
+        quiet(&mut f.source).await,
+        "no change is published before every member committed the origin"
+    );
+    commit(&f, [Some(origin.clone()), Some(origin.clone())]);
+    assert_eq!(lsn_of(&next(&mut f.source).await), lsn(11));
+    // The process exits before any member commits a change.
+    step(f.source.stop(&stop_ctx(StopMode::Abort, STEP)))
+        .await
+        .unwrap();
+    // The old object is gone, as after a process exit.
+    let replacement = restarted(&f, json!({}));
+    drop(std::mem::replace(&mut f.source, replacement));
+    f.db.change(7, 12, 1, 2, 2, 0);
+    f.db.with(|s| s.max_lsn = lsn(20));
+    let mut source = restarted(&f, json!({}));
+    step(source.start(&mut start_ctx())).await.unwrap();
+    assert_eq!(lsn_of(&next(&mut source).await), lsn(11), "not re-resolved");
+    assert_eq!(lsn_of(&next(&mut source).await), lsn(12), "downtime change");
+    step(source.stop(&stop_ctx(StopMode::Drain, STEP)))
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_crash_between_the_members_first_commits_restarts_from_the_committed_origin() {
+    let mut f = fixture();
+    f.db.with(|s| s.max_lsn = lsn(10));
+    step(f.source.start(&mut start_ctx())).await.unwrap();
+    let origin = progress_cursor(&next(&mut f.source).await);
+    // A commits the origin; the process dies before B does.
+    commit(&f, [Some(origin.clone()), None]);
+    step(f.source.stop(&stop_ctx(StopMode::Abort, STEP)))
+        .await
+        .unwrap();
+    // The old object is gone, as after a process exit.
+    let replacement = restarted(&f, json!({}));
+    drop(std::mem::replace(&mut f.source, replacement));
+    f.db.change(7, 11, 1, 2, 1, 0);
+    f.db.with(|s| s.max_lsn = lsn(15));
+    // B has no cursor: it joins at the group minimum, A's committed origin.
+    let mut source = restarted(&f, json!({}));
+    step(source.start(&mut start_ctx())).await.unwrap();
+    assert_eq!(lsn_of(&next(&mut source).await), lsn(11));
+    assert!(quiet(&mut source).await, "exactly the uncommitted range");
+    step(source.stop(&stop_ctx(StopMode::Drain, STEP)))
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idle_selected_tables_commit_progress_so_a_restart_survives_cdc_cleanup() {
+    let mut f = fixture();
+    f.source.set_idle_progress(Duration::from_millis(20));
+    let origin = start_streaming(&mut f).await;
+    // Unrelated tables keep the database busy; the selected table is idle.
+    f.db.with(|s| s.max_lsn = lsn(40));
+    let idle = progress_cursor(&next(&mut f.source).await);
+    assert_eq!(idle.lsn, lsn(40));
+    assert!(
+        quiet(&mut f.source).await,
+        "no further record until the maximum LSN moves again"
+    );
+    commit(&f, [Some(idle.clone()), Some(idle)]);
+    step(f.source.stop(&stop_ctx(StopMode::Drain, STEP)))
+        .await
+        .unwrap();
+    // The old object is gone, as after a process exit.
+    let replacement = restarted(&f, json!({}));
+    drop(std::mem::replace(&mut f.source, replacement));
+    f.db.cleanup(30);
+    f.db.change(7, 41, 1, 2, 1, 0);
+    let mut source = restarted(&f, json!({}));
+    step(source.start(&mut start_ctx())).await.unwrap();
+    assert_eq!(lsn_of(&next(&mut source).await), lsn(41));
+    step(source.stop(&stop_ctx(StopMode::Drain, STEP)))
+        .await
+        .unwrap();
+    // Without the idle record the committed origin is behind cleanup.
+    commit(&f, [Some(origin.clone()), Some(origin)]);
+    let mut stranded = restarted(&f, json!({}));
+    let error = step(stranded.start(&mut start_ctx())).await;
+    let error = match error {
+        Err(error) => format!("{error:#}"),
+        Ok(()) => format!("{:#}", step(stranded.next()).await.unwrap_err()),
+    };
+    assert!(error.contains("CDC cleanup"), "{error}");
+    let _ = step(stranded.stop(&stop_ctx(StopMode::Abort, STEP))).await;
 }

@@ -365,7 +365,7 @@ is not a successful graceful drain or proof that the write rolled back.
   "url": "http://127.0.0.1:9001/reaction",
   "timeoutMs": 60000,
   "maxRetries": 3,
-  "failurePolicy": "strict"
+  "onPermanentFailure": "stall"
 }
 ```
 
@@ -390,8 +390,8 @@ canonical `identity`, and only the `element`, `before`, `after`,
 Empty change sets produce no request; a scheduling control or recovery frame
 fails. `outputTemplates` render body/URL/method/headers with
 `added`/`updated`/`deleted` routing keyed by output alias; templates compile at
-construction and a render failure is a per-change failure under
-`failurePolicy`, never a fallback. `adaptive` plus `batchEndpoint` enables a
+construction and a render failure is a permanent failure of that change under
+`onPermanentFailure`, never a fallback. `adaptive` plus `batchEndpoint` enables a
 `{"batch":[...]}` protocol with host-owned collection and timers, one batch per
 output. `maxBatchBytes` bounds collected inputs; `maxRequestBytes` splits
 rendered requests. See [DESIGN.md](sinks/http/DESIGN.md) and
@@ -414,7 +414,7 @@ rendered requests. See [DESIGN.md](sinks/http/DESIGN.md) and
   "retryBudgetMs": 120000,
   "connectTimeoutMs": 10000,
   "outputFormat": "canonicalJson",
-  "failurePolicy": "strict"
+  "onPermanentFailure": "stall"
 }
 ```
 
@@ -474,12 +474,15 @@ failures are not retried. Retries send the same sequence, payload and
 multi-change envelope can already have partially delivered before a later change
 fails, and retries or cancellation can duplicate external effects.
 
-A template that fails to render is a per-change failure under `failurePolicy`;
-it never falls back to the default body. `failurePolicy="strict"` propagates
-failure (default). `"skip"` logs every exhausted delivery as a sanitized warning
-with component/output/sequence/error and deliberately continues. It is not an implementation of the full legacy `auto_skip_gap`
-recovery policy. The native HTTP strict path does not silently drop permanent
-poison outcomes as the legacy checkpoint loop did. Healthy paired runs should not measure failed
+A template that fails to render is a permanent failure of that change; it
+never falls back to the default body. Every sink follows the graph's
+[delivery-failure model](sinks/NATIVE-SINK-GUIDE.md#delivery-failures): an
+exhausted transient failure fails the input transiently and the graph retries
+it in place with backoff (no manual Retry); a permanent failure follows
+`onPermanentFailure` — `stall` (default) records a terminal failure on the
+sink, `skip` logs the change with component/output/sequence/error, still
+delivers the input's other changes, and the graph counts the input as skipped.
+`skip` drops only permanently rejected changes, never an outage. Healthy paired runs should not measure failed
 request/retry timings.
 
 Client requests live in host-polled operation futures, not background sink

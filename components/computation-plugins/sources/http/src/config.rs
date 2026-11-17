@@ -210,31 +210,6 @@ impl HttpSourceConfig {
         Ok(())
     }
 
-    /// Checks that every environment variable named by webhook
-    /// authentication is present, so a missing secret fails at Initialize
-    /// rather than on every request.
-    pub fn validate_webhook_secrets(&self) -> Result<()> {
-        let Some(webhooks) = &self.webhooks else {
-            return Ok(());
-        };
-        for route in &webhooks.routes {
-            let Some(auth) = &route.auth else { continue };
-            let names = auth
-                .signature
-                .iter()
-                .map(|signature| signature.secret_env.as_str())
-                .chain(auth.bearer.iter().map(|bearer| bearer.token_env.as_str()));
-            for name in names {
-                ensure!(
-                    std::env::var_os(name).is_some_and(|value| !value.is_empty()),
-                    "webhook route {} names environment variable {name}, which is not set",
-                    route.path
-                );
-            }
-        }
-        Ok(())
-    }
-
     pub(crate) fn adaptive_settings(
         &self,
     ) -> Result<Option<drasi_http_common::adaptive_batcher::AdaptiveBatchConfig>> {
@@ -374,15 +349,5 @@ mod tests {
             }]}});
             assert!(HttpSourceConfig::from_value(value).is_err(), "{path}");
         }
-    }
-
-    #[test]
-    fn missing_webhook_secret_environment_is_reported() -> Result<()> {
-        let config = HttpSourceConfig::from_value(json!({"stream":"s","webhooks":{"routes":[{
-            "path":"/hook","methods":["POST"],"auth":{"bearer":{"tokenEnv":"DRASI_TEST_UNSET_WEBHOOK_TOKEN_7c1"}},
-            "mappings":[{"operation":"insert","elementType":"node","template":{"id":"{{payload.id}}","labels":["A"]}}]
-        }]}}))?;
-        assert!(config.validate_webhook_secrets().is_err());
-        Ok(())
     }
 }

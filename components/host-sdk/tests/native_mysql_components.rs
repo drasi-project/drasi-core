@@ -96,11 +96,14 @@ impl Pipe for GatePipe {
 }
 #[async_trait]
 impl EnvelopeReceiver for GateReceiver {
+    /// Takes the next delivery, then hands it on only with a permit. Waiting
+    /// after receiving means closing the gate (forgetting its permits) holds
+    /// the very next delivery; a permit already acquired by an idle receiver
+    /// cannot let one through. A closed semaphore releases everything.
     async fn receive(&mut self) -> std::result::Result<Option<Delivery>, PipeError> {
-        let permit = self.gate.clone().acquire_owned().await.ok();
         let delivery = self.inner.receive().await?;
         if delivery.is_some() {
-            if let Some(permit) = permit {
+            if let Ok(permit) = self.gate.clone().acquire_owned().await {
                 permit.forget();
             }
         }
@@ -935,7 +938,12 @@ async fn transactions(dynamic: bool, shared: bool) -> Result<()> {
         &native,
         path.path(),
         mode,
-        Arc::new(Semaphore::new(0)),
+        // The shared right member runs freely until the proof holds it.
+        Arc::new(Semaphore::new(if shared {
+            Semaphore::MAX_PERMITS
+        } else {
+            0
+        })),
     )
     .await?;
     let mut committed = Vec::new();
@@ -978,6 +986,23 @@ async fn transactions(dynamic: bool, shared: bool) -> Result<()> {
             .iter()
             .map(|result| result.snapshot().map(|value| value.as_of_sequence))
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        // Unselected transactions (such as the sink's own effect and cursor
+        // writes in this database) advance both members. Hold the right one
+        // only once it has caught up, and record the boundary it must keep.
+        let held = if shared {
+            let key = source_key();
+            tokio::time::timeout(Duration::from_secs(30), async {
+                while position(&graph.owners[0], &key)? != position(&graph.owners[1], &key)? {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await??;
+            graph.gate.forget_permits(Semaphore::MAX_PERMITS);
+            Some(position(&graph.owners[1], &key)?)
+        } else {
+            None
+        };
         database
             .sql(
                 "BEGIN; UPDATE items SET value='final' WHERE id=1; \
@@ -995,10 +1020,11 @@ async fn transactions(dynamic: bool, shared: bool) -> Result<()> {
             let key = source_key();
             assert_eq!(position(&graph.owners[0], &key)?["version"], 1);
             assert_eq!(
-                position(&graph.owners[1], &key)?["version"],
-                2,
-                "held owner must retain its actual snapshot boundary"
+                Some(position(&graph.owners[1], &key)?),
+                held,
+                "held owner must retain its own boundary while the other advances"
             );
+            assert_ne!(Some(position(&graph.owners[0], &key)?), held);
             graph
                 .core
                 .component_by_name(&name("source"))?

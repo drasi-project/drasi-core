@@ -32,6 +32,18 @@ use drasi_index_rocksdb::{
 use drasi_lib::computation::v1::*;
 
 use drasi_computation_bridge_common::*;
+
+/// The bridge failure inside a sink error, which also carries the graph's
+/// delivery-failure classification.
+trait BridgeCause {
+    fn bridge_cause(&self) -> Option<&BridgeError>;
+}
+
+impl BridgeCause for anyhow::Error {
+    fn bridge_cause(&self) -> Option<&BridgeError> {
+        self.chain().find_map(|cause| cause.downcast_ref())
+    }
+}
 use drasi_computation_sink_bridge::BridgeSink;
 use drasi_computation_source_bridge::BridgeSource;
 
@@ -135,6 +147,7 @@ fn configuration(
         delivery: schema,
         profile,
         failure_scope: FailureMode::ProcessRestart,
+        on_permanent_failure: Default::default(),
         namespace: namespace(),
         transport: Transport::Unix {
             data_path: directory.path().join("data.sock").to_string_lossy().into(),

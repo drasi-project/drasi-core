@@ -6,7 +6,7 @@
 //! See `CONFIGURATION.md` in this crate for the operator reference.
 
 use anyhow::{ensure, Result};
-use drasi_computation_contracts::{ConfigurationConstraint, OutputAliases};
+use drasi_computation_contracts::{ConfigurationConstraint, OutputAliases, PermanentFailurePolicy};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -112,7 +112,8 @@ pub enum RenderFailurePolicy {
     /// (legacy behaviour). The input completes.
     #[default]
     Fallback,
-    /// Fail the input; nothing from it is emitted.
+    /// Nothing from the input is emitted and it fails permanently; the
+    /// sink's `onPermanentFailure` decides whether the sink stalls or skips it.
     Strict,
 }
 
@@ -147,6 +148,9 @@ pub struct LogSinkConfig {
     pub output: LogOutput,
     #[serde(default)]
     pub render_failure_policy: RenderFailurePolicy,
+    /// What the graph does with an input that failed permanently.
+    #[serde(default)]
+    pub on_permanent_failure: PermanentFailurePolicy,
 }
 
 impl Default for LogSinkConfig {
@@ -161,6 +165,7 @@ impl Default for LogSinkConfig {
             target: default_target(),
             output: LogOutput::default(),
             render_failure_policy: RenderFailurePolicy::default(),
+            on_permanent_failure: PermanentFailurePolicy::default(),
         }
     }
 }
@@ -256,7 +261,7 @@ impl LogSinkConfig {
                 "output",
                 String,
                 false,
-                "Where lines go: 'log' (the process log facade), 'stdout' or 'stderr' (complete lines, flushed before the input completes).",
+                "Where lines go: 'log' (the host's logger, also when the sink is loaded as a plugin library), 'stdout' or 'stderr' (complete lines, flushed before the input completes).",
             )
             .allowed([json!("log"), json!("stdout"), json!("stderr")])
             .default("log"),
@@ -264,10 +269,11 @@ impl LogSinkConfig {
                 "renderFailurePolicy",
                 String,
                 false,
-                "On a template render failure: 'fallback' emits the change in `format` with a warning; 'strict' fails the input and emits nothing from it.",
+                "On a template render failure: 'fallback' emits the change in `format` with a warning; 'strict' emits nothing from the input and fails it permanently, so onPermanentFailure applies.",
             )
             .allowed([json!("fallback"), json!("strict")])
             .default("fallback"),
+            Field::on_permanent_failure(),
         ])
         .unwrap_or_else(|error| unreachable!("constant log sink configuration: {error}"))
     }

@@ -56,7 +56,8 @@ key is a delete plus an insert.
 Element IDs are `mysql:v1:` typed identities over the database, table and key
 values (`keys::transaction_element_id`), shared with the bootstrap providers.
 The label is the table name. The key is `tableKeys` when configured, else the
-primary key, else an `id` column. Positional rows use `@N` property names and
+primary key; a keyless table without `tableKeys` is refused at start (a column
+named `id` is never taken as identity). Positional rows use `@N` property names and
 explicit `@N` keys.
 
 | MySQL | Property |
@@ -88,11 +89,34 @@ capture, and is fenced after Dispose.
   completed boundary; a partial transaction resumes at its start and skips the
   handled rows.
 - **Snapshot boundary (version 2):** a coordinated snapshot hands over at
-  `{file, start: 4, end: boundary}` with a hash of the whole file prefix. The
-  source re-hashes the prefix before admitting live changes.
+  `{file, start: 4, end: boundary}` with a constant-size proof of the file's
+  identity: a SHA-256 of its format description event (creation time,
+  originating server, server version, header lengths, checksum algorithm),
+  read by starting the dump at the boundary. With the binding's
+  `@@server_uuid` it detects a reset or rewritten binlog; the server refuses
+  a boundary beyond the file, and the first event must start exactly at the
+  boundary. Verification therefore costs two events whatever the file size,
+  at the provider, at every source start and on reconnect. A reset that
+  recreates the same file name within the same second on the same server is
+  not detected.
+- **Progress records (row factories):** an empty change set carrying a row
+  cursor without a row offset (`GraphChangeCodec::encode_source_progress`),
+  committed by consumers like any other event. A fresh group (no member has a
+  cursor) with `startFrom: end` first emits its origin, an **origin boundary
+  (version 3)** `{file, start: 4, end}` proven like a snapshot boundary, and
+  holds every row until each member has committed a cursor; a restart, even
+  with a new source object, resumes there and delivers changes made while the
+  process was down. While the selected tables are quiet (30 seconds without an
+  emission), the end of the next transaction that touches no selected table
+  is emitted as a progress record (a version-1 transaction cursor with no
+  rows), so committed cursors follow binlog rotation and purging. The
+  transaction factories already do this with an empty committed transaction
+  for every binlog transaction.
 - **Shared progress:** replay starts at the members' minimum physical
-  position; every member's retained history is verified, and members that
-  disagree about the same boundary fence the source.
+  position, and a member without a cursor joins there (a crash between two
+  members' first commits therefore restarts); every member's retained
+  history is verified, and members that disagree about the same boundary
+  fence the source.
 
 The **binding** (format version 2) is a SHA-256 over the facts a cursor
 depends on: the scope (`mysql-native-v2`, `mysql-native-consumers-v2` or
@@ -114,10 +138,10 @@ with the typed `SourceFailure::SchemaChanged`.
 session, starts `START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY` on
 another, pins the selected tables' metadata locks, reads the binlog position
 and releases the global lock before scanning through bounded server-side
-cursors. The boundary and its prefix hash are committed by the query
+cursors. The boundary and its file-identity proof are committed by the query
 together with the snapshot. The source then refuses to start until every
-owner has a completed boundary, and admits live changes only after the
-retained prefix hashes equal. FTWRL is the only server-wide lock the source
+owner has a completed boundary, and admits live changes only after every
+retained boundary's file identity matches. FTWRL is the only server-wide lock the source
 family takes, and only while the view is established.
 
 ## Positional profile
@@ -251,8 +275,9 @@ the plan or the proposed configuration does not match.
   and port.
 - Only `require_verify_full` verifies the server certificate and host name;
   weaker modes log a warning (see CONFIGURATION.md).
-- Catalog queries use hex string literals (`_utf8mb4 0x...`), never
-  interpolated names, so any MySQL identifier is safe.
+- Catalog queries use hex string literals (`_utf8mb4 0x...`), and snapshot
+  statements quote table names with backticks, doubling embedded backticks
+  (`keys::quote_identifier`), so any MySQL identifier is safe.
 - Every buffer is bounded by `maxProtocolBytes` or the transaction limits.
 
 ## Observability
@@ -277,6 +302,7 @@ SDK has no metric facility yet (Source X-07).
 - Coordinating the source and its bootstrap providers through the SDK
   bootstrap coordinator (MY-16): the pair shares configuration and committed
   progress instead.
+- Inferring identity from a column name: a keyless table needs `tableKeys`.
 
 ## Differences from the legacy source
 
@@ -292,3 +318,5 @@ SDK has no metric facility yet (Source X-07).
   native source derives `serverId` from a SHA-256 of the component ID.
 - Values are decoded strictly (invalid text in a column's character set
   fails instead of being replaced).
+- A keyless table no longer falls back to a column named `id`; it needs
+  `tableKeys`.

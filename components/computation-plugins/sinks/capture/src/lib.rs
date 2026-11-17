@@ -36,7 +36,8 @@ impl Factory for CaptureFactory {
         &self,
         request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
     ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.unkeyed_sink())
+        let configuration = component::Configuration::parse(request.request.configuration.clone())?;
+        Ok(request.unkeyed_sink(configuration.on_permanent_failure))
     }
     fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
         Some(component::configuration_definition().details())

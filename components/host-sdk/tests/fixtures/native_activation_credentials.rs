@@ -11,7 +11,7 @@ use std::sync::{
     Arc,
 };
 
-static COUNTERS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+static COUNTERS: [AtomicU64; 10] = [const { AtomicU64::new(0) }; 10];
 pub const CONSTRUCTED: u32 = 0;
 pub const LITERAL: u32 = 1;
 pub const AUTHENTICATED: u32 = 2;
@@ -20,6 +20,10 @@ pub const IN_FLIGHT: u32 = 4;
 pub const COMPLETED: u32 = 5;
 pub const LAST_SECRET: u32 = 6;
 pub const LAST_KIND: u32 = 7;
+/// Erasing disposes, each with the provider's credentials.
+pub const ERASED: u32 = 8;
+/// Disposes that received credentials they must not have.
+pub const UNEXPECTED_DISPOSE_CREDENTIALS: u32 = 9;
 
 #[no_mangle]
 pub extern "C" fn drasi_activation_fixture_probe(counter: u32) -> u64 {
@@ -83,7 +87,10 @@ impl sdk::Factory for Factory {
                 PipeRequirements::default(),
             )],
             completion: Some(SinkCompletion::Handled),
-            capabilities: sdk::Capabilities::default(),
+            capabilities: sdk::Capabilities {
+                erases_owned_state: true,
+                ..sdk::Capabilities::default()
+            },
         }
     }
 
@@ -177,9 +184,33 @@ impl sdk::NativeComponent for Sink {
     }
     async fn dispose(
         &mut self,
-        _: &sdk::lifecycle::DisposeContext,
+        context: &sdk::lifecycle::DisposeContext,
     ) -> sdk::lifecycle::LifecycleResult {
-        sdk::lifecycle::nothing_to_do()
+        // An erase of a bound component reaches its system with the
+        // provider's credentials, even without any start.
+        let erased: anyhow::Result<()> = match (
+            context.erases_owned_state() && self.bound,
+            context.credentials(),
+        ) {
+            (true, Some(credentials)) => {
+                let (username, _) = credentials.clone().into_auth_pair();
+                if username == "provider-user" {
+                    increment(ERASED);
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("unexpected provider username"))
+                }
+            }
+            (true, None) => Err(anyhow::anyhow!(
+                "an erase of a bound component needs credentials"
+            )),
+            (false, Some(_)) => {
+                increment(UNEXPECTED_DISPOSE_CREDENTIALS);
+                Ok(())
+            }
+            (false, None) => Ok(()),
+        };
+        Ok(erased?)
     }
     async fn start(
         &mut self,

@@ -13,12 +13,13 @@ use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use drasi_computation_contracts::{
-    ChangeNotification, ChangeRoute, ComponentDescriptor, InputEnvelope, SinkBatching,
-    SinkCompletion, SinkOutput, SinkOutputs,
+    ChangeNotification, ChangeRoute, ComponentDescriptor, DeliveryFailure, InputEnvelope,
+    SinkBatching, SinkCompletion, SinkOutput, SinkOutputs,
 };
 use drasi_computation_network_common::{
     batching::AdaptivePolicy,
     config::{delivery_id, COMPONENT_HEADER, PORT_HEADER},
+    retry::InputOutcome,
     update::{ensure_same_component, inputs_changed, BoundaryPlanner},
 };
 use drasi_computation_plugin_sdk::lifecycle::{
@@ -226,6 +227,7 @@ impl HttpSink {
 
     async fn send_batch(
         &self,
+        outcome: &mut InputOutcome<'_>,
         output: &SinkOutput,
         id: &str,
         sequence: u64,
@@ -247,12 +249,9 @@ impl HttpSink {
             body: Bytes::from(serde_json::to_vec(&BatchEnvelope { batch: items })?),
         };
         let label = output.endpoint().to_string();
-        self.config.failure_policy.delivery(
-            transport::deliver(self.client()?, &request, &self.attempts(), id, &label).await,
-            self.descriptor.id(),
-            &label,
-            sequence,
-        )
+        let result =
+            transport::deliver(self.client()?, &request, &self.attempts(), id, &label).await;
+        outcome.record(result, &label, sequence)
     }
 
     async fn process(&mut self, inputs: Vec<InputEnvelope>) -> Result<()> {
@@ -268,7 +267,8 @@ impl HttpSink {
             .adaptive
             .as_ref()
             .map(|policy| policy.current().max_operations);
-        let policy = self.config.failure_policy;
+        let id = self.descriptor.id().clone();
+        let mut outcome = InputOutcome::new(self.config.on_permanent_failure, &id);
         let mut batch = Vec::new();
         let mut batch_bytes = BATCH_ENVELOPE_OVERHEAD;
         let mut batch_run: Option<(usize, usize)> = None;
@@ -283,17 +283,23 @@ impl HttpSink {
                         transport::deliver(self.client()?, &request, &self.attempts(), &id, &label)
                             .await
                     }
-                    Err(error) => Err(error.context("HTTP request could not be rendered")),
+                    // The same change renders the same way every time.
+                    Err(error) => Err(DeliveryFailure::permanent(
+                        error.context("HTTP request could not be rendered"),
+                    )
+                    .into()),
                 };
-                policy.delivery(delivery, self.descriptor.id(), &label, sequence)?;
+                outcome.record(delivery, &label, sequence)?;
                 continue;
             };
             let item = match self.batch_item(notification) {
                 Ok(item) => item,
                 Err(error) => {
-                    policy.delivery(
-                        Err(error.context("HTTP batch item could not be rendered")),
-                        self.descriptor.id(),
+                    outcome.record(
+                        Err(DeliveryFailure::permanent(
+                            error.context("HTTP batch item could not be rendered"),
+                        )
+                        .into()),
                         &label,
                         sequence,
                     )?;
@@ -302,9 +308,11 @@ impl HttpSink {
             };
             let bytes = serde_json::to_vec(&item)?.len() + 1;
             if bytes + BATCH_ENVELOPE_OVERHEAD > self.config.max_request_bytes {
-                policy.delivery(
-                    Err(anyhow::anyhow!("HTTP batch item exceeds maxRequestBytes")),
-                    self.descriptor.id(),
+                outcome.record(
+                    Err(DeliveryFailure::permanent(anyhow::anyhow!(
+                        "HTTP batch item exceeds maxRequestBytes"
+                    ))
+                    .into()),
                     &label,
                     sequence,
                 )?;
@@ -317,6 +325,7 @@ impl HttpSink {
                 {
                     let id = delivery_id(&notifications[first], &notifications[last]);
                     self.send_batch(
+                        &mut outcome,
                         notifications[first].output(),
                         &id,
                         notifications[last].sequence(),
@@ -334,6 +343,7 @@ impl HttpSink {
         if let Some((first, last)) = batch_run {
             let id = delivery_id(&notifications[first], &notifications[last]);
             self.send_batch(
+                &mut outcome,
                 notifications[first].output(),
                 &id,
                 notifications[last].sequence(),
@@ -344,7 +354,7 @@ impl HttpSink {
         if let Some(adaptive) = &mut self.adaptive {
             adaptive.record(notifications.len());
         }
-        Ok(())
+        outcome.finish()
     }
 }
 
@@ -357,12 +367,13 @@ fn insert_output_headers(headers: &mut HeaderMap, output: &SinkOutput) -> Result
 /// Classifies each configuration change by the weakest safe boundary.
 ///
 /// * Pause (in place): everything read per delivery — templates, headers,
-///   secret headers, token, timeout, request size, retries, retry budget,
-///   failure policy and success statuses.
+///   secret headers, token, timeout, request size, retries, retry budget
+///   and success statuses.
 /// * Stop (restart): destination and connection settings bound into the
 ///   client or the host batching declaration — url, baseUrl, batchEndpoint,
 ///   TLS, connect timeout, connection pool, adaptive and maxBatchBytes.
-/// * Replace: output aliases or changed input bindings.
+/// * Replace: output aliases, changed input bindings, or
+///   `onPermanentFailure` (part of the description captured at construction).
 pub(crate) fn plan(
     current: &HttpSinkConfig,
     proposed: &HttpSinkConfig,
@@ -420,7 +431,12 @@ pub(crate) fn plan(
         c.retry_budget_ms != p.retry_budget_ms,
         Pause,
     );
-    planner.field("failurePolicy", c.failure_policy != p.failure_policy, Pause);
+    // The policy is part of the description captured at construction.
+    planner.field(
+        "onPermanentFailure",
+        c.on_permanent_failure != p.on_permanent_failure,
+        Replace,
+    );
     planner.field(
         "successStatusCodes",
         c.success_status_codes != p.success_status_codes,

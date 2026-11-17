@@ -5,13 +5,13 @@ contains no component implementation, plugin export or registered factory.
 
 | Module | Feature | Contents |
 |---|---|---|
-| `config` | always (items gated by feature) | `SecretString` (always); listener security settings (`SecuritySettings`, `IngressSecurity`, `TlsMaterial`, `RateLimit`) and secure defaults (`listener`); `IngressConfig` and `ingress_options` (`ingress`); sink helpers: `FailurePolicy`, reserved headers, `delivery_id`, `ClientTls`, `sanitize` (sink features) |
+| `config` | always (items gated by feature) | `SecretString` (always); listener security settings (`SecuritySettings`, `IngressSecurity`, `TlsMaterial`, `RateLimit`) and secure defaults (`listener`); `IngressConfig` and `ingress_options` (`ingress`); sink helpers: reserved headers, `delivery_id`, `ClientTls`, `sanitize` (sink features) |
 | `security` | `listener` | Constant-time bearer-token `Authenticator`, per-client `RateLimiter`, TLS server configuration (rustls, ring) |
 | `server` | `listener` | The shared HTTP listener: TLS, connection cap, header-read timeout, graceful drain; used by the HTTP source and the SSE sink |
-| `ingress` | `ingress` | `SourceRuntime` (listener ownership, Start with cancellation and deadline, Pause gating, Drain/Abort Stop, live settings) and `Ingress` (access control, request slots, volatile admission, typed `IngressError`) |
-| `durable` | `ingress` | Durable admission: the session protocol, and the server-sequenced producer used by standard routes |
+| `ingress` | `ingress` | `SourceRuntime` (listener ownership, Start with cancellation and deadline, Pause gating of data admission, Drain/Abort Stop, live settings) and `Ingress` (access control, request slots, volatile admission, typed `IngressError`). Drain stops accepting but lets in-flight admissions finish and answer; Abort interrupts them as uncertain |
+| `durable` | `ingress` | Durable admission with back-pressure (`admit_wait`): the session protocol, and the server-sequenced producer used by standard routes. Batches are not atomic; the committed prefix is always reported |
 | `update` | always | `BoundaryPlanner` for classifying configuration changes, `ensure_same_component`, `inputs_changed` |
-| `retry` | `sink` | Sink delivery retries: jittered exponential backoff, `Retry-After`, a total time budget |
+| `retry` | `sink` | Sink delivery retries: jittered exponential backoff, `Retry-After`, a total time budget; `InputOutcome` applies a sink's `onPermanentFailure` to the changes of one input |
 | `wire` | protocol features | HTTP and gRPC change conversion, and sink output projection |
 | `batching` | sink features | Adaptive sink batching |
 | `diag!` | always | Logging through `log` when the host installed a logger, otherwise warnings and errors to standard error |

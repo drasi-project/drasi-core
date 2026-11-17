@@ -17,7 +17,9 @@ use drasi_computation_plugin_sdk::lifecycle::{
 use drasi_computation_plugin_sdk::{
     ActivationCredentials, ApplyUpdateRequest, NativeComponent, NativeManagement, UpdateRequest,
 };
-use drasi_mysql_common::storedproc::runtime::{CleanupPending, MySqlStoredProcSink as Runtime};
+use drasi_mysql_common::storedproc::{
+    delivery::CleanupPending, runtime::MySqlStoredProcSink as Runtime,
+};
 
 /// The native MySQL stored-procedure consumer (`ConsumerMode::External`).
 pub struct MySqlStoredProcSink {
@@ -60,7 +62,10 @@ impl MySqlStoredProcSink {
 }
 
 fn lifecycle_error(error: anyhow::Error) -> LifecycleError {
-    if error.downcast_ref::<CleanupPending>().is_some() {
+    use drasi_computation_storedproc_common::ErrorClass;
+    if error.chain().any(|cause| cause.is::<CleanupPending>())
+        || matches!(Runtime::classify(&error), ErrorClass::Transient { .. })
+    {
         LifecycleError::retryable(error)
     } else {
         error.into()
@@ -209,12 +214,13 @@ impl NativeManagement for MySqlStoredProcSink {
 
 #[async_trait]
 impl DeliveryHandler for MySqlStoredProcSink {
-    fn retryable(&self, error: &anyhow::Error) -> bool {
-        self.runtime.retryable(error)
-    }
     fn delivery_guarantee(&self) -> drasi_computation_contracts::DeliveryGuarantee {
         self.runtime.delivery_guarantee()
     }
+    /// One attempt through the shared stored-procedure protocol, already
+    /// classified for the graph: deadlocks, lock waits and lost sessions are
+    /// transient (the graph retries them); a procedure rejection is
+    /// permanent, or skipped under `onPermanentFailure: skip`.
     async fn handle(&mut self, item: DeliveryItem<'_>) -> Result<()> {
         self.runtime.handle(item).await
     }

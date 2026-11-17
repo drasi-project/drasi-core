@@ -331,3 +331,32 @@ async fn incomplete_assembly_enforces_deadlines_and_transaction_payload_bounds()
         .is_some());
     Ok(())
 }
+
+#[test]
+fn boundary_file_identity_ignores_what_the_server_rewrites_and_binds_the_creation_time() {
+    // header (19) + binlog version, 50-byte server version, created, header
+    // length, post-header lengths and checksum algorithm, then the CRC.
+    let mut event = vec![0u8; 19 + 2 + 50 + 4 + 1 + 40 + 1 + 4];
+    event[..4].copy_from_slice(&1_700_000_000u32.to_le_bytes());
+    event[4] = EventType::FORMAT_DESCRIPTION_EVENT as u8;
+    event[5..9].copy_from_slice(&1u32.to_le_bytes());
+    event[21..27].copy_from_slice(b"8.0.36");
+    let identity = file_identity(&event);
+    let mut sent = event.clone();
+    sent[13..17].fill(0); // log_pos zeroed when sent from an offset
+    sent[17] = 0x01; // in-use flag cleared on close
+    sent[71..75].copy_from_slice(&7u32.to_le_bytes()); // created
+    let crc = sent.len() - 4;
+    sent[crc..].fill(9);
+    assert_eq!(file_identity(&sent), identity);
+    let mut recreated = event.clone();
+    recreated[..4].copy_from_slice(&1_700_000_001u32.to_le_bytes());
+    assert_ne!(
+        file_identity(&recreated),
+        identity,
+        "a reset file is another file"
+    );
+    let mut other = event;
+    other[5..9].copy_from_slice(&2u32.to_le_bytes());
+    assert_ne!(file_identity(&other), identity, "another server's file");
+}

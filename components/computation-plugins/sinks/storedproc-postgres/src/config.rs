@@ -6,7 +6,11 @@
 //! every other field are inspectable.
 
 use anyhow::{ensure, Context, Result};
-use drasi_computation_contracts::{DeliveryGuarantee, OutputAliases, SinkOutputs};
+use drasi_computation_contracts::{
+    DeliveryGuarantee, OutputAliases, PermanentFailurePolicy, SinkOutputs,
+};
+use drasi_computation_storedproc_common::settings;
+pub use drasi_computation_storedproc_common::settings::{is_loopback_host, SslMode};
 use drasi_postgres_common::{
     delivery::progress::{
         ProgressTable, DEFAULT_MAX_STREAMS, DEFAULT_PROGRESS_TABLE, MAX_STREAMS_LIMIT,
@@ -24,30 +28,16 @@ use std::{
 pub const DEFAULT_HOST: &str = "localhost";
 pub const DEFAULT_PORT: u16 = 5432;
 pub const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
-pub const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 10_000;
-pub const DEFAULT_RECONNECT_BUDGET_MS: u64 = 60_000;
-pub const DEFAULT_SHUTDOWN_TIMEOUT_MS: u64 = 10_000;
-/// Upper bound on the connect, reconnect and shutdown durations.
-pub const MAX_DURATION_MS: u64 = 3_600_000;
+pub const DEFAULT_CONNECT_TIMEOUT_MS: u64 = settings::DEFAULT_CONNECT_TIMEOUT_MS;
+pub const DEFAULT_SHUTDOWN_TIMEOUT_MS: u64 = settings::DEFAULT_SHUTDOWN_TIMEOUT_MS;
+/// Upper bound on the connect and shutdown durations.
+pub const MAX_DURATION_MS: u64 = settings::MAX_DURATION_MS;
 /// `statement_timeout` is a 32-bit millisecond setting.
 pub const MAX_COMMAND_TIMEOUT_MS: u64 = i32::MAX as u64;
 /// Largest accepted PEM value.
 pub const MAX_PEM_BYTES: usize = 64 * 1024;
 /// Largest accepted credential field.
 pub const MAX_CREDENTIAL_BYTES: usize = 4096;
-
-/// Transport security for the PostgreSQL connection.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum SslMode {
-    /// Verified TLS: the server certificate chain must be trusted (system
-    /// roots plus `tlsCaPem`) and must match `host` (libpq `verify-full`).
-    #[default]
-    Require,
-    /// Plaintext. Refused for a non-loopback host unless
-    /// `allowRemotePlaintext` is set.
-    Disable,
-}
 
 /// One operation's command template.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,9 +94,6 @@ fn default_command_timeout_ms() -> u64 {
 fn default_connect_timeout_ms() -> u64 {
     DEFAULT_CONNECT_TIMEOUT_MS
 }
-fn default_reconnect_budget_ms() -> u64 {
-    DEFAULT_RECONNECT_BUDGET_MS
-}
 fn default_shutdown_timeout_ms() -> u64 {
     DEFAULT_SHUTDOWN_TIMEOUT_MS
 }
@@ -153,12 +140,14 @@ pub struct PostgresStoredProcConfig {
     /// progress; `atLeastOnce` also accepts in-memory queries.
     #[serde(default)]
     pub delivery_guarantee: DeliveryGuarantee,
+    /// `stall` (default) or `skip`: a skipped operation is recorded in the
+    /// dead-letter table atomically with the cursor advance.
+    #[serde(default)]
+    pub on_permanent_failure: PermanentFailurePolicy,
     #[serde(default = "default_command_timeout_ms")]
     pub command_timeout_ms: u64,
     #[serde(default = "default_connect_timeout_ms")]
     pub connect_timeout_ms: u64,
-    #[serde(default = "default_reconnect_budget_ms")]
-    pub reconnect_budget_ms: u64,
     #[serde(default = "default_shutdown_timeout_ms")]
     pub shutdown_timeout_ms: u64,
 }
@@ -174,6 +163,7 @@ impl std::fmt::Debug for PostgresStoredProcConfig {
             .field("ssl_mode", &self.ssl_mode)
             .field("progress_table", &self.progress_table)
             .field("delivery_guarantee", &self.delivery_guarantee)
+            .field("on_permanent_failure", &self.on_permanent_failure)
             .finish_non_exhaustive()
     }
 }
@@ -204,21 +194,21 @@ impl PostgresStoredProcConfig {
             Field::new("database", String, true, "Database that holds the procedures and the progress table.").default_description("Required; no default."),
             Field::new("user", String, true, "Login role. Replaced for one activation by host activation credentials.").default_description("Required; no default."),
             Field::new("password", String, false, "Password of user. Replaced for one activation by host activation credentials.").secret().default_description("Empty."),
-            Field::new("sslMode", String, false, "require: verified TLS (trusted chain and matching host name, libpq verify-full). disable: plaintext, refused for a non-loopback host unless allowRemotePlaintext is true.").default(json!(SslMode::Require)).allowed([json!(SslMode::Require), json!(SslMode::Disable)]),
-            Field::new("allowRemotePlaintext", Boolean, false, "Permit sslMode disable for a host that is not localhost or a loopback address. Query data and authentication travel unencrypted.").default(false),
+            Field::new("sslMode", String, false, SslMode::DESCRIPTION).default(json!(SslMode::Require)).allowed([json!(SslMode::Require), json!(SslMode::Disable)]),
+            Field::new("allowRemotePlaintext", Boolean, false, SslMode::ALLOW_REMOTE_PLAINTEXT).default(false),
             Field::new("tlsCaPem", String, false, "PEM CA certificates trusted in addition to the system roots; requires sslMode require."),
             Field::new("tlsClientCertificatePem", String, false, "PEM client certificate for mutual TLS; requires tlsClientPrivateKeyPem."),
             Field::new("tlsClientPrivateKeyPem", String, false, "PKCS#8 PEM private key for tlsClientCertificatePem.").secret(),
             Field::new("outputs", Object, false, "Optional aliases for incoming outputs: a map of alias to {component, port?}. An unaliased output is named after its producing component. The alias selects the route and appears in the template context.").default(json!({})).constraint(Constraint::output_aliases()),
             Field::new("routes", Object, false, "Per-output-alias commands: {alias: {added?, updated?, deleted?: {template}}}. A key matches the full alias or its last dotted segment.").default(json!({})).constraint(Constraint::try_new(json!({"type": "object", "additionalProperties": command_schema()})).expect("constant route schema")),
             Field::new("defaultTemplate", Object, false, "Commands used when no route supplies the operation: {added?, updated?, deleted?: {template}}.").constraint(Constraint::try_new(command_schema()).expect("constant command schema")),
-            Field::new("progressTable", String, false, "Schema-qualified destination cursor table (lowercase identifiers). Shared by several consumers; each owns only its rows.").default(DEFAULT_PROGRESS_TABLE),
+            Field::new("progressTable", String, false, "Destination cursor table, as table (in schema public) or schema.table, lowercase identifiers. Its dead-letter table <table>_dead_letter sits beside it. Shared by several consumers; each owns only its rows. Changing it is unsupported in place.").default(DEFAULT_PROGRESS_TABLE),
             Field::new("maxStreams", Integer, false, "Destination cursor rows (producer streams) this consumer may own.").default(DEFAULT_MAX_STREAMS).minimum(1).maximum(MAX_STREAMS_LIMIT as u64),
             Field::new("deliveryGuarantee", String, false, "exactlyOnce accepts only producers with a durable output identity (for example persistent queries). atLeastOnce also accepts producers with a volatile identity (for example in-memory queries): their outputs are delivered at least once, deduplicated within one producer run, and not resumed across a process restart. An incompatible producer is refused when the edge is configured.").default(json!(DeliveryGuarantee::ExactlyOnce)).allowed([json!(DeliveryGuarantee::ExactlyOnce), json!(DeliveryGuarantee::AtLeastOnce)]),
+            Field::on_permanent_failure(),
             Field::new("commandTimeoutMs", Integer, false, "Server statement_timeout for each command; the client waits this long plus a 5 second grace before discarding the connection.").default(DEFAULT_COMMAND_TIMEOUT_MS).minimum(1).maximum(MAX_COMMAND_TIMEOUT_MS),
             Field::new("connectTimeoutMs", Integer, false, "Deadline for one connection attempt (TCP, TLS and authentication).").default(DEFAULT_CONNECT_TIMEOUT_MS).minimum(1).maximum(MAX_DURATION_MS),
-            Field::new("reconnectBudgetMs", Integer, false, "Total time one operation may spend reconnecting and retrying transient failures with jittered exponential backoff; 0 makes a single attempt.").default(DEFAULT_RECONNECT_BUDGET_MS).minimum(0).maximum(MAX_DURATION_MS),
-            Field::new("shutdownTimeoutMs", Integer, false, "Bound on closing the connection at Stop when the host gives no earlier deadline.").default(DEFAULT_SHUTDOWN_TIMEOUT_MS).minimum(1).maximum(MAX_DURATION_MS),
+            Field::new("shutdownTimeoutMs", Integer, false, "Bound on closing the connection at Stop and Dispose when the host gives no earlier deadline.").default(DEFAULT_SHUTDOWN_TIMEOUT_MS).minimum(1).maximum(MAX_DURATION_MS),
         ])
         .expect("constant PostgreSQL stored-procedure configuration")
     }
@@ -254,20 +244,9 @@ impl PostgresStoredProcConfig {
             (1..=MAX_COMMAND_TIMEOUT_MS).contains(&self.command_timeout_ms),
             "commandTimeoutMs must be in 1..={MAX_COMMAND_TIMEOUT_MS}"
         );
-        for (name, value, minimum) in [
-            ("connectTimeoutMs", self.connect_timeout_ms, 1),
-            ("reconnectBudgetMs", self.reconnect_budget_ms, 0),
-            ("shutdownTimeoutMs", self.shutdown_timeout_ms, 1),
-        ] {
-            ensure!(
-                (minimum..=MAX_DURATION_MS).contains(&value),
-                "{name} must be in {minimum}..={MAX_DURATION_MS}"
-            );
-        }
-        ensure!(
-            (1..=MAX_STREAMS_LIMIT).contains(&self.max_streams),
-            "maxStreams must be in 1..={MAX_STREAMS_LIMIT}"
-        );
+        settings::validate_duration("connectTimeoutMs", self.connect_timeout_ms)?;
+        settings::validate_duration("shutdownTimeoutMs", self.shutdown_timeout_ms)?;
+        settings::validate_max_streams(self.max_streams)?;
         self.table()?;
         ensure!(
             self.tls_client_certificate_pem.is_some() == self.tls_client_private_key_pem.is_some(),
@@ -299,14 +278,7 @@ impl PostgresStoredProcConfig {
             native_tls::Identity::from_pkcs8(certificate.as_bytes(), key.as_bytes())
                 .context("invalid tlsClientCertificatePem or tlsClientPrivateKeyPem")?;
         }
-        ensure!(
-            self.ssl_mode == SslMode::Require
-                || self.allow_remote_plaintext
-                || is_loopback_host(&self.host),
-            "sslMode disable sends credentials and data unencrypted to the non-loopback host '{}'; \
-             use sslMode require or set allowRemotePlaintext",
-            self.host
-        );
+        settings::validate_transport(self.ssl_mode, self.allow_remote_plaintext, &self.host)?;
         self.outputs.validate()?;
         let commands = Commands::compile(self)?;
         ensure!(
@@ -348,21 +320,9 @@ impl PostgresStoredProcConfig {
         Duration::from_millis(self.connect_timeout_ms)
     }
 
-    pub fn reconnect_budget(&self) -> Duration {
-        Duration::from_millis(self.reconnect_budget_ms)
-    }
-
     pub fn shutdown_timeout(&self) -> Duration {
         Duration::from_millis(self.shutdown_timeout_ms)
     }
-}
-
-/// Whether plaintext to `host` stays on this machine.
-pub fn is_loopback_host(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|address| address.is_loopback())
 }
 
 /// Compiled command templates and their routing.

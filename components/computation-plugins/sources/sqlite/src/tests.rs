@@ -708,9 +708,31 @@ async fn sql_route_requires_authentication_and_the_authorizer() {
     .await
     .expect("rows");
     assert_eq!(rows, json!({"rows": [{"value": "two"}]}));
+    // Additive DDL keeps every element ID and is captured from then on.
+    let altered = step(
+        "alter",
+        sql(
+            execute("ALTER TABLE items ADD COLUMN extra TEXT"),
+            Some(TOKEN),
+        ),
+    )
+    .await
+    .expect("alter");
+    assert_eq!(altered.status(), reqwest::StatusCode::OK);
+    let inserted = step(
+        "insert after alter",
+        sql(
+            execute("INSERT INTO items(id, value, extra) VALUES (3, 'three', 'added')"),
+            Some(TOKEN),
+        ),
+    )
+    .await
+    .expect("insert after alter");
+    assert_eq!(inserted.status(), reqwest::StatusCode::OK);
+    assert!(step("next", source.next()).await.expect("next").is_some());
     for denied in [
+        // Dropping a captured table would orphan its element IDs.
         "DROP TABLE items",
-        "ALTER TABLE items ADD COLUMN extra TEXT",
         "PRAGMA journal_mode=WAL",
         "BEGIN",
         "CREATE TABLE __drasi_native_state_v1(x)",

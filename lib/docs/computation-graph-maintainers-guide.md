@@ -2123,7 +2123,11 @@ into a transactional participant.
 Managed `ConsumerProgressConfig` resolves
 `{kind: "consumerProgress", producer: <ID>, consumers: {<component>: <resource>}}`.
 Declare exactly one distinct Checkpoint dependency per consumer, using its
-actual `sourceProgress` resource. The producer binds the set to
+actual `sourceProgress` resource. A `sourceProgress` recipe names the owning
+query's index resource (`indexes`) and declares it as its only dependency; the
+progress handle declares that resource's durability, and the set is durable only
+when every member is. The query refuses a `source_progress` binding whose declared
+durability differs from its index provider's. The producer binds the set to
 `consumer_progress`; a query binds its member to `source_progress`, while an
 eligible standalone transformer/Handled sink binds its member to `input_progress`.
 The [Host SDK recipe guide](../../components/host-sdk/README.md#native-producer-consumer-progress)

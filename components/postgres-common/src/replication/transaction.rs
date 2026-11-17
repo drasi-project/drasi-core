@@ -14,91 +14,143 @@
 
 use super::*;
 use crate::types::{PostgresValue, RelationInfo, ReplicaIdentity, TransactionInfo, WalMessage};
-use drasi_computation_contracts::{OutputEnvelope, PortId, SourceTransactionBuilder};
 use drasi_core_types::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 
+/// Decodes pgoutput into the changes of transactions this source has not
+/// handled yet. It maps rows to elements and checks key bindings, but
+/// assembles nothing: whole-transaction and row outputs each consume the
+/// events their own way, so no transaction is encoded twice.
 pub struct Transactions {
     pub decoder: crate::decoder::PgOutputDecoder,
-    pub pending: Option<(TransactionInfo, SourceTransactionBuilder)>,
     pub keys: TableKeys,
     pub source: ComponentId,
-    pub stream: StreamId,
-    pub limits: SourceTransactionLimits,
     pub binding: [u8; 32],
     pub managed_slot: Option<String>,
+    /// Everything at or below this LSN is handled: commits at or below it
+    /// are skipped.
     pub resume: u64,
-    pub transport_sequence: Arc<AtomicU64>,
     pub filtered: bool,
+    open: Option<Open>,
+}
+
+struct Open {
+    info: TransactionInfo,
+    /// The transaction is already handled and is skipped.
+    skip: bool,
+}
+
+/// One decoded event of a transaction the source has not handled.
+pub enum Decoded {
+    /// A transaction opened; its commit LSN and timestamp are already known.
+    Begin(TransactionInfo),
+    /// Changes of the open transaction, in order.
+    Changes(Changes),
+    /// The open transaction committed. `resume` has advanced to it.
+    Commit(TransactionInfo),
+}
+
+/// The changes of one pgoutput message: one change, or a key-changing
+/// update's delete and insert.
+pub struct Changes {
+    first: SourceChange,
+    second: Option<SourceChange>,
+    /// The pgoutput message size, an estimate of the changes' size.
+    pub bytes: usize,
+}
+
+impl Changes {
+    pub fn len(&self) -> usize {
+        1 + usize::from(self.second.is_some())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+}
+
+impl IntoIterator for Changes {
+    type Item = SourceChange;
+    type IntoIter =
+        std::iter::Chain<std::iter::Once<SourceChange>, std::option::IntoIter<SourceChange>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        std::iter::once(self.first).chain(self.second)
+    }
 }
 
 impl Transactions {
-    pub fn decode(&mut self, data: &[u8]) -> Result<Option<OutputEnvelope>> {
-        self.decode_with_position(data, |commit_lsn, binding, managed_slot| {
-            Ok((
-                serde_json::to_vec(&Position {
-                    version: 1,
-                    binding,
-                    commit_lsn,
-                    managed_slot: managed_slot.map(str::to_owned),
-                })?,
-                commit_lsn,
-            ))
-        })
+    pub fn new(
+        decoder: crate::decoder::PgOutputDecoder,
+        keys: TableKeys,
+        source: ComponentId,
+        binding: [u8; 32],
+        managed_slot: Option<String>,
+        resume: u64,
+        filtered: bool,
+    ) -> Self {
+        Self {
+            decoder,
+            keys,
+            source,
+            binding,
+            managed_slot,
+            resume,
+            filtered,
+            open: None,
+        }
     }
 
-    /// Reuse complete-transaction decoding/assembly with an explicitly selected
-    /// cursor and logical sequence. The physical transaction identity is unchanged.
-    pub fn decode_with_position(
+    /// Whether a transaction is open: between Begin and Commit.
+    pub fn in_transaction(&self) -> bool {
+        self.open.is_some()
+    }
+
+    /// Restarts decoding on a new replication connection.
+    pub fn restart(
         &mut self,
-        data: &[u8],
-        mut position: impl FnMut(u64, [u8; 32], Option<&str>) -> Result<(Vec<u8>, u64)>,
-    ) -> Result<Option<OutputEnvelope>> {
+        decoder: crate::decoder::PgOutputDecoder,
+        keys: TableKeys,
+        resume: u64,
+    ) {
+        self.decoder = decoder;
+        self.keys = keys;
+        self.resume = resume;
+        self.open = None;
+    }
+
+    /// Records that everything up to `lsn` is handled: a boundary proven to
+    /// hold no unhandled commit, such as a keepalive's WAL end.
+    pub fn advance(&mut self, lsn: u64) {
+        debug_assert!(self.open.is_none(), "advanced inside a transaction");
+        self.resume = self.resume.max(lsn);
+    }
+
+    pub fn decode(&mut self, data: &[u8]) -> Result<Option<Decoded>> {
         let Some(message) = self.decoder.decode_message(data)? else {
             return Ok(None);
         };
+        let bytes = data.len();
         match message {
             WalMessage::Begin(info) => {
-                anyhow::ensure!(self.pending.is_none(), "incomplete PostgreSQL transaction");
-                self.pending = Some((
-                    info,
-                    SourceTransactionBuilder::new(&self.source, self.limits)?,
-                ));
+                anyhow::ensure!(self.open.is_none(), "incomplete PostgreSQL transaction");
+                let skip = info.commit_lsn <= self.resume;
+                self.open = Some(Open {
+                    info: info.clone(),
+                    skip,
+                });
+                if !skip {
+                    return Ok(Some(Decoded::Begin(info)));
+                }
             }
             WalMessage::Commit(info) => {
-                let (_, builder) = self.pending.take().context("Commit without assembly")?;
-                if info.commit_lsn <= self.resume {
-                    return Ok(None);
+                let open = self.open.take().context("Commit without assembly")?;
+                if !open.skip {
+                    self.resume = info.commit_lsn;
+                    return Ok(Some(Decoded::Commit(info)));
                 }
-                let (position, logical) =
-                    position(info.commit_lsn, self.binding, self.managed_slot.as_deref())?;
-                let transaction = builder.commit(
-                    Bytes::copy_from_slice(&info.commit_lsn.to_be_bytes()),
-                    Bytes::from(position),
-                )?;
-                let transport = self
-                    .transport_sequence
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                        value.checked_add(1)
-                    })
-                    .map_err(|_| anyhow::anyhow!("PostgreSQL transport sequence exhausted"))?
-                    + 1;
-                let envelope = transaction.into_replay_envelope(
-                    self.stream.clone(),
-                    logical,
-                    transport,
-                    info.commit_timestamp,
-                )?;
-                self.resume = info.commit_lsn;
-                return Ok(Some(OutputEnvelope {
-                    port: PortId::try_new("out")?,
-                    envelope,
-                }));
             }
             WalMessage::Relation(relation) => {
                 if self
@@ -106,23 +158,24 @@ impl Transactions {
                     .contains_key(&(relation.namespace.clone(), relation.name.clone()))
                 {
                     self.validate_keys(&relation)?;
-                } else {
-                    if !self.filtered {
-                        return Err(PostgresCdcError::SchemaChanged(format!(
-                            "table {}.{} joined the publication",
-                            relation.namespace, relation.name
-                        ))
-                        .into());
-                    }
+                } else if !self.filtered {
+                    return Err(PostgresCdcError::SchemaChanged(format!(
+                        "table {}.{} joined the publication",
+                        relation.namespace, relation.name
+                    ))
+                    .into());
                 }
             }
             WalMessage::Insert { relation_id, tuple } => {
+                if self.skipping()? {
+                    return Ok(None);
+                }
                 if let Some(element) = self.element(relation_id, &tuple)? {
                     anyhow::ensure!(
                         !tuple.iter().any(PostgresValue::is_unchanged_toast),
                         "INSERT contains unchanged TOAST values"
                     );
-                    self.push(SourceChange::Insert { element })?;
+                    return Ok(Some(changes(SourceChange::Insert { element }, None, bytes)));
                 }
             }
             WalMessage::Update {
@@ -130,6 +183,9 @@ impl Transactions {
                 old_tuple,
                 mut new_tuple,
             } => {
+                if self.skipping()? {
+                    return Ok(None);
+                }
                 let Some(mut element) = self.element(relation_id, &new_tuple)? else {
                     return Ok(None);
                 };
@@ -153,42 +209,68 @@ impl Transactions {
                         element = self
                             .element(relation_id, &new_tuple)?
                             .context("new row mapping")?;
-                        self.push(SourceChange::Delete {
-                            metadata: before.get_metadata().clone(),
-                        })?;
-                        self.push(SourceChange::Insert { element })?;
-                        return Ok(None);
+                        return Ok(Some(changes(
+                            SourceChange::Delete {
+                                metadata: before.get_metadata().clone(),
+                            },
+                            Some(SourceChange::Insert { element }),
+                            bytes,
+                        )));
                     }
                 }
-                self.push(SourceChange::update(element))?;
+                return Ok(Some(changes(SourceChange::update(element), None, bytes)));
             }
             WalMessage::Delete {
                 relation_id,
                 old_tuple,
             } => {
+                if self.skipping()? {
+                    return Ok(None);
+                }
                 if let Some(element) = self.element(relation_id, &old_tuple)? {
-                    self.push(SourceChange::Delete {
-                        metadata: element.get_metadata().clone(),
-                    })?;
+                    return Ok(Some(changes(
+                        SourceChange::Delete {
+                            metadata: element.get_metadata().clone(),
+                        },
+                        None,
+                        bytes,
+                    )));
                 }
             }
-            WalMessage::Truncate { .. } => {
-                return Err(PostgresCdcError::Unsupported(
-                    "the publication published a TRUNCATE; publish only insert, update and delete"
-                        .into(),
-                )
-                .into())
+            WalMessage::Truncate { relation_ids } => {
+                if self.skipping()? {
+                    return Ok(None);
+                }
+                // Decision D-9: a TRUNCATE removes rows without row changes,
+                // and no source reset can be expressed, so a TRUNCATE of a
+                // selected table is a typed permanent failure. Truncating
+                // only unselected tables changes nothing this source emits.
+                for relation_id in relation_ids {
+                    let relation = self
+                        .decoder
+                        .get_relation(relation_id)
+                        .context("TRUNCATE of an unknown relation")?;
+                    if self
+                        .keys
+                        .contains_key(&(relation.namespace.clone(), relation.name.clone()))
+                    {
+                        return Err(PostgresCdcError::Unsupported(format!(
+                            "TRUNCATE of selected table {}.{} cannot be represented as row changes; \
+                             publish only insert, update and delete, then remove the source with \
+                             erase and add it again to rebuild from a new snapshot",
+                            relation.namespace, relation.name
+                        ))
+                        .into());
+                    }
+                }
             }
         }
         Ok(None)
     }
 
-    fn push(&mut self, change: SourceChange) -> Result<()> {
-        let (info, builder) = self.pending.as_mut().context("row outside transaction")?;
-        if info.commit_lsn > self.resume {
-            builder.push(change)?;
-        }
-        Ok(())
+    /// Whether the open transaction is already handled.
+    fn skipping(&self) -> Result<bool> {
+        Ok(self.open.as_ref().context("row outside transaction")?.skip)
     }
 
     fn validate_keys(&self, relation: &RelationInfo) -> Result<()> {
@@ -232,7 +314,7 @@ impl Transactions {
             return Ok(None);
         };
         self.validate_keys(relation)?;
-        let (info, _) = self.pending.as_ref().context("row outside transaction")?;
+        let info = &self.open.as_ref().context("row outside transaction")?.info;
         row_element(
             &self.source,
             relation,
@@ -242,6 +324,14 @@ impl Transactions {
         )
         .map(Some)
     }
+}
+
+fn changes(first: SourceChange, second: Option<SourceChange>, bytes: usize) -> Decoded {
+    Decoded::Changes(Changes {
+        first,
+        second,
+        bytes,
+    })
 }
 
 pub fn row_element(

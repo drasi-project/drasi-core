@@ -37,8 +37,9 @@ preserves standalone initial loading without treating a cursor sampled after
 starting a read transaction as a gap-free CDC boundary. Use the coordinated
 factories when initialization must hand over to replayable live changes.
 
-Standalone settings support manual `tableKeys`, the non-PK `id` fallback and
-views under SELECT-only credentials. An optional factory-level `labels` array
+Standalone settings support manual `tableKeys` and views under SELECT-only
+credentials; a table or view without a primary key needs a `tableKeys` entry
+(identity is never inferred from a column name). An optional factory-level `labels` array
 restricts scanning to requested names in the configured allowlist; names outside
 that allowlist are logged and excluded, and unrequested tables are not inspected.
 An absent or empty `labels` array selects the whole allowlist. Completed volatile
@@ -64,7 +65,9 @@ are committed by the query together. Memory row initialization does not fabricat
 persistent metadata; restart requests volatile reinitialization instead.
 Single/shared transaction and row handover identities remain distinct.
 
-A snapshot boundary includes a bounded-memory hash of the actual binlog prefix.
+A snapshot boundary includes a constant-size proof of its binlog file's identity
+(a hash of the file's format description event), so neither the provider nor
+the source re-reads the file prefix, however large the file.
 The source verifies retained history before admitting live changes. Keep the
 anchor file and subsequent history; missing or reused history is an error.
 

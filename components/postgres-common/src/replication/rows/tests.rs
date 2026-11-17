@@ -252,15 +252,8 @@ fn feedback_uses_every_partial_transaction_not_only_the_minimum_cursor() -> Resu
 }
 
 #[test]
-fn missing_unready_and_cursorless_members_fence_feedback() -> Result<()> {
-    for condition in [
-        "missing",
-        "extra",
-        "cursor",
-        "ready",
-        "recovered",
-        "admitting",
-    ] {
+fn missing_and_unready_members_fence_feedback_and_cursorless_ones_join() -> Result<()> {
+    for condition in ["missing", "extra", "ready", "recovered", "admitting"] {
         let (mut snapshot, expected) = group(&[
             ("first", row(100, 80, 0, 1, 5)),
             ("second", row(200, 180, 0, 1, 1)),
@@ -277,7 +270,6 @@ fn missing_unready_and_cursorless_members_fence_feedback() -> Result<()> {
             _ => {
                 let state = Arc::make_mut(snapshot.consumers.get_mut(&id("second")).unwrap());
                 match condition {
-                    "cursor" => state.checkpoints.clear(),
                     "ready" => state.ready = false,
                     "recovered" => state.recovered = false,
                     "admitting" => state.admitting = false,
@@ -290,10 +282,66 @@ fn missing_unready_and_cursorless_members_fence_feedback() -> Result<()> {
             "{condition}"
         );
     }
+    // A member without a cursor joins at the others' minimum.
+    let (mut snapshot, expected) = group(&[
+        ("first", row(100, 80, 0, 1, 5)),
+        ("second", row(200, 180, 0, 1, 1)),
+    ]);
+    Arc::make_mut(snapshot.consumers.get_mut(&id("first")).unwrap())
+        .checkpoints
+        .clear();
+    let minimum = minimum_row_checkpoint(&snapshot, &expected, &id("source"), BINDING)?
+        .context("the cursorless member joins")?;
+    assert_eq!(minimum.consumer, id("second"));
+    Arc::make_mut(snapshot.consumers.get_mut(&id("second")).unwrap())
+        .checkpoints
+        .clear();
+    assert!(
+        minimum_row_checkpoint(&snapshot, &expected, &id("source"), BINDING)?.is_none(),
+        "no member has a cursor"
+    );
     let empty = ConsumerProgressSnapshot {
         consumers: BTreeMap::new(),
     };
     assert!(minimum_row_checkpoint(&empty, &BTreeSet::new(), &id("source"), BINDING)?.is_none());
+    Ok(())
+}
+
+#[test]
+fn progress_records_and_streamed_rows_order_with_commits_and_rows() -> Result<()> {
+    let progress = RowPosition::progress(BINDING, 100, 7, None);
+    progress.validate()?;
+    assert!(progress.complete() && !progress.is_open());
+    assert_eq!(progress.feedback_lsn(), 100);
+    let open = RowPosition {
+        count: 0,
+        ..row(100, 80, 5, 3, 6)
+    };
+    open.validate()?;
+    assert!(open.is_open() && !open.complete());
+    assert_eq!(
+        open.feedback_lsn(),
+        80,
+        "a streamed row never confirms its commit"
+    );
+    // A streamed row orders by offset against a known-count row of the same
+    // commit and before the commit's completion record.
+    assert_eq!(
+        compare_row_positions(&open, &row(100, 80, 6, 9, 8))?,
+        Ordering::Less
+    );
+    assert_eq!(compare_row_positions(&open, &progress)?, Ordering::Less);
+    assert_eq!(
+        compare_row_positions(&progress, &boundary(100))?,
+        Ordering::Equal,
+        "a progress record covers its LSN like a snapshot boundary"
+    );
+    let mut invalid = progress.clone();
+    invalid.previous_lsn = 90;
+    assert!(invalid.validate().is_err());
+    invalid = progress;
+    invalid.version = 2;
+    assert!(invalid.validate().is_err());
     Ok(())
 }
 

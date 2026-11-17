@@ -145,7 +145,6 @@ async fn runner(path: &Path) -> Result<DeliveryRunner> {
             scope: RecoveryScope::Failure(FailureMode::ProcessRestart),
             max_streams: size(2),
             receipts_per_stream: size(2),
-            retry: DeliveryRetryPolicy::default(),
         },
     )
 }

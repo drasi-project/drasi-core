@@ -104,7 +104,7 @@ pub(super) async fn add_webhook(
                     serde_json::json!({
                         "outputs":{"low-stock":{"component":query_id,"port":"out"}},
                         "url":destination,
-                        "timeoutMs":5000, "maxRetries":0, "failurePolicy":"strict"
+                        "timeoutMs":5000, "maxRetries":0, "onPermanentFailure":"stall"
                     }),
                 )
                 .map_err(|source| GraphError::Validation {

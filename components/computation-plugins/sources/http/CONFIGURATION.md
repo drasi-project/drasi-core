@@ -152,8 +152,11 @@ Templates use Handlebars syntax and can reference `payload`, `route`, `query`,
 
 - Payloads may be JSON, XML, YAML or text, selected by `Content-Type`.
 - When signature and bearer checks are both configured, both must pass.
-- Webhook secrets are read from the named environment variables. Initialize
-  fails if any is unset.
+- Webhook secrets are read from the named environment variables once, when a
+  configuration is accepted: construction, and assessment and apply of an
+  update. An unset or empty variable refuses the configuration or update.
+  Requests never read the environment; a changed variable takes effect with
+  the next configuration.
 
 ## Durable admission
 
@@ -180,7 +183,7 @@ Session-protocol errors carry `{kind, message}`:
 
 | Status | Kinds |
 |---|---|
-| 429 | `Busy`, `CapacityExhausted` (also returned while paused) |
+| 429 | `Busy` (returned while paused), `CapacityExhausted` |
 | 503 | `Closed`, `AcceptanceUnknown`, `MetadataUnknown` |
 | 409 | `NotEnabled`, `Sequence`, `PayloadConflict`, `PendingObligations` |
 | 410 | `SessionExpired`, `ReceiptExpired` |
@@ -190,7 +193,18 @@ After an unknown outcome, retry the **same** session, sequence and event.
 
 A durable webhook can use the session protocol by sending the JSON session in
 `x-drasi-producer-session` and the first sequence in `x-drasi-first-sequence`.
-Every mapping must then set `effectiveFrom`.
+Every mapping must then set `effectiveFrom`. A volatile source refuses requests
+carrying these headers with 409 `NotEnabled`.
+
+A momentarily full graph mailbox or journal makes a durable request wait, up
+to `timeoutMs`, rather than fail. Batches are not atomic: each event commits on
+its own, and a failed batch reports exactly the committed prefix
+(`events_processed` on standard and webhook routes, one receipt per committed
+event on session routes). Only the event after that prefix can be uncertain.
+
+While paused, the producer metadata routes (register, status, receipt,
+retire) keep answering, so a client can resolve an uncertain outcome; only
+event admission is refused.
 
 ## Exposure
 
@@ -223,10 +237,14 @@ is rejected during assessment and changes nothing.
 
 ## Lifecycle and removal
 
-- **Pause** refuses new admissions with 503 and `Retry-After: 1` and waits for
-  in-flight admissions to finish. Volatile events already accepted stay queued.
-- **Stop Drain** lets in-flight requests finish.
-- **Stop Abort** closes all connections immediately.
+- **Pause** refuses new data admissions with 503 and `Retry-After: 1` (429
+  `Busy` on session routes) and waits for in-flight admissions to finish.
+  Volatile events already accepted stay queued. Health and producer metadata
+  routes stay available.
+- **Stop Drain** refuses new requests but lets in-flight admissions finish:
+  a durable commit in progress completes and its client receives success.
+- **Stop Abort** closes all connections immediately; in-flight durable
+  admissions answer that their outcome is unknown.
 - A Stop that misses its deadline reports a retryable error and keeps the
   listener until a later Stop completes.
 - **Removal with erase** succeeds and is idempotent. The source owns no state:

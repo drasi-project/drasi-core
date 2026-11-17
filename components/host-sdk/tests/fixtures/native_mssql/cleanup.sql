@@ -4,7 +4,7 @@ IF (SELECT COUNT(*) FROM {{schema}}.__DrasiOwned WHERE token=N'{{owned_token}}')
   THROW 51003,'owned schema token changed; refusing cleanup',1;
 IF EXISTS(SELECT 1 FROM sys.objects WHERE schema_id=SCHEMA_ID(@schema)
   AND type IN ('U','P','V','FN','IF','TF','TR','SO')
-  AND name NOT IN ('__DrasiOwned','Items','Companion','ReadOnlyItems','DrasiBarrier','Effects','Parameters','Scalars','Signals','DrasiDeliveryProgress',
+  AND name NOT IN ('__DrasiOwned','Items','Companion','ReadOnlyItems','DrasiBarrier','Effects','Parameters','Scalars','Signals','drasi_delivery_progress','drasi_delivery_progress_dead_letter',
     'ApplyEffect','BindParameters','BindScalars','DelayedEffect','PartialFailure'))
   THROW 51002,'unexpected object in owned SQL Server test schema; manual review required',1;
 DECLARE captures CURSOR LOCAL FAST_FORWARD FOR
@@ -23,7 +23,7 @@ DEALLOCATE captures;
 DROP PROCEDURE IF EXISTS {{schema}}.ApplyEffect, {{schema}}.BindParameters, {{schema}}.BindScalars, {{schema}}.DelayedEffect, {{schema}}.PartialFailure;
 DROP TABLE IF EXISTS {{schema}}.Items, {{schema}}.Companion, {{schema}}.ReadOnlyItems, {{schema}}.DrasiBarrier,
   {{schema}}.Effects, {{schema}}.Parameters, {{schema}}.Scalars, {{schema}}.Signals,
-  {{schema}}.DrasiDeliveryProgress;
+  {{schema}}.drasi_delivery_progress, {{schema}}.drasi_delivery_progress_dead_letter;
 -- Refuse to remove a namespace into which anything unexpected was added.
 IF EXISTS(SELECT 1 FROM sys.objects WHERE schema_id=SCHEMA_ID(@schema) AND name<>N'__DrasiOwned')
   THROW 51002,'unexpected object in owned SQL Server test schema; manual review required',1;

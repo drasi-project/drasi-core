@@ -199,6 +199,20 @@ impl DescribeRequest {
         ComponentDescription::new(progress).with_outputs(&self.descriptor, output)
     }
 
+    /// A source whose outputs carry only source replay progress, kept in the
+    /// consumer progress bound to `dependency` (`source_progress` or
+    /// `consumer_progress`). A `durable` source requires that resource to
+    /// declare durability, so wiring it to volatile progress is refused at
+    /// binding, and its own progress then survives a restart; otherwise its
+    /// progress is volatile and any progress resource is accepted.
+    pub fn progress_source_description(
+        &self,
+        dependency: &str,
+        durable: bool,
+    ) -> drasi_computation_contracts::ComponentDescription {
+        progress_source_description(&self.descriptor, dependency, durable)
+    }
+
     /// A transformer whose outputs carry a new volatile producer identity on
     /// every construction.
     pub fn volatile_transformer(&self) -> drasi_computation_contracts::ComponentDescription {
@@ -212,7 +226,10 @@ impl DescribeRequest {
     }
 
     /// A sink whose inputs do not key delivery on producer identity.
-    pub fn unkeyed_sink(&self) -> drasi_computation_contracts::ComponentDescription {
+    pub fn unkeyed_sink(
+        &self,
+        on_permanent_failure: drasi_computation_contracts::PermanentFailurePolicy,
+    ) -> drasi_computation_contracts::ComponentDescription {
         drasi_computation_contracts::ComponentDescription::new(
             drasi_computation_contracts::ProgressPersistence::Stateless,
         )
@@ -220,18 +237,23 @@ impl DescribeRequest {
             &self.descriptor,
             drasi_computation_contracts::InputDelivery::Unkeyed,
         )
+        .with_permanent_failure(on_permanent_failure)
     }
 
     /// A consumer sink whose inputs deliver keyed on producer identity with
-    /// `guarantee`.
+    /// `guarantee`, applying `on_permanent_failure` to an operation that can
+    /// never be delivered (under `skip` the consumer settles it itself; see
+    /// `DeliveryFailure::skipped`).
     pub fn consumer(
         &self,
         guarantee: drasi_computation_contracts::DeliveryGuarantee,
+        on_permanent_failure: drasi_computation_contracts::PermanentFailurePolicy,
     ) -> drasi_computation_contracts::ComponentDescription {
         drasi_computation_contracts::ComponentDescription::new(
             drasi_computation_contracts::ProgressPersistence::Durable,
         )
         .with_inputs(&self.descriptor, guarantee.into())
+        .with_permanent_failure(on_permanent_failure)
     }
 }
 
@@ -444,6 +466,27 @@ mod tests {
     }
 }
 
+/// The description [`DescribeRequest::progress_source_description`] returns,
+/// for in-process wrappers that describe the same source without a request.
+pub fn progress_source_description(
+    descriptor: &drasi_computation_contracts::ComponentDescriptor,
+    dependency: &str,
+    durable: bool,
+) -> drasi_computation_contracts::ComponentDescription {
+    use drasi_computation_contracts::{
+        ComponentDescription, DependencyRequirement, DurabilityRequirement, OutputDescription,
+        ProgressPersistence,
+    };
+    let (progress, durability) = if durable {
+        (ProgressPersistence::Durable, DurabilityRequirement::Durable)
+    } else {
+        (ProgressPersistence::Volatile, DurabilityRequirement::Any)
+    };
+    ComponentDescription::new(progress)
+        .with_outputs(descriptor, OutputDescription::UNTRACKED)
+        .with_dependency(dependency, DependencyRequirement { durability })
+}
+
 /// Lifecycle operation payload: the context of INITIALIZE, START, PAUSE,
 /// RESUME, STOP, DISPOSE and the management APPLY operation. Encoded as
 /// bounded named MessagePack. Unknown optional fields are ignored; any entry in
@@ -459,7 +502,8 @@ pub struct LifecycleRequest {
     pub deadline_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required: Vec<String>,
-    /// START only, and only for activation-credential factories.
+    /// START and an erasing DISPOSE, only for activation-credential
+    /// factories.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials: Option<crate::ActivationCredentials>,
     /// START only, for sources: `Some(true)` when no consumer has a saved

@@ -437,6 +437,7 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
         delivery: PortableDelivery::Events,
         profile: Profile::Durable,
         failure_scope: FailureMode::ProcessRestart,
+        on_permanent_failure: Default::default(),
         namespace: Namespace {
             version: 1,
             source_prefixes: vec!["plant/".into()],

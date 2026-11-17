@@ -4,21 +4,21 @@
 //! Update planning: every configuration field is classified.
 //!
 //! * **InPlace (Pause):** `routes`, `defaultTemplate` (rendered per
-//!   operation), `maxStreams`, `retryBudgetMs` (read per operation),
-//!   `commandTimeoutMs`, `connectTimeoutMs` (applied by replacing the idle
-//!   connection; the next operation reconnects).
-//! * **Restart (Stop):** `host`, `port`, `user`, `password`, `encryption`,
+//!   operation), `maxStreams`, `shutdownTimeoutMs`, `commandTimeoutMs`,
+//!   `connectTimeoutMs` (applied by replacing the idle connection; the next
+//!   operation reconnects).
+//! * **Restart (Stop):** `user`, `password`, `encryption`,
 //!   `trustServerCertificate`, `trustedCaPem`, `hostNameInCertificate`: the
-//!   connection and its credentials are established at start.
+//!   login and transport are established at start.
 //! * **Recreate (Replace):** `outputs` and a change to the bound inputs: the
 //!   route aliases and delivery streams change, which is not a live update
-//!   (CW-94); `deliveryGuarantee`: it is declared on the input port, so the
-//!   graph re-checks every producer against the new guarantee.
-//! * **Unsupported:** `database` and `progressTable`. They are the cursor's
-//!   identity: the cursor lives in that table in that database, so moving it
-//!   would restart every stream without its completed prefix (duplicate or
-//!   refused operations) and leave the old rows behind. Remove the sink with
-//!   Erase and create a new one instead.
+//!   (CW-94); `deliveryGuarantee` and `onPermanentFailure`: both are declared
+//!   in the description the graph checks.
+//! * **Unsupported:** `host`, `port`, `database` and `progressTable`. They
+//!   locate the destination cursor, so moving it would restart every stream
+//!   without its completed prefix (duplicate or refused operations) and leave
+//!   the old rows behind. Remove the sink with Erase and create a new one
+//!   instead.
 
 use crate::config::MsSqlStoredProcConfig;
 use anyhow::{Context, Result};
@@ -29,9 +29,9 @@ use drasi_computation_plugin_sdk::{
 };
 
 /// The boundary each field needs, for documentation and tests.
-pub const FIELD_BOUNDARIES: [(&str, Option<UpdateBoundary>); 19] = [
-    ("host", Some(UpdateBoundary::Stop)),
-    ("port", Some(UpdateBoundary::Stop)),
+pub const FIELD_BOUNDARIES: [(&str, Option<UpdateBoundary>); 20] = [
+    ("host", None),
+    ("port", None),
     ("database", None),
     ("user", Some(UpdateBoundary::Stop)),
     ("password", Some(UpdateBoundary::Stop)),
@@ -42,12 +42,13 @@ pub const FIELD_BOUNDARIES: [(&str, Option<UpdateBoundary>); 19] = [
     ("progressTable", None),
     ("maxStreams", Some(UpdateBoundary::Pause)),
     ("deliveryGuarantee", Some(UpdateBoundary::Replace)),
+    ("onPermanentFailure", Some(UpdateBoundary::Replace)),
     ("outputs", Some(UpdateBoundary::Replace)),
     ("routes", Some(UpdateBoundary::Pause)),
     ("defaultTemplate", Some(UpdateBoundary::Pause)),
     ("commandTimeoutMs", Some(UpdateBoundary::Pause)),
     ("connectTimeoutMs", Some(UpdateBoundary::Pause)),
-    ("retryBudgetMs", Some(UpdateBoundary::Pause)),
+    ("shutdownTimeoutMs", Some(UpdateBoundary::Pause)),
     ("inputs", Some(UpdateBoundary::Replace)),
 ];
 
@@ -68,21 +69,22 @@ pub fn plan(
 ) -> Assessment {
     use UpdateBoundary::*;
     let (c, p) = (current, proposed);
-    if c.database != p.database {
-        return Assessment::unsupported(
-            "database holds the destination cursor; changing it would lose each stream's \
-             completed prefix. Remove the sink (Erase) and create a new one",
-        );
-    }
-    if c.progress_table != p.progress_table {
-        return Assessment::unsupported(
-            "progressTable is the destination cursor's identity; changing it would lose each \
-             stream's completed prefix. Remove the sink (Erase) and create a new one",
-        );
+    for (field, changed) in [
+        ("host", c.host != p.host),
+        ("port", c.port != p.port),
+        ("database", c.database != p.database),
+        (
+            "progressTable",
+            c.progress_table().ok() != p.progress_table().ok(),
+        ),
+    ] {
+        if changed {
+            return Assessment::unsupported(
+                drasi_computation_storedproc_common::settings::cursor_identity_changed(field),
+            );
+        }
     }
     let mut planner = BoundaryPlanner::default();
-    planner.field("host", c.host != p.host, Stop);
-    planner.field("port", c.port != p.port, Stop);
     planner.field("user", c.user != p.user, Stop);
     planner.field("password", c.password != p.password, Stop);
     planner.field("encryption", c.encryption != p.encryption, Stop);
@@ -103,6 +105,11 @@ pub fn plan(
         c.delivery_guarantee != p.delivery_guarantee,
         Replace,
     );
+    planner.field(
+        "onPermanentFailure",
+        c.on_permanent_failure != p.on_permanent_failure,
+        Replace,
+    );
     planner.field("outputs", c.outputs != p.outputs, Replace);
     planner.field("routes", c.routes != p.routes, Pause);
     planner.field(
@@ -121,8 +128,8 @@ pub fn plan(
         Pause,
     );
     planner.field(
-        "retryBudgetMs",
-        c.retry_budget_ms != p.retry_budget_ms,
+        "shutdownTimeoutMs",
+        c.shutdown_timeout_ms != p.shutdown_timeout_ms,
         Pause,
     );
     planner.field("inputs", inputs_changed, Replace);

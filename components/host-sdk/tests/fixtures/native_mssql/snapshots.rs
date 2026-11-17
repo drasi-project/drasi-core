@@ -224,7 +224,20 @@ pub(super) async fn concurrent_cut_and_cleanup(dynamic: bool) -> Result<()> {
     )?;
     limited.prepare().await?;
     let mut snapshot = limited.snapshot().await?;
-    let mut count = 0;
+    snapshot
+        .changes
+        .next()
+        .await
+        .context("first limited snapshot row")??;
+    // The one-row buffer holds the scan open under backpressure. The cut's
+    // table locks are already released and the scan reads row versions, so
+    // a writer neither waits nor changes what the snapshot reads.
+    ensure!(
+        db.sql(SOURCE_LOCKED)? == "0",
+        "a coordinated snapshot held table locks during its scan"
+    );
+    db.sql("SET NOCOUNT ON; SET LOCK_TIMEOUT 2000; UPDATE {{schema}}.Items SET value=value WHERE id=1;")?;
+    let mut count = 1;
     while let Some(row) = snapshot.changes.next().await {
         row?;
         count += 1;

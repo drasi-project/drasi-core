@@ -825,20 +825,12 @@ impl ComputationPipelineBuilder {
                 query_id.clone(),
             )?);
             let progress_id = resource("query-progress", &config.id)?;
-            builder = builder
-                .declare_resource(ResourceSpecification {
-                    id: progress_id.clone(),
-                    role: ResourceRole::Checkpoint,
-                    ownership: ResourceOwnership::Borrowed,
-                    binding: Arc::from(format!("query-progress:{}", config.id)),
-                })?
-                .provide_resource(
-                    progress_id.clone(),
-                    ResourceHandle::new(
-                        ResourceRole::Checkpoint,
-                        Arc::new(QuerySourceProgressResource(progress.clone())),
-                    ),
-                )?;
+            builder = builder.declare_resource(ResourceSpecification {
+                id: progress_id.clone(),
+                role: ResourceRole::Checkpoint,
+                ownership: ResourceOwnership::Borrowed,
+                binding: Arc::from(format!("query-progress:{}", config.id)),
+            })?;
             let mut subscription_ids = Vec::new();
             for (source_rank, setting) in settings.into_iter().enumerate() {
                 if let Some(output) = self.native_sources.get(&setting.source_id) {
@@ -1296,6 +1288,7 @@ impl ComputationPipelineBuilder {
                         )
                     }
                 };
+            let index_capabilities = handle.capabilities();
             builder = builder
                 .declare_resource(ResourceSpecification {
                     id: indexes_id.clone(),
@@ -1303,7 +1296,18 @@ impl ComputationPipelineBuilder {
                     ownership,
                     binding: Arc::from(format!("query-indexes:{}", config.id)),
                 })?
-                .provide_resource(indexes_id.clone(), handle)?;
+                .provide_resource(indexes_id.clone(), handle)?
+                // The query commits its source checkpoints in its index
+                // provider, so the progress resource is exactly as durable
+                // as that provider declares itself.
+                .provide_resource(
+                    progress_id.clone(),
+                    ResourceHandle::new(
+                        ResourceRole::Checkpoint,
+                        Arc::new(QuerySourceProgressResource(progress.clone())),
+                    )
+                    .with_capabilities(index_capabilities),
+                )?;
             let stream = StreamId::try_new(format!("{}/out", config.id))?;
             let definition = ContinuousQueryDefinition {
                 graph_id: self.graph_id.clone(),

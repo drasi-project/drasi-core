@@ -33,7 +33,7 @@ pub fn compare_row_positions(left: &RowPosition, right: &RowPosition) -> Result<
     if commit != Ordering::Equal {
         return Ok(commit);
     }
-    if left.offset.is_some() && right.offset.is_some() {
+    if left.count > 0 && right.count > 0 && left.offset.is_some() && right.offset.is_some() {
         anyhow::ensure!(
             left.count == right.count,
             "PostgreSQL row positions disagree about the same transaction's change count"
@@ -63,11 +63,13 @@ pub struct RowProgressMinimum {
 /// This helper establishes neither ownership nor durability, and does not
 /// compare reset generations belonging to different consumers.
 ///
-/// `None` fences feedback: membership is empty/changed, a member is not ready
-/// for live processing, or a member has no cursor for this source. Never turn
-/// it into acknowledgement of a received/read LSN. Failed owners and malformed,
-/// rebound or conflicting positions are errors, even if another member is
-/// pending. No aggregate SourceProgressSnapshot or replacement cursor is made.
+/// A member without a cursor for this source joins the group at this
+/// minimum, so it does not fence it. `None` fences feedback: membership is
+/// empty/changed, a member is not ready for live processing, or no member has
+/// a cursor. Never turn it into acknowledgement of a received/read LSN.
+/// Failed owners and malformed, rebound or conflicting positions are errors,
+/// even if another member is pending. No aggregate SourceProgressSnapshot or
+/// replacement cursor is made.
 pub fn minimum_row_checkpoint(
     snapshot: &ConsumerProgressSnapshot,
     expected_consumers: &BTreeSet<ComponentId>,
@@ -89,10 +91,9 @@ pub fn minimum_row_checkpoint(
         let Some(position) = row_checkpoint(state, source, binding)
             .with_context(|| format!("invalid PostgreSQL row progress for consumer {consumer}"))?
         else {
-            fenced = true;
             continue;
         };
-        if position.offset.is_some() {
+        if position.offset.is_some() && position.count > 0 {
             if let Some(previous) = counts.insert(position.commit_lsn, position.count) {
                 anyhow::ensure!(
                     previous == position.count,
@@ -155,24 +156,59 @@ impl RowPosition {
         }
     }
 
+    /// A progress-only record: the source proved that nothing selected
+    /// changed up to and including `lsn` (a commit without selected rows, a
+    /// keepalive's WAL end, the end of a streamed transaction or a group's
+    /// join point). It carries a logical sequence but no row.
+    pub fn progress(
+        binding: [u8; 32],
+        lsn: u64,
+        sequence: u64,
+        managed_slot: Option<String>,
+    ) -> Self {
+        Self {
+            version: 1,
+            binding,
+            commit_lsn: lsn,
+            previous_lsn: lsn,
+            offset: None,
+            count: 0,
+            sequence,
+            managed_slot,
+        }
+    }
+
     pub fn is_configured_snapshot(&self) -> bool {
         self.version == 2 && self.offset.is_none() && self.managed_slot.is_none()
+    }
+
+    /// A row of a transaction streamed before its commit, so its change
+    /// count is not known (`count` is zero). The commit's progress record
+    /// completes the transaction.
+    pub fn is_open(&self) -> bool {
+        self.offset.is_some() && self.count == 0
     }
 
     pub fn validate(&self) -> Result<()> {
         anyhow::ensure!(
             self.commit_lsn > 0
                 && match self.offset {
+                    // A snapshot boundary has no sequence; a progress record
+                    // has one.
                     None =>
                         self.count == 0
-                            && self.sequence == 0
                             && self.previous_lsn == self.commit_lsn
-                            && ((self.version == 1 && self.managed_slot.is_some())
-                                || self.is_configured_snapshot()),
+                            && if self.sequence == 0 {
+                                (self.version == 1 && self.managed_slot.is_some())
+                                    || self.is_configured_snapshot()
+                            } else {
+                                self.version == 1
+                            },
+                    // A row of a known (count > 0) or streamed (count 0)
+                    // transaction.
                     Some(offset) =>
                         self.version == 1
-                            && self.count > 0
-                            && offset < self.count
+                            && (self.count == 0 || offset < self.count)
                             && self.sequence > 0
                             && self.previous_lsn < self.commit_lsn,
                 },
@@ -182,7 +218,8 @@ impl RowPosition {
     }
 
     pub fn complete(&self) -> bool {
-        self.offset.is_none_or(|offset| offset + 1 == self.count)
+        self.offset
+            .is_none_or(|offset| self.count > 0 && offset + 1 == self.count)
     }
 
     pub fn feedback_lsn(&self) -> u64 {

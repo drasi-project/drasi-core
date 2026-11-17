@@ -25,7 +25,10 @@ impl sdk::Factory for Factory {
                     .unwrap_or_default()
             }
         };
-        Ok(request.consumer(guarantee))
+        let policy =
+            serde_json::from_value(request.request.configuration["onPermanentFailure"].clone())
+                .unwrap_or_default();
+        Ok(request.consumer(guarantee, policy))
     }
     fn metadata(&self) -> sdk::FactoryMetadata {
         sdk::FactoryMetadata {
@@ -40,20 +43,26 @@ impl sdk::Factory for Factory {
             role: ComponentRole::Sink,
             configuration_version: 1,
             configuration: sdk::ConfigSchema {
-                fields: ["path", "mode", "signal", "deliveryGuarantee"]
-                    .into_iter()
-                    .map(|name| {
-                        (
-                            name.into(),
-                            sdk::ConfigField {
-                                constraint: None,
-                                value_type: sdk::ConfigType::String,
-                                required: false,
-                                secret: false,
-                            },
-                        )
-                    })
-                    .collect(),
+                fields: [
+                    "path",
+                    "mode",
+                    "signal",
+                    "deliveryGuarantee",
+                    "onPermanentFailure",
+                ]
+                .into_iter()
+                .map(|name| {
+                    (
+                        name.into(),
+                        sdk::ConfigField {
+                            constraint: None,
+                            value_type: sdk::ConfigType::String,
+                            required: false,
+                            secret: false,
+                        },
+                    )
+                })
+                .collect(),
                 allow_additional: false,
             },
             ports: vec![PortDescriptor::new(
@@ -118,8 +127,22 @@ impl Handler {
                 if let Some(path) = self.configuration["signal"].as_str() {
                     std::fs::write(path, b"failed")?;
                 }
-                anyhow::bail!("fixture second operation failed")
+                // The destination rejects this operation every time.
+                Err(
+                    drasi_computation_contracts::DeliveryFailure::permanent(anyhow::anyhow!(
+                        "fixture second operation failed"
+                    ))
+                    .into(),
+                )
             }
+            // The destination rejects this operation and the consumer
+            // records the skip with its own progress.
+            "skip-second" if operation == 1 => Err(
+                drasi_computation_contracts::DeliveryFailure::skipped(anyhow::anyhow!(
+                    "fixture second operation skipped"
+                ))
+                .into(),
+            ),
             "pending" => {
                 if let Some(path) = self.configuration["signal"].as_str() {
                     std::fs::write(path, b"entered")?;
@@ -210,9 +233,6 @@ impl std::error::Error for Retry {}
 
 #[async_trait]
 impl DeliveryHandler for Handler {
-    fn retryable(&self, error: &anyhow::Error) -> bool {
-        error.is::<Retry>()
-    }
     fn delivery_guarantee(&self) -> drasi_computation_contracts::DeliveryGuarantee {
         serde_json::from_value(self.configuration["deliveryGuarantee"].clone()).unwrap_or_default()
     }
@@ -236,7 +256,7 @@ impl DeliveryHandler for Handler {
         transaction.commit()?;
         self.attempts += 1;
         if self.mode() == "retry-once" && self.attempts == 1 {
-            return Err(Retry.into());
+            return Err(drasi_computation_contracts::DeliveryFailure::transient(Retry).into());
         }
         Ok(())
     }

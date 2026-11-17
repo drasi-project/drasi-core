@@ -123,6 +123,11 @@ async fn confirms_each_batch_once_with_its_identity() -> Result<()> {
     Ok(())
 }
 
+fn permanent(error: &anyhow::Error) -> bool {
+    drasi_computation_contracts::delivery_failure_class(error)
+        .is_some_and(|class| class.is_permanent())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn a_mismatched_confirmation_is_a_permanent_failure() -> Result<()> {
     let server = Server::start_with(None, Some(mismatch)).await?;
@@ -134,10 +139,12 @@ async fn a_mismatched_confirmation_is_a_permanent_failure() -> Result<()> {
         .err()
         .context("mismatch fails")?;
     assert!(matches!(
-        error.downcast_ref::<HttpDeliveryError>(),
+        error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<HttpDeliveryError>()),
         Some(HttpDeliveryError::ConfirmationMismatch)
     ));
-    assert!(!consumer.retryable(&error));
+    assert!(permanent(&error));
     Ok(())
 }
 
@@ -146,12 +153,13 @@ async fn rejections_and_transport_failures_are_classified() -> Result<()> {
     let server = Server::start().await?;
     let mut consumer = started(json!({"url": url(&server), "timeoutMs": 1000})).await?;
     let batch = batch(1)?;
+    // The same classification as the HTTP sink (HSA-3): 409 is transient.
     for (status, retryable) in [
         (503, true),
         (429, true),
         (500, true),
+        (409, true),
         (400, false),
-        (409, false),
     ] {
         server
             .state
@@ -161,7 +169,7 @@ async fn rejections_and_transport_failures_are_classified() -> Result<()> {
             .await
             .err()
             .with_context(|| format!("{status} fails"))?;
-        assert_eq!(consumer.retryable(&error), retryable, "{status}");
+        assert_eq!(!permanent(&error), retryable, "{status}");
         assert!(
             !format!("{error}").contains('\n'),
             "rejection text is sanitized"
@@ -174,7 +182,7 @@ async fn rejections_and_transport_failures_are_classified() -> Result<()> {
         .await
         .err()
         .context("empty 200")?;
-    assert!(!consumer.retryable(&error));
+    assert!(permanent(&error));
     let address = server.address;
     drop(server);
     tokio::task::yield_now().await;
@@ -186,7 +194,7 @@ async fn rejections_and_transport_failures_are_classified() -> Result<()> {
         .await
         .err()
         .context("connection refused")?;
-    assert!(unreachable.retryable(&error), "{error:#}");
+    assert!(!permanent(&error), "{error:#}");
     Ok(())
 }
 
@@ -333,5 +341,39 @@ async fn in_place_update_changes_the_token_at_pause() -> Result<()> {
         Some("Bearer rotated")
     );
     assert_eq!(consumer.configuration()?["token"], "rotated");
+    Ok(())
+}
+
+fn reject(_: &Captured) -> Reply {
+    Reply::status(422).body("{\"error\":\"unprocessable\"}")
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_rejected_batch_is_settled_as_skipped_only_under_skip() -> Result<()> {
+    use drasi_computation_contracts::{delivery_failure_class, DeliveryFailureClass};
+    let server = Server::start_with(None, Some(reject)).await?;
+    let batch = batch(3)?;
+    let mut stalling = started(json!({"url": url(&server)})).await?;
+    let error = stalling.handle(batch.item(0)?).await.unwrap_err();
+    assert_eq!(
+        delivery_failure_class(&error),
+        Some(DeliveryFailureClass::Permanent)
+    );
+    stalling.stop(&contexts::stop(StopMode::Drain)).await?;
+    let mut skipping = started(json!({"url": url(&server), "onPermanentFailure": "skip"})).await?;
+    for index in 0..2 {
+        let error = skipping.handle(batch.item(index)?).await.unwrap_err();
+        assert_eq!(
+            delivery_failure_class(&error),
+            Some(DeliveryFailureClass::Skipped),
+            "{error:#}"
+        );
+    }
+    assert_eq!(
+        server.state.requests().len(),
+        2,
+        "the rejected batch is not resent for its later operations"
+    );
+    skipping.stop(&contexts::stop(StopMode::Drain)).await?;
     Ok(())
 }

@@ -109,8 +109,10 @@ impl LogSink {
 
 /// Classifies a configuration change by the weakest safe boundary.
 ///
-/// * Replace: the `outputs` aliases or the incoming bindings. Live input
-///   rebinding is a host decision, never an in-place update.
+/// * Replace: the `outputs` aliases, the incoming bindings, or
+///   `onPermanentFailure`. Live input rebinding is a host decision, never an
+///   in-place update, and the permanent-failure policy is part of the
+///   description the graph captured when it constructed the sink.
 /// * Pause (in place): everything else (routes, templates, format, header,
 ///   level, target, output, render policy). All are read per input.
 pub(crate) fn plan(
@@ -118,7 +120,10 @@ pub(crate) fn plan(
     proposed: &LogSinkConfig,
     inputs_changed: bool,
 ) -> Assessment {
-    let boundary = if inputs_changed || current.outputs != proposed.outputs {
+    let boundary = if inputs_changed
+        || current.outputs != proposed.outputs
+        || current.on_permanent_failure != proposed.on_permanent_failure
+    {
         UpdateBoundary::Replace
     } else {
         UpdateBoundary::Pause
@@ -304,11 +309,11 @@ impl NativeSink for LogSink {
     }
 
     /// Renders every change, then emits all lines. Returns `Ok` only after
-    /// the lines were handed to the `log` facade or written and flushed.
+    /// the lines were handed to the host's logger or written and flushed.
     async fn handle(&mut self, input: InputEnvelope) -> Result<()> {
         ensure!(self.started, "log sink is not running");
         ensure!(!self.paused, "log sink is paused");
         let lines = self.lines(&input)?;
-        self.live.emitter.emit(&lines)
+        self.live.emitter.emit(&lines).await
     }
 }

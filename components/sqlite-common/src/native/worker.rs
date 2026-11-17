@@ -215,6 +215,13 @@ struct Database {
     journal: Option<super::journal::Journal>,
     fenced: bool,
     schema_version: Cell<Option<i64>>,
+    /// The capture identity element IDs are bound to; the journal records it.
+    identity: super::identity::CaptureIdentity,
+    /// The reserved objects present when the first transaction began, after
+    /// any journal was opened.
+    reserved: std::cell::RefCell<Option<std::collections::BTreeSet<String>>>,
+    /// The schema version when the current transaction began.
+    begun_version: Cell<Option<i64>>,
 }
 
 /// Runs `initSql` with a guard that keeps it away from the source's own
@@ -364,8 +371,6 @@ impl Database {
                 | AuthAction::Pragma { .. }
                 | AuthAction::Attach { .. }
                 | AuthAction::Detach { .. }
-                | AuthAction::AlterTable { .. }
-                | AuthAction::DropTable { .. }
                 | AuthAction::CreateVtable { .. }
                 | AuthAction::DropVtable { .. }
                 | AuthAction::CreateTempTable { .. }
@@ -402,6 +407,10 @@ impl Database {
                 | AuthAction::Update { table_name, .. }
                 | AuthAction::Delete { table_name }
                 | AuthAction::CreateTable { table_name }
+                // Schema changes are checked against the capture identity at
+                // commit: only one that would orphan element IDs is refused.
+                | AuthAction::AlterTable { table_name, .. }
+                | AuthAction::DropTable { table_name }
                 | AuthAction::Analyze { table_name } => {
                     if reserved(table_name) {
                         Authorization::Deny
@@ -506,7 +515,7 @@ impl Database {
                     })
             }),
         );
-        let database = Self {
+        let mut database = Self {
             connection,
             config,
             capture,
@@ -514,9 +523,37 @@ impl Database {
             journal: None,
             fenced: false,
             schema_version: Cell::new(None),
+            identity: super::identity::CaptureIdentity::new(&BTreeMap::new()),
+            reserved: std::cell::RefCell::new(None),
+            begun_version: Cell::new(None),
         };
-        database.refresh_tables()?;
+        database.identity = database.current_identity()?;
         Ok(database)
+    }
+
+    /// The names of the source's reserved (`__drasi_`) schema objects.
+    fn reserved_objects(&self) -> Result<std::collections::BTreeSet<String>> {
+        self.internal(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT name FROM sqlite_schema WHERE lower(substr(name,1,8))='__drasi_'",
+            )?;
+            let names = statement
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(names)
+        })
+    }
+
+    /// The capture identity of the current schema.
+    fn current_identity(&self) -> Result<super::identity::CaptureIdentity> {
+        self.refresh_tables()?;
+        Ok(super::identity::CaptureIdentity::new(
+            &self
+                .capture
+                .lock()
+                .map_err(|_| anyhow::anyhow!("SQLite capture poisoned"))?
+                .tables,
+        ))
     }
 
     fn internal<T>(&self, work: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
@@ -575,32 +612,15 @@ impl Database {
         }
         self.sql_internal("BEGIN IMMEDIATE")?;
         self.refresh_tables()?;
+        if self.reserved.borrow().is_none() {
+            *self.reserved.borrow_mut() = Some(self.reserved_objects()?);
+        }
+        self.begun_version.set(self.schema_version.get());
         self.authorization
             .lock()
             .map_err(|_| anyhow::anyhow!("SQLite authorizer poisoned"))?
             .scoped = true;
         Ok(deadline)
-    }
-    fn schema(&self) -> Result<String> {
-        self.internal(|connection| {
-            let mut statement = connection.prepare(
-                "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE lower(substr(name,1,7))!='sqlite_' AND lower(substr(name,1,8))!='__drasi_' ORDER BY type,name"
-            )?;
-            let mut rows = statement.query([])?;
-            let mut entries = Vec::new();
-            let mut bytes = 0usize;
-            while let Some(row) = rows.next()? {
-                let table: String = row.get(2)?;
-                if !self.config.tables.is_empty() && !self.config.tables.contains(&table) { continue; }
-                let kind: String = row.get(0)?;
-                let name: String = row.get(1)?;
-                let sql: String = row.get(3)?;
-                bytes = bytes.checked_add(kind.len() + name.len() + table.len() + sql.len()).context("SQLite schema size overflow")?;
-                anyhow::ensure!(bytes <= self.config.transactions.max_bytes.get(), "native SQLite schema exceeds configured bound");
-                entries.push((kind, name, table, sql));
-            }
-            Ok(serde_json::to_string(&entries)?)
-        })
     }
     fn rollback(&self) -> Result<()> {
         if !self.connection.is_autocommit() {
@@ -766,18 +786,30 @@ impl Database {
             }
             _ => None,
         };
-        let schema = if let Some(journal) = &self.journal {
-            let schema = self.schema()?;
-            if schema != journal.schema {
+        // DDL in this transaction may only extend the capture identity; the
+        // journal records the extension in the same transaction.
+        let identity = self.current_identity()?;
+        if self.schema_version.get() != self.begun_version.get() {
+            // The authorizer cannot see a rename's target name; a renamed
+            // table must not take a reserved journal name.
+            anyhow::ensure!(
+                self.reserved.borrow().as_ref() == Some(&self.reserved_objects()?),
+                "native SQLite DDL cannot create or rename __drasi_ objects"
+            );
+        }
+        let schema = if identity != self.identity {
+            identity.check_extends(&self.identity)?;
+            let encoded = identity.encode()?;
+            if let Some(journal) = &self.journal {
                 self.internal(|connection| {
                     anyhow::ensure!(connection.execute(
                         "UPDATE __drasi_native_state_v1 SET source_schema=?1 WHERE singleton=1 AND source_schema=?2",
-                        rusqlite::params![schema, journal.schema],
-                    )? == 1, "native SQLite stored schema changed unexpectedly");
+                        rusqlite::params![encoded, journal.schema],
+                    )? == 1, "native SQLite stored capture identity changed unexpectedly");
                     Ok(())
                 })?;
             }
-            Some(schema)
+            Some(encoded)
         } else {
             None
         };
@@ -803,9 +835,13 @@ impl Database {
                 journal.head = head;
                 journal.bytes = bytes;
             }
-            journal.schema = schema.context("native SQLite committed schema missing")?;
+            if let Some(schema) = schema {
+                journal.schema = schema;
+            }
+            self.identity = identity;
             return Ok(None);
         }
+        self.identity = identity;
         payload
             .map(|payload| {
                 Ok(OutputEnvelope {
@@ -1016,7 +1052,7 @@ pub fn snapshot(mut work: SnapshotWork) -> Result<Option<Handover>> {
     if *work.shutdown.borrow() {
         return Ok(None);
     }
-    let schema = database.schema()?;
+    let schema = database.identity.encode()?;
     let journal = database.internal(|connection| {
         super::journal::Journal::open(
             connection,
@@ -1051,11 +1087,8 @@ pub fn snapshot(mut work: SnapshotWork) -> Result<Option<Handover>> {
 
 fn validate_snapshot_owner(owner: &SourceProgressSnapshot, generation: u64) -> Result<()> {
     anyhow::ensure!(
-        owner.recovered
-            && owner.persistent
-            && owner.failure.is_none()
-            && owner.reset_generation == generation,
-        "native SQLite snapshot consumer is failed, reset or not persistently recovered"
+        owner.recovered && owner.failure.is_none() && owner.reset_generation == generation,
+        "native SQLite snapshot consumer is failed, reset or not recovered"
     );
     Ok(())
 }
@@ -1205,7 +1238,7 @@ pub fn group_snapshot(mut work: GroupSnapshotWork) -> Result<Option<GroupHandove
         return Ok(None);
     }
     validate_snapshot_owner(work.member.snapshot()?.as_ref(), work.generation)?;
-    let schema = database.schema()?;
+    let schema = database.identity.encode()?;
     let observed = Observed::Group(work.consumers.snapshot()?);
     let journal = database.internal(|connection| {
         let journal = super::journal::Journal::open_mode(
@@ -1313,7 +1346,7 @@ pub fn run(
         .transpose()?;
     let mut database = Database::open(config, &options, source.clone(), control.abort.clone())?;
     if let Some((owner, snapshot, bootstrap)) = progress {
-        let schema = database.schema()?;
+        let schema = database.identity.encode()?;
         database.journal = Some(database.internal(|connection| {
             super::journal::Journal::open(
                 connection,

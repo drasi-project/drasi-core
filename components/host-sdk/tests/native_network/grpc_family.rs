@@ -369,29 +369,42 @@ async fn native_grpc_retries_the_same_batch_and_requires_exact_acknowledgement()
     receiver.stop().await
 }
 
+fn delivery_class(error: &anyhow::Error) -> Option<DeliveryFailureClass> {
+    drasi_computation_contracts::delivery_failure_class(error)
+}
+
+/// A failed delivery crosses the plugin ABI with its classification: the
+/// graph retries a transient failure in place with the exact same envelope,
+/// and applies `onPermanentFailure` to a permanent one.
 #[tokio::test(flavor = "current_thread")]
-async fn native_grpc_failure_policy_defines_graph_retry_ownership() -> Result<()> {
+async fn native_grpc_delivery_failures_cross_the_abi_classified() -> Result<()> {
     let receiver = server().await?;
     for linked in [true, false] {
-        let configuration = |failure_policy: &str| {
+        let mut sink = family_component(
+            GRPC_SINK,
+            NETWORK_SINK_ID,
             json!({
                 "outputs":{"q":{"component":RESULT_QUERY_ID,"port":"out"}},
                 "endpoint":format!("grpc://{}",receiver.address),
                 "batchSize":1,
                 "batchFlushTimeoutMs":25,
                 "maxRetries":0,
-                "failurePolicy":failure_policy,
-            })
-        };
-
-        let mut strict =
-            family_component(GRPC_SINK, NETWORK_SINK_ID, configuration("strict"), linked)?;
-        strict.initialize(&crate::hooks::initialize_ctx()).await?;
-        strict.start(&crate::hooks::start_ctx()).await?;
+            }),
+            linked,
+        )?;
+        sink.initialize(&crate::hooks::initialize_ctx()).await?;
+        sink.start(&crate::hooks::start_ctx()).await?;
         receiver.state.failures.store(1, Ordering::SeqCst);
         let start = receiver.state.requests.lock().unwrap().len();
-        assert!(strict.handle(result_input(1)?).await.is_err());
-        strict.handle(result_input(1)?).await?;
+        let error = sink.handle(result_input(1)?).await.unwrap_err();
+        assert!(
+            matches!(
+                delivery_class(&error),
+                Some(DeliveryFailureClass::Transient { .. })
+            ),
+            "linked={linked}: {error:#}"
+        );
+        sink.handle(result_input(1)?).await?;
         {
             let requests = receiver.state.requests.lock().unwrap();
             assert_eq!(requests.len() - start, 2);
@@ -401,27 +414,17 @@ async fn native_grpc_failure_policy_defines_graph_retry_ownership() -> Result<()
                 "the graph-owned retry must preserve the exact failed envelope"
             );
         }
-        strict.stop(&crate::hooks::stop_ctx()).await?;
-        strict.dispose(&crate::hooks::dispose_ctx()).await?;
-
-        let mut skip = family_component(
-            GRPC_SINK,
-            "00000000-0000-0000-0000-000000000609",
-            configuration("skip"),
-            linked,
-        )?;
-        skip.initialize(&crate::hooks::initialize_ctx()).await?;
-        skip.start(&crate::hooks::start_ctx()).await?;
-        receiver.state.failures.store(1, Ordering::SeqCst);
-        let start = receiver.state.requests.lock().unwrap().len();
-        skip.handle(result_input(2)?).await?;
+        // An incomplete acknowledgement is final for the request.
+        receiver.state.partial.store(1, Ordering::SeqCst);
+        let error = sink.handle(result_input(2)?).await.unwrap_err();
+        receiver.state.partial.store(0, Ordering::SeqCst);
         assert_eq!(
-            receiver.state.requests.lock().unwrap().len() - start,
-            1,
-            "skip deliberately acknowledges the failed envelope without retry"
+            delivery_class(&error),
+            Some(DeliveryFailureClass::Permanent),
+            "linked={linked}: {error:#}"
         );
-        skip.stop(&crate::hooks::stop_ctx()).await?;
-        skip.dispose(&crate::hooks::dispose_ctx()).await?;
+        sink.stop(&crate::hooks::stop_ctx()).await?;
+        sink.dispose(&crate::hooks::dispose_ctx()).await?;
     }
     receiver.stop().await
 }

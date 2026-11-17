@@ -368,8 +368,27 @@ async fn real_mailbox_after_start() {
         fixture.admission.wait_active().await,
         Err(PipeError::Closed)
     ));
+    // Producer metadata stays available without an activation, so a client
+    // can resolve its receipt; data admission needs the activation.
+    assert_eq!(
+        fixture
+            .admission
+            .register_producer(id("caller"))
+            .await
+            .expect("metadata while stopped"),
+        session
+    );
+    assert_eq!(
+        fixture
+            .admission
+            .admission_receipt(&session, 1)
+            .await
+            .expect("receipt while stopped")
+            .map(|receipt| receipt.position),
+        Some(1)
+    );
     assert!(matches!(
-        fixture.admission.register_producer(id("caller")).await,
+        fixture.admission.admit(&session, 2, &input).await,
         Err(PipeError::Closed)
     ));
     fixture

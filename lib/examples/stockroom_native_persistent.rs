@@ -311,7 +311,6 @@ async fn run(directory: &Path, stage: bool) -> anyhow::Result<()> {
             scope: RecoveryScope::Failure(FailureMode::ProcessRestart),
             max_streams: size(1),
             receipts_per_stream: size(32),
-            retry: DeliveryRetryPolicy::default(),
         },
     )?));
     let (completed, mut completion) = mpsc::channel(4);

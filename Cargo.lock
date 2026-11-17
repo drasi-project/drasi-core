@@ -3139,6 +3139,7 @@ dependencies = [
  "drasi-core-types",
  "futures-core",
  "futures-util",
+ "log",
  "rmp-serde",
  "serde",
  "serde_bytes",
@@ -3169,6 +3170,7 @@ dependencies = [
  "async-trait",
  "drasi-computation-contracts",
  "drasi-computation-plugin-sdk",
+ "drasi-core-types",
  "serde",
  "serde_json",
  "tokio",
@@ -3285,6 +3287,7 @@ dependencies = [
  "async-trait",
  "drasi-computation-contracts",
  "drasi-computation-plugin-sdk",
+ "drasi-computation-storedproc-common",
  "drasi-core-types",
  "drasi-mssql-common",
  "drasi-reaction-common",
@@ -3305,12 +3308,15 @@ dependencies = [
  "async-trait",
  "drasi-computation-contracts",
  "drasi-computation-plugin-sdk",
+ "drasi-computation-storedproc-common",
  "drasi-core-types",
  "drasi-mysql-common",
  "drasi-reaction-common",
  "log",
+ "mysql_common",
  "serde",
  "serde_json",
+ "testcontainers",
  "tokio",
 ]
 
@@ -3322,6 +3328,7 @@ dependencies = [
  "async-trait",
  "drasi-computation-contracts",
  "drasi-computation-plugin-sdk",
+ "drasi-computation-storedproc-common",
  "drasi-postgres-common",
  "drasi-reaction-common",
  "log",
@@ -3330,6 +3337,7 @@ dependencies = [
  "postgres-native-tls",
  "serde",
  "serde_json",
+ "testcontainers",
  "tokio",
  "tokio-postgres",
 ]
@@ -3446,6 +3454,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
+ "chrono",
  "drasi-computation-contracts",
  "drasi-computation-plugin-sdk",
  "drasi-core-types",
@@ -3477,6 +3486,22 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid 1.26.1",
+]
+
+[[package]]
+name = "drasi-computation-storedproc-common"
+version = "0.11.3"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "drasi-computation-contracts",
+ "drasi-reaction-common",
+ "log",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]
@@ -4036,6 +4061,7 @@ dependencies = [
  "bytes",
  "chrono",
  "drasi-computation-contracts",
+ "drasi-computation-storedproc-common",
  "drasi-core-types",
  "drasi-reaction-common",
  "encoding_rs",
@@ -4055,6 +4081,7 @@ dependencies = [
  "sha2 0.10.9",
  "testcontainers",
  "testcontainers-modules",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-native-tls",
  "utoipa",
@@ -4132,6 +4159,7 @@ dependencies = [
  "bytes",
  "chrono",
  "drasi-computation-contracts",
+ "drasi-computation-storedproc-common",
  "drasi-core-types",
  "drasi-reaction-common",
  "handlebars 5.1.2",

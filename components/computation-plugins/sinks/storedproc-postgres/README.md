@@ -11,8 +11,12 @@ statically or as a separately loaded library, and does not depend on
 It is an external consumer for the host `DeliveryRunner`: each operation's
 procedure call commits in one PostgreSQL transaction together with a
 per-consumer destination cursor row, so retries after a lost connection, an
-unknown commit outcome or a crash do not repeat committed effects (as long as
-the procedure does not commit by itself). Command templates are parameter-only
+unknown commit outcome or a crash do not repeat committed effects. Procedures
+that `COMMIT` or `ROLLBACK` themselves are refused. With
+`onPermanentFailure: skip`, an undeliverable operation is recorded in a
+dead-letter table atomically with the cursor advance. The protocol is shared
+with the MySQL and SQL Server sinks
+([storedproc-common](../../common/storedproc/README.md)). Command templates are parameter-only
 Handlebars: values are always bound as `$n` parameters.
 
 ```sh
@@ -20,7 +24,7 @@ cargo build -p drasi-computation-sink-storedproc-postgres --features dynamic-plu
 ```
 
 - **[DESIGN.md](DESIGN.md)**: architecture, delivery profile with exact
-  duplicate and loss windows, the format-2 cursor protocol and exactly-once
+  duplicate and loss windows, the format-4 cursor protocol and exactly-once
   conditions, retry and classification, lifecycle per hook, management,
   security model and differences from the legacy reaction.
 - **[CONFIGURATION.md](CONFIGURATION.md)**: every field with defaults, ranges,
@@ -39,6 +43,8 @@ Minimal configuration (supply `password` as a secret reference):
 
 ```sh
 cargo test -p drasi-computation-sink-storedproc-postgres
+# the shared protocol table, commit classification and lost-COMMIT cases:
+cargo test -p drasi-computation-sink-storedproc-postgres --test live -- --ignored --test-threads=1
 cargo build --locked --features dynamic-plugin -p drasi-computation-source-postgres \
   -p drasi-computation-bootstrap-postgres -p drasi-computation-sink-storedproc-postgres
 # copy the three libraries into target/debug/plugins/, then:

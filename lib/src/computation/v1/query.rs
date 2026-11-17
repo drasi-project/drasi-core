@@ -2171,13 +2171,26 @@ impl super::QueryAuthoring for ContinuousQueryFactory {
 #[async_trait]
 impl ComponentFactory for ContinuousQueryFactory {
     /// Outputs follow the durability the bound index provider declares.
+    ///
+    /// The query commits its source checkpoints in that provider, so a bound
+    /// `source_progress` resource that declares a different durability is a
+    /// false declaration and the query refuses it.
     fn describe(
         &self,
         context: &crate::computation::v1::ConstructionContext,
     ) -> anyhow::Result<crate::computation::v1::ComponentDescription> {
+        use drasi_computation_contracts::ResourceDurability;
+        let durability = bound_durability(context, "indexes");
+        let progress = bound_durability(context, "source_progress");
+        anyhow::ensure!(
+            progress == ResourceDurability::Undeclared || progress == durability,
+            "the query's source_progress resource declares {progress:?} durability but its \
+             index provider declares {durability:?}; the query stores its checkpoints in \
+             that provider"
+        );
         Ok(indexed_description(
             &context.specification.descriptor,
-            bound_durability(context, "indexes"),
+            durability,
         ))
     }
     fn supports_query_reconstruction(&self) -> bool {

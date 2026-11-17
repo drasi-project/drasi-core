@@ -564,11 +564,15 @@ impl<'a> SinkConformance<'a> {
         sink.initialize(&contexts::initialize()).await?;
         step("start", sink.start(&mut contexts::start())).await??;
         let input = probe.input(1)?;
+        let failure = step("failed handle", sink.handle(input.clone()))
+            .await?
+            .err()
+            .context("delivery to an unavailable destination must fail")?;
         ensure!(
-            step("failed handle", sink.handle(input.clone()))
-                .await?
-                .is_err(),
-            "delivery to an unavailable destination must fail under the strict policy"
+            !drasi_computation_contracts::delivery_failure_class(&failure)
+                .is_some_and(|class| class.is_permanent()),
+            "an unavailable destination is a transient failure the graph retries, not a \
+             permanent one: {failure:#}"
         );
         probe.set_available(true).await?;
         step("retried handle", sink.handle(input))

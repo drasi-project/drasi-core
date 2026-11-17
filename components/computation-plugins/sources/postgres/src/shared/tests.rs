@@ -181,84 +181,59 @@ fn observation_keeps_physical_minimum_and_every_member_counter_floor() -> Result
     Arc::make_mut(snapshot.consumers.get_mut(&id("right")).unwrap())
         .transport_sequences
         .insert(stream(), 10_000);
-    let observed = observe(
-        &snapshot,
-        &members(),
-        &id("source"),
-        &stream(),
-        [1; 32],
-        false,
-    )?;
+    let observed = observe(&snapshot, &members(), &id("source"), &stream(), [1; 32])?;
     let minimum = observed.minimum.unwrap();
     assert_eq!(minimum.consumer, id("left"));
     assert_eq!(minimum.position.sequence, 8_000);
     assert_eq!(minimum.feedback_lsn, 90);
     assert_eq!(observed.max_counter, 10_000);
     assert_eq!(observed.max_lsn, 200);
-    assert!(observe(
-        &snapshot,
-        &members(),
-        &id("source"),
-        &stream(),
-        [1; 32],
-        true
-    )
-    .is_err());
     Arc::make_mut(snapshot.consumers.get_mut(&id("right")).unwrap()).ready = false;
-    let fenced = observe(
-        &snapshot,
-        &members(),
-        &id("source"),
-        &stream(),
-        [1; 32],
-        false,
-    )?;
+    let fenced = observe(&snapshot, &members(), &id("source"), &stream(), [1; 32])?;
     assert!(!fenced.ready);
     assert!(fenced.minimum.is_none());
     snapshot.consumers.remove(&id("right"));
-    assert!(observe(
-        &snapshot,
-        &members(),
-        &id("source"),
-        &stream(),
-        [1; 32],
-        false
-    )
-    .is_err());
+    assert!(observe(&snapshot, &members(), &id("source"), &stream(), [1; 32],).is_err());
     Ok(())
 }
 
 #[test]
-fn mixed_or_bootstrapped_missing_initialization_is_not_a_new_streaming_start() -> Result<()> {
-    let fresh = |snapshot: &ConsumerProgressSnapshot, origin| {
-        fresh_group(
+fn fresh_members_join_unless_they_bootstrapped_or_consumed_the_stream() -> Result<()> {
+    let start = |snapshot: &ConsumerProgressSnapshot| {
+        initialization(
             snapshot,
             &members(),
             &id("source"),
             &stream(),
-            false,
-            origin,
+            SharedMode::Rows,
         )
     };
-    assert!(fresh(&snapshot(None, None), None)?);
-    let mixed = snapshot(None, Some(position(100, 2, 2)));
-    assert!(fresh(&mixed, None).is_err());
-    assert!(fresh(&mixed, Some(50))?);
-    assert!(!fresh(
-        &snapshot(Some(position(100, 2, 2)), Some(position(200, 1, 1))),
-        None
-    )?);
-    let mut missing = snapshot(None, None);
-    Arc::make_mut(missing.consumers.get_mut(&id("right")).unwrap()).bootstrap_complete = true;
-    assert!(fresh(&missing, None).is_err());
-    assert!(fresh(&missing, Some(50)).is_err());
+    let fresh = start(&snapshot(None, None))?;
+    assert!(fresh.fresh && fresh.missing);
+    // A member without a cursor joins a group with cursors at its minimum.
+    let mixed = start(&snapshot(None, Some(position(100, 2, 2))))?;
+    assert!(!mixed.fresh && mixed.missing);
+    let resumed = start(&snapshot(
+        Some(position(100, 2, 2)),
+        Some(position(200, 1, 1)),
+    ))?;
+    assert!(!resumed.fresh && !resumed.missing);
+    let mut missing = snapshot(None, Some(position(100, 2, 2)));
+    Arc::make_mut(missing.consumers.get_mut(&id("left")).unwrap()).bootstrap_complete = true;
+    assert!(
+        start(&missing).is_err(),
+        "a bootstrapped member cannot just join"
+    );
     missing = snapshot(None, None);
     Arc::make_mut(missing.consumers.get_mut(&id("right")).unwrap())
         .transport_sequences
         .insert(stream(), 1);
-    assert!(fresh(&missing, None).is_err());
+    assert!(
+        start(&missing).is_err(),
+        "a member that consumed the stream lost its cursor"
+    );
     let managed = RowPosition::snapshot([1; 32], "managed".into(), 100);
-    assert!(fresh(&snapshot(Some(managed.clone()), Some(managed)), None).is_err());
+    assert!(start(&snapshot(Some(managed.clone()), Some(managed))).is_err());
     Ok(())
 }
 
@@ -272,23 +247,17 @@ fn an_unready_subscription_cannot_silently_resume_without_an_ordered_restart() -
         &[id("left"), id("right")],
     )?;
     provider.allowed.store(true, AtomicOrdering::Relaxed);
-    let mut updates = SharedUpdates::new(&binding, &initial, &id("source"), [1; 32], None)?;
+    let mut updates = SharedUpdates::new(&binding, &initial, &id("source"), [1; 32])?;
     let mut unready = initial.clone();
     Arc::make_mut(unready.consumers.get_mut(&id("left")).unwrap()).ready = false;
     provider.sender.send_replace(unready);
-    let observed = updates.snapshot(&id("source"), &stream(), [1; 32], false)?;
+    let observed = updates.snapshot(&id("source"), &stream(), [1; 32])?;
     assert!(!observed.ready && observed.minimum.is_none());
     provider.sender.send_replace(initial.clone());
-    assert!(updates
-        .snapshot(&id("source"), &stream(), [1; 32], false)
-        .is_err());
+    assert!(updates.snapshot(&id("source"), &stream(), [1; 32]).is_err());
     drop(updates);
-    let mut restarted = SharedUpdates::new(&binding, &initial, &id("source"), [1; 32], None)?;
-    assert!(
-        restarted
-            .snapshot(&id("source"), &stream(), [1; 32], false)?
-            .ready
-    );
+    let mut restarted = SharedUpdates::new(&binding, &initial, &id("source"), [1; 32])?;
+    assert!(restarted.snapshot(&id("source"), &stream(), [1; 32])?.ready);
     Ok(())
 }
 
@@ -302,36 +271,34 @@ fn only_a_completed_configured_snapshot_can_reenroll_a_reset_member_after_stop()
         &[id("left"), id("right")],
     )?;
     provider.allowed.store(true, AtomicOrdering::Relaxed);
-    let mut updates = SharedUpdates::new(&binding, &initial, &id("source"), [1; 32], None)?;
+    let mut updates = SharedUpdates::new(&binding, &initial, &id("source"), [1; 32])?;
     let mut renewed = snapshot(
         Some(RowPosition::configured_snapshot([1; 32], 200)),
         Some(position(150, 2, 2)),
     );
     Arc::make_mut(renewed.consumers.get_mut(&id("left")).unwrap()).reset_generation = 1;
     provider.sender.send_replace(renewed.clone());
-    assert!(updates
-        .snapshot(&id("source"), &stream(), [1; 32], false)
-        .is_err());
-    assert!(binding.retained_origin(&renewed, &id("source")).is_err());
+    assert!(updates.snapshot(&id("source"), &stream(), [1; 32]).is_err());
     Arc::make_mut(renewed.consumers.get_mut(&id("left")).unwrap()).bootstrap_complete = true;
     provider.sender.send_replace(renewed.clone());
     assert!(
-        updates
-            .snapshot(&id("source"), &stream(), [1; 32], false)
-            .is_err(),
+        updates.snapshot(&id("source"), &stream(), [1; 32]).is_err(),
         "an active reader must not adopt a new snapshot"
     );
     drop(updates);
-    assert_eq!(binding.retained_origin(&renewed, &id("source"))?, None);
-    let mut restarted = SharedUpdates::new(&binding, &renewed, &id("source"), [1; 32], None)?;
+    let mut restarted = SharedUpdates::new(&binding, &renewed, &id("source"), [1; 32])?;
     let minimum = restarted
-        .snapshot(&id("source"), &stream(), [1; 32], false)?
+        .snapshot(&id("source"), &stream(), [1; 32])?
         .minimum
         .unwrap();
     assert_eq!(minimum.consumer, id("right"));
     assert_eq!(minimum.feedback_lsn, 150);
+    drop(restarted);
     Arc::make_mut(renewed.consumers.get_mut(&id("left")).unwrap()).reset_generation = 0;
-    assert!(binding.retained_origin(&renewed, &id("source")).is_err());
+    assert!(
+        SharedUpdates::new(&binding, &renewed, &id("source"), [1; 32]).is_err(),
+        "a reset generation never moves backwards"
+    );
     Ok(())
 }
 
@@ -345,39 +312,30 @@ fn failed_reset_and_lost_members_are_fenced_across_source_restarts() -> Result<(
         &[id("left"), id("right")],
     )?;
     provider.allowed.store(true, AtomicOrdering::Relaxed);
-    let mut updates = SharedUpdates::new(&binding, &initial, &id("source"), [1; 32], Some(50))?;
+    let mut updates = SharedUpdates::new(&binding, &initial, &id("source"), [1; 32])?;
+    // The right member has not committed its join point yet; the left
+    // member's cursor is the minimum it joins at.
     let mut handled = snapshot(Some(position(100, 1, 2)), None);
     provider.sender.send_replace(handled.clone());
-    assert!(updates
-        .snapshot(&id("source"), &stream(), [1; 32], false)?
-        .minimum
-        .is_none());
-    assert_eq!(binding.retained_origin(&handled, &id("source"))?, Some(50));
+    let observed = updates.snapshot(&id("source"), &stream(), [1; 32])?;
+    assert!(observed.missing);
+    assert_eq!(
+        observed.minimum.context("joining minimum")?.consumer,
+        id("left")
+    );
+    // A member that handled input never loses its cursor.
     provider.sender.send_replace(initial.clone());
-    assert!(updates
-        .snapshot(&id("source"), &stream(), [1; 32], false)
-        .is_err());
-    assert!(binding.retained_origin(&initial, &id("source")).is_err());
+    assert!(updates.snapshot(&id("source"), &stream(), [1; 32]).is_err());
+    drop(updates);
+    assert!(SharedUpdates::new(&binding, &initial, &id("source"), [1; 32]).is_err());
     Arc::make_mut(handled.consumers.get_mut(&id("right")).unwrap()).reset_generation = 1;
     provider.sender.send_replace(handled.clone());
-    assert!(updates
-        .snapshot(&id("source"), &stream(), [1; 32], false)
-        .is_err());
-    assert!(binding.retained_origin(&handled, &id("source")).is_err());
-    assert!(SharedUpdates::new(&binding, &handled, &id("source"), [1; 32], Some(50)).is_err());
-    assert!(SharedUpdates::new(&binding, &initial, &id("source"), [2; 32], Some(50)).is_err());
+    assert!(SharedUpdates::new(&binding, &handled, &id("source"), [1; 32]).is_err());
+    assert!(SharedUpdates::new(&binding, &initial, &id("source"), [2; 32]).is_err());
     let mut failed = snapshot(None, None);
     Arc::make_mut(failed.consumers.get_mut(&id("left")).unwrap()).failure =
         Some("owner failed".into());
-    assert!(observe(
-        &failed,
-        &members(),
-        &id("source"),
-        &stream(),
-        [1; 32],
-        false
-    )
-    .is_err());
+    assert!(observe(&failed, &members(), &id("source"), &stream(), [1; 32],).is_err());
     Ok(())
 }
 
@@ -492,13 +450,6 @@ fn transaction_observation_and_rewind_keep_physical_minimum_and_all_allocation_f
     assert!(replacement.position(300, [1; 32], None)?.1 > sequence);
     counters.logical.store(u64::MAX, AtomicOrdering::Relaxed);
     assert!(replacement.position(400, [1; 32], None).is_err());
-    for consumer in ["left", "right"] {
-        let mut invalid = snapshot.clone();
-        Arc::make_mut(invalid.consumers.get_mut(&id(consumer)).unwrap()).persistent = false;
-        assert!(
-            observe_transactions(&invalid, &members(), &id("source"), &stream(), [1; 32]).is_err()
-        );
-    }
     Ok(())
 }
 
@@ -517,7 +468,7 @@ fn transaction_membership_readiness_failure_and_active_reset_are_independent_fen
         SharedMode::Transactions,
     )?;
     provider.allowed.store(true, AtomicOrdering::Relaxed);
-    let mut updates = SharedUpdates::new(&binding, &initial, &id("source"), [1; 32], None)?;
+    let mut updates = SharedUpdates::new(&binding, &initial, &id("source"), [1; 32])?;
     let mut renewed = transaction_snapshot(
         Some(SharedTransactionPosition::configured_snapshot(
             [1; 32], 200,
@@ -529,15 +480,13 @@ fn transaction_membership_readiness_failure_and_active_reset_are_independent_fen
     assert!(updates
         .transaction_snapshot(&id("source"), &stream(), [1; 32])
         .is_err());
-    assert!(binding.retained_origin(&renewed, &id("source")).is_err());
     Arc::make_mut(renewed.consumers.get_mut(&id("left")).unwrap()).bootstrap_complete = true;
     provider.sender.send_replace(renewed.clone());
     assert!(updates
         .transaction_snapshot(&id("source"), &stream(), [1; 32])
         .is_err());
     drop(updates);
-    assert_eq!(binding.retained_origin(&renewed, &id("source"))?, None);
-    let mut updates = SharedUpdates::new(&binding, &renewed, &id("source"), [1; 32], None)?;
+    let mut updates = SharedUpdates::new(&binding, &renewed, &id("source"), [1; 32])?;
     assert_eq!(
         updates
             .transaction_snapshot(&id("source"), &stream(), [1; 32])?

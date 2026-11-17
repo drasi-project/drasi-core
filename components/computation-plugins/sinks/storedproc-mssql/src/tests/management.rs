@@ -52,6 +52,7 @@ fn every_field_has_a_classified_boundary() -> Result<()> {
         ("trustedCaPem", json!(pem)),
         ("hostNameInCertificate", json!("sql.example")),
         ("progressTable", json!("dbo.other_progress")),
+        ("onPermanentFailure", json!("skip")),
         ("maxStreams", json!(8)),
         ("deliveryGuarantee", json!("atLeastOnce")),
         (
@@ -68,7 +69,7 @@ fn every_field_has_a_classified_boundary() -> Result<()> {
         ),
         ("commandTimeoutMs", json!(1000)),
         ("connectTimeoutMs", json!(1000)),
-        ("retryBudgetMs", json!(0)),
+        ("shutdownTimeoutMs", json!(500)),
     ];
     // Every published field is covered by the matrix and the table.
     let published: Vec<String> = MsSqlStoredProcFactory
@@ -112,7 +113,7 @@ fn every_field_has_a_classified_boundary() -> Result<()> {
     );
     // The strongest changed field wins.
     let mut both = changed("routes", json!({}));
-    both["host"] = json!("h2");
+    both["user"] = json!("u2");
     assert_eq!(
         boundary(assess(&current, &both, inputs())?),
         Some(UpdateBoundary::Stop)
@@ -164,7 +165,7 @@ async fn stopped_sinks_apply_in_place_and_restart_updates() -> Result<()> {
             "EXEC dbo.v2 {{param after.id}}"
         );
         let mut host = routes.clone();
-        host["host"] = json!("h2");
+        host["user"] = json!("u2");
         assert!(
             apply(
                 &mut sink,
@@ -184,7 +185,7 @@ async fn stopped_sinks_apply_in_place_and_restart_updates() -> Result<()> {
         )
         .await
         .map_err(|error| anyhow::anyhow!("{error:?}"))?;
-        assert_eq!(sink.configuration()?["host"], "h2");
+        assert_eq!(sink.configuration()?["user"], "u2");
         assert!(
             apply(&mut sink, routes, config(), UpdateBoundary::Stop)
                 .await

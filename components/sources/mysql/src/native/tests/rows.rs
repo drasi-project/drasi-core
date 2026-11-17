@@ -282,7 +282,7 @@ async fn memory_rows() -> Result<()> {
     builder = builder.sink(drasi_lib::computation::v1::ComponentName::try_new("procedures").expect("fixture component name"), Box::new(Procedures(
         drasi_mysql_common::storedproc::runtime::MySqlStoredProcSink::new(id("procedures"),
             serde_json::from_value(json!({
-                "hostname":"127.0.0.1","port":settings.connection.port,
+                "host":"127.0.0.1","sslMode":"disable","port":settings.connection.port,
                 "database":"test","user":"root","password":"root",
                 // The queries are in-memory (volatile): the sink must opt in.
                 "deliveryGuarantee":"atLeastOnce",
@@ -517,7 +517,7 @@ async fn memory_rows() -> Result<()> {
         async fn procedure_lifecycle(admin: &mut connection::Connection, port: u16, envelope: ChangeEnvelope) -> Result<()> {
             use drasi_mysql_common::storedproc::runtime::MySqlStoredProcSink;
             let config = |template: &str, stop_ms: u64| serde_json::from_value(json!({
-                "hostname":"127.0.0.1","port":port,"database":"test","user":"root","password":"root",
+                "host":"127.0.0.1","sslMode":"disable","port":port,"database":"test","user":"root","password":"root",
                 "commandTimeoutMs":5000,"shutdownTimeoutMs":stop_ms,
                 // The input is an in-memory query output: opt in.
                 "deliveryGuarantee":"atLeastOnce",

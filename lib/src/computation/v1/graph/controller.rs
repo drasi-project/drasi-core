@@ -70,6 +70,7 @@ pub(super) struct InstanceSlot {
     handler: Mutex<Option<Arc<dyn crate::computation::v1::ControlHandler>>>,
     requires_readiness: std::sync::atomic::AtomicBool,
     pub(super) processing_ready: std::sync::atomic::AtomicBool,
+    delivery: Arc<super::sink_delivery::SinkDeliveryStatus>,
 }
 
 struct Instance {
@@ -94,6 +95,10 @@ struct Instance {
 }
 
 impl InstanceSlot {
+    pub(super) fn delivery(&self) -> &super::sink_delivery::SinkDeliveryStatus {
+        &self.delivery
+    }
+
     /// Ask an idle live object to assess a change. `None` means the object is
     /// busy, unconstructed or defers to its factory planner.
     pub(super) fn assess_update(
@@ -142,6 +147,11 @@ impl InstanceSlot {
         metadata_changes: super::registry::MetadataChanges,
     ) -> Arc<Self> {
         let slot = Arc::new(Self {
+            delivery: Arc::new(super::sink_delivery::SinkDeliveryStatus::new(
+                id.clone(),
+                generation,
+                metadata_changes.clone(),
+            )),
             id,
             generation,
             description: Mutex::new(component.description()),
@@ -1385,6 +1395,7 @@ pub(super) fn initial_observations(snapshot: &GraphSnapshot) -> ObservedGraph {
                         exhausted: false,
                         started: false,
                         lifecycle_requested: false,
+                        skipped_inputs: 0,
                         transition_time: now,
                     },
                 )
@@ -5125,6 +5136,7 @@ impl Operations {
                         &admission_snapshot,
                     )?;
                     super::bind_inputs(&mut lease.component, &node, &admission_snapshot).await?;
+                    let delivery = lease.slot.delivery.clone();
                     let Instance {
                         component,
                         sequences,
@@ -5160,6 +5172,7 @@ impl Operations {
                             &budget,
                             sink_batch,
                             input_progress,
+                            &delivery,
                             startup_work,
                         ));
                     let result = if let Some(feedback) = &feedback {
@@ -7169,7 +7182,7 @@ pub(super) async fn run(
         let deadline = operations.next_drain_deadline();
         tokio::select! {
             _ = cancelled(cancel) => return Err(GraphError::Cancelled),
-            _ = metadata_changes.notified() => super::registry::publish(graph),
+            _ = metadata_changes.notified() => super::sink_delivery::publish(graph),
             job = graph.tasks.resources.next(), if !graph.tasks.resources.is_empty() => {
                 if let Err(error) = super::resource_tasks::complete(graph, &job) {
                     log::debug!("Resource callback completed with a retained failure: {error}");
@@ -7471,7 +7484,9 @@ fn handle_command<'a>(
                         let observed = graph.observed();
                         for node in &desired.components {
                             if observed.components.get(node.descriptor.id()).is_some_and(|node| {
-                                node.failure.as_ref().is_some_and(|failure| failure.disposition == FailureDisposition::Retryable)
+                                // A running sink retrying a delivery in place recovers by itself.
+                                node.failure.as_ref().is_some_and(|failure| failure.disposition == FailureDisposition::Retryable
+                                    && !(failure.phase == FailurePhase::Processing && node.lifecycle == ComponentLifecycle::Running))
                                     || node.realization == RealizationState::CreationFailed && node.failure.is_none()
                             }) {
                                 changes.push(reconcile::DesiredMutation::Retry(GraphSelection::Exact(vec![node.descriptor.id().clone()])));

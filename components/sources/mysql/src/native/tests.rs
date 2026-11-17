@@ -12,6 +12,7 @@ use shared_tests::fixture_attribution::{Attribution, Fixture};
 use testcontainers::{runners::AsyncRunner, ContainerRequest, ImageExt};
 use testcontainers_modules::mysql::Mysql;
 mod production;
+mod progress;
 mod rows;
 mod shared;
 mod snapshot;

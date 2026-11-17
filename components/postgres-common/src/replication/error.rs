@@ -10,6 +10,28 @@
 /// (an owned replication slot is active).
 pub use drasi_computation_contracts::SourceFailure as PostgresCdcError;
 
+/// The server's host name did not resolve. Name service outages are
+/// usually brief (a restarting pod behind a headless service returns
+/// NXDOMAIN until it is back), so reconnection retries this within its
+/// budget. The resolver's own error carries no portable kind.
+#[derive(Debug)]
+pub struct AddressUnresolved {
+    pub host: String,
+    pub source: std::io::Error,
+}
+
+impl std::fmt::Display for AddressUnresolved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PostgreSQL host {} did not resolve", self.host)
+    }
+}
+
+impl std::error::Error for AddressUnresolved {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 /// Whether `error` is, or wraps, a permanent [`PostgresCdcError`].
 pub fn is_permanent(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| cause.is::<PostgresCdcError>())
@@ -36,7 +58,8 @@ pub fn is_transient(error: &anyhow::Error) -> bool {
                     | ErrorKind::HostUnreachable
                     | ErrorKind::NetworkUnreachable
             )
-        }) || cause.is::<tokio::time::error::Elapsed>()
+        }) || cause.is::<AddressUnresolved>()
+            || cause.is::<tokio::time::error::Elapsed>()
             || cause
                 .downcast_ref::<crate::protocol::ErrorResponse>()
                 .is_some_and(|error| transient_sqlstate(&error.code))
@@ -78,6 +101,39 @@ mod tests {
         assert!(is_permanent(&permanent));
         assert!(!is_transient(&permanent));
         assert!(transient_sqlstate("57P01") && transient_sqlstate("53300"));
+        let unresolved = anyhow::Error::new(AddressUnresolved {
+            host: "database.invalid".into(),
+            source: std::io::Error::other("failed to lookup address information"),
+        })
+        .context("PostgreSQL reconnect failed");
+        assert!(is_transient(&unresolved) && !is_permanent(&unresolved));
         assert!(!transient_sqlstate("42704") && !transient_sqlstate("28P01"));
+    }
+}
+
+#[cfg(test)]
+mod resolution_tests {
+    use super::*;
+
+    /// A name that cannot resolve fails as [`AddressUnresolved`], which
+    /// reconnection retries, rather than as an unclassified permanent error.
+    #[tokio::test]
+    async fn an_unresolvable_host_is_a_transient_failure() {
+        let config = crate::replication::PostgresTransactionConfig::new(
+            "drasi-unresolvable.invalid",
+            5432,
+            "database",
+            "user",
+            "publication",
+        );
+        let error = match crate::replication::connect(&config).await {
+            Ok(_) => panic!("an .invalid host must not resolve"),
+            Err(error) => error,
+        };
+        assert!(
+            error.chain().any(|cause| cause.is::<AddressUnresolved>()),
+            "{error:#}"
+        );
+        assert!(is_transient(&error), "{error:#}");
     }
 }

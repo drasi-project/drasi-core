@@ -19,3 +19,17 @@ versus durable acceptance, sender mapping recovery, namespace preservation,
 transports, TLS, explicit cuts and cleanup. Durable mode requires an actual host
 index provider. The saved input/mapping precedes first transmission; a receiver
 receipt proves admission, never downstream completion or whole-graph drain.
+
+The sender declares what it requires, so the graph checks it when the edge is
+bound: a durable sender keys its mapping on the producer's durable identity and
+declares exactly-once input from a durable producer, a durable progress and a
+durable `state` dependency, so a volatile or unidentified producer is refused at
+wiring (the sender node carries a terminal binding failure). A volatile sender
+declares an unkeyed input.
+
+Delivery failures follow the shared
+[delivery-failure model](../NATIVE-SINK-GUIDE.md#delivery-failures):
+`Busy`, `Closed`, `AcceptanceUnknown` and `StaleGeneration` are transient; a
+receiver that rejects the input (`Invalid`, `Incompatible`) is permanent and
+follows `onPermanentFailure`; lost, conflicting or expired link state ends the
+activation (the node fails).

@@ -1157,6 +1157,7 @@ pub(super) fn insert(
                 exhausted: false,
                 started: false,
                 lifecycle_requested: false,
+                skipped_inputs: 0,
                 transition_time: chrono::Utc::now(),
             },
         );

@@ -228,6 +228,10 @@ impl Limits {
     }
 }
 
+fn is_stall(policy: &drasi_lib::computation::v1::PermanentFailurePolicy) -> bool {
+    *policy == drasi_lib::computation::v1::PermanentFailurePolicy::Stall
+}
+
 fn failure_scope() -> FailureMode {
     FailureMode::ProcessRestart
 }
@@ -251,6 +255,15 @@ pub struct BridgeConfig {
     pub transport: Transport,
     #[serde(default)]
     pub limits: Limits,
+    /// What the graph does with an input the sender can never deliver; the
+    /// same `onPermanentFailure` setting every sink has. Only senders publish
+    /// it in their configuration schema.
+    #[serde(
+        default,
+        rename = "onPermanentFailure",
+        skip_serializing_if = "is_stall"
+    )]
+    pub on_permanent_failure: drasi_lib::computation::v1::PermanentFailurePolicy,
 }
 
 impl BridgeConfig {
@@ -449,12 +462,30 @@ pub fn receiver_description(
     }
 }
 
-/// The description of a bridge sender (a sink): its input does not key
-/// delivery on producer identity.
+/// The description of a bridge sender (a sink). A durable sender keys its
+/// persisted sender mapping on the producer's restart-stable identity and
+/// sequence, so it requires exactly-once input from a durable producer and a
+/// durable mapping store; a volatile or unidentified producer is refused when
+/// the edge is bound. A volatile sender does not key on producer identity.
 pub fn sender_description(
     descriptor: &drasi_lib::computation::v1::ComponentDescriptor,
+    config: &BridgeConfig,
 ) -> drasi_lib::computation::v1::ComponentDescription {
-    use drasi_lib::computation::v1::{ComponentDescription, InputDelivery, ProgressPersistence};
-    ComponentDescription::new(ProgressPersistence::Stateless)
-        .with_inputs(descriptor, InputDelivery::Unkeyed)
+    use drasi_lib::computation::v1::{
+        ComponentDescription, DependencyRequirement, DurabilityRequirement, InputDelivery,
+        ProgressPersistence,
+    };
+    match config.profile {
+        Profile::Durable => ComponentDescription::new(ProgressPersistence::Durable)
+            .with_inputs(descriptor, InputDelivery::ExactlyOnce)
+            .with_dependency(
+                "state",
+                DependencyRequirement {
+                    durability: DurabilityRequirement::Durable,
+                },
+            ),
+        Profile::Volatile => ComponentDescription::new(ProgressPersistence::Stateless)
+            .with_inputs(descriptor, InputDelivery::Unkeyed),
+    }
+    .with_permanent_failure(config.on_permanent_failure)
 }

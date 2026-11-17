@@ -40,6 +40,7 @@ pub mod bootstrap_coordination;
 pub mod configuration;
 pub mod consumer;
 pub mod consumer_progress;
+pub mod logging;
 pub mod management;
 pub mod output_follow;
 pub mod output_reads;
@@ -161,7 +162,8 @@ pub mod status {
     pub const PROTOCOL: u32 = 8;
 }
 
-/// Nonzero codes carry UTF-8 JSON Failure data (code, message, retryable). Success
+/// Nonzero codes carry UTF-8 JSON Failure data (code, message, retryable, and a
+/// sink's delivery-failure class). Success
 /// must have an empty error buffer. An unrecognized code is a failure, never success.
 #[repr(C)]
 pub struct Status {

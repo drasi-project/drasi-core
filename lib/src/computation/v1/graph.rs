@@ -46,6 +46,7 @@ mod retirement;
 pub(crate) use registry::GraphRegistrySnapshot;
 pub(crate) use retirement::RecoveryFreeze;
 mod sink_batching;
+mod sink_delivery;
 mod specification;
 mod topology;
 pub use controller::reconcile::{DesiredMutation, ReconciliationPreview, ReconciliationReport};
@@ -3106,6 +3107,7 @@ async fn run_node(
     budget: &NodeWorkBudget,
     sink_batch: &mut Option<Box<sink_batching::SinkBatchState>>,
     input_progress: &mut Option<Box<input_progress::InputProgress>>,
+    delivery: &sink_delivery::SinkDeliveryStatus,
     mut startup_work: Option<super::feedback::Work>,
 ) -> GraphResult<()> {
     validate_source_progress(
@@ -3114,23 +3116,21 @@ async fn run_node(
         routing.downstream,
         routing.transitive_recovery,
     )?;
-    if let Component::Sink(sink) = component {
-        let batching = sink
-            .batching()
-            .map_err(|error| component_error(node, "sink batch policy", error))?;
-        if batching.is_some() || sink_batch.is_some() {
-            drop(startup_work.take());
-            return Box::pin(sink_batching::run(
-                component,
-                node,
-                inputs,
-                quiesce,
-                budget,
-                sink_batch,
-                input_progress,
-            ))
-            .await;
-        }
+    if matches!(component, Component::Sink(_)) {
+        // Every sink retains its unacknowledged inputs on the instance lease,
+        // so a failed delivery is retried in place across pause and resume.
+        drop(startup_work.take());
+        return Box::pin(sink_batching::run(
+            component,
+            node,
+            inputs,
+            quiesce,
+            budget,
+            sink_batch,
+            input_progress,
+            delivery,
+        ))
+        .await;
     }
     if matches!(component, Component::BootstrapProvider(_)) {
         drop(startup_work.take());
@@ -3350,13 +3350,8 @@ async fn run_node(
                         .transform(input)
                         .await
                         .map_err(|source| component_error(node, "transform", source))?,
-                    Component::Sink(sink) => {
-                        sink.handle(input)
-                            .await
-                            .map_err(|source| component_error(node, "handle", source))?;
-                        Vec::new()
-                    }
                     Component::Source(_)
+                    | Component::Sink(_)
                     | Component::Service(_)
                     | Component::BootstrapProvider(_) => unreachable!(),
                     Component::Deferred { .. } | Component::Unresolved(_) => {

@@ -39,18 +39,18 @@ effect exactly once when the procedure does not commit on its own.
 
 | Capability | Native behaviour |
 |---|---|
-| Delivery profile | `ConsumerMode::External` plus a destination cursor (`progressTable`, format 2) committed in the same transaction as each change's procedure call. Exactly once for transactional procedures; at-least-once for procedures that commit internally. |
+| Delivery profile | `ConsumerMode::External` plus a destination cursor (`progressTable`, format 4) committed in the same transaction as each change's procedure call, through the protocol shared with the PostgreSQL and MySQL sinks ([storedproc-common](../../common/storedproc/README.md)). Exactly once per operation. A procedure that commits or rolls back is refused permanently and never run again (no duplicate on replay). `onPermanentFailure: skip` records an undeliverable operation in the dead-letter table atomically with the cursor advance. |
 | Templates | Parameter-only: every value goes through `{{param …}}` and is bound as `@P1…@Pn`. Inline `{{json}}`, `{{x}}`, `{{{x}}}`, partials, decorators and other block helpers are rejected at construction. Compiled once; strict rendering. |
 | Routing | Full output alias, then its last dotted segment, then `defaultTemplate`, per operation. |
 | Context | Truthful change: `operation` (`ADD`, `REPLACE`, `PATCH`, `DELETE`), `output`, `sequence`, `timestamp`, `identity`, and only the `element`, `before`, `after`, `removedProperties`, `effectiveFrom` the record carries; plus `deliveryId`. |
 | Values | Exact positional binding; unsigned values beyond `BIGINT` bind as decimal text; objects and arrays as JSON text; at most 2 098 values per command. |
 | Large inputs | No input size limit; rendering per change; timeouts per server round trip. |
-| Retry | Classified by SQL Server error number and error type; reconnect and retry within `retryBudgetMs`; a lost commit reply is retried safely through the cursor. No latched failure state. |
-| Connection | One persistent connection per activation, reconnected with jittered backoff. |
-| Lifecycle | Start honours cancellation and the deadline and creates or checks the progress table; host-driven pause; Drain closes gracefully, Abort drops; Erase deletes only this sink's cursor rows. |
+| Retry | Classified by SQL Server error number and error type; one attempt per operation, retried by the graph; a lost commit reply is resolved through the cursor; a definite commit error is classified by its number. No latched failure state. |
+| Connection | One persistent connection per activation, reconnected on demand. |
+| Lifecycle | Start honours cancellation and the deadline and creates or checks the progress and dead-letter tables; host-driven pause; Drain closes gracefully within `shutdownTimeoutMs`, Abort drops; Erase deletes only this sink's rows. |
 | Authentication | SQL authentication; activation credentials (SQL login or Microsoft Entra ID access token as Tiberius `AADToken`). The Host does not yet bind identities to consumers. |
 | TLS | Required by default with certificate verification; extra CA via `trustedCaPem`; plaintext and `trustServerCertificate` are explicit opt-ins with warnings. |
-| Management | `Factory::assess` and `NativeManagement`; every field classified (InPlace, Restart, Recreate, or Unsupported for `database` and `progressTable`). |
+| Management | `Factory::assess` and `NativeManagement`; every field classified (InPlace, Restart, Recreate, or Unsupported for `host`, `port`, `database` and `progressTable`). |
 | Configuration | Flat camelCase, unknown fields rejected, only `password` secret, published defaults, redacting `Debug`. |
 | Cancellation | Tiberius cannot send ATTENTION; an interrupted statement drops the connection and SQL Server rolls the transaction back. |
 

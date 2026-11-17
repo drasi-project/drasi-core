@@ -5,7 +5,7 @@ use super::*;
 use crate::{
     config::{
         DEFAULT_COMMAND_TIMEOUT_MS, DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_MAX_STREAMS,
-        DEFAULT_PROGRESS_TABLE, DEFAULT_RETRY_BUDGET_MS,
+        DEFAULT_PROGRESS_TABLE, DEFAULT_SHUTDOWN_TIMEOUT_MS,
     },
     Encryption, MsSqlStoredProcConfig, MsSqlStoredProcFactory, ProgressTable,
 };
@@ -25,7 +25,11 @@ fn defaults_are_published_and_applied() -> Result<()> {
     );
     assert_eq!(config.command_timeout_ms, DEFAULT_COMMAND_TIMEOUT_MS);
     assert_eq!(config.connect_timeout_ms, DEFAULT_CONNECT_TIMEOUT_MS);
-    assert_eq!(config.retry_budget_ms, DEFAULT_RETRY_BUDGET_MS);
+    assert_eq!(config.shutdown_timeout_ms, DEFAULT_SHUTDOWN_TIMEOUT_MS);
+    assert_eq!(
+        config.on_permanent_failure,
+        drasi_computation_contracts::PermanentFailurePolicy::Stall
+    );
 
     let details = MsSqlStoredProcFactory
         .configuration_details()
@@ -41,7 +45,8 @@ fn defaults_are_published_and_applied() -> Result<()> {
         ("deliveryGuarantee", json!("exactlyOnce")),
         ("commandTimeoutMs", json!(DEFAULT_COMMAND_TIMEOUT_MS)),
         ("connectTimeoutMs", json!(DEFAULT_CONNECT_TIMEOUT_MS)),
-        ("retryBudgetMs", json!(DEFAULT_RETRY_BUDGET_MS)),
+        ("shutdownTimeoutMs", json!(DEFAULT_SHUTDOWN_TIMEOUT_MS)),
+        ("onPermanentFailure", json!("stall")),
     ] {
         assert_eq!(details.fields[field].default, Some(expected), "{field}");
     }
@@ -70,7 +75,8 @@ fn configuration_round_trips_through_construction() -> Result<()> {
     full["routes"] = json!({"q": {"deleted": {"template": "EXEC dbo.d {{param before.id}}"}}});
     full["commandTimeoutMs"] = json!(1000);
     full["connectTimeoutMs"] = json!(2000);
-    full["retryBudgetMs"] = json!(0);
+    full["shutdownTimeoutMs"] = json!(500);
+    full["onPermanentFailure"] = json!("skip");
     let details = MsSqlStoredProcFactory
         .configuration_details()
         .expect("details");
@@ -136,7 +142,10 @@ fn invalid_and_legacy_configuration_is_rejected() {
         ("commandTimeoutMs", json!(0)),
         ("commandTimeoutMs", json!(3_600_001)),
         ("connectTimeoutMs", json!(0)),
-        ("retryBudgetMs", json!(3_600_001)),
+        ("retryBudgetMs", json!(0)),
+        ("shutdownTimeoutMs", json!(0)),
+        ("onPermanentFailure", json!("deadLetter")),
+        ("progressTable", json!("Dbo.T")),
         ("trustedCaPem", json!("not a certificate")),
         (
             "outputs",
@@ -225,26 +234,26 @@ fn routes_must_name_a_bound_output() {
 }
 
 #[test]
-fn progress_tables_are_validated_and_bracket_quoted() -> Result<()> {
+fn progress_tables_are_bracket_quoted_in_dbo_with_a_dead_letter_table() -> Result<()> {
     assert_eq!(
-        ProgressTable::parse("dbo.drasi_delivery_progress")?.quoted(),
+        crate::session::quoted(&ProgressTable::parse("drasi_delivery_progress")?),
         "[dbo].[drasi_delivery_progress]"
     );
-    assert_eq!(ProgressTable::parse("_t1")?.quoted(), "[_t1]");
-    for invalid in ["", ".t", "s.", "s t", "s.t;", "s.t]", "ü", &"a".repeat(129)] {
-        assert!(ProgressTable::parse(invalid).is_err(), "{invalid}");
-    }
-    let ddl = crate::create_table_sql("[dbo].[drasi_delivery_progress]");
+    assert_eq!(
+        crate::session::quoted(&ProgressTable::parse("audit.progress")?),
+        "[audit].[progress]"
+    );
+    let ddl = crate::create_table_sql(&ProgressTable::parse("drasi_delivery_progress")?);
     for column in [
         "owner NVARCHAR(64)",
         "stream_key NVARCHAR(128)",
-        "CHECK (version = 3)",
+        "CHECK (version = 4)",
         "epoch NVARCHAR(64)",
-        "sequence NVARCHAR(20)",
-        "digest VARBINARY(32)",
-        "operations BIGINT",
-        "completed BIGINT",
+        "generation BIGINT",
+        "pending BIGINT",
         "PRIMARY KEY (owner, stream_key)",
+        "[dbo].[drasi_delivery_progress_dead_letter]",
+        "PRIMARY KEY (owner, delivery_id)",
     ] {
         assert!(ddl.contains(column), "{column}");
     }

@@ -40,6 +40,7 @@ persistence hook).
 | `tlsCertificatePem` | string | none | PEM certificate chain, ≤ 256 KiB. Requires `tlsPrivateKeyPem`. | Stop |
 | `tlsPrivateKeyPem` | string, **secret** | none | PEM private key matching the certificate. | Stop |
 | `tlsClientCaPem` | string | none | PEM CA bundle. When set, clients must present a certificate it issued (mutual TLS). Requires TLS. | Stop |
+| `onPermanentFailure` | string | `stall` | `stall`, `skip`. The shared sink setting of the [delivery-failure model](../NATIVE-SINK-GUIDE.md#delivery-failures); a failed publication is otherwise transient and retried in place by the graph. | Replace |
 
 "Pause (new connections)" means the change is applied in place, but streams
 that are already connected keep their old interval until they reconnect.
@@ -217,7 +218,7 @@ sees the proxy's address.
 |---|---|
 | Pause (InPlace) | `routes`, `defaultTemplate`, `heartbeatIntervalMs`, `keepAliveIntervalMs`, `eventIds`, `authToken`, `authTokenSecondary`, `allowQueryToken`, `allowUnauthenticated`, `corsAllowedOrigins`, `rateLimitPerSecond`, `rateLimitBurst`, `maxSubscribers` |
 | Stop (Restart) | `host`, `port`, `tlsCertificatePem`, `tlsPrivateKeyPem`, `tlsClientCaPem`, `ssePath`, `broadcastCapacity`, `maxPaths`, `maxConnections`, `headerReadTimeoutMs` |
-| Replace (Recreate) | `outputs`, or a change to the incoming edges |
+| Replace (Recreate) | `outputs`, `onPermanentFailure`, or a change to the incoming edges |
 
 The strongest boundary of any changed field wins. An invalid proposal (for
 example, a route that names no incoming output, or unsafe exposure) is an

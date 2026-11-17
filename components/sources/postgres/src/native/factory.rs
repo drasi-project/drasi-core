@@ -93,9 +93,9 @@ impl Default for PostgresTransactionSourceFactory {
 impl ComponentFactory for PostgresTransactionSourceFactory {
     fn describe(
         &self,
-        _context: &drasi_lib::computation::v1::ConstructionContext,
+        context: &drasi_lib::computation::v1::ConstructionContext,
     ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
-        Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
+        Ok(transactions_description(&context.specification.descriptor))
     }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor

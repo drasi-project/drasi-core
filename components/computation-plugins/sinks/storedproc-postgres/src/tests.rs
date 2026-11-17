@@ -43,7 +43,7 @@ fn full_config() -> Value {
         "defaultTemplate": {"deleted": {"template": "CALL remove({{param before.id}})"}},
         "progressTable": "drasi.progress", "maxStreams": 8,
         "commandTimeoutMs": 1000, "connectTimeoutMs": 2000,
-        "reconnectBudgetMs": 0, "shutdownTimeoutMs": 3000
+        "shutdownTimeoutMs": 3000
     })
 }
 
@@ -332,8 +332,12 @@ fn configuration_rejects_injection_unknown_fields_and_invalid_bounds() {
             with(config(), "shutdownTimeoutMs", json!(0)),
         ),
         (
-            "reconnect budget too large",
-            with(config(), "reconnectBudgetMs", json!(3_600_001)),
+            "retry budgets are gone",
+            with(config(), "reconnectBudgetMs", json!(1000)),
+        ),
+        (
+            "unknown permanent-failure policy",
+            with(config(), "onPermanentFailure", json!("deadLetter")),
         ),
         ("max streams 0", with(config(), "maxStreams", json!(0))),
         (
@@ -341,8 +345,8 @@ fn configuration_rejects_injection_unknown_fields_and_invalid_bounds() {
             with(config(), "maxStreams", json!(1_000_001)),
         ),
         (
-            "unqualified table",
-            with(config(), "progressTable", json!("progress")),
+            "three-part table",
+            with(config(), "progressTable", json!("a.b.c")),
         ),
         (
             "quoted table",
@@ -395,7 +399,7 @@ fn configuration_rejects_injection_unknown_fields_and_invalid_bounds() {
 #[test]
 fn owner_is_derived_from_graph_and_component() -> Result<()> {
     let sink = sink(config())?;
-    assert_eq!(sink.owner(), &DeliveryOwner::derive(GRAPH, SINK_ID));
+    assert_eq!(sink.owner(), owner(GRAPH, SINK_ID));
     let mut other = request(config());
     other.scope.as_mut().unwrap().graph_id = "another-graph".into();
     assert_ne!(
@@ -481,9 +485,9 @@ fn assess_matrix_classifies_every_field() {
             Some(Pause),
         ),
         (
-            "reconnectBudgetMs",
-            with(full_config(), "reconnectBudgetMs", json!(1000)),
-            Some(Pause),
+            "onPermanentFailure",
+            with(full_config(), "onPermanentFailure", json!("skip")),
+            Some(Replace),
         ),
         (
             "shutdownTimeoutMs",
@@ -493,13 +497,13 @@ fn assess_matrix_classifies_every_field() {
         (
             "host",
             with(full_config(), "host", json!("db2.example")),
-            Some(Stop),
+            None,
         ),
-        ("port", with(full_config(), "port", json!(5432)), Some(Stop)),
+        ("port", with(full_config(), "port", json!(5432)), None),
         (
             "database",
             with(full_config(), "database", json!("other")),
-            Some(Stop),
+            None,
         ),
         (
             "user",
@@ -533,7 +537,7 @@ fn assess_matrix_classifies_every_field() {
         (
             "connectTimeoutMs",
             with(full_config(), "connectTimeoutMs", json!(500)),
-            Some(Stop),
+            Some(Pause),
         ),
         (
             "deliveryGuarantee",
@@ -596,33 +600,6 @@ fn assess_matrix_classifies_every_field() {
     let mut renamed = update(full_config(), full_config());
     renamed.proposed.id = ComponentId::generate();
     assert!(PostgresStoredProcFactory.assess(&renamed).is_err());
-}
-
-#[test]
-fn error_classification_retries_only_transient_failures() {
-    use std::time::Duration;
-    let transient = [
-        anyhow::Error::from(DeliveryError::Timeout(Duration::from_secs(1))),
-        DeliveryError::CommitTimeout(Duration::from_secs(1)).into(),
-    ];
-    for error in &transient {
-        assert!(component::retryable(error), "{error}");
-    }
-    let render = anyhow::Error::from(RenderError::for_test());
-    let permanent = [
-        DeliveryError::Rejected("gap".into()).into(),
-        DeliveryError::Effect(render).into(),
-        DeliveryError::Capacity {
-            owner: "o".into(),
-            table: "t".into(),
-            limit: 1,
-        }
-        .into(),
-        anyhow::anyhow!("an untyped failure is not retried"),
-    ];
-    for error in &permanent {
-        assert!(!component::retryable(error), "{error}");
-    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -714,7 +691,7 @@ async fn in_place_and_restart_updates_apply_to_a_stopped_sink() -> Result<()> {
         sink.configuration()?["defaultTemplate"],
         templates["defaultTemplate"]
     );
-    let moved = with(templates.clone(), "host", json!("db2.example"));
+    let moved = with(templates.clone(), "user", json!("rotated"));
     let stop = apply(templates.clone(), moved.clone());
     assert!(sink
         .apply(&ApplyContext::new(scope(), UpdateBoundary::Pause), &stop)
@@ -723,7 +700,7 @@ async fn in_place_and_restart_updates_apply_to_a_stopped_sink() -> Result<()> {
     sink.apply(&ApplyContext::new(scope(), UpdateBoundary::Stop), &stop)
         .await
         .map_err(|error| anyhow::anyhow!("{error:?}"))?;
-    assert_eq!(sink.configuration()?["host"], "db2.example");
+    assert_eq!(sink.configuration()?["user"], "rotated");
     // A stale current configuration is refused.
     assert!(sink
         .apply(

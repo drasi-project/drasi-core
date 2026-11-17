@@ -23,6 +23,7 @@ and the HTTP-only `maxBatchEvents`, are rejected.
 | `maxConnections` | integer | `1024` | `1..=65536`. Open connections; excess connections are closed at once. | Stop |
 | `maxConcurrentStreams` | integer | `64` | `1..=65536`. Open streaming RPCs, separate from unary slots. | Stop |
 | `streamIdleTimeoutMs` | integer | `300000` | ≥ 1. A stream that sends nothing for this long is closed. | Pause |
+| `headerReadTimeoutMs` | integer | `10000` | `1..=600000`. A connection must finish its TLS handshake and send the HTTP/2 connection preface within this deadline, or it is closed. | Stop |
 | `authToken` | string, **secret** | none | 16–4096 visible ASCII characters. Required as `authorization: Bearer <token>` metadata on every RPC. | Pause |
 | `authTokenSecondary` | string, **secret** | none | A second accepted token, for rotation. Requires `authToken`. | Pause |
 | `allowUnauthenticated` | boolean | `false` | Permits a non-loopback listener without a token, for use behind an authenticating proxy. | Pause |
@@ -102,6 +103,11 @@ admission enabled, on the same stream.
   producer (acknowledged after commit, at-least-once). No client changes are
   needed.
 - `AdmissionService` gives idempotent client sequencing.
+- A momentarily full graph mailbox or journal makes a call wait, up to
+  `timeoutMs`, instead of failing; streams are not ended by it. Each event
+  commits on its own, and responses always report the committed prefix.
+- While paused, the producer metadata RPCs keep answering so that clients can
+  resolve uncertain outcomes; only event admission is refused.
 
 ## Exposure
 
@@ -118,10 +124,12 @@ during assessment.
 
 ## Lifecycle and removal
 
-- **Pause:** new calls and new streams get `UNAVAILABLE`, and open streams end
-  at their next message.
-- **Stop Drain:** in-flight unary calls finish.
-- **Stop Abort:** all connections close.
+- **Pause:** new admissions and new streams are refused, and open streams end
+  at their next message. Health and producer metadata RPCs keep answering.
+- **Stop Drain:** new calls are refused; admissions already in flight finish,
+  so a durable commit in progress is answered with success.
+- **Stop Abort:** all connections close; in-flight durable admissions answer
+  that their outcome is unknown.
 - A Stop that misses its deadline reports a retryable error and keeps the
   server until a later Stop completes.
 - **Removal with erase** succeeds and is idempotent. Durable journals belong to

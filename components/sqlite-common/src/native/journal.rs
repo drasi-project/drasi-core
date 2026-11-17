@@ -416,17 +416,20 @@ impl Journal {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         )?;
         anyhow::ensure!(stored == binding, "native SQLite journal belongs to a different source, stream, consumer or table selection");
+        // DDL applied while the source was stopped may only extend the
+        // capture identity the journal's element IDs are bound to.
         let recorded_schema: String = transaction.query_row(
             "SELECT source_schema FROM __drasi_native_state_v1 WHERE singleton=1",
             [],
             |row| row.get(0),
         )?;
         if schema != recorded_schema {
-            return Err(anyhow::Error::new(SourceFailure::SchemaChanged(
-                "the SQLite schema changed outside the source (external DDL on the database file); \
-                 remove the source with erase and add it again"
-                    .into(),
-            )));
+            super::identity::CaptureIdentity::decode(&schema)?
+                .check_extends(&super::identity::CaptureIdentity::decode(&recorded_schema)?)?;
+            transaction.execute(
+                "UPDATE __drasi_native_state_v1 SET source_schema=?1 WHERE singleton=1",
+                [&schema],
+            )?;
         }
         anyhow::ensure!(retired <= head, "native SQLite journal progress is damaged");
         let (count, total, low, high): (u64, u64, Option<u64>, Option<u64>) = transaction.query_row(
@@ -500,9 +503,7 @@ impl Journal {
 
     fn member_position(&self, snapshot: &SourceProgressSnapshot, generation: u64) -> Result<u64> {
         anyhow::ensure!(
-            snapshot.failure.is_none()
-                && snapshot.persistent
-                && snapshot.reset_generation == generation,
+            snapshot.failure.is_none() && snapshot.reset_generation == generation,
             "native SQLite consumer progress is fenced or reset"
         );
         let Some(position) = checkpoint(snapshot, &self.source, self.epoch)? else {

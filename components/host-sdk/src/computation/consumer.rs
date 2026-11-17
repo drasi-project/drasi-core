@@ -6,7 +6,9 @@ use super::{
     transaction::{RequestScope, TransactionRequests},
 };
 use async_trait::async_trait;
-use drasi_computation_contracts::{delivery, output_identity};
+use drasi_computation_contracts::{
+    delivery, lifecycle::LifecycleErrorKind, output_identity, DeliveryGuarantee,
+};
 use drasi_computation_plugin_abi::{self as abi, consumer::PluginConsumerV1};
 use drasi_computation_plugin_sdk::{
     consumer::{BeginBatch, ConsumerMode, HandleOperation},
@@ -47,13 +49,68 @@ pub struct NativeConsumerProxy {
     disposing: bool,
 }
 impl NativeConsumerProxy {
-    /// Attach the plugin's declaration for this instance.
+    /// Attach the plugin's declaration for this instance. An external
+    /// consumer may declare `PermanentFailurePolicy::Skip`: it then settles
+    /// each undeliverable operation itself (recording the skip with its
+    /// destination progress) and reports it as
+    /// `DeliveryFailureClass::Skipped`, which the `DeliveryRunner` records as
+    /// completed. A transactional consumer's operation commits with the
+    /// runner's own transaction, which cannot record a skip, so it supports
+    /// only `stall`.
     pub(super) fn with_description(
         mut self,
         description: drasi_lib::computation::v1::ComponentDescription,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            self.mode == ConsumerMode::External
+                || description.component.on_permanent_failure == PermanentFailurePolicy::Stall,
+            "a transactional native consumer supports only onPermanentFailure: stall"
+        );
         self.component.set_description(description);
-        self
+        Ok(self)
+    }
+
+    /// Enforces the declared permanent-failure policy on a failed delivery.
+    /// Under `skip`, the graph acknowledges a permanently failed input, so the
+    /// failure must be the runner's report of settled skips; an operation the
+    /// consumer could not settle (its destination progress refused it) would
+    /// leave unfinished progress behind, so it fails the node instead. Under
+    /// `stall`, a consumer must never settle a skip.
+    fn enforce_policy(&self, error: anyhow::Error) -> anyhow::Error {
+        let policy = self.component.description().component.on_permanent_failure;
+        let class = drasi_computation_contracts::delivery_failure_class(&error);
+        let found = |skipped: bool| {
+            error.chain().any(|cause| {
+                cause.downcast_ref::<DeliveryError>().is_some_and(|error| {
+                    if skipped {
+                        matches!(error, DeliveryError::Skipped { .. })
+                    } else {
+                        matches!(error, DeliveryError::Handling { .. })
+                    }
+                })
+            })
+        };
+        let (reported, handling) = (found(true), found(false));
+        match (policy, class) {
+            (PermanentFailurePolicy::Stall, _)
+                if reported || class == Some(DeliveryFailureClass::Skipped) =>
+            {
+                LifecycleError::terminal(error.context(
+                    "native consumer settled a skip although it declares onPermanentFailure: stall",
+                ))
+                .into()
+            }
+            (PermanentFailurePolicy::Skip, Some(class))
+                if class.is_permanent() && handling && !reported =>
+            {
+                LifecycleError::terminal(error.context(
+                    "native consumer could not settle this undeliverable operation as skipped; \
+                     its delivery progress must be repaired before more input",
+                ))
+                .into()
+            }
+            _ => error,
+        }
     }
     pub(super) async fn new(
         component: NativeComponentProxy,
@@ -378,43 +435,97 @@ impl EnvelopeSink for NativeConsumerProxy {
         SinkCompletion::Handled
     }
     async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            self.running && !self.cleanup_required,
-            "native consumer is not ready"
-        );
+        if !self.running || self.cleanup_required {
+            // An interrupted or uncertain delivery left work that only a
+            // restart can clean up; retrying the input cannot help.
+            return Err(LifecycleError::terminal(anyhow::anyhow!(
+                "native consumer is not ready: incomplete delivery requires a restart"
+            ))
+            .into());
+        }
         wire::check_port(
             self.component.descriptor(),
             &input.port,
             &input.envelope,
             PortDirection::Input,
         )?;
+        // The declared input guarantee alone selects the delivery mode.
+        let guarantee = self
+            .component
+            .description()
+            .input(&input.port)
+            .delivery
+            .guarantee()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "native consumer input '{}' declares no keyed delivery",
+                    input.port
+                )
+            })?;
         // Held while a batch may be open on the plugin: a cancelled delivery
         // (this future dropped mid-await) leaves it set, so cleanup is
         // required before more input.
         self.cleanup_required = true;
-        let runner = self.runner.as_mut().expect("running consumer");
-        let identity = match runner.batch_identity(&input) {
-            Ok(identity) => identity,
-            // An External consumer may receive an immediate in-memory query's
-            // output at least once. Whether it accepts that is the plugin's
-            // decision: it re-derives the identity and refuses unless it is
-            // configured `atLeastOnce`.
-            Err(error)
-                if self.mode == ConsumerMode::External
-                    && output_identity::is_missing_progress(&error) =>
-            {
-                match output_identity::Candidate::new_volatile(&input.envelope, &self.codec) {
-                    Ok(candidate) => return self.deliver_at_least_once(&input, candidate).await,
-                    Err(_) => return Err(error),
+        let delivered = match guarantee {
+            DeliveryGuarantee::ExactlyOnce => self.deliver_exactly_once(&input).await,
+            DeliveryGuarantee::AtLeastOnce => self.deliver_at_least_once(&input).await,
+        }
+        .map_err(|error| self.enforce_policy(error));
+        match &delivered {
+            Ok(()) => self.cleanup_required = false,
+            // A failure that settled before or during handling keeps only the
+            // completed operation prefix (runner ledger or destination
+            // cursor) and never skips the failed operation, so the graph may
+            // deliver the same input again without Stop/Start. A
+            // transactional failure is settled only after a confirmed
+            // rollback, which the runner reports as `DeliveryError::Handling`;
+            // anything else may leave commit uncertainty that fences the owner.
+            Err(error) => {
+                let closed = matches!(
+                    drasi_computation_contracts::lifecycle::lifecycle_error_kind(error),
+                    Some(LifecycleErrorKind::Terminal)
+                );
+                if !closed
+                    && (self.mode == ConsumerMode::External
+                        || error
+                            .downcast_ref::<DeliveryError>()
+                            .is_some_and(|error| matches!(error, DeliveryError::Handling { .. })))
+                {
+                    self.cleanup_required = false;
                 }
             }
-            Err(error) => return Err(error),
-        };
+        }
+        delivered
+    }
+}
+
+/// An envelope that does not carry the producer identity its input's declared
+/// guarantee requires. The graph checked the producer's declaration when it
+/// bound the edge, so this input can never be delivered.
+fn missing_identity(guarantee: DeliveryGuarantee, error: anyhow::Error) -> anyhow::Error {
+    if output_identity::is_missing_progress(&error) {
+        DeliveryFailure::permanent(error.context(format!(
+            "the envelope lacks the producer identity that {guarantee:?} delivery requires"
+        )))
+        .into()
+    } else {
+        error
+    }
+}
+
+impl NativeConsumerProxy {
+    /// Exactly-once delivery through the host `DeliveryRunner` ledger, keyed
+    /// on the producer's durable identity.
+    async fn deliver_exactly_once(&mut self, input: &InputEnvelope) -> anyhow::Result<()> {
+        let runner = self.runner.as_mut().expect("running consumer");
+        let identity = runner
+            .batch_identity(input)
+            .map_err(|error| missing_identity(DeliveryGuarantee::ExactlyOnce, error))?;
         let mut batch = match Batch::begin(
             self.component.inner.clone(),
             self.extension,
             self.component.codec.clone(),
-            &input,
+            input,
             identity,
         )
         .await
@@ -427,44 +538,27 @@ impl EnvelopeSink for NativeConsumerProxy {
             }
         };
         let delivered = match self.mode {
-            ConsumerMode::External => runner.deliver(&input, &mut batch).await,
-            ConsumerMode::Transactional => runner.deliver_transactional(&input, &batch).await,
+            ConsumerMode::External => runner.deliver(input, &mut batch).await,
+            ConsumerMode::Transactional => runner.deliver_transactional(input, &batch).await,
         };
         // The batch is closed whatever the outcome; a failed close keeps the
         // cleanup requirement.
-        batch.finish()?;
-        match delivered {
-            Ok(()) => {
-                self.cleanup_required = false;
-                Ok(())
-            }
-            // An External delivery that returned an error has settled: the
-            // runner kept only the completed operation prefix and never skips
-            // the failed operation, and the consumer deduplicates by
-            // `DeliveryItem::id`, so the same input can be retried without
-            // Stop/Start. Transactional failures may leave commit uncertainty
-            // that fences the owner, so they keep the cleanup requirement.
-            Err(error) => {
-                if self.mode == ConsumerMode::External {
-                    self.cleanup_required = false;
-                }
-                Err(error)
-            }
-        }
+        batch.finish().map_err(LifecycleError::terminal)?;
+        delivered
     }
-}
 
-impl NativeConsumerProxy {
-    /// At-least-once delivery of a volatile producer's batch. It bypasses the
-    /// `DeliveryRunner`: there is no host-local ledger because nothing can be
-    /// resumed across a restart. The destination cursor, keyed by the batch's
-    /// epoch, still deduplicates retries within one producer incarnation.
-    /// Operations are handled in order and stop at the first failure.
-    async fn deliver_at_least_once(
-        &mut self,
-        input: &InputEnvelope,
-        candidate: output_identity::Candidate,
-    ) -> anyhow::Result<()> {
+    /// At-least-once delivery. It bypasses the `DeliveryRunner`: the
+    /// destination cursor, keyed by the batch's producer identity (and a
+    /// volatile producer's epoch), deduplicates redelivery. Operations are
+    /// handled in order and stop at the first failure.
+    async fn deliver_at_least_once(&mut self, input: &InputEnvelope) -> anyhow::Result<()> {
+        let candidate = match output_identity::Candidate::new(&input.envelope, &self.codec) {
+            Err(error) if output_identity::is_missing_progress(&error) => {
+                output_identity::Candidate::new_volatile(&input.envelope, &self.codec)
+            }
+            candidate => candidate,
+        }
+        .map_err(|error| missing_identity(DeliveryGuarantee::AtLeastOnce, error))?;
         let identity = delivery::batch_identity(&self.scope, input, &candidate)?;
         let mut batch = match Batch::begin(
             self.component.inner.clone(),
@@ -483,41 +577,47 @@ impl NativeConsumerProxy {
             }
         };
         let delivered = async {
+            // As the runner does: an operation the consumer settled as
+            // skipped is passed, and the input reports the skips at the end.
+            let mut skipped: Option<(usize, anyhow::Error)> = None;
             for (index, operation) in input.envelope.changes().operations().iter().enumerate() {
                 let id =
                     delivery::operation_id(&self.scope, input, &candidate, operation.ordinal())?;
-                let attempts = self.options.retry.max_attempts.get();
-                for attempt in 1..=attempts {
-                    let item = delivery::delivery_item(
-                        input,
-                        &candidate,
-                        &identity,
-                        index,
-                        operation,
-                        id.clone(),
-                    );
-                    match DeliveryHandler::handle(&mut batch, item).await {
-                        Ok(()) => break,
-                        Err(source) if attempt < attempts && retryable(&source) => {
-                            tracing::warn!(%id, attempt, error = %format!("{source:#}"), "retrying at-least-once delivery");
-                            tokio::time::sleep(self.options.retry.delay).await;
+                let item =
+                    delivery::delivery_item(input, &candidate, &identity, index, operation, id);
+                if let Err(error) = DeliveryHandler::handle(&mut batch, item).await {
+                    if drasi_computation_contracts::delivery_failure_class(&error)
+                        != Some(DeliveryFailureClass::Skipped)
+                    {
+                        return Err(DeliveryError::Handling {
+                            id: delivery::operation_id(
+                                &self.scope,
+                                input,
+                                &candidate,
+                                operation.ordinal(),
+                            )?,
+                            source: error,
                         }
-                        Err(source) => {
-                            return Err(source.context(format!(
-                                "at-least-once delivery {id} failed after {attempt} attempt(s)"
-                            )))
-                        }
+                        .into());
                     }
+                    skipped = Some(match skipped {
+                        Some((count, first)) => (count + 1, first),
+                        None => (1, error),
+                    });
                 }
             }
-            anyhow::Ok(())
+            match skipped {
+                None => anyhow::Ok(()),
+                Some((skipped, first)) => {
+                    Err(
+                        DeliveryFailure::permanent(DeliveryError::Skipped { skipped, first })
+                            .into(),
+                    )
+                }
+            }
         }
         .await;
-        batch.finish()?;
-        // A returned failure has settled: the destination cursor kept only
-        // the completed prefix, so the same input can be retried. A cancelled
-        // delivery never reaches here and keeps the cleanup requirement.
-        self.cleanup_required = false;
+        batch.finish().map_err(LifecycleError::terminal)?;
         delivered
     }
 }
@@ -613,16 +713,8 @@ fn begin(
         OperationFuture::new(operation).map_err(super::proxy::native_operation_cause)
     }
 }
-fn retryable(error: &anyhow::Error) -> bool {
-    error
-        .downcast_ref::<Failure>()
-        .is_some_and(|failure| failure.code == abi::consumer::RETRYABLE)
-}
 #[async_trait]
 impl DeliveryHandler for Batch {
-    fn retryable(&self, error: &anyhow::Error) -> bool {
-        retryable(error)
-    }
     async fn handle(&mut self, item: DeliveryItem<'_>) -> anyhow::Result<()> {
         let operation = begin(
             &self.component,
@@ -643,9 +735,6 @@ impl DeliveryHandler for Batch {
 }
 #[async_trait]
 impl TransactionalDeliveryHandler for Batch {
-    fn retryable(&self, error: &anyhow::Error) -> bool {
-        retryable(error)
-    }
     async fn handle(
         &self,
         item: DeliveryItem<'_>,

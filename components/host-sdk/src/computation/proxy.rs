@@ -53,9 +53,13 @@ fn lifecycle_failure(error: Failure) -> anyhow::Error {
     }
 }
 
+/// The host-side cause of a native failure. A sink's delivery classification
+/// is restored as the typed [`DeliveryFailure`] the graph acts on.
 pub(super) fn native_operation_cause(error: Failure) -> anyhow::Error {
     if error.code == abi::status::PANICKED {
         ComponentPanic::new(error).into()
+    } else if let Some(class) = error.delivery {
+        DeliveryFailure::new(class, error).into()
     } else {
         error.into()
     }
@@ -81,6 +85,7 @@ mod failure_tests {
                 message: "retained native cause".into(),
                 retryable,
                 data: None,
+                delivery: None,
             })
             .context("host operation");
             assert_eq!(
@@ -1765,7 +1770,7 @@ impl ComputationComponent for NativeComponentProxy {
         if let Some(reads) = &self.output_reads {
             reads.retire();
         }
-        let request = self.lifecycle_request(context.scope()).with_dispose(
+        let mut request = self.lifecycle_request(context.scope()).with_dispose(
             context.reason(),
             context.intent(),
             context.attempt(),
@@ -1775,6 +1780,16 @@ impl ComputationComponent for NativeComponentProxy {
                 processing.close().await?;
             }
             return self.run_dispose(&request).await;
+        }
+        // Erasure may have to reach the external system without any start in
+        // this process, so a bound factory receives freshly resolved
+        // activation credentials. A retry that polls the accepted operation
+        // resolves nothing.
+        if let Some((identity, endpoint)) = &self.identity {
+            let state = self.disposal.get_mut();
+            if !state.completed && state.operation.is_none() {
+                request = request.with_credentials(identity.resolve(endpoint).await?);
+            }
         }
         // Erasure needs the owned processing state open while native code
         // removes it; it is closed again whatever the outcome.
@@ -2041,6 +2056,7 @@ impl EnvelopeSink for NativeComponentProxy {
         self.inner
             .unit(abi::operation::HANDLE_BATCH, &wire::encode(&batch)?)
             .await
+            .map_err(delivery_cause)
     }
     /// Exposed only for the input ports the factory metadata lists, which the
     /// plugin validated against its actual handlers at construction.
@@ -2058,6 +2074,24 @@ impl EnvelopeSink for NativeComponentProxy {
         self.inner
             .unit(abi::operation::HANDLE, &self.input(&input)?)
             .await
+            .map_err(delivery_cause)
+    }
+}
+
+/// A native delivery that failed because the activation is closed or broke
+/// the protocol cannot succeed by delivering the same input again, so it is
+/// marked terminal for the activation; the graph fails the node instead of
+/// retrying it.
+fn delivery_cause(error: anyhow::Error) -> anyhow::Error {
+    let closed = error.chain().any(|cause| {
+        cause.downcast_ref::<Failure>().is_some_and(|failure| {
+            matches!(failure.code, abi::status::CLOSED | abi::status::PROTOCOL)
+        })
+    });
+    if closed {
+        LifecycleError::terminal(error).into()
+    } else {
+        error
     }
 }
 #[async_trait]

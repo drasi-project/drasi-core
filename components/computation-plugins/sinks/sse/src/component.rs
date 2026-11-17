@@ -67,7 +67,8 @@ impl Factory for SseFactory {
         &self,
         request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
     ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.unkeyed_sink())
+        let config = SseSinkConfig::parse(request.request.configuration.clone())?;
+        Ok(request.unkeyed_sink(config.on_permanent_failure))
     }
     fn supports_output_snapshots(&self) -> bool {
         true

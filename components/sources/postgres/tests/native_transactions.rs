@@ -48,6 +48,8 @@ mod libraries;
 mod ordinary;
 #[path = "native_transactions/production.rs"]
 mod production;
+#[path = "native_transactions/recovery.rs"]
+mod recovery;
 #[path = "native_transactions/shared.rs"]
 mod shared;
 #[path = "native_transactions/snapshot.rs"]
@@ -761,10 +763,12 @@ async fn postgres_direct_and_factory_sources_deliver_whole_groups_through_actual
                 })?
                 .provide_resource(
                     resource,
+                    // The query's indexes are persistent.
                     ResourceHandle::new(
                         ResourceRole::Checkpoint,
                         Arc::new(QuerySourceProgressResource(progress.clone())),
-                    ),
+                    )
+                    .with_capabilities(ResourceCapabilities::DURABLE),
                 )?
                 .component(
                     drasi_lib::computation::v1::ComponentName::try_new("source")

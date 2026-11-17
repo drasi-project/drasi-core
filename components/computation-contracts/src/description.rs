@@ -36,6 +36,10 @@ pub enum ProgressPersistence {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ComponentCapabilities {
     pub progress: ProgressPersistence,
+    /// What the graph does with a sink input that failed permanently. Only
+    /// sinks act on it; other roles keep the default.
+    #[serde(default)]
+    pub on_permanent_failure: super::PermanentFailurePolicy,
 }
 
 /// The producer identity an output stream carries, as an identity-keyed
@@ -201,6 +205,7 @@ impl ComponentDescription {
         Self {
             component: ComponentCapabilities {
                 progress: ProgressPersistence::Undeclared,
+                on_permanent_failure: super::PermanentFailurePolicy::Stall,
             },
             ports: BTreeMap::new(),
             dependencies: BTreeMap::new(),
@@ -209,9 +214,18 @@ impl ComponentDescription {
 
     pub fn new(progress: ProgressPersistence) -> Self {
         Self {
-            component: ComponentCapabilities { progress },
+            component: ComponentCapabilities {
+                progress,
+                on_permanent_failure: super::PermanentFailurePolicy::Stall,
+            },
             ..Self::undeclared()
         }
+    }
+
+    /// Declare what the graph does with a sink input that failed permanently.
+    pub fn with_permanent_failure(mut self, policy: super::PermanentFailurePolicy) -> Self {
+        self.component.on_permanent_failure = policy;
+        self
     }
 
     /// Declare `description` on every output port of `descriptor`.

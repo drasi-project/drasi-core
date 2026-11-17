@@ -176,7 +176,14 @@ struct PauseState {
 pub struct Ingress {
     pub config: IngressConfig,
     pub source_id: ComponentId,
-    pub cancel: CancellationToken,
+    /// Fired by every Stop: the listener stops accepting, new requests and
+    /// admissions are refused and open streams end. Admissions already in
+    /// flight keep running and are answered with their real outcome.
+    pub shutdown: CancellationToken,
+    /// Fired only by an aborting Stop (or when the activation is dropped):
+    /// in-flight admissions stop waiting and answer that their outcome is
+    /// uncertain.
+    pub(crate) abort: CancellationToken,
     live: Arc<Live<LiveSettings>>,
     sender: Option<mpsc::Sender<OutputEnvelope>>,
     mode: AdmissionMode,
@@ -257,13 +264,12 @@ impl Ingress {
     }
 
     /// Reserves one of `ingressCapacity` request slots, failing fast when the
-    /// source is stopped, paused or saturated.
+    /// source is stopping or saturated. Pause does not refuse the slot: it
+    /// gates data admission only (see [`Self::enter_admission`]), so health
+    /// and producer-session metadata requests are answered while paused.
     pub fn request_permit(&self) -> Result<OwnedSemaphorePermit, IngressError> {
-        if self.cancel.is_cancelled() {
+        if self.shutdown.is_cancelled() {
             return Err(IngressError::stopped());
-        }
-        if self.is_paused() {
-            return Err(IngressError::paused());
         }
         self.requests.clone().try_acquire_owned().map_err(|_| {
             IngressError::new(
@@ -276,7 +282,7 @@ impl Ingress {
     /// Enters the admission section. Rejects immediately while paused; the
     /// guard keeps a concurrent Pause waiting until this admission settles.
     pub(crate) async fn enter_admission(&self) -> Result<RwLockReadGuard<'_, ()>, IngressError> {
-        if self.cancel.is_cancelled() {
+        if self.shutdown.is_cancelled() {
             return Err(IngressError::stopped());
         }
         if self.is_paused() {
@@ -388,7 +394,7 @@ impl Ingress {
         let timeout = self.live().timeout;
         let result = tokio::select! {
             biased;
-            _ = self.cancel.cancelled() => Err(IngressError::stopped()),
+            _ = self.shutdown.cancelled() => Err(IngressError::stopped()),
             _ = self.pause_requested() => Err(IngressError::paused()),
             result = tokio::time::timeout(timeout, submit) => result
                 .unwrap_or_else(|_| Err(IngressError::new(IngressErrorKind::Timeout, "ingress capacity/admission timeout"))),
@@ -407,7 +413,7 @@ async fn sleep_until(deadline: Option<Instant>) {
 }
 
 struct Running {
-    cancel: CancellationToken,
+    shutdown: CancellationToken,
     ingress: Arc<Ingress>,
     receiver: Option<mpsc::Receiver<OutputEnvelope>>,
     listener: RwLock<Option<JoinHandle<Result<()>>>>,
@@ -478,7 +484,8 @@ impl Running {
 
 impl Drop for Running {
     fn drop(&mut self) {
-        self.cancel.cancel();
+        self.shutdown.cancel();
+        self.ingress.abort.cancel();
         if let Some(receiver) = &mut self.receiver {
             receiver.close();
         }
@@ -656,12 +663,13 @@ impl SourceRuntime {
             }
             AdmissionMode::Durable(_) => (None, None),
         };
-        let cancel = CancellationToken::new();
+        let shutdown = CancellationToken::new();
         let ingress = Arc::new(Ingress {
             config: self.config.clone(),
             source_id: self.descriptor.id().clone(),
             sender,
-            cancel: cancel.clone(),
+            shutdown: shutdown.clone(),
+            abort: CancellationToken::new(),
             live: self.live.clone(),
             mode: self.mode.clone(),
             requests: Arc::new(Semaphore::new(self.config.ingress_capacity)),
@@ -671,12 +679,12 @@ impl SourceRuntime {
             },
             implicit: Mutex::new(None),
         });
-        let stopped = cancel.clone();
+        let stopped = shutdown.clone();
         let admission = ingress.durable().cloned();
         let component = self.descriptor.id().clone();
         let work = serve(listener, ingress.clone());
         let running = self.running.insert(Running {
-            cancel,
+            shutdown,
             ingress,
             receiver,
             listener: RwLock::new(None),
@@ -772,7 +780,7 @@ impl SourceRuntime {
             .context("durable source is driven by graph admission, not next")?;
         tokio::select! {
             biased;
-            _ = running.cancel.cancelled() => {
+            _ = running.shutdown.cancelled() => {
                 running.join(Duration::MAX).await.map_err(LifecycleError::into_source)?;
                 anyhow::bail!("native source listener closed");
             }
@@ -786,20 +794,27 @@ impl SourceRuntime {
         }
     }
 
-    /// Settles the activation. `Drain` stops accepting connections and lets
-    /// in-flight requests finish; `Abort` also aborts the listener and its
-    /// connections. The listener is joined within the deadline (or the
-    /// configured timeout); on expiry ownership is retained for a retry.
+    /// Settles the activation.
+    ///
+    /// `Drain` stops accepting connections, requests and new admissions, and
+    /// lets admissions already in flight finish: a durable commit completes
+    /// and its client receives the real outcome (bounded by `timeoutMs`).
+    /// `Abort` also interrupts in-flight admissions, which answer that their
+    /// outcome is uncertain, and aborts the listener and its connections.
+    /// The listener is joined within the deadline (or the configured timeout);
+    /// on expiry ownership is retained, and a later Drain keeps waiting while
+    /// a later Abort interrupts.
     pub async fn stop(&mut self, mode: StopMode, deadline: Option<Instant>) -> LifecycleResult {
         let Some(running) = &mut self.running else {
             return Ok(());
         };
-        running.cancel.cancel();
+        running.shutdown.cancel();
         running.ingress.resume_admission();
         if let Some(receiver) = &mut running.receiver {
             receiver.close();
         }
         if mode == StopMode::Abort {
+            running.ingress.abort.cancel();
             if let Some(listener) = running.listener.get_mut() {
                 listener.abort();
             }
@@ -915,7 +930,7 @@ mod tests {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         runtime
             .start(&token(), None, move |_listener, ingress| async move {
-                let cancel = ingress.cancel.clone();
+                let cancel = ingress.shutdown.clone();
                 let _ = sender.send(ingress);
                 cancel.cancelled().await;
                 Ok(())
@@ -958,7 +973,7 @@ mod tests {
                 .running
                 .as_ref()
                 .expect("running owner")
-                .cancel
+                .shutdown
                 .cancelled()
                 .await;
             let error = runtime
@@ -997,7 +1012,7 @@ mod tests {
         let worker_resume = resume.clone();
         runtime
             .start(&token(), None, move |_listener, ingress| async move {
-                ingress.cancel.cancelled().await;
+                ingress.shutdown.cancelled().await;
                 worker_entered.notify_one();
                 worker_resume.notified().await;
                 Ok(())
@@ -1089,10 +1104,9 @@ mod tests {
             .expect_err("paused admission");
         assert_eq!(failure.error.kind, IngressErrorKind::Paused);
         assert_eq!(failure.accepted, 0);
-        assert_eq!(
-            ingress.request_permit().expect_err("paused permit").kind,
-            IngressErrorKind::Paused
-        );
+        // Pause gates data admission only; request slots stay available for
+        // health and producer-session metadata.
+        drop(ingress.request_permit().expect("paused metadata permit"));
         // The event accepted before Pause is still delivered.
         assert!(runtime.next().await?.is_some());
         runtime.resume()?;

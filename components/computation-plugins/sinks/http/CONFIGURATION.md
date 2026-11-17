@@ -35,7 +35,7 @@ is the persistence hook, and `Debug` output redacts them.
 | `poolMaxIdlePerHost` | integer | `10` | `0..=1024`. `0` disables connection reuse. | Stop |
 | `maxRetries` | integer | `3` | `0..=100`. Additional attempts after the first for a retryable failure. | Pause |
 | `retryBudgetMs` | integer | `120000` | `1..=3600000`. No retry starts after this long from the first attempt. | Pause |
-| `failurePolicy` | string | `"strict"` | `strict` fails the input; `skip` logs the failed change and completes the input. | Pause |
+| `onPermanentFailure` | string | `"stall"` | What the graph does with an input the destination can never accept: `stall` records a terminal failure on the sink; `skip` logs it, counts it on the sink and continues. Transient failures are always retried in place. See [Delivery failures](#delivery-failures). | Replace |
 | `successStatusCodes` | array | `[200, 201, 203, 204]` | Non-empty, unique, each `200..=299`. `202` is not success unless listed. | Pause |
 | `tlsCaPem` | string | none | PEM CA certificates trusted in addition to the built-in roots. | Stop |
 | `tlsClientCertificatePem` | string | none | PEM client certificate chain (mutual TLS). Requires `tlsClientPrivateKeyPem`. | Stop |
@@ -161,12 +161,35 @@ Helpers: `json`, and the Handlebars built-ins `if`, `unless`, `each`, `with`,
 construction. Missing fields render empty; `{{x}}` is HTML-escaped, so use
 `{{json x}}` or `{{{x}}}` for raw values.
 
-**Render-failure policy:** a template that fails to render, a rendered URL off
-the base origin, an invalid rendered header value, a batch item that is not
-JSON, or a body over `maxRequestBytes` is a per-change failure. `strict` fails
-the input (the host retries it, and it will fail again until the configuration
-or data changes); `skip` logs it and moves on. Nothing falls back to a default
+**Render failures:** a template that fails to render, a rendered URL off the
+base origin, an invalid rendered header value, a batch item that is not JSON,
+or a body over `maxRequestBytes` is a permanent failure of that change (the
+same change fails the same way every time). Nothing falls back to a default
 body or URL.
+
+## Delivery failures
+
+The sink follows the graph's [delivery-failure model](../NATIVE-SINK-GUIDE.md#delivery-failures). Each failed change is classified:
+
+| Failure | Class |
+|---|---|
+| Connection failure, timeout, or a request whose outcome is unknown | transient |
+| Status 5xx, 408, 409, 425, 429 | transient; a 429 or 503 `Retry-After` is the minimum delay before the graph retries |
+| Any other non-success status (including 202 unless listed in `successStatusCodes`, and 3xx, which is never followed) | permanent |
+| Render failure, oversized body or batch item | permanent |
+
+A transient failure is first retried inside the sink (`maxRetries`,
+`retryBudgetMs`, with `Retry-After`); if it persists, the input fails
+transiently and the graph retries the whole input in place with backoff,
+showing the sink as retrying (health `Degraded`, the last error as a
+retryable failure) until it is delivered. A permanent failure follows
+`onPermanentFailure`: `stall` stops at that change and records a terminal
+failure on the sink; `skip` logs the change, still delivers the input's other
+changes, and the graph counts the input as skipped. Every repeated request
+carries the same `x-drasi-delivery-id`.
+
+The `http-delivery` consumer uses the same classification and supports only
+`stall`: its progress belongs to the host `DeliveryRunner`.
 
 ## Destination prerequisites
 
@@ -243,11 +266,11 @@ From `drasi-reaction-http` (breaking; no automatic migration):
 | redirects followed | never followed | |
 | `outputTemplates.routes` keyed by query ID | keyed by output alias | Unaliased outputs are named after their component. |
 | template context `query_id`, `query_name`, `data`, `metadata` | `output.*`, `sequence`, `identity`, `before`, `after`, … | See [Templates](#templates). |
-| render failure falls back to the default body/URL | per-change failure under `failurePolicy` | |
+| render failure falls back to the default body/URL | permanent failure of that change under `onPermanentFailure` | |
 | static headers in templates rendered | `headers` are static; use template `headers` | |
 | `adaptive`, `batchEndpoint` | same | Host-owned collection; `maxBatchBytes`, `maxRequestBytes`. |
 | `priorityQueueCapacity` | removed | Host pipes bound queuing. |
-| `recoveryPolicy` (strict / auto-skip-gap), poison drop | `failurePolicy` (`strict` / `skip`), host progress | Strict never drops. |
+| `recoveryPolicy` (strict / auto-skip-gap), poison drop | `onPermanentFailure` (`stall` / `skip`); outages are retried in place by the graph | `stall` never drops; `skip` drops only permanently rejected changes (4xx other than 408/409/425/429). |
 | pool idle 90 s, 10 per host | `poolIdleTimeoutMs`, `poolMaxIdlePerHost` | Same defaults. |
 | — | `secretHeaders`, TLS fields, `connectTimeoutMs`, `x-drasi-delivery-id` | New. |
 | durable delivery | `drasi.network/http-delivery` | Requires a confirming endpoint. |

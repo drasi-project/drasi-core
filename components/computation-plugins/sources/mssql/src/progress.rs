@@ -132,31 +132,4 @@ impl Membership {
             sequence,
         })
     }
-
-    /// The resume cursor for an observation: the minimum, held down to
-    /// `origin` when some members have no cursor yet. A group mixing fresh
-    /// and resumed members needs the activation origin retained in this
-    /// process (or a coordinated bootstrap), never the read position.
-    pub fn resume(
-        &self,
-        observation: &Observation,
-        origin: Option<&Cursor>,
-    ) -> Result<Option<Cursor>> {
-        let mut minimum = observation.minimum.clone();
-        if observation.missing > 0 && observation.missing < self.members.len() {
-            let origin = origin.context(
-                "SQL Server consumers mix fresh and resumed members; use the coordinated bootstrap \
-                 or restart within the process that started the group",
-            )?;
-            if minimum
-                .as_ref()
-                .map(|cursor| origin.compare(cursor))
-                .transpose()?
-                .is_none_or(|order| order == Ordering::Less)
-            {
-                minimum = Some(origin.clone());
-            }
-        }
-        Ok(minimum)
-    }
 }
