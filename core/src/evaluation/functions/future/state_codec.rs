@@ -178,7 +178,9 @@ pub(super) fn decode(value: &ElementValue) -> Result<VariableValue> {
         | ElementValue::Integer(_)
         | ElementValue::String(_)
         | ElementValue::LocalDateTime(_)
-        | ElementValue::ZonedDateTime(_) => Ok(VariableValue::from(value)),
+        | ElementValue::ZonedDateTime(_)
+        // A typed value is already a validated, lossless encoding.
+        | ElementValue::Typed(_) => Ok(VariableValue::from(value)),
     }
 }
 
@@ -243,8 +245,8 @@ fn envelope(
 fn reference_fields(reference: &ElementReference) -> [(&'static str, ElementValue); 2] {
     [
         (
-            "source_id",
-            ElementValue::String(reference.source_id.clone()),
+            "namespace",
+            ElementValue::String(reference.namespace.clone()),
         ),
         (
             "element_id",
@@ -347,7 +349,7 @@ fn decode_duration(map: &ElementPropertyMap) -> Result<Duration> {
 
 fn decode_reference(map: &ElementPropertyMap) -> Result<ElementReference> {
     Ok(ElementReference {
-        source_id: str_field(map, "source_id")?.clone(),
+        namespace: str_field(map, "namespace")?.clone(),
         element_id: str_field(map, "element_id")?.clone(),
     })
 }
@@ -595,7 +597,7 @@ mod tests {
     #[test]
     fn envelope_formats_are_pinned() {
         let element_metadata = json!({
-            "reference": {"source_id": "src", "element_id": "e1"},
+            "reference": {"namespace": "src", "element_id": "e1"},
             "labels": ["A", "B"],
             "effective_from": "1700000000000",
         });
@@ -629,14 +631,14 @@ mod tests {
             (
                 "ElementReference",
                 VariableValue::ElementReference(ElementReference::new("src", "e1")),
-                json!({TYPE_KEY: "ElementReference", "source_id": "src", "element_id": "e1"}),
+                json!({TYPE_KEY: "ElementReference", "namespace": "src", "element_id": "e1"}),
             ),
             (
                 "ElementMetadata",
                 VariableValue::ElementMetadata(metadata(1_700_000_000_000)),
                 json!({
                     TYPE_KEY: "ElementMetadata",
-                    "reference": {"source_id": "src", "element_id": "e1"},
+                    "reference": {"namespace": "src", "element_id": "e1"},
                     "labels": ["A", "B"],
                     "effective_from": "1700000000000",
                 }),
@@ -656,8 +658,8 @@ mod tests {
                 json!({
                     TYPE_KEY: "Relation",
                     "metadata": element_metadata,
-                    "in_node": {"source_id": "src", "element_id": "n1"},
-                    "out_node": {"source_id": "src", "element_id": "n2"},
+                    "in_node": {"namespace": "src", "element_id": "n1"},
+                    "out_node": {"namespace": "src", "element_id": "n2"},
                     "properties": {"name": "x"},
                 }),
             ),
@@ -703,7 +705,16 @@ mod tests {
             (
                 "integer above i64::MAX",
                 VariableValue::Integer(Integer::from(u64::MAX)),
-                ElementValue::Integer(0),
+                // Stored losslessly as a typed value, not truncated.
+                ElementValue::Typed(Box::new(
+                    crate::models::TypedElementValue::try_from(
+                        drasi_core_types::data_value::DataValue::encode(&VariableValue::Integer(
+                            Integer::from(u64::MAX),
+                        ))
+                        .unwrap(),
+                    )
+                    .unwrap(),
+                )),
             ),
             (
                 "float",
@@ -713,17 +724,20 @@ mod tests {
             (
                 "NaN",
                 VariableValue::Float(Float::from(f64::NAN)),
-                ElementValue::Float(0.0.into()),
+                // Kept as is, not replaced with zero.
+                ElementValue::Float(f64::NAN.into()),
             ),
             (
                 "infinity",
                 VariableValue::Float(Float::from(f64::INFINITY)),
-                ElementValue::Float(0.0.into()),
+                // Kept as is, not replaced with zero.
+                ElementValue::Float(f64::INFINITY.into()),
             ),
             (
                 "negative infinity",
                 VariableValue::Float(Float::from(f64::NEG_INFINITY)),
-                ElementValue::Float(0.0.into()),
+                // Kept as is, not replaced with zero.
+                ElementValue::Float(f64::NEG_INFINITY.into()),
             ),
             (
                 "string",
@@ -741,7 +755,19 @@ mod tests {
                     zoned,
                     Some("Europe/Berlin".to_string()),
                 )),
-                ElementValue::ZonedDateTime(zoned),
+                // The zone name is kept, as a typed value.
+                ElementValue::Typed(Box::new(
+                    crate::models::TypedElementValue::try_from(
+                        drasi_core_types::data_value::DataValue::encode(
+                            &VariableValue::ZonedDateTime(ZonedDateTime::new(
+                                zoned,
+                                Some("Europe/Berlin".to_string()),
+                            )),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap(),
+                )),
             ),
         ];
         for (name, value, expected) in cases {
@@ -923,7 +949,7 @@ mod tests {
                 "non-numeric effective_from",
                 json!({
                     TYPE_KEY: "ElementMetadata",
-                    "reference": {"source_id": "src", "element_id": "e1"},
+                    "reference": {"namespace": "src", "element_id": "e1"},
                     "labels": [],
                     "effective_from": "abc",
                 }),
@@ -932,7 +958,7 @@ mod tests {
                 "negative effective_from",
                 json!({
                     TYPE_KEY: "ElementMetadata",
-                    "reference": {"source_id": "src", "element_id": "e1"},
+                    "reference": {"namespace": "src", "element_id": "e1"},
                     "labels": [],
                     "effective_from": "-1",
                 }),
@@ -941,7 +967,7 @@ mod tests {
                 "effective_from above u64::MAX",
                 json!({
                     TYPE_KEY: "ElementMetadata",
-                    "reference": {"source_id": "src", "element_id": "e1"},
+                    "reference": {"namespace": "src", "element_id": "e1"},
                     "labels": [],
                     "effective_from": "18446744073709551616",
                 }),
@@ -950,7 +976,7 @@ mod tests {
                 "non-string label",
                 json!({
                     TYPE_KEY: "ElementMetadata",
-                    "reference": {"source_id": "src", "element_id": "e1"},
+                    "reference": {"namespace": "src", "element_id": "e1"},
                     "labels": [1],
                     "effective_from": "0",
                 }),
