@@ -374,6 +374,80 @@ async fn shared_query_middleware_bootstrap_origin_multi_thread() -> Result<()> {
     bootstrap_origin_and_live_binding().await
 }
 
+/// A bootstrap without origin metadata, such as a bootstrap-provider component,
+/// whose records carry the source's identity as their namespace.
+struct UnscopedBootstrap;
+
+#[async_trait]
+impl ComputationBootstrapProvider for UnscopedBootstrap {
+    async fn snapshot(&self) -> Result<ComputationBootstrapSnapshot> {
+        let envelope = GraphChangeCodec::encode_change(
+            SourceChange::Insert {
+                element: Element::Node {
+                    metadata: ElementMetadata {
+                        reference: ElementReference::new(SOURCE_ID, "one"),
+                        labels: Arc::from([Arc::from("Item")]),
+                        effective_from: 1,
+                    },
+                    properties: ElementPropertyMap::from(json!({"value": 1})),
+                },
+            },
+            StreamId::try_new("snapshot-source")?,
+            1,
+            None,
+        )?;
+        Ok(ComputationBootstrapSnapshot {
+            changes: Box::pin(futures_util::stream::iter([Ok(envelope)])),
+            watermarks: Vec::new(),
+        })
+    }
+}
+
+async fn unscoped_bootstrap_uses_input_pipeline() -> Result<()> {
+    let mut configuration = configured(SOURCE_ID, "Item");
+    configuration["volatile"] = json!(true);
+    configuration["bootstrap"] = json!(true);
+    let mut query = factory()?.create_component_with_processing(
+        component_id()?,
+        configuration,
+        scope(1),
+        Arc::new(drasi_core::computation::InMemoryComputationProvider),
+    )?;
+    query.initialize(&crate::hooks::initialize_ctx()).await?;
+    query.bind_bootstrap_provider(Arc::new(computation::NativeBootstrapResource(Arc::new(
+        UnscopedBootstrap,
+    ))))?;
+    query
+        .bind_inputs(&[binding(ComponentId::try_new(SOURCE_ID)?, "source/out")?])
+        .await?;
+    query.start(&crate::hooks::start_ctx()).await?;
+    let snapshot = query
+        .output_readers()
+        .ports()
+        .get(&PortId::try_new("out")?)
+        .and_then(|port| port.snapshot())
+        .context("missing native snapshot")?
+        .snapshot()
+        .await?;
+    assert_eq!(
+        snapshot.records().len(),
+        1,
+        "unscoped bootstrap records from an input must use that input's pipeline"
+    );
+    query.stop(&crate::hooks::stop_ctx()).await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn shared_query_middleware_unscoped_bootstrap_current_thread() -> Result<()> {
+    unscoped_bootstrap_uses_input_pipeline().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_query_middleware_unscoped_bootstrap_multi_thread() -> Result<()> {
+    unscoped_bootstrap_uses_input_pipeline().await
+}
+
 async fn custom_factory_and_actual_index(persistent: bool) -> Result<()> {
     let path = library()
         .parent()

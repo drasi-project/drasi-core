@@ -1101,6 +1101,24 @@ async fn transient_watch_failure_retries_and_stop_joins() {
 }
 
 #[tokio::test]
+async fn persistent_watch_failure_backs_off() {
+    let api = MockApi::new().await;
+    let source = api.source();
+    source.start().await.unwrap();
+    api.wait_for_watches(2).await;
+    let before = *api.state.watch_count.borrow();
+    api.state.watch_status.store(503, Ordering::SeqCst);
+    api.close_watches();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let retries = *api.state.watch_count.borrow() - before;
+    assert!(
+        (1..10).contains(&retries),
+        "an unavailable API server must be retried with backoff, saw {retries} watches"
+    );
+    source.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn startup_retries_transient_watch_errors() {
     for code in [502, 503] {
         let api = MockApi::new().await;

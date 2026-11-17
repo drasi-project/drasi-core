@@ -73,6 +73,7 @@ fn add_execution(
 pub(super) fn configuration_for_update(
     specification: &ComponentSpecification,
     volatile: Option<bool>,
+    edge_bootstrap: bool,
 ) -> anyhow::Result<serde_json::Value> {
     let configuration = super::factory::literal_configuration(specification)?;
     let values = configuration
@@ -86,7 +87,8 @@ pub(super) fn configuration_for_update(
         "recovery": values.get("recovery").cloned().unwrap_or_else(|| serde_json::json!("strict")),
         "publication": values.get("publication").cloned().unwrap_or_else(|| serde_json::json!("atomic")),
         "reset_configuration": values.get("reset_configuration").cloned().unwrap_or(serde_json::json!(false)),
-        "bootstrap": specification.dependencies.get("bootstrap").is_some_and(|ids| !ids.is_empty()),
+        "bootstrap": edge_bootstrap
+            || specification.dependencies.get("bootstrap").is_some_and(|ids| !ids.is_empty()),
     });
     if let Some(volatile) = volatile {
         configuration["volatile"] = serde_json::json!(volatile);
@@ -203,7 +205,7 @@ impl QueryConstructor for NativeQueryConstructor {
                 id: specification.descriptor.id().clone(),
                 implementation: metadata.implementation.clone(),
                 configuration_version: metadata.configuration_version,
-                configuration: configuration_for_update(specification, None)?,
+                configuration: configuration_for_update(specification, None, false)?,
                 scope: None,
                 inputs: Vec::new(),
                 activation_credentials_bound: false,
@@ -263,7 +265,8 @@ impl QueryConstructor for NativeQueryConstructor {
                 },
                 "stream": construction.definition.output_stream,
                 "outbox_capacity": construction.definition.outbox_capacity,
-                "bootstrap": construction.bootstrap.is_some(),
+                // A bootstrap edge is bound at start in place of a resource.
+                "bootstrap": construction.bootstrap.is_some() || construction.edge_bootstrap,
                 "reset_configuration": construction.reset_configuration,
                 "recovery": match construction.options.recovery {
                     QueryRecoveryPolicy::Strict => "strict",
@@ -292,6 +295,8 @@ impl QueryConstructor for NativeQueryConstructor {
                         .map(super::factory::update_directive),
                 },
             )?;
+            // The graph checks the instance against the query factory's declaration.
+            component.set_description(construction.description.clone());
             let defer_build = construction.defer_build;
             component.bind_query_construction(construction)?;
             if !defer_build {

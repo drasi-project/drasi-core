@@ -360,6 +360,12 @@ impl OrdinaryComponentRecord {
 /// restore flag exists. Futures must release partial acquisitions on cancellation.
 #[async_trait]
 pub trait OrdinaryComponentResolver: Send + Sync {
+    /// Whether this resolver constructs ordinary sources and reactions from
+    /// their definitions. Only the unconfigured default returns `false`.
+    fn constructs_components(&self) -> bool {
+        true
+    }
+
     /// Pure assessment delegated to the registered component author's factory.
     /// The default rejects live updates; creation support is not update support.
     fn plan_update(
@@ -406,6 +412,10 @@ pub(super) struct NoOrdinaryComponents;
 
 #[async_trait]
 impl OrdinaryComponentResolver for NoOrdinaryComponents {
+    fn constructs_components(&self) -> bool {
+        false
+    }
+
     async fn create_source(
         &self,
         _: &str,

@@ -53,6 +53,11 @@ pub struct QueryConstruction {
     pub default_dispatch_capacity: usize,
     pub reset_configuration: bool,
     pub defer_build: bool,
+    /// Whether a graph edge connects a bootstrap producer to the query's
+    /// bootstrap input, which supplies bootstrap instead of a resource.
+    pub edge_bootstrap: bool,
+    /// The factory's declaration for this instance; the constructed query must report it.
+    pub description: drasi_computation_contracts::ComponentDescription,
     pub(super) declaration: Option<Arc<super::query_configuration::OrdinaryQueryDeclaration>>,
 }
 
@@ -124,6 +129,10 @@ fn optional<T: Any + Send + Sync>(
 
 impl QueryConstruction {
     pub(super) fn prepare(context: ConstructionContext) -> Result<Self, ComponentCreationError> {
+        let description = super::query::indexed_description(
+            &context.specification.descriptor,
+            super::query::bound_durability(&context, "indexes"),
+        );
         let provider =
             optional::<QueryIndexProviderResource>(&context, "indexes")?.ok_or_else(|| {
                 ComponentCreationError::terminal(anyhow::anyhow!("missing index provider"))
@@ -197,6 +206,8 @@ impl QueryConstruction {
             .transpose()
             .map_err(ComponentCreationError::terminal)?;
         Ok(Self {
+            description,
+            edge_bootstrap: !context.bootstrap_producers().is_empty(),
             instance_id: context.instance_id.clone(),
             generation: context.generation,
             replacement: context.is_replacement(),
