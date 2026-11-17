@@ -115,9 +115,13 @@ class BuildTestPlugins(unittest.TestCase):
                 self.assertTrue(all(p.read_text() == "fresh" for p in staged.glob(f"*.{ext}")))
 
     def test_missing_artifact_fails_instead_of_accepting_stale_staged_file(self):
-        _, result = self.run_script(TEST_MISSING="drasi_source_mock")
+        root, result = self.run_script(TEST_MISSING="drasi_source_mock")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Expected plugin not found or empty:", result.stderr)
+        self.assertIn("libdrasi_source_mock.so", result.stderr)
+        # The stale staged copy is neither accepted nor silently refreshed.
+        staged = root / "custom target/debug/plugins/libdrasi_source_mock.so"
+        self.assertEqual(staged.read_text(), "stale")
 
     def test_missing_fixture_fails(self):
         _, result = self.run_script(TEST_MISSING="native_recovery")

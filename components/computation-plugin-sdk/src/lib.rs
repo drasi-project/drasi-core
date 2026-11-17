@@ -81,6 +81,10 @@ pub use wire::{
 #[macro_export]
 macro_rules! export_computation_plugin {
     ($definition:expr) => {
+        /// Binary-inspectable native ABI declaration (read without loading).
+        #[used]
+        static __DRASI_COMPUTATION_ABI_VERSION_MARKER: [u8; $crate::abi::ABI_VERSION_MARKER.len()] =
+            $crate::abi::ABI_VERSION_MARKER;
         fn __drasi_computation_export(
         ) -> &'static std::result::Result<$crate::ExportedPlugin, String> {
             static EXPORT: std::sync::OnceLock<

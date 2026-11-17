@@ -88,6 +88,7 @@ drasi-reaction-grpc = { workspace = true }
 drasi-source-sqlite = { path = "../sources/sqlite" }
 drasi-index-rocksdb = { workspace = true, features = ["computation"] }
 drasi-state-store-redb = { workspace = true, features = ["configuration"] }
+drasi-wal-redb = { workspace = true }
 tempfile = "3"
 libloading = "0.8"
 rusqlite = { version = "0.32", features = ["bundled"] }

@@ -1359,7 +1359,10 @@ async fn graph_query_atomically_persists_and_recovers_typed_output_without_legac
     let mut query = ContinuousQueryTransformer::new(definition, provider)
         .await
         .expect("reopen query");
-    query.start().await.expect("reconcile committed bundle");
+    query
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("reconcile committed bundle");
     assert_eq!(
         query.results().snapshot().expect("snapshot").as_of_sequence,
         1
@@ -1381,7 +1384,10 @@ async fn graph_query_atomically_persists_and_recovers_typed_output_without_legac
         .await
         .expect("checkpoint dedup")
         .is_empty());
-    query.stop().await.expect("stop healthy query");
+    query
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop healthy query");
 }
 
 #[tokio::test]
@@ -1530,7 +1536,10 @@ mod atomic_failure {
             .await
             .expect("construct");
         let results = query.results();
-        query.start().await.expect("start");
+        query
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("start");
         let input = || InputEnvelope {
             port: port("in"),
             envelope: GraphChangeCodec::encode_change(
@@ -1549,19 +1558,28 @@ mod atomic_failure {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(results.snapshot().expect("snapshot").as_of_sequence, 0);
         assert!(results.snapshot().expect("snapshot").rows.is_empty());
-        query.stop().await.expect("await failed query cleanup");
+        query
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("await failed query cleanup");
         drop(query);
         let mut recovered = ContinuousQueryTransformer::new(definition, base)
             .await
             .expect("reopen");
-        recovered.start().await.expect("recover rollback");
+        recovered
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("recover rollback");
         let output = recovered
             .transform(input())
             .await
             .expect("input checkpoint did not advance on failed output");
         assert_eq!(output.len(), 1);
         assert_eq!(output[0].envelope.system().sequence(), 1);
-        recovered.stop().await.expect("stop");
+        recovered
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
     }
 
     #[tokio::test]
@@ -1590,7 +1608,10 @@ mod atomic_failure {
                 ContinuousQueryTransformer::new_with_options(definition.clone(), provider, options)
                     .await
                     .expect("construct");
-            query.start().await.expect("start");
+            query
+                .start(&lifecycle_contexts::start())
+                .await
+                .expect("start");
             assert!(query
                 .transform(InputEnvelope {
                     port: port("in"),
@@ -1604,20 +1625,26 @@ mod atomic_failure {
                 })
                 .await
                 .is_err());
-            query.stop().await.expect("stop failed publication");
+            query
+                .stop(&lifecycle_contexts::stop())
+                .await
+                .expect("stop failed publication");
         }
         let mut reopened = ContinuousQueryTransformer::new_with_options(definition, base, options)
             .await
             .expect("reopen");
         let error = reopened
-            .start()
+            .start(&lifecycle_contexts::start())
             .await
             .expect_err("incomplete publication cannot silently resume");
         assert!(matches!(
             error.downcast_ref::<QueryRecoveryError>(),
             Some(QueryRecoveryError::PendingPublication)
         ));
-        reopened.stop().await.expect("cleanup");
+        reopened
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("cleanup");
     }
 }
 

@@ -14,8 +14,8 @@
 
 //! Integration test for bootstrap failure handling.
 //!
-//! Verifies that failed queries report `Error` and can be stopped through both
-//! the query runtime and managed lifecycle APIs.
+//! Verifies that failed queries report `Error`, cancel their source forwarders,
+//! and can be stopped through both the query runtime and managed lifecycle APIs.
 
 mod mock_source;
 mod runtime_support;
@@ -131,7 +131,10 @@ async fn core_with_failed_bootstrap_query() -> Result<(DrasiLib, MockSourceHandl
         }),
         "expected the configured bootstrap failure, got {failed:?}"
     );
-    handle.wait_for_subscription_counts(1, None).await?;
+    // A failed bootstrap cancels its source forwarders without waiting for an
+    // explicit stop: the source is not held open by a query that can never
+    // process its input.
+    handle.wait_for_subscription_counts(1, Some(0)).await?;
     Ok((core, handle))
 }
 
@@ -389,8 +392,10 @@ async fn query_enters_error_state_when_multiple_bootstraps_fail() -> Result<()> 
         )
         .await
         .map_err(anyhow::Error::msg)?;
-    handle_a.wait_for_subscription_counts(1, None).await?;
-    handle_b.wait_for_subscription_counts(1, None).await?;
+    // Every forwarder is cancelled even when more than one provider fails.
+    handle_a.wait_for_subscription_counts(1, Some(0)).await?;
+    handle_b.wait_for_subscription_counts(1, Some(0)).await?;
+    assert_eq!(query.subscription_count().await, 0);
     core.stop_query_by_name(
         &drasi_core_types::ComponentName::try_new("q-multi").expect("fixture component name"),
     )

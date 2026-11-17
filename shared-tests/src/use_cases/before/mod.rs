@@ -491,6 +491,7 @@ async fn value_types_for(config: &(impl QueryTestConfig + Send), query: &str) {
 
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: thing(
                 2000,
                 json!({
@@ -573,6 +574,7 @@ async fn distinct_date_unchanged(config: &(impl QueryTestConfig + Send)) {
 
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: thing(2000, json!({ "id": "t1", "d": "2024-01-02", "other": "a" })),
         };
         let result = cq.process_source_change(change).await.unwrap();
@@ -596,6 +598,7 @@ async fn distinct_date_unchanged(config: &(impl QueryTestConfig + Send)) {
     // Another property changes while the date stays the same.
     {
         let change = SourceChange::Update {
+            removed_properties: Default::default(),
             element: thing(3000, json!({ "id": "t1", "d": "2024-01-02", "other": "b" })),
         };
         let result = cq.process_source_change(change).await.unwrap();

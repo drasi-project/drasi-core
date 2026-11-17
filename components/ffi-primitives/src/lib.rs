@@ -46,3 +46,83 @@ pub use types::*;
 /// provider. `xtask build-plugins` checks for this exact NUL-terminated value
 /// in each staged cdylib before publication.
 pub const RUSTLS_RING_PROVIDER_MARKER: [u8; 27] = *b"drasi-rustls-provider=ring\0";
+
+/// Prefix of the NUL-terminated ordinary Source/Reaction ABI version that
+/// `export_plugin!` embeds in every plugin binary.
+///
+/// Build, publication and registry tools read it without loading the binary or
+/// running its initialization code, including for cross-compiled targets. The
+/// native ComputationGraph family embeds its own marker
+/// (`drasi_computation_plugin_abi::ABI_VERSION_MARKER_PREFIX`).
+pub const PLUGIN_ABI_VERSION_MARKER_PREFIX: &[u8] = b"drasi-plugin-ffi-abi=";
+
+/// Read the unique ordinary Source/Reaction ABI version embedded in a binary.
+// Inline (here and below) so plugin rlibs carry no externally linked copy:
+// MinGW auto-exports one and retains its search string, which would be
+// mistaken for a second ABI marker.
+#[inline]
+pub fn read_plugin_abi_version(binary: &[u8]) -> Result<&str, &'static str> {
+    read_abi_version_marker(binary, PLUGIN_ABI_VERSION_MARKER_PREFIX)
+}
+
+/// Read the unique NUL-terminated, non-empty UTF-8 version that follows
+/// `prefix` in `binary`. A missing, unterminated, empty, non-UTF-8 or repeated
+/// marker is an error: a binary's ABI is never guessed.
+#[inline]
+pub fn read_abi_version_marker<'a>(
+    binary: &'a [u8],
+    prefix: &[u8],
+) -> Result<&'a str, &'static str> {
+    let mut version = None;
+    for (offset, window) in binary.windows(prefix.len()).enumerate() {
+        if window != prefix {
+            continue;
+        }
+        if version.is_some() {
+            return Err("multiple plugin ABI version markers");
+        }
+        let value = &binary[offset + prefix.len()..];
+        let end = value
+            .iter()
+            .position(|byte| *byte == 0)
+            .ok_or("unterminated plugin ABI version marker")?;
+        let value =
+            std::str::from_utf8(&value[..end]).map_err(|_| "plugin ABI version is not UTF-8")?;
+        if value.is_empty() {
+            return Err("empty plugin ABI version marker");
+        }
+        version = Some(value);
+    }
+    version.ok_or("missing plugin ABI version marker")
+}
+
+#[cfg(test)]
+mod abi_marker_tests {
+    use super::*;
+
+    #[test]
+    fn reads_abi_version_from_binary_bytes() {
+        assert_eq!(
+            read_plugin_abi_version(b"\x7fELF\0drasi-plugin-ffi-abi=0.19.0\0suffix"),
+            Ok("0.19.0")
+        );
+        assert_eq!(
+            read_abi_version_marker(b"\0native-abi=5.0.0\0", b"native-abi="),
+            Ok("5.0.0")
+        );
+    }
+
+    #[test]
+    fn rejects_missing_malformed_and_ambiguous_markers() {
+        for binary in [
+            b"legacy binary".as_slice(),
+            b"drasi-plugin-ffi-abi=0.19.0",
+            b"drasi-plugin-ffi-abi=\0",
+            b"drasi-plugin-ffi-abi=\xff\0",
+            b"drasi-plugin-ffi-abi=0.18.0\0drasi-plugin-ffi-abi=0.19.0\0",
+            b"drasi-plugin-ffi-abi=0.19.0\0drasi-plugin-ffi-abi=0.19.0\0",
+        ] {
+            assert!(read_plugin_abi_version(binary).is_err(), "{binary:?}");
+        }
+    }
+}

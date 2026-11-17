@@ -212,7 +212,10 @@ async fn open(
         MiddlewareTransformer::new_durable(definition, registry, provider, options(size))
             .await
             .expect("durable middleware");
-    transformer.start().await.expect("recover middleware");
+    transformer
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("recover middleware");
     transformer
 }
 async fn query(provider: Arc<dyn ComputationIndexProvider>) -> ContinuousQueryTransformer {
@@ -229,7 +232,10 @@ async fn query(provider: Arc<dyn ComputationIndexProvider>) -> ContinuousQueryTr
     )
     .await
     .expect("durable query");
-    query.start().await.expect("recover query");
+    query
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("recover query");
     query
 }
 fn parent(source: &str, key: &str, time: u64, items: serde_json::Value) -> Element {
@@ -336,8 +342,8 @@ async fn unwind_reopen_and_lost_ack_replay_remove_children_without_rerunning_pip
             let output = middleware.transform(input(first)).await.unwrap();
             assert_eq!(apply(&mut query, &output).await, 2);
             middleware.delivery_completed(&output).await.unwrap();
-            middleware.stop().await.unwrap();
-            query.stop().await.unwrap();
+            middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
+            query.stop(&lifecycle_contexts::stop()).await.unwrap();
             drop((middleware, query));
 
             let mut middleware = open(provider.clone(), registry.clone(), definition(), 4).await;
@@ -348,8 +354,8 @@ async fn unwind_reopen_and_lost_ack_replay_remove_children_without_rerunning_pip
             assert_eq!(logical(&output[0].envelope), 2);
             assert_deleted(&output[0].envelope, "-b");
             assert_eq!(apply(&mut query, &output).await, 1);
-            middleware.stop().await.unwrap();
-            query.stop().await.unwrap();
+            middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
+            query.stop(&lifecycle_contexts::stop()).await.unwrap();
             drop((middleware, query));
 
             let evaluated = calls.calls.load(Ordering::SeqCst);
@@ -404,8 +410,8 @@ async fn unwind_reopen_and_lost_ack_replay_remove_children_without_rerunning_pip
             assert_deleted(&output[0].envelope, "-a");
             assert_eq!(apply(&mut query, &output).await, 0);
             middleware.delivery_completed(&output).await.unwrap();
-            middleware.stop().await.unwrap();
-            query.stop().await.unwrap();
+            middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
+            query.stop(&lifecycle_contexts::stop()).await.unwrap();
         }
     }
 }
@@ -426,7 +432,7 @@ async fn pending_commit_is_replayed_before_a_new_live_input_and_survives_clean_r
         )))
         .await
         .unwrap();
-    middleware.stop().await.unwrap();
+    middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
     drop(middleware);
 
     let mut middleware = open(provider.clone(), registry.clone(), definition(), 2).await;
@@ -446,8 +452,11 @@ async fn pending_commit_is_replayed_before_a_new_live_input_and_survives_clean_r
     assert_eq!(apply(&mut query, &output).await, 1);
     middleware.delivery_completed(&output).await.unwrap();
     assert!(!middleware.has_pending_emissions());
-    middleware.stop().await.unwrap();
-    middleware.start().await.unwrap();
+    middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
+    middleware
+        .start(&lifecycle_contexts::start())
+        .await
+        .unwrap();
     assert!(!middleware.has_pending_emissions());
     let duplicate = middleware
         .transform(input(event("source", 2, 2, change(2, &["a"], true), false)))
@@ -456,8 +465,8 @@ async fn pending_commit_is_replayed_before_a_new_live_input_and_survives_clean_r
     assert!(duplicate[0].envelope.system().sequence() > output[0].envelope.system().sequence());
     assert_eq!(logical(&duplicate[0].envelope), 2);
     middleware.delivery_completed(&duplicate).await.unwrap();
-    middleware.stop().await.unwrap();
-    query.stop().await.unwrap();
+    middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test]
@@ -500,7 +509,7 @@ async fn output_bindings_requeue_middleware_handoff_and_survive_both_providers()
         assert_eq!(logical(&replay[0].envelope), 1);
         assert_ne!(output[0].envelope.id(), replay[0].envelope.id());
         assert_eq!(probe.calls.load(Ordering::SeqCst), calls);
-        middleware.stop().await.unwrap();
+        middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
         drop(middleware);
         let mut middleware = open(provider, registry, definition(), 2).await;
         middleware
@@ -515,7 +524,7 @@ async fn output_bindings_requeue_middleware_handoff_and_survive_both_providers()
             .bind_output_destinations(&OutputBindings::default())
             .await
             .unwrap();
-        middleware.stop().await.unwrap();
+        middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
     }
 }
 
@@ -548,7 +557,7 @@ async fn retention_full_never_evicts_unconfirmed_output_and_can_retry_after_conf
     let output = middleware.transform(input(update)).await.unwrap();
     assert_eq!(logical(&output[0].envelope), 2);
     assert_deleted(&output[0].envelope, "-b");
-    middleware.stop().await.unwrap();
+    middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
     drop(middleware);
     let mut middleware = open(provider, registry, definition(), 1).await;
     let replay = middleware.on_wakeup().await.unwrap();
@@ -565,7 +574,7 @@ async fn retention_full_never_evicts_unconfirmed_output_and_can_retry_after_conf
         .await
         .unwrap()
         .is_empty());
-    middleware.stop().await.unwrap();
+    middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test]
@@ -612,8 +621,11 @@ async fn partial_batch_failure_and_cancellation_roll_back_prior_element_mutation
         } else {
             assert!(middleware.transform(input(batch)).await.is_err());
         }
-        middleware.stop().await.unwrap();
-        assert!(middleware.start().await.is_err());
+        middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
+        assert!(middleware
+            .start(&lifecycle_contexts::start())
+            .await
+            .is_err());
         drop(middleware);
         probe.mode.store(0, Ordering::SeqCst);
         let mut middleware = open(provider, registry, definition(), 4).await;
@@ -626,7 +638,7 @@ async fn partial_batch_failure_and_cancellation_roll_back_prior_element_mutation
         assert_eq!(output[0].envelope.system().sequence(), 2);
         assert_deleted(&output[0].envelope, "-b");
         middleware.delivery_completed(&output).await.unwrap();
-        middleware.stop().await.unwrap();
+        middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
     }
 }
 
@@ -645,7 +657,10 @@ async fn durable_mode_rejects_volatile_resources_and_persistent_queries_reject_v
     let directory = scratch();
     let provider = provider(directory.path(), Backend::Computation);
     let mut middleware = MiddlewareTransformer::new(definition(), registry).unwrap();
-    middleware.start().await.unwrap();
+    middleware
+        .start(&lifecycle_contexts::start())
+        .await
+        .unwrap();
     let output = middleware
         .transform(input(event("source", 1, 1, change(1, &["a"], false), true)))
         .await
@@ -657,8 +672,8 @@ async fn durable_mode_rejects_volatile_resources_and_persistent_queries_reject_v
         .unwrap_err();
     assert!(error.to_string().contains("volatile middleware"));
     assert!(query.results().snapshot().unwrap().rows.is_empty());
-    query.stop().await.unwrap();
-    middleware.stop().await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
+    middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test]
@@ -672,7 +687,7 @@ async fn configuration_and_retained_input_identity_mismatches_are_rejected() {
         .await
         .unwrap();
     middleware.delivery_completed(&first).await.unwrap();
-    middleware.stop().await.unwrap();
+    middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
     drop(middleware);
     let mut changed = definition();
     changed.pipeline = vec!["probe".into()];
@@ -681,12 +696,12 @@ async fn configuration_and_retained_input_identity_mismatches_are_rejected() {
             .await
             .unwrap();
     assert!(middleware
-        .start()
+        .start(&lifecycle_contexts::start())
         .await
         .unwrap_err()
         .to_string()
         .contains("configuration"));
-    middleware.stop().await.unwrap();
+    middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
     drop(middleware);
     let mut middleware = open(provider.clone(), registry.clone(), definition(), 2).await;
     assert!(middleware
@@ -701,7 +716,7 @@ async fn configuration_and_retained_input_identity_mismatches_are_rejected() {
         .unwrap_err()
         .to_string()
         .contains("committed contents"));
-    middleware.stop().await.unwrap();
+    middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
     drop(middleware);
     let progress = Arc::new(QuerySourceProgress::new(GRAPH, definition().id).unwrap());
     let mut verified = MiddlewareTransformer::new_durable(
@@ -714,7 +729,7 @@ async fn configuration_and_retained_input_identity_mismatches_are_rejected() {
     .unwrap()
     .with_source_progress(progress.clone())
     .unwrap();
-    verified.start().await.unwrap();
+    verified.start(&lifecycle_contexts::start()).await.unwrap();
     assert_eq!(
         progress.snapshot().transport_sequences[&stream("source")],
         1,
@@ -733,7 +748,7 @@ async fn configuration_and_retained_input_identity_mismatches_are_rejected() {
         progress.snapshot().checkpoints[&SourceProgressKey::Source(id("source"))].sequence,
         1
     );
-    verified.stop().await.unwrap();
+    verified.stop(&lifecycle_contexts::stop()).await.unwrap();
     drop(verified);
     let mut changed = definition();
     changed.output_stream = stream("different");
@@ -741,8 +756,11 @@ async fn configuration_and_retained_input_identity_mismatches_are_rejected() {
         MiddlewareTransformer::new_durable(changed, registry, provider, options(2))
             .await
             .unwrap();
-    assert!(middleware.start().await.is_err());
-    middleware.stop().await.unwrap();
+    assert!(middleware
+        .start(&lifecycle_contexts::start())
+        .await
+        .is_err());
+    middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test]
@@ -764,7 +782,7 @@ async fn raw_zero_and_generic_progress_are_distinct_from_chained_logical_output_
         .unwrap()
         .with_source_progress(source_progress.clone())
         .unwrap();
-        first.start().await.unwrap();
+        first.start(&lifecycle_contexts::start()).await.unwrap();
         let mut second_definition = definition();
         second_definition.id = id("second");
         second_definition.output_stream = stream("second");
@@ -780,7 +798,7 @@ async fn raw_zero_and_generic_progress_are_distinct_from_chained_logical_output_
         .unwrap()
         .with_source_progress(second_progress.clone())
         .unwrap();
-        second.start().await.unwrap();
+        second.start(&lifecycle_contexts::start()).await.unwrap();
         let mut query = query(provider.clone()).await;
         let mut original = Vec::new();
         for source in ["a", "b"] {
@@ -822,9 +840,9 @@ async fn raw_zero_and_generic_progress_are_distinct_from_chained_logical_output_
             2
         );
         assert_eq!(second_progress.snapshot().checkpoints.len(), 1);
-        first.stop().await.unwrap();
-        second.stop().await.unwrap();
-        query.stop().await.unwrap();
+        first.stop(&lifecycle_contexts::stop()).await.unwrap();
+        second.stop(&lifecycle_contexts::stop()).await.unwrap();
+        query.stop(&lifecycle_contexts::stop()).await.unwrap();
         drop((first, second, query));
 
         let mut first = MiddlewareTransformer::new_durable(
@@ -837,7 +855,7 @@ async fn raw_zero_and_generic_progress_are_distinct_from_chained_logical_output_
         .unwrap()
         .with_source_progress(source_progress.clone())
         .unwrap();
-        first.start().await.unwrap();
+        first.start(&lifecycle_contexts::start()).await.unwrap();
         let mut second = open(provider.clone(), registry.clone(), second_definition, 8).await;
         let mut query = self::query(provider).await;
         probe.mode.store(0, Ordering::SeqCst);
@@ -869,9 +887,9 @@ async fn raw_zero_and_generic_progress_are_distinct_from_chained_logical_output_
         assert_eq!(probe.calls.load(Ordering::SeqCst), calls);
         second.delivery_completed(&downstream).await.unwrap();
         first.delivery_completed(&replay).await.unwrap();
-        first.stop().await.unwrap();
-        second.stop().await.unwrap();
-        query.stop().await.unwrap();
+        first.stop(&lifecycle_contexts::stop()).await.unwrap();
+        second.stop(&lifecycle_contexts::stop()).await.unwrap();
+        query.stop(&lifecycle_contexts::stop()).await.unwrap();
     }
 }
 
@@ -913,7 +931,7 @@ async fn nested_unwind_and_patch_properties_survive_reconstruction() {
         .unwrap();
     assert_eq!(apply(&mut query, &output).await, 3);
     middleware.delivery_completed(&output).await.unwrap();
-    middleware.stop().await.unwrap();
+    middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
     drop(middleware);
     let mut middleware = open(provider.clone(), registry.clone(), definition.clone(), 4).await;
     let mut updated = parent(
@@ -943,7 +961,7 @@ async fn nested_unwind_and_patch_properties_survive_reconstruction() {
     assert_deleted(&output[0].envelope, "-c");
     assert_eq!(apply(&mut query, &output).await, 1);
     middleware.delivery_completed(&output).await.unwrap();
-    middleware.stop().await.unwrap();
+    middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
     drop(middleware);
     let resources = provider
         .create_indexes(GRAPH, &id("middleware"))
@@ -986,8 +1004,8 @@ async fn nested_unwind_and_patch_properties_survive_reconstruction() {
     assert_deleted(&output[0].envelope, "-a");
     assert_eq!(apply(&mut query, &output).await, 0);
     middleware.delivery_completed(&output).await.unwrap();
-    middleware.stop().await.unwrap();
-    query.stop().await.unwrap();
+    middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[test]
@@ -1374,7 +1392,10 @@ async fn element_outbox_checkpoint_and_commit_failures_rollback_the_whole_input(
                 .unwrap()
                 .with_source_progress(progress.clone())
                 .unwrap();
-        middleware.start().await.unwrap();
+        middleware
+            .start(&lifecycle_contexts::start())
+            .await
+            .unwrap();
         let first = middleware
             .transform(input(event(
                 "source",
@@ -1402,7 +1423,7 @@ async fn element_outbox_checkpoint_and_commit_failures_rollback_the_whole_input(
             1
         );
         assert!(progress.snapshot().failure.is_some());
-        middleware.stop().await.unwrap();
+        middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
         drop(middleware);
         let mut middleware = open(provider, registry, definition(), 1).await;
         assert!(!middleware.has_pending_emissions(), "{point:?}");
@@ -1411,7 +1432,7 @@ async fn element_outbox_checkpoint_and_commit_failures_rollback_the_whole_input(
         assert_eq!(retried[0].envelope.system().sequence(), 2, "{point:?}");
         assert_deleted(&retried[0].envelope, "-b");
         middleware.delivery_completed(&retried).await.unwrap();
-        middleware.stop().await.unwrap();
+        middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
     }
 }
 
@@ -1445,7 +1466,7 @@ async fn uncertain_commit_and_interrupted_commit_acknowledgement_recover_exact_o
             assert!(work.as_mut().await.is_err());
         }
         drop(work);
-        middleware.stop().await.unwrap();
+        middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
         drop(middleware);
         let evaluated = calls.calls.load(Ordering::SeqCst);
         let mut middleware = open(provider.clone(), registry, definition(), 2).await;
@@ -1463,8 +1484,8 @@ async fn uncertain_commit_and_interrupted_commit_acknowledgement_recover_exact_o
         );
         assert_eq!(apply(&mut query, &output).await, 2);
         middleware.delivery_completed(&output).await.unwrap();
-        middleware.stop().await.unwrap();
-        query.stop().await.unwrap();
+        middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
+        query.stop(&lifecycle_contexts::stop()).await.unwrap();
     }
 }
 
@@ -1497,14 +1518,14 @@ async fn failed_delivery_confirmation_and_replay_reservation_retain_pending_outp
             let duplicate = event("source", 1, 1, change(1, &["a"], false), false);
             assert!(middleware.transform(input(duplicate)).await.is_err());
         }
-        middleware.stop().await.unwrap();
+        middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
         drop(middleware);
         let mut middleware = open(provider, registry, definition(), 1).await;
         let replay = middleware.on_wakeup().await.unwrap();
         assert_eq!(decoded(&replay[0].envelope), decoded(&output[0].envelope));
         assert_eq!(replay[0].envelope.system().sequence(), 2);
         middleware.delivery_completed(&replay).await.unwrap();
-        middleware.stop().await.unwrap();
+        middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
     }
 }
 
@@ -1537,11 +1558,11 @@ async fn logical_gaps_changed_producers_and_missing_annotations_fail_before_quer
         .to_string()
         .contains("gap"));
     assert!(query.results().snapshot().unwrap().rows.is_empty());
-    query.stop().await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
     drop(query);
     let mut query = self::query(provider.clone()).await;
     assert_eq!(apply(&mut query, &first).await, 1);
-    query.stop().await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
     drop(query);
 
     let mut missing = event("source", 2, 2, change(2, &["a", "b"], true), true);
@@ -1555,7 +1576,7 @@ async fn logical_gaps_changed_producers_and_missing_annotations_fail_before_quer
         .unwrap_err()
         .to_string()
         .contains("omitted"));
-    query.stop().await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
     drop(query);
 
     let other_directory = scratch();
@@ -1579,9 +1600,9 @@ async fn logical_gaps_changed_producers_and_missing_annotations_fail_before_quer
         .to_string()
         .contains("identity changed"));
     assert_eq!(query.results().snapshot().unwrap().rows.len(), 1);
-    query.stop().await.unwrap();
-    replacement.stop().await.unwrap();
-    middleware.stop().await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
+    replacement.stop(&lifecycle_contexts::stop()).await.unwrap();
+    middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1629,7 +1650,7 @@ async fn graph_progress_metadata_is_versioned_and_validates_its_immediate_owner(
             .unwrap();
         assert!(GraphProducerProgress::from_envelope(&invalid).is_err());
     }
-    middleware.stop().await.unwrap();
+    middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 struct ProgressSource {
@@ -1850,10 +1871,13 @@ async fn durable_mode_rejects_incomplete_non_atomic_and_unowned_cleanup_resource
     .await
     .unwrap();
     assert!(
-        middleware.start().await.is_err(),
+        middleware
+            .start(&lifecycle_contexts::start())
+            .await
+            .is_err(),
         "reject missing lifecycle support before any input"
     );
-    middleware.stop().await.unwrap();
+    middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1877,7 +1901,7 @@ async fn durable_emission_overflow_cannot_mutate_input_state_or_discard_pending_
         if !pending {
             middleware.delivery_completed(&first).await.unwrap();
         }
-        middleware.stop().await.unwrap();
+        middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
         drop(middleware);
         let resources = provider
             .create_indexes(GRAPH, &id("middleware"))
@@ -1910,7 +1934,7 @@ async fn durable_emission_overflow_cannot_mutate_input_state_or_discard_pending_
         };
         assert!(error.to_string().contains("sequence exhausted"));
         assert_eq!(calls.calls.load(Ordering::SeqCst), evaluated);
-        middleware.stop().await.unwrap();
+        middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
         drop(middleware);
         let resources = provider
             .create_indexes(GRAPH, &id("middleware"))
@@ -1982,7 +2006,10 @@ async fn redb_wal_reopens_at_middleware_commit_while_undelivered_output_replays_
     .unwrap()
     .with_source_progress(progress.clone())
     .unwrap();
-    middleware.start().await.unwrap();
+    middleware
+        .start(&lifecycle_contexts::start())
+        .await
+        .unwrap();
     assert!(progress.replay_only());
     let mut source = WalReplaySource::new(
         id("source"),
@@ -1995,7 +2022,7 @@ async fn redb_wal_reopens_at_middleware_commit_while_undelivered_output_replays_
         0,
     )
     .with_source_progress(progress.clone());
-    source.start().await.unwrap();
+    source.start(&lifecycle_contexts::start()).await.unwrap();
     let source_output = source.next().await.unwrap().unwrap();
     let committed = middleware
         .transform(input(source_output.envelope))
@@ -2009,8 +2036,8 @@ async fn redb_wal_reopens_at_middleware_commit_while_undelivered_output_replays_
     // Input can be pruned at the middleware commit: its still-unconfirmed
     // transformed output is now the durable recovery boundary.
     assert_eq!(wal.prune_up_to(&scope, &id("source"), 1).await.unwrap(), 1);
-    source.stop().await.unwrap();
-    middleware.stop().await.unwrap();
+    source.stop(&lifecycle_contexts::stop()).await.unwrap();
+    middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
     drop((source, middleware, wal));
 
     let wal = Arc::new(drasi_wal_redb::RedbWalProvider::new(
@@ -2025,7 +2052,10 @@ async fn redb_wal_reopens_at_middleware_commit_while_undelivered_output_replays_
             .unwrap()
             .with_source_progress(progress.clone())
             .unwrap();
-    middleware.start().await.unwrap();
+    middleware
+        .start(&lifecycle_contexts::start())
+        .await
+        .unwrap();
     let resource = Arc::new(WalSourceResource {
         provider: wal.clone(),
         scope,
@@ -2034,15 +2064,15 @@ async fn redb_wal_reopens_at_middleware_commit_while_undelivered_output_replays_
     let mut invalid = WalReplaySource::new(id("invalid"), stream("invalid"), resource.clone(), 2)
         .with_source_progress(progress.clone());
     assert!(invalid
-        .start()
+        .start(&lifecycle_contexts::start())
         .await
         .unwrap_err()
         .to_string()
         .contains("committed recovery boundary"));
-    invalid.stop().await.unwrap();
+    invalid.stop(&lifecycle_contexts::stop()).await.unwrap();
     let mut source = WalReplaySource::new(id("source"), stream("source"), resource, 0)
         .with_source_progress(progress);
-    source.start().await.unwrap();
+    source.start(&lifecycle_contexts::start()).await.unwrap();
     let mut query = query(provider).await;
     let replay = middleware.on_wakeup().await.unwrap();
     assert_eq!(
@@ -2070,9 +2100,9 @@ async fn redb_wal_reopens_at_middleware_commit_while_undelivered_output_replays_
     assert_deleted(&output[0].envelope, "-b");
     assert_eq!(apply(&mut query, &output).await, 1);
     middleware.delivery_completed(&output).await.unwrap();
-    source.stop().await.unwrap();
-    middleware.stop().await.unwrap();
-    query.stop().await.unwrap();
+    source.stop(&lifecycle_contexts::stop()).await.unwrap();
+    middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test]
@@ -2122,8 +2152,8 @@ async fn durable_control_notifications_checkpoint_logical_progress_before_later_
         .unwrap()
         .is_empty());
     middleware.delivery_completed(&replay).await.unwrap();
-    middleware.stop().await.unwrap();
-    query.stop().await.unwrap();
+    middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test]
@@ -2146,7 +2176,7 @@ async fn replayed_middleware_control_does_not_evaluate_not_yet_due_query_futures
     )
     .await
     .unwrap();
-    query.start().await.unwrap();
+    query.start(&lifecycle_contexts::start()).await.unwrap();
     let output = middleware
         .transform(input(event("source", 1, 1, change(1, &["a"], false), true)))
         .await
@@ -2182,8 +2212,8 @@ async fn replayed_middleware_control_does_not_evaluate_not_yet_due_query_futures
         assert!(query.results().snapshot().unwrap().rows.is_empty());
         middleware.delivery_completed(&output).await.unwrap();
     }
-    middleware.stop().await.unwrap();
-    query.stop().await.unwrap();
+    middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 struct GatedSource {
@@ -2264,7 +2294,7 @@ async fn declared_graph_confirms_wakeup_continuation_and_live_fanout_only_after_
             .await
             .unwrap();
     }
-    original.stop().await.unwrap();
+    original.stop(&lifecycle_contexts::stop()).await.unwrap();
     drop(original);
     assert_eq!(calls.calls.load(Ordering::SeqCst), 2);
 
@@ -2460,5 +2490,47 @@ async fn declared_graph_confirms_wakeup_continuation_and_live_fanout_only_after_
         !middleware.has_pending_emissions(),
         "every branch accepted all three outputs"
     );
-    middleware.stop().await.unwrap();
+    middleware.stop(&lifecycle_contexts::stop()).await.unwrap();
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
+    }
 }

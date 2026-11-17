@@ -1266,7 +1266,7 @@ async fn persistent_reopen_keeps_identity_and_rejects_unidentified_output_withou
             ContinuousQueryTransformer::new(definition("persistent", TEXT, 4), provider.clone())
                 .await
                 .unwrap();
-        first.start().await.unwrap();
+        first.start(&lifecycle_contexts::start()).await.unwrap();
         let output = emit(&mut first, 1, "Alice").await;
         let identity = first.results().recovery_view(None).unwrap().identity;
         assert!(identity.incarnation().is_none());
@@ -1274,7 +1274,7 @@ async fn persistent_reopen_keeps_identity_and_rejects_unidentified_output_withou
             QueryRecoveryIdentity::from_envelope(&output).unwrap(),
             identity
         );
-        first.stop().await.unwrap();
+        first.stop(&lifecycle_contexts::stop()).await.unwrap();
         identity
     };
     let mut codec = EnvelopeCodec::new(NonZeroUsize::new(1 << 20).unwrap());
@@ -1283,7 +1283,7 @@ async fn persistent_reopen_keeps_identity_and_rejects_unidentified_output_withou
         ContinuousQueryTransformer::new(definition("persistent", TEXT, 4), provider.clone())
             .await
             .unwrap();
-    reopened.start().await.unwrap();
+    reopened.start(&lifecycle_contexts::start()).await.unwrap();
     let view = reopened.results().recovery_view(Some(0)).unwrap();
     assert_eq!(view.identity, identity);
     assert_eq!(view.snapshot.as_of_sequence, 1);
@@ -1291,7 +1291,7 @@ async fn persistent_reopen_keeps_identity_and_rejects_unidentified_output_withou
         QueryRecoveryIdentity::from_envelope(&view.retained.as_ref().unwrap()[0]).unwrap(),
         identity
     );
-    reopened.stop().await.unwrap();
+    reopened.stop(&lifecycle_contexts::stop()).await.unwrap();
     drop(reopened);
     {
         let resources = provider
@@ -1324,12 +1324,15 @@ async fn persistent_reopen_keeps_identity_and_rejects_unidentified_output_withou
             ContinuousQueryTransformer::new(definition("persistent", TEXT, 4), provider.clone())
                 .await
                 .unwrap();
-        let error = rejected.start().await.unwrap_err();
+        let error = rejected
+            .start(&lifecycle_contexts::start())
+            .await
+            .unwrap_err();
         assert!(
             error.to_string().contains("no producer identity"),
             "{error:#}"
         );
-        rejected.stop().await.unwrap();
+        rejected.stop(&lifecycle_contexts::stop()).await.unwrap();
     }
     {
         let resources = provider
@@ -1367,12 +1370,15 @@ async fn persistent_reopen_keeps_identity_and_rejects_unidentified_output_withou
             ContinuousQueryTransformer::new(definition("persistent", TEXT, 4), provider.clone())
                 .await
                 .unwrap();
-        let error = unverified.start().await.unwrap_err();
+        let error = unverified
+            .start(&lifecycle_contexts::start())
+            .await
+            .unwrap_err();
         assert!(
             error.to_string().contains("no producer identity"),
             "{error:#}"
         );
-        unverified.stop().await.unwrap();
+        unverified.stop(&lifecycle_contexts::stop()).await.unwrap();
     }
     let resources = provider
         .create_indexes("persistent", &id("query"))

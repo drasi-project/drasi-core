@@ -2599,7 +2599,7 @@ mod profiling_tests {
             )
             .await
             .unwrap();
-            query.start().await.unwrap();
+            query.start(&lifecycle_contexts::start()).await.unwrap();
             let outbox = query
                 .query()
                 .unwrap()
@@ -2727,14 +2727,14 @@ mod profiling_tests {
                 live.profiling
             );
             drop(outbox);
-            query.stop().await.unwrap();
+            query.stop(&lifecycle_contexts::stop()).await.unwrap();
             drop(query);
 
             let mut recovered =
                 ContinuousQueryTransformer::new_with_options(definition, backend, options)
                     .await
                     .unwrap();
-            recovered.start().await.unwrap();
+            recovered.start(&lifecycle_contexts::start()).await.unwrap();
             let replay = recovered.results().replay(0).unwrap();
             assert_eq!(replay.len(), 1);
             assert_eq!(
@@ -2742,7 +2742,25 @@ mod profiling_tests {
                 saved.profiling,
                 "recovery preserves unknown completion times rather than fabricating them"
             );
-            recovered.stop().await.unwrap();
+            recovered.stop(&lifecycle_contexts::stop()).await.unwrap();
+        }
+    }
+
+    mod lifecycle_contexts {
+        use crate::computation::v1::{
+            CancellationToken, OperationScope, StartContext, StopContext, StopMode,
+        };
+
+        fn scope() -> OperationScope {
+            OperationScope::new("test", "component", 1, None, CancellationToken::new())
+        }
+
+        pub fn start() -> StartContext {
+            StartContext::new(scope())
+        }
+
+        pub fn stop() -> StopContext {
+            StopContext::new(scope(), StopMode::Drain)
         }
     }
 }

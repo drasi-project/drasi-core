@@ -1179,7 +1179,7 @@ mod persistent {
             }
         };
         let mut first = make(QueryRecoveryPolicy::Strict).await;
-        first.start().await.unwrap();
+        first.start(&lifecycle_contexts::start()).await.unwrap();
         assert_eq!(first.results().snapshot().unwrap().rows.len(), 2);
         first
             .transform(InputEnvelope {
@@ -1189,21 +1189,24 @@ mod persistent {
             .await
             .unwrap();
         let before = first.results().snapshot().unwrap();
-        first.stop().await.unwrap();
+        first.stop(&lifecycle_contexts::stop()).await.unwrap();
         drop(first);
         *bootstrap.rows.lock().unwrap() = vec![("one", "Carol")];
         bootstrap.pending.store(true, Ordering::Release);
         let mut strict = make(QueryRecoveryPolicy::Strict).await;
-        let error = strict.start().await.unwrap_err();
+        let error = strict
+            .start(&lifecycle_contexts::start())
+            .await
+            .unwrap_err();
         assert!(matches!(
             error.downcast_ref::<QueryRecoveryError>(),
             Some(QueryRecoveryError::SourceResetRequired)
         ));
         assert_eq!(bootstrap.calls.load(Ordering::SeqCst), 1);
-        strict.stop().await.unwrap();
+        strict.stop(&lifecycle_contexts::stop()).await.unwrap();
         drop(strict);
         let mut reset = make(QueryRecoveryPolicy::AutoReset).await;
-        reset.start().await.unwrap();
+        reset.start(&lifecycle_contexts::start()).await.unwrap();
         let after = reset.results().snapshot().unwrap();
         assert!(after.generation > before.generation);
         assert_eq!(after.as_of_sequence, before.as_of_sequence);
@@ -1215,15 +1218,15 @@ mod persistent {
                 .get("name"),
             Some(&drasi_core::evaluation::variable_value::VariableValue::from("Carol")),
         );
-        reset.stop().await.unwrap();
+        reset.stop(&lifecycle_contexts::stop()).await.unwrap();
         drop(reset);
         let mut reopened = make(QueryRecoveryPolicy::Strict).await;
-        reopened.start().await.unwrap();
+        reopened.start(&lifecycle_contexts::start()).await.unwrap();
         let restored = reopened.results().snapshot().unwrap();
         assert_eq!(restored.generation, after.generation);
         assert_eq!(restored.rows, after.rows);
         assert_eq!(bootstrap.calls.load(Ordering::SeqCst), 2);
-        reopened.stop().await.unwrap();
+        reopened.stop(&lifecycle_contexts::stop()).await.unwrap();
     }
 
     #[tokio::test]
@@ -1240,7 +1243,7 @@ mod persistent {
             calls.clone(),
         )
         .await;
-        first.start().await.unwrap();
+        first.start(&lifecycle_contexts::start()).await.unwrap();
         first
             .transform(InputEnvelope {
                 port: PortId::try_new("in").unwrap(),
@@ -1248,7 +1251,7 @@ mod persistent {
             })
             .await
             .unwrap();
-        first.stop().await.unwrap();
+        first.stop(&lifecycle_contexts::stop()).await.unwrap();
         drop(first);
         let foreign_bytes = {
             let resources = indexes
@@ -1291,12 +1294,15 @@ mod persistent {
         ] {
             let mut restored =
                 query(indexes.clone(), requested, policy, false, calls.clone()).await;
-            let error = restored.start().await.unwrap_err();
+            let error = restored
+                .start(&lifecycle_contexts::start())
+                .await
+                .unwrap_err();
             assert!(matches!(
                 error.downcast_ref::<QueryRecoveryError>(),
                 Some(QueryRecoveryError::OwnershipMismatch)
             ));
-            restored.stop().await.unwrap();
+            restored.stop(&lifecycle_contexts::stop()).await.unwrap();
             drop(restored);
             assert_eq!(calls.load(Ordering::SeqCst), 1);
             let resources = indexes
@@ -1333,10 +1339,16 @@ mod persistent {
         )
         .await;
         let results = query.results();
-        query.start().await.expect_err("partial bootstrap");
-        query.stop().await.expect("release failed storage owner");
+        query
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect_err("partial bootstrap");
+        query
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("release failed storage owner");
         let error = query
-            .start()
+            .start(&lifecycle_contexts::start())
             .await
             .expect_err("partial bootstrap requires reset");
         assert!(
@@ -1346,17 +1358,23 @@ mod persistent {
             ),
             "restart must read recovery state, not retain its old database lock: {error:#}"
         );
-        query.stop().await.expect("release reconstructed owner");
+        query
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("release reconstructed owner");
         query
             .dispose(&lifecycle_contexts::erase())
             .await
             .expect("reopen and clear incomplete state");
         query
-            .start()
+            .start(&lifecycle_contexts::start())
             .await
             .expect_err("new bootstrap still intentionally fails");
         assert_eq!(results.snapshot().expect("view").rows.len(), 1);
-        query.stop().await.expect("cleanup");
+        query
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("cleanup");
     }
 
     #[async_trait]
@@ -1445,11 +1463,17 @@ mod persistent {
             .expect("bind")
             .with_bootstrap(bootstrap.clone());
             if fail {
-                query.start().await.expect_err("partial snapshot");
+                query
+                    .start(&lifecycle_contexts::start())
+                    .await
+                    .expect_err("partial snapshot");
                 assert!(!progress.snapshot().ready);
                 assert!(progress.snapshot().checkpoints.is_empty());
             } else {
-                query.start().await.expect("complete or recover");
+                query
+                    .start(&lifecycle_contexts::start())
+                    .await
+                    .expect("complete or recover");
                 let snapshot = progress.snapshot();
                 assert!(snapshot.ready && snapshot.bootstrap_complete);
                 let checkpoint = &snapshot.checkpoints
@@ -1474,7 +1498,10 @@ mod persistent {
                 bootstrap.calls.load(Ordering::SeqCst),
                 usize::from(index < 2)
             );
-            query.stop().await.expect("cleanup");
+            query
+                .stop(&lifecycle_contexts::stop())
+                .await
+                .expect("cleanup");
         }
     }
 
@@ -1496,7 +1523,10 @@ mod persistent {
                     calls.clone(),
                 )
                 .await;
-                first.start().await.expect("bootstrap");
+                first
+                    .start(&lifecycle_contexts::start())
+                    .await
+                    .expect("bootstrap");
                 first
                     .transform(InputEnvelope {
                         port: PortId::try_new("in").expect("port"),
@@ -1504,7 +1534,7 @@ mod persistent {
                     })
                     .await
                     .expect("committed output");
-                first.stop().await.expect("stop");
+                first.stop(&lifecycle_contexts::stop()).await.expect("stop");
             }
             {
                 let resources = provider
@@ -1594,7 +1624,10 @@ mod persistent {
                     calls.clone(),
                 )
                 .await;
-                let error = strict.start().await.expect_err(corrupt);
+                let error = strict
+                    .start(&lifecycle_contexts::start())
+                    .await
+                    .expect_err(corrupt);
                 assert!(
                     matches!(
                         error.downcast_ref::<QueryRecoveryError>(),
@@ -1614,7 +1647,10 @@ mod persistent {
                     1,
                     "Strict does not bootstrap away corruption"
                 );
-                strict.stop().await.expect("stop failed recovery");
+                strict
+                    .stop(&lifecycle_contexts::stop())
+                    .await
+                    .expect("stop failed recovery");
             }
             let mut reset = query(
                 provider,
@@ -1624,7 +1660,10 @@ mod persistent {
                 calls.clone(),
             )
             .await;
-            reset.start().await.expect(corrupt);
+            reset
+                .start(&lifecycle_contexts::start())
+                .await
+                .expect(corrupt);
             assert_eq!(calls.load(Ordering::SeqCst), 2);
             let snapshot = reset.results().snapshot().expect("rebuilt snapshot");
             assert_eq!(
@@ -1640,7 +1679,10 @@ mod persistent {
                     .get("name"),
                 Some(&drasi_core::evaluation::variable_value::VariableValue::from("Alice")),
             );
-            reset.stop().await.expect("stop reset");
+            reset
+                .stop(&lifecycle_contexts::stop())
+                .await
+                .expect("stop reset");
         }
     }
 
@@ -1659,8 +1701,11 @@ mod persistent {
                 calls.clone(),
             )
             .await;
-            assert!(failed.start().await.is_err());
-            failed.stop().await.expect("cleanup interrupted bootstrap");
+            assert!(failed.start(&lifecycle_contexts::start()).await.is_err());
+            failed
+                .stop(&lifecycle_contexts::stop())
+                .await
+                .expect("cleanup interrupted bootstrap");
         }
         {
             let mut strict = query(
@@ -1672,14 +1717,17 @@ mod persistent {
             )
             .await;
             let error = strict
-                .start()
+                .start(&lifecycle_contexts::start())
                 .await
                 .expect_err("do not silently reuse partial index");
             assert!(matches!(
                 error.downcast_ref::<QueryRecoveryError>(),
                 Some(QueryRecoveryError::IncompleteBootstrap)
             ));
-            strict.stop().await.expect("cleanup");
+            strict
+                .stop(&lifecycle_contexts::stop())
+                .await
+                .expect("cleanup");
         }
         {
             let mut reset = query(
@@ -1690,13 +1738,16 @@ mod persistent {
                 calls.clone(),
             )
             .await;
-            reset.start().await.expect("explicit safe reset");
+            reset
+                .start(&lifecycle_contexts::start())
+                .await
+                .expect("explicit safe reset");
             assert_eq!(reset.results().snapshot().expect("snapshot").rows.len(), 1);
             assert_eq!(
                 reset.results().snapshot().expect("snapshot").as_of_sequence,
                 0
             );
-            reset.stop().await.expect("stop");
+            reset.stop(&lifecycle_contexts::stop()).await.expect("stop");
         }
         {
             let mut reopened = query(
@@ -1708,11 +1759,14 @@ mod persistent {
             )
             .await;
             reopened
-                .start()
+                .start(&lifecycle_contexts::start())
                 .await
                 .expect("completed bootstrap marker survives restart");
             assert_eq!(calls.load(Ordering::SeqCst), 2);
-            reopened.stop().await.expect("stop");
+            reopened
+                .stop(&lifecycle_contexts::stop())
+                .await
+                .expect("stop");
         }
     }
 
@@ -1732,7 +1786,7 @@ mod persistent {
             )
             .await;
             query
-                .start()
+                .start(&lifecycle_contexts::start())
                 .await
                 .unwrap_or_else(|error| panic!("incarnation {incarnation} starts: {error:#}"));
             let output = query
@@ -1754,7 +1808,7 @@ mod persistent {
                 query.results().snapshot().expect("snapshot").generation
             );
             published.push(generation);
-            query.stop().await.expect("stop");
+            query.stop(&lifecycle_contexts::stop()).await.expect("stop");
             query
                 .dispose(&lifecycle_contexts::erase())
                 .await
@@ -1781,7 +1835,10 @@ mod persistent {
                 calls.clone(),
             )
             .await;
-            first.start().await.expect("start");
+            first
+                .start(&lifecycle_contexts::start())
+                .await
+                .expect("start");
             let output = first
                 .transform(InputEnvelope {
                     port: PortId::try_new("in").expect("port"),
@@ -1795,7 +1852,7 @@ mod persistent {
                 .recovery_view(None)
                 .expect("identity")
                 .identity;
-            first.stop().await.expect("stop");
+            first.stop(&lifecycle_contexts::stop()).await.expect("stop");
             identity
         };
         let text = "MATCH (n:Person) RETURN n.name AS renamed";
@@ -1808,7 +1865,10 @@ mod persistent {
                 calls.clone(),
             )
             .await;
-            reset.start().await.expect("changed query reset");
+            reset
+                .start(&lifecycle_contexts::start())
+                .await
+                .expect("changed query reset");
             assert_eq!(
                 reset.results().snapshot().expect("snapshot").as_of_sequence,
                 1,
@@ -1837,7 +1897,10 @@ mod persistent {
                 progress.clone(),
                 ConsumerRecoveryPolicy::AutoReset,
             );
-            replay.start().await.expect("restart consumer");
+            replay
+                .start(&lifecycle_contexts::start())
+                .await
+                .expect("restart consumer");
             let output = replay
                 .on_wakeup()
                 .await
@@ -1864,13 +1927,13 @@ mod persistent {
                     .generation,
                 reset.results().snapshot().expect("snapshot").generation
             );
-            reset.stop().await.expect("stop");
+            reset.stop(&lifecycle_contexts::stop()).await.expect("stop");
         }
         {
             let mut recovered =
                 query(provider, text, QueryRecoveryPolicy::Strict, false, calls).await;
             recovered
-                .start()
+                .start(&lifecycle_contexts::start())
                 .await
                 .expect("empty retained history is valid at a recorded reset baseline");
             assert_eq!(
@@ -1889,7 +1952,10 @@ mod persistent {
                 .await
                 .expect("new live output");
             assert_eq!(output[0].envelope.system().sequence(), 2);
-            recovered.stop().await.expect("stop");
+            recovered
+                .stop(&lifecycle_contexts::stop())
+                .await
+                .expect("stop");
         }
     }
 
@@ -1930,7 +1996,10 @@ mod persistent {
             Arc::new(AtomicUsize::new(0)),
         )
         .await;
-        reset.start().await.expect("explicit reset");
+        reset
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("explicit reset");
         assert_eq!(
             reset.results().snapshot().expect("snapshot").as_of_sequence,
             17
@@ -1943,7 +2012,7 @@ mod persistent {
             .await
             .expect("live");
         assert_eq!(output[0].envelope.system().sequence(), 18);
-        reset.stop().await.expect("stop");
+        reset.stop(&lifecycle_contexts::stop()).await.expect("stop");
     }
 
     #[tokio::test]
@@ -1994,13 +2063,19 @@ mod persistent {
                 calls.clone(),
             )
             .await;
-            let error = strict.start().await.expect_err("invalid stored marker");
+            let error = strict
+                .start(&lifecycle_contexts::start())
+                .await
+                .expect_err("invalid stored marker");
             assert!(matches!(
                 error.downcast_ref::<QueryRecoveryError>(),
                 Some(QueryRecoveryError::Inconsistent(_))
             ));
             assert_eq!(calls.load(Ordering::SeqCst), 0);
-            strict.stop().await.expect("cleanup");
+            strict
+                .stop(&lifecycle_contexts::stop())
+                .await
+                .expect("cleanup");
         }
     }
 
@@ -2062,7 +2137,10 @@ mod persistent {
             )
             .await
             .expect("construct");
-            query.start().await.expect("recover maximum sequence");
+            query
+                .start(&lifecycle_contexts::start())
+                .await
+                .expect("recover maximum sequence");
             for (sequence, position) in [
                 (1, bytes::Bytes::from_static(b"valid-cursor")),
                 (
@@ -2090,7 +2168,7 @@ mod persistent {
                     .expect("no output allocation for a no-op")
                     .is_empty());
             }
-            query.stop().await.expect("stop");
+            query.stop(&lifecycle_contexts::stop()).await.expect("stop");
         }
         let resources = provider
             .create_indexes("recovery", &fixture_support::component_id(46))

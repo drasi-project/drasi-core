@@ -314,8 +314,15 @@ impl RuntimeComponent for ReactionInstance {
         host.validate_startup_configuration().await?;
         let mut subscriptions = Vec::new();
         let mut heads = BTreeMap::new();
+        let control = owner.control()?;
         for id in &query_ids {
-            host.wait_query_ready(id).await?;
+            // An explicitly stopped query is preserved, not awaited until the
+            // startup deadline: fail this start promptly with a typed cause.
+            tokio::select! {
+                biased;
+                error = query_explicitly_stopped(&control, id) => return Err(error),
+                result = host.wait_query_ready(id) => result?,
+            }
             let subscription = owner.query_subscription(id).await?;
             heads.insert(id.clone(), subscription.head()?);
             subscriptions.push((id.clone(), subscription));
@@ -422,5 +429,38 @@ impl RuntimeComponent for ReactionInstance {
         context: crate::management::OrdinaryComponentUpdateContext,
     ) -> anyhow::Result<()> {
         self.reaction.apply_update(context).await
+    }
+}
+
+/// Resolves once `query` is explicitly stopped: its current generation ran, was
+/// stopped by a lifecycle request, and its activation is deferred until another
+/// explicit start. A generation that never started (a pending, replaced or
+/// disabled-auto-start query) remains a wait.
+async fn query_explicitly_stopped(control: &GraphControl, query: &ComponentId) -> anyhow::Error {
+    let mut registry = control.subscribe_registry();
+    loop {
+        {
+            let publication = registry.borrow_and_update();
+            let stopped = publication.activation_is_deferred(query)
+                && publication
+                    .observed
+                    .components
+                    .get(query)
+                    .is_some_and(|node| {
+                        node.started
+                            && node.lifecycle_requested
+                            && node.lifecycle == ComponentLifecycle::Stopped
+                    });
+            if stopped {
+                return crate::error::DependencyStoppedError {
+                    component_type: "reaction",
+                    dependency: query.clone(),
+                }
+                .into();
+            }
+        }
+        if registry.changed().await.is_err() {
+            return std::future::pending().await;
+        }
     }
 }

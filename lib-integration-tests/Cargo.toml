@@ -24,6 +24,10 @@ drasi-core.workspace = true
 drasi-core-types.workspace = true
 drasi-source-postgres.workspace = true
 drasi-source-application.workspace = true
+drasi-source-http = { path = "../components/sources/http" }
+drasi-source-grpc = { path = "../components/sources/grpc" }
+drasi-source-otel = { path = "../components/sources/otel" }
+drasi-bootstrap-noop = { path = "../components/bootstrappers/noop" }
 drasi-reaction-application.workspace = true
 drasi-bootstrap-application.workspace = true
 drasi-source-sqlite.workspace = true

@@ -129,8 +129,10 @@ async fn interrupted_stop_preserves_owned_workers_multi_thread() {
     interrupted_stop().await;
 }
 
-#[tokio::test]
-async fn stop_timeout_is_not_completed_cleanup() {
+/// A worker that ignores the cooperative stop signal is aborted, and the abort
+/// is joined before stop reports success, so nothing it owns outlives stop.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn stop_joins_an_aborted_worker_before_reporting_stopped() {
     for base in Base::cases() {
         let exited = Arc::new(AtomicUsize::new(0));
         let (started, ready) = oneshot::channel();
@@ -145,6 +147,35 @@ async fn stop_timeout_is_not_completed_cleanup() {
         .await;
         ready.await.expect("worker started");
         base.set_running().await;
+        base.stop().await.expect("aborted worker joined");
+        assert_eq!(
+            exited.load(Ordering::SeqCst),
+            1,
+            "aborted worker must be joined"
+        );
+        assert!(base.slot().read().await.is_none());
+        assert_eq!(base.status().await, ComponentStatus::Stopped);
+    }
+}
+
+/// Work that cannot observe an abort is never reported as released.
+#[tokio::test]
+async fn stop_timeout_is_not_completed_cleanup() {
+    for base in Base::cases() {
+        let exited = Arc::new(AtomicUsize::new(0));
+        let (started, ready) = oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        base.install(tokio::task::spawn_blocking({
+            let exited = exited.clone();
+            move || {
+                let _exit = Exit(exited);
+                started.send(()).expect("worker readiness observed");
+                let _ = blocked.recv();
+            }
+        }))
+        .await;
+        ready.await.expect("worker started");
+        base.set_running().await;
         let error = base.stop().await.unwrap_err();
         assert!(matches!(
             error.downcast_ref::<WorkerCleanupError>(),
@@ -152,7 +183,9 @@ async fn stop_timeout_is_not_completed_cleanup() {
         ));
         assert!(base.slot().read().await.is_some());
         assert_ne!(base.status().await, ComponentStatus::Stopped);
+        assert_eq!(exited.load(Ordering::SeqCst), 0);
 
+        release.send(()).expect("worker still owned");
         base.stop().await.unwrap();
         assert_eq!(exited.load(Ordering::SeqCst), 1);
         assert!(base.slot().read().await.is_none());

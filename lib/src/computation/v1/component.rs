@@ -318,8 +318,31 @@ pub trait EnvelopeSink: ComputationComponent {
     /// cannot upgrade this declaration.
     fn completion(&self) -> SinkCompletion;
 
+    /// Observer-only deliveries this sink makes, which a stop must not wait on.
+    /// Captured at construction/operation boundaries; `None` (the default) means
+    /// every delivery is an obligation that stop drains. Durable obligations,
+    /// such as QoS journals and delivery runners, must not use this.
+    fn observer_delivery(&self) -> Option<std::sync::Arc<dyn ObserverDelivery>> {
+        None
+    }
+
     /// Success meets exactly the instance's declared completion boundary.
     /// It does not automatically acknowledge a Delivery or establish
     /// durability/atomicity of external effects.
     async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()>;
+}
+
+/// Live observers of a sink's deliveries (for example query-result
+/// subscribers) that backpressure while the component runs but are not
+/// delivery obligations. When a stop of the component is requested the graph
+/// releases them, so the stop's drain never waits for an observer that is not
+/// reading; an observer that falls behind while released is reported a typed
+/// gap instead of silently missing deliveries. The graph reclaims them when
+/// the stop is withdrawn or the component starts again.
+pub trait ObserverDelivery: Send + Sync {
+    /// A stop was requested: stop waiting for observers without capacity.
+    fn release_observers(&self);
+    /// The stop was withdrawn or the component is starting: observers
+    /// backpressure deliveries again.
+    fn reclaim_observers(&self);
 }

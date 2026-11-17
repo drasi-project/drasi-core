@@ -20,3 +20,5 @@ proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
 syn = { version = "2", features = ["full", "visit", "visit-mut"] }
 drasi-ffi-primitives = { path = "../components/ffi-primitives" }
+drasi-computation-plugin-abi = { path = "../components/computation-plugin-abi" }
+semver = "1"

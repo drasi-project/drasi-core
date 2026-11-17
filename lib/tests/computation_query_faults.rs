@@ -523,7 +523,7 @@ async fn schedule_writes_and_pops_roll_back_with_input_state_and_recover_exactly
                 .await?
                 .with_source_progress(progress.clone())?;
                 let mut query = QueryUnderTest::new(query, entry);
-                query.start().await?;
+                query.start(&lifecycle_contexts::start()).await?;
                 if point != Fault::SchedulePush {
                     assert!(query.transform(scheduling_input(1, true)).await?.is_empty());
                 }
@@ -541,7 +541,7 @@ async fn schedule_writes_and_pops_roll_back_with_input_state_and_recover_exactly
                 );
                 assert!(query.results().snapshot()?.rows.is_empty());
                 assert!(query.transform(scheduling_input(3, true)).await.is_err());
-                query.stop().await?;
+                query.stop(&lifecycle_contexts::stop()).await?;
                 drop(query);
 
                 let stored = base.create_indexes("faults", &query_id()).await?;
@@ -569,7 +569,7 @@ async fn schedule_writes_and_pops_roll_back_with_input_state_and_recover_exactly
                     .await?
                     .with_source_progress(progress.clone())?;
                 let mut recovered = QueryUnderTest::new(recovered, entry);
-                recovered.start().await?;
+                recovered.start(&lifecycle_contexts::start()).await?;
                 if point == Fault::SchedulePush {
                     assert!(recovered
                         .transform(scheduling_input(1, true))
@@ -598,7 +598,7 @@ async fn schedule_writes_and_pops_roll_back_with_input_state_and_recover_exactly
                         .sequence,
                     if point == Fault::ScheduleRemove { 2 } else { 1 }
                 );
-                recovered.stop().await?;
+                recovered.stop(&lifecycle_contexts::stop()).await?;
             }
         }
     }
@@ -647,7 +647,10 @@ async fn atomic_fault_matrix(backend: Backend, entry: EntryPoint) {
             .with_source_progress(progress.clone())
             .expect("source progress");
             let mut query = QueryUnderTest::new(query, entry);
-            query.start().await.expect("start");
+            query
+                .start(&lifecycle_contexts::start())
+                .await
+                .expect("start");
             fault.armed.store(true, Ordering::Release);
             assert!(query.transform(input(1)).await.is_err(), "{point:?}");
             assert!(
@@ -666,7 +669,10 @@ async fn atomic_fault_matrix(backend: Backend, entry: EntryPoint) {
                 progress.wait_ready().await.is_err(),
                 "a failed owner wakes a source waiting for confirmed progress"
             );
-            query.stop().await.expect("cleanup");
+            query
+                .stop(&lifecycle_contexts::stop())
+                .await
+                .expect("cleanup");
         }
         {
             let stored = base
@@ -718,7 +724,10 @@ async fn atomic_fault_matrix(backend: Backend, entry: EntryPoint) {
             .with_source_progress(progress.clone())
             .expect("source progress");
         let mut reopened = QueryUnderTest::new(reopened, entry);
-        reopened.start().await.expect("consistent rollback");
+        reopened
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("consistent rollback");
         assert!(reopened
             .results()
             .snapshot()
@@ -742,7 +751,10 @@ async fn atomic_fault_matrix(backend: Backend, entry: EntryPoint) {
                 .sequence,
             1
         );
-        reopened.stop().await.expect("stop");
+        reopened
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
     }
 }
 
@@ -767,18 +779,27 @@ async fn outbox_overflow_eviction_rolls_back_with_failed_output_and_stays_bounde
             )
             .await
             .expect("construct");
-            query.start().await.expect("start");
+            query
+                .start(&lifecycle_contexts::start())
+                .await
+                .expect("start");
             query.transform(input(1)).await.expect("first output");
             query.transform(input(2)).await.expect("full outbox");
             fault.armed.store(true, Ordering::Release);
             assert!(query.transform(input(3)).await.is_err(), "{backend:?}");
-            query.stop().await.expect("stop failed query");
+            query
+                .stop(&lifecycle_contexts::stop())
+                .await
+                .expect("stop failed query");
         }
         {
             let mut query = ContinuousQueryTransformer::new(definition(), base.clone())
                 .await
                 .expect("reopen");
-            query.start().await.expect("recover rolled-back eviction");
+            query
+                .start(&lifecycle_contexts::start())
+                .await
+                .expect("recover rolled-back eviction");
             assert_eq!(
                 query
                     .results()
@@ -802,12 +823,18 @@ async fn outbox_overflow_eviction_rolls_back_with_failed_output_and_stays_bounde
                     if before == &serde_json::json!({"name": "name-2"})
                         && after == &serde_json::json!({"name": "name-3"})
             ));
-            query.stop().await.expect("stop successful replay");
+            query
+                .stop(&lifecycle_contexts::stop())
+                .await
+                .expect("stop successful replay");
         }
         let mut query = ContinuousQueryTransformer::new(definition(), base)
             .await
             .expect("second reopen");
-        query.start().await.expect("recover committed retention");
+        query
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("recover committed retention");
         assert!(query.results().replay(0).is_err());
         assert_eq!(
             query
@@ -820,7 +847,10 @@ async fn outbox_overflow_eviction_rolls_back_with_failed_output_and_stays_bounde
             vec![2, 3],
             "{backend:?}"
         );
-        query.stop().await.expect("cleanup");
+        query
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("cleanup");
     }
 }
 
@@ -845,10 +875,16 @@ async fn non_atomic_pending_marker_stage_and_clear_failures_have_distinct_recove
             )
             .await
             .expect("construct");
-            query.start().await.expect("start");
+            query
+                .start(&lifecycle_contexts::start())
+                .await
+                .expect("start");
             fault.armed.store(true, Ordering::Release);
             assert!(query.transform(input(1)).await.is_err());
-            query.stop().await.expect("cleanup");
+            query
+                .stop(&lifecycle_contexts::stop())
+                .await
+                .expect("cleanup");
         }
         let mut reopened =
             ContinuousQueryTransformer::new_with_options(definition(false), base, options)
@@ -856,7 +892,7 @@ async fn non_atomic_pending_marker_stage_and_clear_failures_have_distinct_recove
                 .expect("reopen");
         if point == Fault::PendingStart {
             reopened
-                .start()
+                .start(&lifecycle_contexts::start())
                 .await
                 .expect("initial fence failed before evaluation began");
             assert_eq!(
@@ -868,7 +904,7 @@ async fn non_atomic_pending_marker_stage_and_clear_failures_have_distinct_recove
             );
         } else {
             let error = reopened
-                .start()
+                .start(&lifecycle_contexts::start())
                 .await
                 .expect_err("successful core commit, incomplete publication");
             assert!(matches!(
@@ -876,7 +912,10 @@ async fn non_atomic_pending_marker_stage_and_clear_failures_have_distinct_recove
                 Some(QueryRecoveryError::PendingPublication)
             ));
         }
-        reopened.stop().await.expect("cleanup");
+        reopened
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("cleanup");
     }
 }
 
@@ -913,9 +952,12 @@ async fn recovery_io_failure_does_not_authorize_auto_reset_of_committed_state() 
         let mut first = ContinuousQueryTransformer::new(definition(false), base.clone())
             .await
             .expect("query");
-        first.start().await.expect("start");
+        first
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("start");
         first.transform(input(1)).await.expect("committed input");
-        first.stop().await.expect("stop");
+        first.stop(&lifecycle_contexts::stop()).await.expect("stop");
     }
     let fault = Injection::new(Fault::ReadLiveRows);
     {
@@ -934,24 +976,36 @@ async fn recovery_io_failure_does_not_authorize_auto_reset_of_committed_state() 
         .expect("reopen")
         .with_bootstrap(Arc::new(NoBootstrap));
         fault.armed.store(true, Ordering::Release);
-        let error = unavailable.start().await.expect_err("storage outage");
+        let error = unavailable
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect_err("storage outage");
         assert!(matches!(
             error.downcast_ref::<IndexError>(),
             Some(IndexError::IOError)
         ));
         assert!(error.downcast_ref::<QueryRecoveryError>().is_none());
-        unavailable.stop().await.expect("cleanup");
+        unavailable
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("cleanup");
     }
     let mut recovered = ContinuousQueryTransformer::new(definition(false), base)
         .await
         .expect("reopen after outage");
-    recovered.start().await.expect("committed state retained");
+    recovered
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("committed state retained");
     let snapshot = recovered.results().snapshot().expect("snapshot");
     assert_eq!(snapshot.as_of_sequence, 1);
     assert_eq!(snapshot.rows.len(), 1);
     assert_eq!(snapshot.generation, 0);
     assert_eq!(recovered.results().replay(0).expect("outbox").len(), 1);
-    recovered.stop().await.expect("stop");
+    recovered
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop");
 }
 
 #[tokio::test]
@@ -972,24 +1026,33 @@ async fn bootstrap_projection_and_completion_checkpoint_failures_keep_handoff_cl
             .expect("construct")
             .with_bootstrap(Arc::new(Bootstrap));
             fault.armed.store(true, Ordering::Release);
-            assert!(query.start().await.is_err());
+            assert!(query.start(&lifecycle_contexts::start()).await.is_err());
             assert!(
                 query.transform(input(2)).await.is_err(),
                 "failed bootstrap must close live ingress"
             );
-            query.stop().await.expect("cleanup");
+            query
+                .stop(&lifecycle_contexts::stop())
+                .await
+                .expect("cleanup");
         }
         {
             let mut strict = ContinuousQueryTransformer::new(definition(false), base.clone())
                 .await
                 .expect("reopen")
                 .with_bootstrap(Arc::new(Bootstrap));
-            let error = strict.start().await.expect_err("incomplete durable marker");
+            let error = strict
+                .start(&lifecycle_contexts::start())
+                .await
+                .expect_err("incomplete durable marker");
             assert!(matches!(
                 error.downcast_ref::<QueryRecoveryError>(),
                 Some(QueryRecoveryError::IncompleteBootstrap)
             ));
-            strict.stop().await.expect("cleanup");
+            strict
+                .stop(&lifecycle_contexts::stop())
+                .await
+                .expect("cleanup");
         }
         let mut reset = ContinuousQueryTransformer::new_with_options(
             definition(false),
@@ -1002,14 +1065,17 @@ async fn bootstrap_projection_and_completion_checkpoint_failures_keep_handoff_cl
         .await
         .expect("reset")
         .with_bootstrap(Arc::new(Bootstrap));
-        reset.start().await.expect("complete new snapshot");
+        reset
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("complete new snapshot");
         assert_eq!(reset.results().snapshot().expect("snapshot").rows.len(), 1);
         assert!(reset
             .transform(input(1))
             .await
             .expect("covered watermark")
             .is_empty());
-        reset.stop().await.expect("stop");
+        reset.stop(&lifecycle_contexts::stop()).await.expect("stop");
     }
 }
 
@@ -1043,7 +1109,10 @@ async fn cancelled_committed_outputs(backend: Backend, entry: EntryPoint) {
             .await
             .expect("construct");
             let mut query = QueryUnderTest::new(query, entry);
-            query.start().await.expect("start");
+            query
+                .start(&lifecycle_contexts::start())
+                .await
+                .expect("start");
             if temporal {
                 assert!(query
                     .transform(input(1))
@@ -1076,13 +1145,19 @@ async fn cancelled_committed_outputs(backend: Backend, entry: EntryPoint) {
                 query.transform(input(2)).await.is_err(),
                 "late commit cannot open failed ingress"
             );
-            query.stop().await.expect("join owned I/O and retire query");
+            query
+                .stop(&lifecycle_contexts::stop())
+                .await
+                .expect("join owned I/O and retire query");
         }
         let recovered = ContinuousQueryTransformer::new(definition(temporal), base)
             .await
             .expect("reopen");
         let mut recovered = QueryUnderTest::new(recovered, entry);
-        recovered.start().await.expect("committed output recovery");
+        recovered
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("committed output recovery");
         let retained = recovered
             .results()
             .replay(0)
@@ -1141,7 +1216,10 @@ async fn cancelled_committed_outputs(backend: Backend, entry: EntryPoint) {
             );
         }
 
-        recovered.stop().await.expect("stop");
+        recovered
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
     }
 }
 
@@ -1164,18 +1242,27 @@ async fn transaction_query_body_failed_confirmation_replays_identical_results_wi
             .await
             .expect("construct");
             let mut query = query.with_delivery_tracking();
-            query.start().await.expect("start");
+            query
+                .start(&lifecycle_contexts::start())
+                .await
+                .expect("start");
             output = query.transform(input(1)).await.expect("commit result");
             fault.armed.store(true, Ordering::Release);
             assert!(query.delivery_completed(&output).await.is_err());
-            query.stop().await.expect("cleanup");
+            query
+                .stop(&lifecycle_contexts::stop())
+                .await
+                .expect("cleanup");
         }
         {
             let query = ContinuousQueryTransformer::new(definition(false), base.clone())
                 .await
                 .expect("reopen");
             let mut query = query.with_delivery_tracking();
-            query.start().await.expect("start");
+            query
+                .start(&lifecycle_contexts::start())
+                .await
+                .expect("start");
             assert!(query.has_pending_emissions());
             let replay = query.continue_transform().await.expect("replay");
             assert_eq!(replay.len(), 1);
@@ -1208,16 +1295,22 @@ async fn transaction_query_body_failed_confirmation_replays_identical_results_wi
                 .await
                 .expect("deduplicated input")
                 .is_empty());
-            query.stop().await.expect("stop");
+            query.stop(&lifecycle_contexts::stop()).await.expect("stop");
         }
         let query = ContinuousQueryTransformer::new(definition(false), base)
             .await
             .expect("reopen confirmed");
         let mut query = query.with_delivery_tracking();
-        query.start().await.expect("start");
+        query
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("start");
         assert!(!query.has_pending_emissions());
         assert_eq!(query.results().replay(0).unwrap().len(), 1);
-        query.stop().await.expect("cleanup");
+        query
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("cleanup");
     }
 }
 #[tokio::test]
@@ -1235,11 +1328,14 @@ async fn strict_recovery_output_validation(backend: Backend) {
             let mut query = ContinuousQueryTransformer::new(definition(false), base.clone())
                 .await
                 .expect("construct");
-            query.start().await.expect("start");
+            query
+                .start(&lifecycle_contexts::start())
+                .await
+                .expect("start");
             for sequence in 1..=3 {
                 query.transform(input(sequence)).await.expect("output");
             }
-            query.stop().await.expect("stop");
+            query.stop(&lifecycle_contexts::stop()).await.expect("stop");
         }
         {
             let resources = base
@@ -1282,12 +1378,18 @@ async fn strict_recovery_output_validation(backend: Backend) {
         let mut query = ContinuousQueryTransformer::new(definition(false), base)
             .await
             .expect("reopen");
-        let error = query.start().await.expect_err("cannot infer lost output");
+        let error = query
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect_err("cannot infer lost output");
         assert!(matches!(
             error.downcast_ref::<QueryRecoveryError>(),
             Some(QueryRecoveryError::Inconsistent(_))
         ));
-        query.stop().await.expect("cleanup");
+        query
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("cleanup");
     }
 }
 
@@ -1335,7 +1437,10 @@ async fn transport_checkpoint_failure_cannot_commit_query_state_or_advance_dupli
             .with_source_progress(progress.clone())
             .expect("source progress");
             let mut query = query.with_delivery_tracking();
-            query.start().await.expect("start");
+            query
+                .start(&lifecycle_contexts::start())
+                .await
+                .expect("start");
             fault.armed.store(true, Ordering::Release);
             assert!(query.transform(replayed_source_input(11)).await.is_err());
             assert_eq!(
@@ -1344,7 +1449,10 @@ async fn transport_checkpoint_failure_cannot_commit_query_state_or_advance_dupli
             );
             assert!(progress.snapshot().checkpoints.is_empty());
             assert!(progress.snapshot().transport_sequences.is_empty());
-            query.stop().await.expect("cleanup");
+            query
+                .stop(&lifecycle_contexts::stop())
+                .await
+                .expect("cleanup");
         }
         {
             let stored = base
@@ -1395,7 +1503,10 @@ async fn transport_checkpoint_failure_cannot_commit_query_state_or_advance_dupli
             .with_source_progress(progress.clone())
             .expect("progress");
             let mut query = query.with_delivery_tracking();
-            query.start().await.expect("start after rollback");
+            query
+                .start(&lifecycle_contexts::start())
+                .await
+                .expect("start after rollback");
             let output = query
                 .transform(replayed_source_input(11))
                 .await
@@ -1418,7 +1529,10 @@ async fn transport_checkpoint_failure_cannot_commit_query_state_or_advance_dupli
                 query.transform(replayed_source_input(12)).await.is_err(),
                 "duplicate progress must not hide persistence failure"
             );
-            query.stop().await.expect("cleanup");
+            query
+                .stop(&lifecycle_contexts::stop())
+                .await
+                .expect("cleanup");
         }
         {
             let stored = base
@@ -1463,7 +1577,10 @@ async fn transport_checkpoint_failure_cannot_commit_query_state_or_advance_dupli
             .with_source_progress(progress.clone())
             .expect("progress");
         let mut query = query.with_delivery_tracking();
-        query.start().await.expect("start");
+        query
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("start");
         assert!(query
             .transform(replayed_source_input(12))
             .await
@@ -1478,6 +1595,48 @@ async fn transport_checkpoint_failure_cannot_commit_query_state_or_advance_dupli
                 [&StreamId::try_new("source/out").expect("stream")],
             12
         );
-        query.stop().await.expect("stop");
+        query.stop(&lifecycle_contexts::stop()).await.expect("stop");
+    }
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
     }
 }

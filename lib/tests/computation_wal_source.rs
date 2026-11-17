@@ -557,7 +557,10 @@ mod persistent_progress {
                 .expect("query")
                 .with_source_progress(owner.clone())
                 .expect("binding");
-            query.start().await.expect("start query");
+            query
+                .start(&lifecycle_contexts::start())
+                .await
+                .expect("start query");
             queries.push(query);
             owners.push(owner);
         }
@@ -567,7 +570,9 @@ mod persistent_progress {
             resource.clone(),
             0,
         );
-        seed.start().await.expect("seed source");
+        seed.start(&lifecycle_contexts::start())
+            .await
+            .expect("seed source");
         let first = seed.next().await.expect("first").expect("event");
         let second = seed.next().await.expect("second").expect("event");
         for query in &mut queries {
@@ -586,7 +591,9 @@ mod persistent_progress {
             })
             .await
             .expect("fast consumer handles second");
-        seed.stop().await.expect("stop seed");
+        seed.stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop seed");
         let consumers = Arc::new(
             ConsumerProgressSet::new("source-progress", source_id.clone(), owners.clone())
                 .expect("actual consumers"),
@@ -600,15 +607,21 @@ mod persistent_progress {
         .with_consumer_progress(consumers.clone())
         .expect("binding");
         assert!(
-            invalid.start().await.is_err(),
+            invalid.start(&lifecycle_contexts::start()).await.is_err(),
             "configured resume must not skip the slow owner"
         );
-        invalid.stop().await.expect("cleanup rejected start");
+        invalid
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("cleanup rejected start");
         let mut source =
             WalReplaySource::new(source_id.clone(), output_stream.clone(), resource, 0)
                 .with_consumer_progress(consumers)
                 .expect("multi-owner binding");
-        source.start().await.expect("resume all owners");
+        source
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("resume all owners");
         let replay = source.next().await.expect("replay").expect("second event");
         assert_eq!(
             GraphChangeCodec::source_metadata(&replay.envelope)
@@ -653,9 +666,15 @@ mod persistent_progress {
             );
             assert_eq!(owner.snapshot().transport_sequences[&output_stream], 4);
         }
-        source.stop().await.expect("stop source");
+        source
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop source");
         for query in &mut queries {
-            query.stop().await.expect("stop query");
+            query
+                .stop(&lifecycle_contexts::stop())
+                .await
+                .expect("stop query");
         }
         assert_eq!(wal.deletes.load(Ordering::SeqCst), 0);
         assert_eq!(wal.prunes.load(Ordering::SeqCst), 0);
@@ -869,7 +888,10 @@ mod persistent_progress {
             0,
         )
         .with_source_progress(progress.clone());
-        let (source_started, query_started) = tokio::join!(source.start(), query.start());
+        let (source_start, query_start) =
+            (lifecycle_contexts::start(), lifecycle_contexts::start());
+        let (source_started, query_started) =
+            tokio::join!(source.start(&source_start), query.start(&query_start));
         source_started.expect("source waits for durable query reconciliation");
         query_started.expect("query recovery");
         wal.append(
@@ -900,8 +922,14 @@ mod persistent_progress {
             .await
             .expect("process");
         assert_eq!(output[0].envelope.system().sequence(), 3);
-        source.stop().await.expect("stop source");
-        query.stop().await.expect("stop query");
+        source
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop source");
+        query
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop query");
         assert_eq!(wal.deletes.load(Ordering::SeqCst), 0);
     }
 }

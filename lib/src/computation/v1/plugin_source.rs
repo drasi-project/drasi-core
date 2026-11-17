@@ -610,6 +610,11 @@ struct SubscriptionState {
     position: Option<Arc<AtomicU64>>,
     requested_position: bool,
     generation: u64,
+    /// A persistent subscription made without a committed checkpoint. Only
+    /// such a subscription can contribute a fresh bootstrap boundary.
+    fresh: bool,
+    /// Snapshot events actually received from this subscription's bootstrap.
+    bootstrap_events: Arc<AtomicUsize>,
 }
 
 pub struct LegacySourceSubscription {
@@ -663,6 +668,8 @@ impl LegacySourceSubscription {
                 position: None,
                 requested_position: false,
                 generation: 0,
+                fresh: false,
+                bootstrap_events: Arc::new(AtomicUsize::new(0)),
             }),
         }))
     }
@@ -875,6 +882,12 @@ impl LegacySourceSubscription {
                     state.result = response.bootstrap_result_receiver;
                     state.position = response.position_handle;
                     state.generation = view.reset_generation;
+                    // Streaming-only subscriptions already replay from sequence
+                    // zero without a checkpoint; only a bootstrap subscription
+                    // needs its empty-snapshot boundary recorded.
+                    state.fresh =
+                        view.persistent && saved.is_none() && self.options.enable_bootstrap;
+                    state.bootstrap_events = Arc::new(AtomicUsize::new(0));
                 }
                 // Keep the prepared cut owned until the query accepts a reset.
                 // A source without a snapshot must not invent a refresh, while
@@ -884,9 +897,11 @@ impl LegacySourceSubscription {
                     let generation = self.progress.as_ref()
                         .ok_or_else(|| anyhow::anyhow!("snapshot refresh lost source progress"))?
                         .snapshot().reset_generation;
-                    self.state.lock()
-                        .map_err(|_| anyhow::anyhow!("subscription ownership poisoned"))?
-                        .generation = generation;
+                    let mut state = self.state.lock()
+                        .map_err(|_| anyhow::anyhow!("subscription ownership poisoned"))?;
+                    state.generation = generation;
+                    // The accepted reset cleared every checkpoint.
+                    state.fresh = view.persistent && self.options.enable_bootstrap;
                 }
                 self.confirm_position()?;
                 self.phase.send_replace(SubscriptionPhase::Ready);
@@ -916,6 +931,7 @@ impl LegacySourceSubscription {
             state.bootstrap = None;
             state.result = None;
             state.position = None;
+            state.fresh = false;
             std::mem::take(&mut state.requested_position)
         };
         if requested {
@@ -1195,20 +1211,21 @@ impl ComputationBootstrapProvider for LegacySourceBootstrap {
     async fn snapshot(&self) -> anyhow::Result<ComputationBootstrapSnapshot> {
         let mut streams = Vec::new();
         for subscription in &self.subscriptions {
-            let receiver = subscription
-                .state
-                .lock()
-                .map_err(|_| anyhow::anyhow!("subscription ownership poisoned"))?
-                .bootstrap
-                .take();
+            let (receiver, received) = {
+                let mut state = subscription
+                    .state
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("subscription ownership poisoned"))?;
+                (state.bootstrap.take(), state.bootstrap_events.clone())
+            };
             if let Some(receiver) = receiver {
                 let source = subscription.host.id().to_owned();
                 let stream = StreamId::try_new(format!("{}/bootstrap", subscription.stream))?;
                 let deadline = tokio::time::Instant::now()
                     + std::time::Duration::from_secs(subscription.options.bootstrap_timeout_secs);
                 streams.push(Box::pin(futures::stream::try_unfold(
-                    (receiver, source, stream, deadline),
-                    |(mut receiver, source, stream, deadline)| async move {
+                    (receiver, source, stream, deadline, received),
+                    |(mut receiver, source, stream, deadline, received)| async move {
                         let Some(event) =
                             tokio::time::timeout_at(deadline, receiver.recv()).await?
                         else {
@@ -1217,6 +1234,7 @@ impl ComputationBootstrapProvider for LegacySourceBootstrap {
                         if event.source_id != source {
                             anyhow::bail!("bootstrap returned another source's data");
                         }
+                        received.fetch_add(1, Ordering::AcqRel);
                         let sequence = event
                             .sequence
                             .checked_add(1)
@@ -1227,7 +1245,10 @@ impl ComputationBootstrapProvider for LegacySourceBootstrap {
                             sequence,
                             Some(event.timestamp),
                         )?;
-                        Ok(Some((envelope, (receiver, source, stream, deadline))))
+                        Ok(Some((
+                            envelope,
+                            (receiver, source, stream, deadline, received),
+                        )))
                     },
                 ))
                     as std::pin::Pin<
@@ -1241,33 +1262,71 @@ impl ComputationBootstrapProvider for LegacySourceBootstrap {
         })
     }
     async fn complete_snapshot(&self) -> anyhow::Result<Vec<BootstrapWatermark>> {
-        let mut watermarks = Vec::new();
+        let mut pending = Vec::with_capacity(self.subscriptions.len());
         for subscription in &self.subscriptions {
-            let receiver = subscription
+            let mut state = subscription
                 .state
                 .lock()
-                .map_err(|_| anyhow::anyhow!("subscription ownership poisoned"))?
-                .result
-                .take();
-            if let Some(receiver) = receiver {
-                let result = tokio::time::timeout(
-                    std::time::Duration::from_secs(subscription.options.bootstrap_timeout_secs),
-                    receiver,
-                )
-                .await???;
-                if result.source_position.is_none() {
-                    // An absent bootstrap cursor is not a confirmed sequence-zero
-                    // checkpoint: the next start may still require bootstrap.
-                    continue;
-                }
-                watermarks.push(BootstrapWatermark {
-                    producer: None,
-                    stream: subscription.stream.clone(),
-                    source_id: Some(subscription.host.id().to_owned()),
-                    sequence: 0,
-                    position: result.source_position,
-                });
+                .map_err(|_| anyhow::anyhow!("subscription ownership poisoned"))?;
+            pending.push((
+                subscription,
+                state.result.take(),
+                state.bootstrap_events.load(Ordering::Acquire),
+                std::mem::take(&mut state.fresh),
+            ));
+        }
+        // Await every provider together: the first failure (or dropped result)
+        // fails the handover at once and drops the remaining receivers, which
+        // cancels providers that would otherwise never finish.
+        let completed = futures::future::try_join_all(pending.into_iter().map(
+            |(subscription, receiver, received, fresh)| async move {
+                let position = match receiver {
+                    Some(receiver) => {
+                        tokio::time::timeout(
+                            std::time::Duration::from_secs(
+                                subscription.options.bootstrap_timeout_secs,
+                            ),
+                            receiver,
+                        )
+                        .await
+                        .map_err(|_| {
+                            anyhow::anyhow!(
+                                "bootstrap result from source '{}' timed out",
+                                subscription.host.id()
+                            )
+                        })?
+                        .map_err(|_| {
+                            anyhow::anyhow!(
+                                "bootstrap provider for source '{}' ended without a result",
+                                subscription.host.id()
+                            )
+                        })??
+                        .source_position
+                    }
+                    None => None,
+                };
+                anyhow::Ok((subscription, position, received, fresh))
+            },
+        ))
+        .await?;
+        let mut watermarks = Vec::new();
+        for (subscription, position, received, fresh) in completed {
+            // A cursorless snapshot that incorporated data is not a confirmed
+            // boundary: the next start must bootstrap again under the recovery
+            // policy. A fresh persistent subscription that incorporated nothing
+            // has a real boundary at the start of its framework sequence, so a
+            // restart replays all of its retained history instead of
+            // bootstrapping again or skipping input admitted while stopped.
+            if position.is_none() && !(fresh && received == 0) {
+                continue;
             }
+            watermarks.push(BootstrapWatermark {
+                producer: None,
+                stream: subscription.stream.clone(),
+                source_id: Some(subscription.host.id().to_owned()),
+                sequence: 0,
+                position,
+            });
         }
         Ok(watermarks)
     }

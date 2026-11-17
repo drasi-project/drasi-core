@@ -68,6 +68,7 @@ pub(super) struct InstanceSlot {
     uses_volatile_input_progress: std::sync::atomic::AtomicBool,
     damaged: Mutex<Option<Arc<GraphError>>>,
     handler: Mutex<Option<Arc<dyn crate::computation::v1::ControlHandler>>>,
+    observers: Mutex<Option<Arc<dyn crate::computation::v1::ObserverDelivery>>>,
     requires_readiness: std::sync::atomic::AtomicBool,
     pub(super) processing_ready: std::sync::atomic::AtomicBool,
     delivery: Arc<super::sink_delivery::SinkDeliveryStatus>,
@@ -169,6 +170,7 @@ impl InstanceSlot {
             uses_volatile_input_progress: std::sync::atomic::AtomicBool::new(false),
             damaged: Mutex::new(None),
             handler: Mutex::new(None),
+            observers: Mutex::new(None),
             requires_readiness: std::sync::atomic::AtomicBool::new(false),
             processing_ready: std::sync::atomic::AtomicBool::new(true),
             value: Mutex::new(Some(Instance {
@@ -351,6 +353,23 @@ impl InstanceSlot {
         damaged.get_or_insert_with(|| Arc::new(error)).clone()
     }
 
+    /// Releases (on a requested stop) or reclaims (on start or a withdrawn
+    /// stop) this component's observer-only deliveries.
+    fn set_observers_released(&self, released: bool) {
+        let observers = self
+            .observers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(observers) = observers {
+            if released {
+                observers.release_observers();
+            } else {
+                observers.reclaim_observers();
+            }
+        }
+    }
+
     pub(super) fn damage(&self) -> Option<Arc<GraphError>> {
         self.damaged
             .lock()
@@ -504,6 +523,11 @@ impl InstanceLease {
             .handler
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = self.component.control_handler();
+        *self
+            .slot
+            .observers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = self.component.observer_delivery();
         self.slot.requires_readiness.store(
             self.component.requires_readiness_confirmation(),
             std::sync::atomic::Ordering::Release,
@@ -3585,6 +3609,9 @@ impl Operations {
         self.suspended_starts.extend(&selected);
         if matches!(reply, DrainReply::Stop(_)) {
             for index in &selected {
+                // Observers are not delivery obligations: the drain must not
+                // wait for one that is not reading.
+                graph.components[*index].set_observers_released(true);
                 self.pending_auto_start.remove(index);
                 self.supersede_queued_starts(graph.nodes[*index].descriptor.id());
             }
@@ -3660,6 +3687,9 @@ impl Operations {
         }
         for index in &group.selected {
             self.suspended_starts.remove(index);
+            if matches!(group.reply, DrainReply::Stop(_)) {
+                graph.components[*index].set_observers_released(false);
+            }
         }
         self.resume_quiescing(graph, &group.selected);
         let ids = group
@@ -4982,6 +5012,7 @@ impl Operations {
                         return Err(topology("unfinished activation must be stopped before reactivation"));
                     }
                     lease.attempted = true;
+                    lease.slot.set_observers_released(false);
                     if let Some(control) = peer_control {
                         lease.component.bind_control(control);
                     }

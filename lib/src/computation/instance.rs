@@ -425,6 +425,54 @@ impl Drop for Entry {
     }
 }
 
+/// Whether a failed shutdown is terminal: every retained cause is a component
+/// cleanup hook that returned a failure the host does not retry (not a
+/// retryable or cancelled `LifecycleError`, a timeout, or any other uncertain
+/// outcome). No processing worker remains behind such a failure, so retrying
+/// cannot change it and its storage owners need not be retained for a retry.
+pub(crate) fn shutdown_failure_is_terminal(error: &anyhow::Error) -> bool {
+    fn terminal_chain(error: &(dyn std::error::Error + 'static)) -> bool {
+        let mut current = Some(error);
+        while let Some(error) = current {
+            if let Some(error) = error.downcast_ref::<GraphError>() {
+                return terminal_graph(error);
+            }
+            if let Some(failures) = error.downcast_ref::<crate::error::OperationFailures>() {
+                return !failures.failures().is_empty()
+                    && failures
+                        .failures()
+                        .iter()
+                        .all(|failure| terminal_chain(failure.as_ref()));
+            }
+            current = error.source();
+        }
+        false
+    }
+    fn terminal_graph(error: &GraphError) -> bool {
+        match error {
+            GraphError::Cleanup { primary, errors } => {
+                !errors.is_empty()
+                    && primary.as_deref().is_none_or(terminal_graph)
+                    && errors.iter().all(terminal_graph)
+            }
+            GraphError::Reported { cause } => terminal_graph(cause),
+            GraphError::Component { source, .. } => source.chain().all(|cause| {
+                !cause
+                    .downcast_ref::<drasi_computation_contracts::lifecycle::LifecycleError>()
+                    .is_some_and(|error| error.is_retryable())
+                    && cause
+                        .downcast_ref::<super::v1::LifecycleTimeoutError>()
+                        .is_none()
+                    && cause
+                        .downcast_ref::<GraphError>()
+                        .is_none_or(terminal_graph)
+            }),
+            _ => false,
+        }
+    }
+    terminal_chain(error.as_ref())
+}
+
 fn operation(id: &str, action: &str, error: impl std::fmt::Display) -> DrasiError {
     DrasiError::operation_failed(
         "computation",

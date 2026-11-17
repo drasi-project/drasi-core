@@ -802,15 +802,7 @@ mod tests {
 
 /// Same major and an older or equal minor, matching the binary header rule.
 fn accepts_abi_version(version: &str) -> bool {
-    let mut parts = version.split('.').map(str::parse::<u16>);
-    match (parts.next(), parts.next(), parts.next(), parts.next()) {
-        (Some(Ok(major)), Some(Ok(minor)), Some(Ok(_)), None) => {
-            #[allow(clippy::absurd_extreme_comparisons)]
-            let accepted_minor = minor <= abi::ABI_MINOR;
-            major == abi::ABI_MAJOR && accepted_minor
-        }
-        _ => false,
-    }
+    abi::accepts_abi_version(version)
 }
 
 #[cfg(test)]

@@ -783,6 +783,13 @@ impl Component {
             Self::Deferred { .. } | Self::Unresolved(_) => false,
         }
     }
+
+    fn observer_delivery(&self) -> Option<Arc<dyn super::ObserverDelivery>> {
+        match self {
+            Self::Sink(component) => component.observer_delivery(),
+            _ => None,
+        }
+    }
 }
 
 /// Entire topology is validated by `build` before any provider creation or start.

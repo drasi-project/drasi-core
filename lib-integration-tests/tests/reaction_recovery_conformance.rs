@@ -1090,6 +1090,79 @@ async fn wait_for_snapshot_row(
     }
 }
 
+/// Runs in one child process: seed, terminal shutdown, then rebuild and recover
+/// over the same files without leaving the process.
+async fn terminal_shutdown_reopen_phase(paths: &FixturePaths) -> Result<()> {
+    let fixture = build_fixture(paths).await?;
+    fixture.core.start().await?;
+    wait_for_status(&fixture.core, REACTION_ID, ComponentStatus::Running).await?;
+    insert_person(&fixture.source, "p1", "Alice", true).await?;
+    wait_for_checkpoint_sequence(fixture.state_store.as_ref(), 1).await?;
+    insert_person(&fixture.source, "p2", "Bob", false).await?;
+    let checkpoint = wait_for_checkpoint_sequence(fixture.state_store.as_ref(), 2).await?;
+    let snapshot = observe_snapshot(&fixture.core).await?;
+    assert_eq!(
+        snapshot.people,
+        vec![person("p1", "Alice", true), person("p2", "Bob", false)]
+    );
+    let outbox = query_instance(&fixture.core).await?.fetch_outbox(0).await?;
+    assert_eq!(outbox.results.len(), 2);
+    let store = Arc::downgrade(&fixture.state_store);
+    let wal = Arc::downgrade(&fixture.wal);
+    tokio::time::timeout(Duration::from_secs(10), fixture.core.shutdown()).await??;
+    fixture.core.shutdown().await?;
+    drop(fixture);
+
+    // Reopening all three providers immediately proves teardown, not a delayed
+    // process exit or a sleep that happens to let detached tasks release locks.
+    assert!(store.upgrade().is_none(), "old state provider is retained");
+    assert!(wal.upgrade().is_none(), "old WAL provider is retained");
+    let recovered = build_fixture(paths).await?;
+    assert_eq!(
+        read_reaction_checkpoint(recovered.state_store.as_ref()).await?,
+        checkpoint
+    );
+    recovered.core.start().await?;
+    wait_for_status(&recovered.core, REACTION_ID, ComponentStatus::Running).await?;
+    assert_eq!(observe_snapshot(&recovered.core).await?, snapshot);
+    assert_eq!(
+        outbox_emissions(
+            &query_instance(&recovered.core)
+                .await?
+                .fetch_outbox(0)
+                .await?
+                .results
+        )?,
+        outbox_emissions(&outbox.results)?
+    );
+    insert_person(&recovered.source, "p3", "Carol", true).await?;
+    assert_eq!(
+        wait_for_checkpoint_sequence(recovered.state_store.as_ref(), 3)
+            .await?
+            .sequence,
+        3
+    );
+    assert_eq!(
+        journal_emissions(&read_journal(&paths.journal)?)?,
+        vec![
+            add_emission(1, "p1", "Alice", true),
+            add_emission(2, "p2", "Bob", false),
+            add_emission(3, "p3", "Carol", true),
+        ]
+    );
+    recovered.core.shutdown().await?;
+    drop(recovered);
+    let store = RedbStateStoreProvider::new(&paths.state)?;
+    assert_eq!(read_reaction_checkpoint(&store).await?.sequence, 3);
+    let partition = drasi_core::interface::StorePartition::named("fixture");
+    store.set(&partition, "after-recovery", vec![4]).await?;
+    assert_eq!(
+        store.get(&partition, "after-recovery").await?,
+        Some(vec![4])
+    );
+    Ok(())
+}
+
 async fn seed_phase(paths: &FixturePaths) -> Result<()> {
     let fixture = build_fixture(paths).await?;
     fixture.core.start().await?;
@@ -2041,6 +2114,30 @@ async fn rocksdb_redb_full_process_reconstruction() -> Result<()> {
     if let Err(error) = &cleanup {
         eprintln!("failed to clean up test root {}: {error}", root.display());
     }
+    if let Some(message) = failure {
+        anyhow::bail!(message);
+    }
+    cleanup.with_context(|| format!("remove test root {}", root.display()))?;
+    Ok(())
+}
+
+/// Terminal shutdown must release every durable provider (RocksDB index, redb
+/// state store, redb WAL) so one process can rebuild the same topology over the
+/// same files immediately and recover it without replaying side effects.
+#[tokio::test(flavor = "current_thread")]
+async fn terminal_shutdown_recovers_durable_topology_in_same_process() -> Result<()> {
+    if std::env::var_os(PHASE_ENV).is_some() {
+        return Ok(());
+    }
+
+    let root = test_root()?;
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("create test root {}", root.display()))?;
+    let paths = FixturePaths::under(&root);
+    let output = run_phase("terminal_shutdown_reopen", &paths)?;
+    let failure =
+        (!output.status.success()).then(|| child_failure("terminal_shutdown_reopen", &output));
+    let cleanup = std::fs::remove_dir_all(&root);
     if let Some(message) = failure {
         anyhow::bail!(message);
     }
@@ -3418,6 +3515,7 @@ fn recovery_phase<'a>(
     // future before polling it on the current-thread runtime.
     Ok(match phase {
         "seed" => Box::pin(seed_phase(paths)),
+        "terminal_shutdown_reopen" => Box::pin(terminal_shutdown_reopen_phase(paths)),
         "recover" => Box::pin(recover_phase(paths)),
         "seed_hwm" => Box::pin(seed_hwm_phase(paths)),
         "recover_hwm" => Box::pin(recover_hwm_phase(paths)),

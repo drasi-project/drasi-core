@@ -2036,9 +2036,12 @@ mod unwind {
             ],
         );
 
-        subject.stop().await.expect("stop after insert");
         subject
-            .start()
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop after insert");
+        subject
+            .start(&lifecycle_contexts::start())
             .await
             .expect("restart retains emitted element state");
         let smaller = node(
@@ -2079,9 +2082,12 @@ mod unwind {
         );
         assert!(updated.system().sequence() > inserted.system().sequence());
 
-        subject.stop().await.expect("stop after update");
         subject
-            .start()
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop after update");
+        subject
+            .start(&lifecycle_contexts::start())
             .await
             .expect("restart retains shrinking update");
         let deletion = SourceChange::Delete {
@@ -2129,7 +2135,10 @@ mod unwind {
             decoded(&delete),
             "new instances have no durable prior state"
         );
-        reconstructed.stop().await.expect("stop");
+        reconstructed
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
     }
 
     #[tokio::test]
@@ -2679,7 +2688,10 @@ async fn ordered_decoder_parse_json_promote_relabel_chain_uses_configured_names(
         .await
         .expect_err("promote cannot read parsed JSON before decoding and parsing");
     assert!(format!("{error:#}").contains("JSONPath"));
-    wrong_order.stop().await.expect("stop failed chain");
+    wrong_order
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop failed chain");
 }
 
 #[cfg(all(
@@ -2748,7 +2760,10 @@ mod ordered_mapping {
             output.changes().is_empty(),
             "map sees Raw before it is relabeled to Reading"
         );
-        wrong_order.stop().await.expect("stop");
+        wrong_order
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
     }
 
     async fn graph_scenario() {

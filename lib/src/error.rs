@@ -129,6 +129,16 @@ impl ComponentNotFoundError {
     }
 }
 
+/// Typed start failure carried through internal `anyhow` errors: the
+/// component needs a dependency that was explicitly stopped. An explicit stop
+/// is preserved rather than awaited; start the dependency, then retry.
+#[derive(Debug, Error)]
+#[error("{component_type} dependency {dependency} is explicitly stopped")]
+pub struct DependencyStoppedError {
+    pub component_type: &'static str,
+    pub dependency: ComponentId,
+}
+
 /// Main error type for drasi-lib operations.
 ///
 /// This enum provides structured error variants that enable type-safe pattern matching
