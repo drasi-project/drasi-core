@@ -17,6 +17,52 @@ permissions:
 
 
 jobs:
+  foundry-routines-example:
+    name: Foundry Routines Demo
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/lib/foundry-routines
+    env:
+      RUST_LOG: error
+      FOUNDRY_DEMO_POSTGRES_PASSWORD: local-fixture-only
+      FOUNDRY_DEMO_MYSQL_PASSWORD: local-fixture-only
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: examples/lib/foundry-routines/ui/package-lock.json
+      - name: Prepare Rust
+        run: rustup toolchain install stable --profile minimal --component clippy --component rustfmt && rustup override set stable
+      - name: Start owned database fixtures
+        run: docker compose up -d --wait
+      - name: Check and test standalone backend
+        run: |
+          cargo fmt -- --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked --all-targets -- --include-ignored
+          cargo build --locked
+      - name: Check and build portal UI
+        working-directory: examples/lib/foundry-routines/ui
+        run: npm ci && npm run check && npm test -- --run && npm run build
+      - name: Browser integration
+        run: |
+          target/debug/foundry-routines-demo --offline --fixtures > .demo-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid"' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8780/api/health >/dev/null; then break; fi
+            sleep 1
+          done
+          cd ui
+          npx playwright install --with-deps chromium
+          npm run test:e2e
+      - name: Stop database fixtures
+        if: always()
+        run: docker compose down
+
   signature-repair:
     name: Plugin Signature Repair Tests (offline)
     runs-on: ubuntu-latest

@@ -1,0 +1,44 @@
+[package]
+name = "foundry-routines-demo"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+
+[workspace]
+
+[dependencies]
+drasi-lib = { path = "../../../lib" }
+drasi-source-postgres = { path = "../../../components/sources/postgres" }
+drasi-source-mysql = { path = "../../../components/sources/mysql" }
+drasi-bootstrap-postgres = { path = "../../../components/bootstrappers/postgres" }
+drasi-bootstrap-mysql = { path = "../../../components/bootstrappers/mysql" }
+drasi-state-store-redb = { path = "../../../components/state_stores/redb" }
+drasi-identity-azure = { path = "../../../components/identity/azure" }
+drasi-mysql-common = { path = "../../../components/mysql-common" }
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+dotenvy = "0.15"
+env_logger = "0.11"
+futures-util = "0.3"
+log = "0.4"
+mysql_async = { version = "0.37", features = ["rustls-tls", "ring", "tls12"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-postgres = "0.7"
+tokio-postgres-rustls = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "0.26"
+tower-http = { version = "0.6", features = ["fs"] }
+uuid = { version = "1", features = ["v4", "v5"] }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+
+[profile.dev]
+debug = 0

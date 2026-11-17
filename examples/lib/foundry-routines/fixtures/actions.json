@@ -1,0 +1,7 @@
+[
+  {"name":"stock-risk","title":"Reduce SKU-A stock","connectionId":"inventory-db","sql":"UPDATE inventory SET available = 3 WHERE sku = 'SKU-A'"},
+  {"name":"unrelated","title":"Change unrelated notes","connectionId":"orders-db","sql":"UPDATE orders SET notes = notes || ' updated' WHERE order_id = 'order-1001'"},
+  {"name":"order-risk","title":"Increase order-1002 quantity","connectionId":"orders-db","sql":"UPDATE orders SET quantity = 12 WHERE order_id = 'order-1002'"},
+  {"name":"restore","title":"Restore SKU-A stock","connectionId":"inventory-db","sql":"UPDATE inventory SET available = 10 WHERE sku = 'SKU-A'"},
+  {"name":"reenter","title":"Reduce SKU-A stock again","connectionId":"inventory-db","sql":"UPDATE inventory SET available = 2 WHERE sku = 'SKU-A'"}
+]

@@ -1,0 +1,31 @@
+{
+  "name": "foundry-routines-ui",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "check": "tsc --noEmit",
+    "test": "vitest",
+    "test:e2e": "playwright test",
+    "build": "tsc --noEmit && vite build"
+  },
+  "dependencies": {
+    "@fluentui/react-components": "^9.72.0",
+    "@fluentui/react-icons": "^2.0.321",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.1",
+    "@testing-library/react": "^16.3.0",
+    "@types/node": "^24.10.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.1.0",
+    "jsdom": "^27.1.0",
+    "typescript": "~5.9.3",
+    "vite": "^7.2.2",
+    "vitest": "^3.2.4"
+  }
+}

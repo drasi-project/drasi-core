@@ -1,0 +1,15 @@
+[
+  {
+    "id": "orders-db", "name": "Orders · PostgreSQL", "kind": "postgres",
+    "host": "127.0.0.1", "port": 15432, "database": "orders", "user": "drasi",
+    "passwordRef": "FOUNDRY_DEMO_POSTGRES_PASSWORD", "tls": "disabled",
+    "tables": ["orders"], "publication": "foundry_demo", "slot": "foundry_demo_slot",
+    "tableKeys": [{"table":"orders","columns":["order_id"]}]
+  },
+  {
+    "id": "inventory-db", "name": "Inventory · MySQL", "kind": "mysql",
+    "host": "127.0.0.1", "port": 13306, "database": "inventory", "user": "drasi",
+    "passwordRef": "FOUNDRY_DEMO_MYSQL_PASSWORD", "tls": "disabled",
+    "tables": ["inventory"], "serverId": 81234, "tableKeys": [{"table":"inventory","columns":["sku"]}]
+  }
+]

@@ -1,0 +1,30 @@
+name: foundry-routines-demo
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: orders
+      POSTGRES_PASSWORD: local-fixture-admin
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=20", "-c", "max_wal_senders=20"]
+    ports: ["127.0.0.1:15432:5432"]
+    volumes:
+      - ./fixtures/postgres.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d orders"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: inventory
+      MYSQL_ROOT_PASSWORD: local-fixture-admin
+    command: ["--server-id=1", "--log-bin=mysql-bin", "--binlog-format=ROW", "--binlog-row-image=FULL", "--binlog-row-metadata=FULL"]
+    ports: ["127.0.0.1:13306:3306"]
+    volumes:
+      - ./fixtures/mysql.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -plocal-fixture-admin --silent"]
+      interval: 2s
+      timeout: 5s
+      retries: 60

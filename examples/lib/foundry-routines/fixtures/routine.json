@@ -1,0 +1,14 @@
+{
+  "id": "order-risk", "name": "Investigate order risk",
+  "agent": "offline-test-agent",
+  "prompt": "Explain why this pending order is at risk, using the supplied before/after facts. Recommend a response. Do not take external actions.",
+  "query": "",
+  "sources": [
+    {"connectionId": "orders-db", "labels": ["orders"]},
+    {"connectionId": "inventory-db", "labels": ["inventory"]}
+  ],
+  "joins": [
+    {"name": "STOCK_FOR", "leftLabel": "orders", "leftProperty": "sku", "rightLabel": "inventory", "rightProperty": "sku"}
+  ],
+  "keyFields": ["order_id"], "operations": ["added"], "revision": 1
+}
