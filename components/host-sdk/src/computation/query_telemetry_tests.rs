@@ -384,6 +384,64 @@ fn nested_sdk_scopes_reject_reentry_without_blocking() -> anyhow::Result<()> {
 }
 
 #[test]
+fn sdk_scope_admits_other_threads_and_defers_finish_until_they_leave() -> anyhow::Result<()> {
+    let (_graph, scope) = setup(true)?;
+    let (v2, v4) = extensions();
+    let binding = scope
+        .in_scope(|| NativeTelemetryBinding::capture_query(Some(v2), Some(v4), "query"))?
+        .expect("binding");
+    let query = binding.scope(|| Ok(QueryTelemetry::capture()?))?;
+    let mut guard = query
+        .begin(
+            QueryObservationKind::Transaction,
+            QueryObservationPhase::Steady,
+            None,
+        )?
+        .expect("transaction guard");
+    let (entered, worker_entered) = std::sync::mpsc::sync_channel(1);
+    let (release, released) = std::sync::mpsc::sync_channel::<()>(1);
+    // Processing work is polled inside the query scope on a host runtime
+    // thread while the initiating transform is polled on another thread.
+    let mut work = guard.scope(std::future::poll_fn(move |_| {
+        entered
+            .send(NativeQueryScope::current().is_some())
+            .expect("test thread waits for the worker");
+        released
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("test thread releases the worker");
+        Poll::Ready(Ok::<_, anyhow::Error>(()))
+    }));
+    let worker = std::thread::spawn(move || {
+        let polled = std::future::Future::poll(
+            std::pin::Pin::new(&mut work),
+            &mut std::task::Context::from_waker(std::task::Waker::noop()),
+        );
+        matches!(polled, Poll::Ready(Ok(())))
+    });
+    let worker_scope = worker_entered.recv_timeout(std::time::Duration::from_secs(5))?;
+    let mut shared = false;
+    let entered_here = guard.in_scope(&mut || shared = NativeQueryScope::current().is_some());
+    let finished = guard.finish(QueryObservationOutcome::Success, None);
+    let open_while_entered = binding.state.queries.lock().unwrap().entries.len();
+    release.send(())?;
+    let completed = worker.join().expect("query scope worker did not panic");
+    assert!(worker_scope, "worker entered the host query scope");
+    entered_here?;
+    assert!(shared, "another thread shares the entered query scope");
+    finished?;
+    assert_eq!(
+        open_while_entered, 1,
+        "finish waits for the other thread to leave the scope"
+    );
+    assert!(completed, "worker completed inside the scope");
+    assert!(
+        binding.state.queries.lock().unwrap().entries.is_empty(),
+        "the last entry to leave applies the deferred finish"
+    );
+    Ok(())
+}
+
+#[test]
 fn query_scope_releases_retirement_gates_before_foreign_callbacks() -> anyhow::Result<()> {
     let (done, completed) = std::sync::mpsc::sync_channel(1);
     let worker = std::thread::spawn(move || {

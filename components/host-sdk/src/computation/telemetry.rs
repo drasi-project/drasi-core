@@ -16,8 +16,9 @@ use std::{
     ffi::c_void,
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
     },
+    thread::ThreadId,
 };
 
 static NEXT_QUERY_BINDING: AtomicU64 = AtomicU64::new(1);
@@ -32,9 +33,45 @@ impl Drop for QuerySlot {
 }
 
 struct QueryEntry {
-    observation: Mutex<Option<Box<dyn QueryObservation>>>,
+    // Plugin processing work enters an observation's scope on a host runtime
+    // thread while its initiating query is polled on another. Scopes share it;
+    // finish is exclusive.
+    observation: RwLock<Option<Box<dyn QueryObservation>>>,
+    /// A thread inside the scope cannot nest it again.
+    threads: Mutex<Vec<ThreadId>>,
     diagnostics: TelemetryDiagnostics,
     _slot: QuerySlot,
+}
+
+/// The calling thread is inside the entry's scope until this is dropped.
+struct EnteredThread<'a>(&'a QueryEntry);
+
+impl<'a> EnteredThread<'a> {
+    fn enter(entry: &'a QueryEntry) -> drasi_lib::observability::Result<Self> {
+        let thread = std::thread::current().id();
+        let mut threads = entry.threads.lock().map_err(|_| TelemetryError::Poisoned)?;
+        if threads.contains(&thread) {
+            return Err(TelemetryError::Invalid(
+                "native query observation is busy".into(),
+            ));
+        }
+        threads.push(thread);
+        Ok(Self(entry))
+    }
+}
+
+impl Drop for EnteredThread<'_> {
+    fn drop(&mut self) {
+        let thread = std::thread::current().id();
+        let mut threads = self
+            .0
+            .threads
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(index) = threads.iter().position(|entered| *entered == thread) {
+            threads.swap_remove(index);
+        }
+    }
 }
 
 impl Drop for QueryEntry {
@@ -417,13 +454,14 @@ unsafe extern "C" fn begin_query(context: *mut c_void, bytes: abi::BorrowedBytes
                 .map_err(|error| TelemetryError::Invalid(error.to_string()));
             };
             let entry = Arc::new(QueryEntry {
-                observation: Mutex::new(Some(observation)),
+                observation: RwLock::new(Some(observation)),
+                threads: Mutex::new(Vec::new()),
                 diagnostics: state.backend.diagnostics().clone(),
                 _slot: slot,
             });
             let context = entry
                 .observation
-                .lock()
+                .read()
                 .map_err(|_| TelemetryError::Poisoned)?
                 .as_ref()
                 .ok_or(TelemetryError::Retired)?
@@ -484,9 +522,10 @@ unsafe extern "C" fn query_scope(
             if !state.lifetime.is_active()? {
                 return Err(TelemetryError::Retired);
             }
+            let _entered = EnteredThread::enter(&entry)?;
             let observation = entry
                 .observation
-                .try_lock()
+                .try_read()
                 .map_err(|_| TelemetryError::Invalid("native query observation is busy".into()))?;
             let observation = observation.as_ref().ok_or(TelemetryError::Retired)?;
             let mut called = false;
@@ -537,7 +576,7 @@ unsafe extern "C" fn finish_query(
                 }
                 queries.entries.remove(&token.lease);
                 drop(queries);
-                let mut observation = entry.observation.try_lock().map_err(|_| {
+                let mut observation = entry.observation.try_write().map_err(|_| {
                     TelemetryError::Invalid(
                         "native query observation is busy; cancellation is pending".into(),
                     )

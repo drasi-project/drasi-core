@@ -8,8 +8,9 @@ use std::{
     cell::RefCell,
     future::Future,
     pin::Pin,
-    sync::{Arc, Mutex, TryLockError},
+    sync::{Arc, Mutex},
     task::{Context, Poll},
+    thread::{self, ThreadId},
 };
 
 #[derive(Clone)]
@@ -62,7 +63,11 @@ impl QueryTelemetry {
             .with_trace_from(&observation.context());
         Ok(Some(QueryObservationGuard {
             scope: QueryScope(Arc::new(ScopeState {
-                observation: Mutex::new(Some(observation)),
+                entries: Mutex::new(Entries {
+                    observation: Some(Arc::from(observation)),
+                    threads: Vec::new(),
+                    finish: None,
+                }),
                 execution: scope.with_context(context),
             })),
         }))
@@ -80,8 +85,50 @@ impl QueryTelemetry {
 }
 
 struct ScopeState {
-    observation: Mutex<Option<Box<dyn QueryObservation>>>,
+    entries: Mutex<Entries>,
     execution: ExecutionScope,
+}
+
+/// Processing work is polled inside its initiating query scope on a host
+/// runtime thread while that query is polled elsewhere, so threads share an
+/// observation. This lock is never held across a host callback or finish.
+struct Entries {
+    observation: Option<Arc<dyn QueryObservation>>,
+    threads: Vec<ThreadId>,
+    /// Requested while entered; the last thread to leave applies it.
+    finish: Option<QueryObservationResult>,
+}
+
+impl Entries {
+    fn deferred_finish(&mut self) -> Option<(Arc<dyn QueryObservation>, QueryObservationResult)> {
+        if !self.threads.is_empty() {
+            return None;
+        }
+        let result = self.finish.take()?;
+        Some((self.observation.take()?, result))
+    }
+}
+
+/// Only entered threads hold a clone, so none remain once all have left.
+fn finish_observation(
+    mut observation: Arc<dyn QueryObservation>,
+    result: QueryObservationResult,
+) -> Result<()> {
+    Arc::get_mut(&mut observation)
+        .ok_or_else(|| TelemetryError::Invalid("native query observation is still entered".into()))?
+        .finish(result)
+}
+
+struct Entry<'a> {
+    scope: &'a QueryScope,
+    observation: Option<Arc<dyn QueryObservation>>,
+}
+
+impl Drop for Entry<'_> {
+    fn drop(&mut self) {
+        drop(self.observation.take());
+        self.scope.leave();
+    }
 }
 
 #[derive(Clone)]
@@ -98,7 +145,7 @@ impl QueryScope {
 
     pub(crate) fn in_scope<T>(&self, work: impl FnOnce() -> T) -> Result<T> {
         // A processing callback may synchronously re-enter its initiating query.
-        // Do not recursively lock the same local observation in that case.
+        // Do not enter the same local observation again in that case.
         if CURRENT.with(|current| {
             current
                 .borrow()
@@ -107,12 +154,11 @@ impl QueryScope {
         }) {
             return Ok(self.0.execution.in_scope(work));
         }
-        let observation = self
-            .0
-            .observation
-            .try_lock()
-            .map_err(observation_lock_error)?;
-        let observation = observation.as_ref().ok_or(TelemetryError::Retired)?;
+        let entry = Entry {
+            scope: self,
+            observation: Some(self.enter()?),
+        };
+        let observation = entry.observation.as_ref().expect("entered observation");
         let mut work = Some(work);
         let mut result = None;
         let mut repeated = false;
@@ -138,6 +184,55 @@ impl QueryScope {
         result.ok_or_else(|| {
             TelemetryError::Invalid("query observation scope did not invoke its callback".into())
         })
+    }
+
+    fn enter(&self) -> Result<Arc<dyn QueryObservation>> {
+        let mut entries = self
+            .0
+            .entries
+            .lock()
+            .map_err(|_| TelemetryError::Poisoned)?;
+        let thread = thread::current().id();
+        if entries.threads.contains(&thread) {
+            // Entered beneath another query scope; nesting would interleave them.
+            return Err(TelemetryError::Invalid(
+                "native query observation is busy".into(),
+            ));
+        }
+        if entries.finish.is_some() {
+            return Err(TelemetryError::Retired);
+        }
+        let observation = entries.observation.clone().ok_or(TelemetryError::Retired)?;
+        entries.threads.push(thread);
+        Ok(observation)
+    }
+
+    fn leave(&self) {
+        let thread = thread::current().id();
+        let deferred = match self.0.entries.lock() {
+            Ok(mut entries) => {
+                if let Some(index) = entries
+                    .threads
+                    .iter()
+                    .position(|entered| *entered == thread)
+                {
+                    entries.threads.swap_remove(index);
+                }
+                entries.deferred_finish()
+            }
+            Err(_) => {
+                log::error!(
+                    "Leaving native query observation: {}",
+                    TelemetryError::Poisoned
+                );
+                None
+            }
+        };
+        if let Some((observation, result)) = deferred {
+            if let Err(error) = finish_observation(observation, result) {
+                log::error!("Finishing native query observation after scoped work: {error}");
+            }
+        }
     }
 }
 
@@ -175,26 +270,23 @@ impl QueryObservationGuard {
             result_count,
         };
         result.validate()?;
-        if let Some(mut observation) = self
-            .scope
-            .0
-            .observation
-            .try_lock()
-            .map_err(observation_lock_error)?
-            .take()
-        {
-            observation.finish(result)?;
-        }
-        Ok(())
-    }
-}
-
-fn observation_lock_error<T>(error: TryLockError<T>) -> TelemetryError {
-    match error {
-        TryLockError::WouldBlock => {
-            TelemetryError::Invalid("native query observation is busy".into())
-        }
-        TryLockError::Poisoned(_) => TelemetryError::Poisoned,
+        let observation = {
+            let mut entries = self
+                .scope
+                .0
+                .entries
+                .lock()
+                .map_err(|_| TelemetryError::Poisoned)?;
+            if !entries.threads.is_empty() {
+                // Scoped work may still run on another runtime thread.
+                entries.finish.get_or_insert(result);
+                return Ok(());
+            }
+            entries.observation.take()
+        };
+        observation.map_or(Ok(()), |observation| {
+            finish_observation(observation, result)
+        })
     }
 }
 
@@ -243,7 +335,8 @@ impl<F> Drop for QueryScopedFuture<F> {
     }
 }
 
-/// Processing work is polled by a different runtime after the borrowing call.
+/// Processing work is polled by a host runtime, possibly while its initiating
+/// query is still being polled on another thread.
 #[derive(Clone)]
 pub(crate) struct WorkScope {
     execution: ExecutionScope,
