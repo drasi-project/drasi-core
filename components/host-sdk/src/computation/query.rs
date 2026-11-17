@@ -263,7 +263,7 @@ impl QueryConstructor for NativeQueryConstructor {
                 },
                 "stream": construction.definition.output_stream,
                 "outbox_capacity": construction.definition.outbox_capacity,
-                "bootstrap": construction.bootstrap.is_some(),
+                "bootstrap": construction.bootstrap.is_some() || construction.graph_bootstrap,
                 "reset_configuration": construction.reset_configuration,
                 "recovery": match construction.options.recovery {
                     QueryRecoveryPolicy::Strict => "strict",

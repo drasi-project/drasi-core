@@ -44,6 +44,8 @@ pub struct QueryConstruction {
     pub options: QueryOptions,
     pub middleware: Option<Arc<MiddlewareTypeRegistry>>,
     pub bootstrap: Option<Arc<dyn ComputationBootstrapProvider>>,
+    /// The query has bootstrap edges, bound as a provider when it starts.
+    pub graph_bootstrap: bool,
     pub source_progress: Option<Arc<QuerySourceProgress>>,
     pub catalog: Option<QueryResultsCatalog>,
     pub transport_sequence: Option<Arc<std::sync::atomic::AtomicU64>>,
@@ -208,6 +210,7 @@ impl QueryConstruction {
             middleware,
             bootstrap: optional::<QueryBootstrapResource>(&context, "bootstrap")?
                 .map(|resource| resource.0.clone()),
+            graph_bootstrap: !context.bootstrap_producers().is_empty(),
             source_progress: optional::<QuerySourceProgressResource>(&context, "source_progress")?
                 .map(|resource| resource.0.clone()),
             catalog,
