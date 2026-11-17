@@ -670,6 +670,9 @@ async fn prepare_types_database(config: &MssqlConfig) -> Result<MssqlConfig> {
             FloatVal FLOAT NOT NULL,
             RealVal REAL NOT NULL,
             DecimalVal DECIMAL(10,2) NOT NULL,
+            BigDecimalVal DECIMAL(38,0) NOT NULL,
+            ScaleDecimalVal NUMERIC(38,30) NOT NULL,
+            TinyDecimalVal DECIMAL(38,38) NOT NULL,
             MoneyVal MONEY NOT NULL,
             SmallMoneyVal SMALLMONEY NOT NULL,
             VarcharVal VARCHAR(100) NOT NULL,
@@ -732,6 +735,49 @@ async fn prepare_types_database(config: &MssqlConfig) -> Result<MssqlConfig> {
     Ok(db_config)
 }
 
+#[tokio::test]
+#[ignore]
+async fn test_mssql_decimal_primary_keys_are_exact() -> Result<()> {
+    use drasi_core::models::ElementValue;
+    use drasi_mssql_common::{extract_column_value, MsSqlSourceConfig, PrimaryKeyCache};
+
+    let mssql = setup_mssql().await?;
+    let mut client = mssql.get_client().await?;
+    execute_sql(
+        &mut client,
+        "CREATE TABLE dbo.DecimalKeys (
+            Id DECIMAL(18,0) PRIMARY KEY,
+            NullableVal NUMERIC(38,38) NULL
+         );
+         INSERT INTO dbo.DecimalKeys (Id) VALUES (12345678901234567), (12345678901234568);",
+    )
+    .await?;
+
+    let mut keys = PrimaryKeyCache::new();
+    keys.discover_keys(&mut client, &MsSqlSourceConfig::default())
+        .await?;
+    let rows = client
+        .simple_query("SELECT Id, NullableVal FROM dbo.DecimalKeys ORDER BY Id")
+        .await?
+        .into_first_result()
+        .await?;
+    assert_eq!(rows.len(), 2);
+    for (row, expected) in rows.iter().zip(["12345678901234567", "12345678901234568"]) {
+        assert_eq!(
+            extract_column_value(row, 0)?,
+            ElementValue::String(expected.into())
+        );
+        assert_eq!(extract_column_value(row, 1)?, ElementValue::Null);
+        assert_eq!(
+            keys.generate_element_id("dbo.DecimalKeys", row)?,
+            format!("dbo.DecimalKeys:{expected}")
+        );
+    }
+
+    mssql.cleanup().await;
+    Ok(())
+}
+
 /// Verify that column types are correctly mapped to ElementValue types.
 /// Integers should be integers, floats should be floats, booleans should be
 /// booleans, and strings should be strings — not everything coerced to string.
@@ -782,12 +828,15 @@ async fn test_mssql_column_type_mapping() -> Result<()> {
             &mut seed_client,
             "INSERT INTO dbo.TypesTest (
                 Id, IntVal, BigIntVal, SmallIntVal, TinyIntVal, BitVal,
-                FloatVal, RealVal, DecimalVal, MoneyVal, SmallMoneyVal, VarcharVal, NVarcharVal,
+                FloatVal, RealVal, DecimalVal, BigDecimalVal, ScaleDecimalVal, TinyDecimalVal,
+                MoneyVal, SmallMoneyVal, VarcharVal, NVarcharVal,
                 GuidVal, BinaryVal, DateTimeVal, DateTime2Val, SmallDateTimeVal,
                 DateVal, TimeVal, DateTimeOffsetVal
              ) VALUES (
                 1, 42, 9876543210, 256, 7, 1,
-                3.15, 2.5, 99.95, 12.3400, 9.9900, 'hello', N'world',
+                3.15, 2.5, 99.95, 1000000000000000000000000000000,
+                -1.234567890123456789012345678901, -0.00000000000000000000000000000000000001,
+                12.3400, 9.9900, 'hello', N'world',
                 '550e8400-e29b-41d4-a716-446655440000', 0xDEADBEEF,
                 '2024-06-15T10:30:45.123', '2024-06-15T10:30:45.1234567', '2024-06-15T10:30:00',
                 '2024-06-15', '10:30:45.1234567', '2024-06-15T10:30:45.1234567+05:00'
@@ -808,6 +857,9 @@ async fn test_mssql_column_type_mapping() -> Result<()> {
                        t.FloatVal AS float_val,
                        t.RealVal AS real_val,
                        t.DecimalVal AS decimal_val,
+                       t.BigDecimalVal AS big_decimal_val,
+                       t.ScaleDecimalVal AS scale_decimal_val,
+                       t.TinyDecimalVal AS tiny_decimal_val,
                        t.MoneyVal AS money_val,
                        t.SmallMoneyVal AS smallmoney_val,
                        t.VarcharVal AS varchar_val,
@@ -974,10 +1026,21 @@ fn assert_types_test_row(data: &Value, path: &str) -> Result<()> {
         (real_val - 2.5).abs() < 0.01,
         "{path}.real_val should be ~2.5, got: {real_val}"
     );
-    let decimal_val = f64_field("decimal_val")?;
     anyhow::ensure!(
-        (decimal_val - 99.95).abs() < 0.01,
-        "{path}.decimal_val should be ~99.95, got: {decimal_val}"
+        str_field("decimal_val")? == "99.95",
+        "{path}.decimal_val mismatch"
+    );
+    anyhow::ensure!(
+        str_field("big_decimal_val")? == "1000000000000000000000000000000",
+        "{path}.big_decimal_val mismatch"
+    );
+    anyhow::ensure!(
+        str_field("scale_decimal_val")? == "-1.234567890123456789012345678901",
+        "{path}.scale_decimal_val mismatch"
+    );
+    anyhow::ensure!(
+        str_field("tiny_decimal_val")? == "-0.00000000000000000000000000000000000001",
+        "{path}.tiny_decimal_val mismatch"
     );
     let money_val = f64_field("money_val")?;
     anyhow::ensure!(

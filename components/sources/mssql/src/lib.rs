@@ -137,16 +137,14 @@ pub struct MsSqlSource {
 fn mssql_type_to_property_type(data_type: &str) -> Option<PropertyType> {
     match data_type {
         "tinyint" | "smallint" | "int" | "bigint" => Some(PropertyType::Integer),
-        "decimal" | "numeric" | "float" | "real" | "money" | "smallmoney" => {
-            Some(PropertyType::Float)
-        }
+        "float" | "real" | "money" | "smallmoney" => Some(PropertyType::Float),
         "bit" => Some(PropertyType::Boolean),
         "date" | "datetime" | "datetime2" | "datetimeoffset" | "smalldatetime" | "time" => {
             Some(PropertyType::Timestamp)
         }
         "json" => Some(PropertyType::Json),
-        "char" | "nchar" | "varchar" | "nvarchar" | "text" | "ntext" | "uniqueidentifier"
-        | "binary" | "varbinary" => Some(PropertyType::String),
+        "decimal" | "numeric" | "char" | "nchar" | "varchar" | "nvarchar" | "text" | "ntext"
+        | "uniqueidentifier" | "binary" | "varbinary" => Some(PropertyType::String),
         _ => None,
     }
 }
@@ -764,14 +762,6 @@ mod tests {
             Some(PropertyType::Float)
         );
         assert_eq!(
-            mssql_type_to_property_type("decimal"),
-            Some(PropertyType::Float)
-        );
-        assert_eq!(
-            mssql_type_to_property_type("numeric"),
-            Some(PropertyType::Float)
-        );
-        assert_eq!(
             mssql_type_to_property_type("money"),
             Some(PropertyType::Float)
         );
@@ -815,6 +805,14 @@ mod tests {
 
     #[test]
     fn test_mssql_type_to_property_type_string() {
+        assert_eq!(
+            mssql_type_to_property_type("decimal"),
+            Some(PropertyType::String)
+        );
+        assert_eq!(
+            mssql_type_to_property_type("numeric"),
+            Some(PropertyType::String)
+        );
         assert_eq!(
             mssql_type_to_property_type("nvarchar"),
             Some(PropertyType::String)

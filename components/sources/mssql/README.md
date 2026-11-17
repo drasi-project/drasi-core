@@ -100,6 +100,19 @@ Start → Load LSN from StateStore
 - **INSERT** (op=2): After image of inserted row
 - **UPDATE** (op=4): After image of updated row
 
+## Decimal values
+
+`DECIMAL` and `NUMERIC` properties are exact decimal strings in both bootstrap
+and CDC events, including the full SQL Server precision and scale range (up to
+38). Fractional trailing zeros are removed, so `123.4500` becomes `"123.45"`.
+Decimal primary keys use this same exact representation, avoiding floating-point
+rounding collisions.
+
+These properties were previously floats. Queries requiring approximate numeric
+arithmetic can explicitly use `toFloat()`, with the associated loss of precision.
+When upgrading an existing deployment with decimal keys, rebuild its query state
+from a fresh bootstrap: previously rounded element IDs may differ or have collided.
+
 ## Testing
 
 ```bash
@@ -156,4 +169,3 @@ Apache License 2.0
 ## Authors
 
 Drasi Contributors
-

@@ -42,6 +42,8 @@ impl MsSqlConnection {
 
         // Build Tiberius config
         let mut tiberius_config = Config::new();
+        // Preserve pre-0.13 behavior for long-running bootstrap and CDC queries.
+        tiberius_config.command_timeout(None);
         tiberius_config.host(&config.host);
         tiberius_config.port(config.port);
         tiberius_config.database(&config.database);
