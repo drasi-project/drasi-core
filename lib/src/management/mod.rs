@@ -319,6 +319,14 @@ impl crate::DrasiLib {
         self.management.get().is_some()
     }
 
+    /// Whether ordinary sources and reactions are constructed from managed
+    /// definitions, so they can be created and updated by definition.
+    pub fn constructs_ordinary_components(&self) -> bool {
+        self.management
+            .get()
+            .is_some_and(Management::constructs_ordinary)
+    }
+
     /// Whether accepted configuration is backed by an external durable store.
     pub fn configuration_is_persistent(&self) -> bool {
         self.management.get().is_some_and(Management::persistent)

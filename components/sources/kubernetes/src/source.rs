@@ -32,6 +32,7 @@ use futures::StreamExt;
 use kube::api::{Api, DynamicObject, ListParams, WatchParams};
 use kube::core::{ApiResource, GroupVersionKind};
 use kube::runtime::watcher::{self, Event};
+use kube::runtime::WatchStreamExt;
 use kube::Client;
 use log::{debug, error, info, warn};
 use serde_json::Value;
@@ -646,7 +647,10 @@ async fn prepare_source_stream(
         }
 
         let target_clone = target.clone();
+        // Without backoff, an unreachable API server is redialed in a tight
+        // loop, exhausting local ephemeral ports.
         let stream = watcher::watcher(api, watch_cfg)
+            .default_backoff()
             .map(move |event| (target_clone.clone(), event))
             .boxed();
         streams.push(stream);

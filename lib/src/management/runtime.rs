@@ -98,6 +98,7 @@ pub(crate) struct Management {
     running: Arc<RwLock<bool>>,
     confirmed: Arc<AtomicBool>,
     guarantees: ConfigurationStoreGuarantees,
+    constructs_ordinary: bool,
 }
 
 struct ManagementTask {
@@ -245,6 +246,10 @@ impl Management {
         self.guarantees.durable
     }
 
+    pub(crate) fn constructs_ordinary(&self) -> bool {
+        self.constructs_ordinary
+    }
+
     pub(crate) async fn open(
         instance_id: String,
         graph: Arc<InstanceGraph>,
@@ -261,6 +266,7 @@ impl Management {
             .unwrap_or_else(|| Arc::new(super::memory::MemoryConfigStore::default()));
         let guarantees = provider.guarantees();
         guarantees.validate()?;
+        let constructs_ordinary = options.ordinary.constructs_components();
         let store = provider.open(&instance_id).await?;
         let current = match store.load().await {
             Ok(current) => current,
@@ -315,6 +321,7 @@ impl Management {
             running,
             confirmed,
             guarantees,
+            constructs_ordinary,
         };
         // Declarations and failures are visible on return, without requiring
         // successful component realization to open a persisted instance.

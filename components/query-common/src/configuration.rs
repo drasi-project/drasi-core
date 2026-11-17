@@ -84,6 +84,13 @@ impl QueryExecutionSettingsExt for QueryExecutionSettings {
         }
         for input in &self.inputs {
             builder = builder.with_component_pipeline(input.component.clone(), &input.pipeline);
+            // Bootstrap records without a host-selected origin (for example from
+            // a bootstrap-provider component) are selected by record namespace,
+            // which for a source's records is the source's component identity.
+            if !input.pipeline.is_empty() {
+                builder =
+                    builder.with_namespace_pipeline(input.component.as_str(), &input.pipeline);
+            }
         }
         Ok(builder.with_joins(self.joins.iter().cloned().map(Into::into).collect()))
     }

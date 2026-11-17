@@ -50,6 +50,8 @@ fn id(value: &str) -> ComponentId {
         "upstream" => 8,
         "upstream-sink" => 9,
         "durable" => 12,
+        "second-source" => 13,
+        "second-provider" => 14,
         other => panic!("missing explicit fixture component ID for {other}"),
     })
 }
@@ -92,6 +94,7 @@ fn graph_change_port(name: &str, direction: PortDirection, bootstrap: bool) -> P
 /// input and hands over at the live sequence it has emitted so far.
 struct RelaySource {
     descriptor: ComponentDescriptor,
+    out: StreamId,
     relay: Arc<RecordingRelay>,
     live: mpsc::UnboundedReceiver<SourceChange>,
     emitted: Arc<AtomicU64>,
@@ -133,6 +136,11 @@ impl SourceHandle {
 }
 
 fn relay_source() -> (RelaySource, SourceHandle) {
+    named_relay_source("source")
+}
+
+fn named_relay_source(name: &str) -> (RelaySource, SourceHandle) {
+    let out = format!("{name}/out");
     let (live, receiver) = mpsc::unbounded_channel();
     let emitted = Arc::new(AtomicU64::new(0));
     let handovers = Arc::new(Mutex::new(Vec::new()));
@@ -146,7 +154,7 @@ fn relay_source() -> (RelaySource, SourceHandle) {
                 .unwrap()
                 .push((request.consumer.clone(), request.session, sequence));
             Ok(vec![BootstrapWatermark {
-                stream: stream("source/out"),
+                stream: stream(&out),
                 source_id: None,
                 sequence,
                 position: None,
@@ -160,7 +168,7 @@ fn relay_source() -> (RelaySource, SourceHandle) {
     });
     let source = RelaySource {
         descriptor: ComponentDescriptor::try_new(
-            id("source"),
+            id(name),
             vec![
                 graph_change_port("out", PortDirection::Output, false),
                 graph_change_port("bootstrap", PortDirection::Input, true),
@@ -168,6 +176,7 @@ fn relay_source() -> (RelaySource, SourceHandle) {
             ],
         )
         .unwrap(),
+        out: stream(&format!("{name}/out")),
         relay: relay.clone(),
         live: receiver,
         emitted,
@@ -214,18 +223,14 @@ impl EnvelopeSource for RelaySource {
         let sequence = self.emitted.fetch_add(1, Ordering::SeqCst) + 1;
         Ok(Some(OutputEnvelope {
             port: port("out"),
-            envelope: GraphChangeCodec::encode_change(
-                change,
-                stream("source/out"),
-                sequence,
-                None,
-            )?,
+            envelope: GraphChangeCodec::encode_change(change, self.out.clone(), sequence, None)?,
         }))
     }
 }
 
 /// Serves a fixed set of records, or fails with a reason.
 struct Seed {
+    stream: String,
     records: Vec<SourceChange>,
     failure: Option<&'static str>,
 }
@@ -243,7 +248,7 @@ impl ComputationBootstrapProvider for Seed {
             .map(|(index, change)| {
                 GraphChangeCodec::encode_change(
                     change.clone(),
-                    stream("seed"),
+                    stream(&self.stream),
                     index as u64 + 1,
                     None,
                 )
@@ -267,11 +272,17 @@ fn provider(
     failure: Option<&'static str>,
 ) -> (BootstrapProviderComponent, ProviderHandle) {
     let sessions = Arc::new(Mutex::new(Vec::new()));
+    let stream_name = if name == "provider" {
+        "seed".to_string()
+    } else {
+        format!("{name}/seed")
+    };
     let factory: BootstrapProviderFactory = {
         let sessions = sessions.clone();
         Arc::new(move |request: &BootstrapRequest| {
             sessions.lock().unwrap().push(request.clone());
             Ok(Arc::new(Seed {
+                stream: stream_name.clone(),
                 records: records.clone(),
                 failure,
             }) as Arc<dyn ComputationBootstrapProvider>)
@@ -470,6 +481,80 @@ async fn two_consumers_bootstrap_through_one_source_relay_with_their_own_session
                 && rows(&right_results) == names(&["Alice", "Bob"])
         })
         .await;
+        control.cancel();
+    });
+    assert!(matches!(result, Err(GraphError::Cancelled)), "{result:?}");
+}
+
+/// Two queries bootstrap from the same two relaying sources, each of which
+/// serves one session at a time. A query must not hold one source's session
+/// while waiting for the other's, or the queries deadlock. The hang depends on
+/// the order in which requests reach the sources, so several rounds run on a
+/// multi-threaded runtime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queries_sharing_two_relaying_sources_bootstrap_without_deadlock() {
+    for _ in 0..10 {
+        bootstrap_from_two_shared_relaying_sources().await;
+    }
+}
+
+async fn bootstrap_from_two_shared_relaying_sources() {
+    let people = |prefix: &str| {
+        (0..32)
+            .map(|index| {
+                let name = format!("{prefix}{index}");
+                person(&name, &name, 1)
+            })
+            .collect::<Vec<_>>()
+    };
+    let (first_source, _first) = named_relay_source("source");
+    let (second_source, _second) = named_relay_source("second-source");
+    let (first_seed, _) = provider("provider", people("p"), None);
+    let (second_seed, _) = provider("second-provider", people("s"), None);
+    let (left, left_results) = query("left", PEOPLE).await;
+    let (right, right_results) = query("right", PEOPLE).await;
+    let mut builder = ComputationGraph::builder("bootstrap-graph")
+        .fixture_source(Box::new(first_source))
+        .fixture_source(Box::new(second_source))
+        .bootstrap_provider(fixture_support::component_name(), Box::new(first_seed))
+        .bootstrap_provider(fixture_support::component_name(), Box::new(second_seed))
+        .bind_stream(endpoint("source", "out"), stream("source/out"))
+        .bind_stream(
+            endpoint("second-source", "out"),
+            stream("second-source/out"),
+        );
+    for (provider, source) in [("provider", "source"), ("second-provider", "second-source")] {
+        builder = builder.connect(
+            EdgeDefinition::new(
+                endpoint(provider, "snapshot"),
+                endpoint(source, "bootstrap"),
+            ),
+            pipe(),
+        );
+    }
+    // The queries list their inputs in opposite orders.
+    for (name, query, sources) in [
+        ("left", left, ["source", "second-source"]),
+        ("right", right, ["second-source", "source"]),
+    ] {
+        builder = with_query(builder, name, query).connect(
+            EdgeDefinition::new(endpoint("second-source", "out"), endpoint(name, "in")),
+            pipe(),
+        );
+        for source in sources {
+            builder = builder.connect(
+                EdgeDefinition::new(endpoint(source, "snapshot"), endpoint(name, "bootstrap")),
+                pipe(),
+            );
+        }
+    }
+    let mut graph = builder.build().unwrap();
+    let run = graph.start().unwrap();
+    let control = run.control();
+    let (result, ()) = tokio::join!(run, async {
+        wait_started(&control, &["left", "right"]).await;
+        assert_eq!(rows(&left_results).len(), 64);
+        assert_eq!(rows(&right_results).len(), 64);
         control.cancel();
     });
     assert!(matches!(result, Err(GraphError::Cancelled)), "{result:?}");

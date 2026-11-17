@@ -86,6 +86,7 @@ impl NativeComponentProxy {
             Some(binding) => Some(super::super::query::configuration_for_update(
                 specification,
                 Some(binding.construction.provider.is_volatile()),
+                binding.construction.edge_bootstrap,
             )?),
             None => None,
         })

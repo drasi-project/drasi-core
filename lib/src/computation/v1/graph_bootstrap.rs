@@ -794,6 +794,25 @@ impl PipeBootstrapProvider {
     }
 }
 
+/// Request a session on `edge`, resuming from the state saved for its producer.
+async fn open_reader(
+    ports: &BootstrapPorts,
+    control: &ComponentControl,
+    persistent: bool,
+    saved: &HashMap<(ComponentId, PortId), Bytes>,
+    edge: BootstrapInputEdge,
+) -> anyhow::Result<BootstrapSessionReader> {
+    let reader = BootstrapSessionReader::new(ports.clone(), edge);
+    let state = saved
+        .get(&(
+            reader.edge().producer.component.clone(),
+            reader.edge().producer.port.clone(),
+        ))
+        .cloned();
+    reader.request(control, persistent, state, None).await?;
+    Ok(reader)
+}
+
 #[async_trait]
 impl ComputationBootstrapProvider for PipeBootstrapProvider {
     fn validate_query_scope(
@@ -877,88 +896,92 @@ impl ComputationBootstrapProvider for PipeBootstrapProvider {
             "component {} has no bound bootstrap input",
             self.component
         );
-        let mut readers = Vec::with_capacity(edges.len());
-        for edge in edges {
-            let reader = BootstrapSessionReader::new(self.ports.clone(), edge);
-            let state = saved
-                .get(&(
-                    reader.edge().producer.component.clone(),
-                    reader.edge().producer.port.clone(),
-                ))
-                .cloned();
-            reader
-                .request(&self.control, persistent, state, None)
-                .await?;
-            readers.push(reader);
-        }
-        // Retain each provider's state before any record is processed, so a
-        // restarted session can resume or release what the provider created.
-        let mut retained = saved;
-        let mut queued = Vec::with_capacity(readers.len());
-        for mut reader in readers {
-            let first = loop {
-                match reader.next().await? {
-                    BootstrapSessionItem::State(bytes) => {
-                        if persistent {
-                            let producer = &reader.edge().producer;
-                            retained
-                                .insert((producer.component.clone(), producer.port.clone()), bytes);
-                            state.write(encode_sessions(&retained)?).await?;
-                        }
+        // Inputs are drained one after another, and each is requested only
+        // when the previous one completes. Holding one producer's session
+        // while waiting for another's would deadlock consumers that share
+        // producers serving one session at a time.
+        let mut pending: std::collections::VecDeque<_> = edges.into_iter().collect();
+        let first = pending.pop_front().expect("bootstrap inputs are not empty");
+        let mut reader = open_reader(&self.ports, &self.control, persistent, &saved, first).await?;
+        // Retain the first provider's state before any record is processed, so
+        // a restarted session can resume or release what the provider created.
+        // A later provider's state is retained when the bootstrap completes.
+        let mut retained = saved.clone();
+        let first = loop {
+            match reader.next().await? {
+                BootstrapSessionItem::State(bytes) => {
+                    if persistent {
+                        let producer = &reader.edge().producer;
+                        retained.insert((producer.component.clone(), producer.port.clone()), bytes);
+                        state.write(encode_sessions(&retained)?).await?;
                     }
-                    item => break item,
                 }
-            };
-            queued.push((reader, Some(first)));
-        }
-        let readers: std::collections::VecDeque<_> = queued.into();
+                item => break item,
+            }
+        };
+        let readers: std::collections::VecDeque<_> = [(reader, Some(first))].into();
+        let ports = self.ports.clone();
+        let control = self.control.clone();
         let changes = futures::stream::try_unfold(
-            (readers, collected),
-            move |(mut readers, collected)| async move {
-                loop {
-                    let Some((reader, first)) = readers.front_mut() else {
-                        lock(&collected).complete = true;
-                        return Ok(None);
-                    };
-                    let item = match first.take() {
-                        Some(item) => item,
-                        None => reader.next().await?,
-                    };
-                    match item {
-                        BootstrapSessionItem::State(_) => {
-                            log::debug!(
+            (readers, pending, collected),
+            move |(mut readers, mut pending, collected)| {
+                let ports = ports.clone();
+                let control = control.clone();
+                let saved = saved.clone();
+                async move {
+                    loop {
+                        if readers.is_empty() {
+                            let Some(edge) = pending.pop_front() else {
+                                lock(&collected).complete = true;
+                                return Ok(None);
+                            };
+                            let reader =
+                                open_reader(&ports, &control, persistent, &saved, edge).await?;
+                            readers.push_back((reader, None));
+                        }
+                        let Some((reader, first)) = readers.front_mut() else {
+                            unreachable!("a reader was just opened");
+                        };
+                        let item = match first.take() {
+                            Some(item) => item,
+                            None => reader.next().await?,
+                        };
+                        match item {
+                            BootstrapSessionItem::State(_) => {
+                                log::debug!(
                                 "Bootstrap state from {} after its first record is kept only on completion",
                                 reader.edge().producer.component
                             );
-                        }
-                        BootstrapSessionItem::Record(record) => {
-                            if !reader.edge().local {
-                                let mut collected = lock(&collected);
-                                let stream = record.system().stream().clone();
-                                let producer = &reader.edge().producer;
-                                match collected.origins.get(&stream) {
-                                    Some(origin) => anyhow::ensure!(
-                                        origin.component == producer.component,
-                                        "bootstrap stream {stream} is shared by two producers"
-                                    ),
-                                    None => {
-                                        collected.origins.insert(stream, producer.clone());
+                            }
+                            BootstrapSessionItem::Record(record) => {
+                                if !reader.edge().local {
+                                    let mut collected = lock(&collected);
+                                    let stream = record.system().stream().clone();
+                                    let producer = &reader.edge().producer;
+                                    match collected.origins.get(&stream) {
+                                        Some(origin) => anyhow::ensure!(
+                                            origin.component == producer.component,
+                                            "bootstrap stream {stream} is shared by two producers"
+                                        ),
+                                        None => {
+                                            collected.origins.insert(stream, producer.clone());
+                                        }
                                     }
                                 }
+                                return Ok(Some((record, (readers, pending, collected))));
                             }
-                            return Ok(Some((record, (readers, collected))));
-                        }
-                        BootstrapSessionItem::Complete { watermarks, state } => {
-                            let producer = reader.edge().producer.clone();
-                            readers.pop_front();
-                            let mut collected = lock(&collected);
-                            collected.watermarks.extend(watermarks);
-                            if let Some(state) = state.filter(|_| persistent) {
-                                collected.states.push(ProducerState {
-                                    component: producer.component,
-                                    port: producer.port,
-                                    state,
-                                });
+                            BootstrapSessionItem::Complete { watermarks, state } => {
+                                let producer = reader.edge().producer.clone();
+                                readers.pop_front();
+                                let mut collected = lock(&collected);
+                                collected.watermarks.extend(watermarks);
+                                if let Some(state) = state.filter(|_| persistent) {
+                                    collected.states.push(ProducerState {
+                                        component: producer.component,
+                                        port: producer.port,
+                                        state,
+                                    });
+                                }
                             }
                         }
                     }
@@ -1271,6 +1294,8 @@ pub struct BootstrapRelay {
     ports: Mutex<BootstrapPorts>,
     handover: BootstrapHandover,
     released: tokio::sync::watch::Sender<bool>,
+    /// Whether the source's bootstrap input is bound for serving requests.
+    active: tokio::sync::watch::Sender<bool>,
     /// Whether a relayed session completed during this activation.
     boundary_reached: Mutex<bool>,
 }
@@ -1281,14 +1306,26 @@ impl BootstrapRelay {
             ports: Mutex::new(BootstrapPorts::default()),
             handover,
             released: tokio::sync::watch::channel(true).0,
+            active: tokio::sync::watch::channel(true).0,
             boundary_reached: Mutex::new(false),
         })
     }
 
     /// Start a new activation: nothing is held and no boundary is reached.
+    /// Requests deferred by [`Self::end_activation`] are served from here on.
     pub fn begin_activation(&self) {
         *lock(&self.boundary_reached) = false;
         self.released.send_replace(true);
+        self.active.send_replace(true);
+    }
+
+    /// Defer bootstrap requests until the next [`Self::begin_activation`].
+    ///
+    /// A consumer can start before its source does. Its request must not be
+    /// answered before the source's activation binds the provider input, or
+    /// the consumer would complete an empty bootstrap.
+    pub fn end_activation(&self) {
+        self.active.send_replace(false);
     }
 
     pub fn bind(&self, ports: BootstrapPorts) {
@@ -1341,6 +1378,9 @@ impl BootstrapRelay {
         control: &ComponentControl,
         request: &BootstrapRequest,
     ) -> anyhow::Result<()> {
+        let mut active = self.active.subscribe();
+        // The sender lives as long as `self`, so the wait cannot fail.
+        let _ = active.wait_for(|active| *active).await;
         let ports = lock(&self.ports).clone();
         let mut reply = BootstrapReply::open(&ports, request)?;
         reply.begin().await?;

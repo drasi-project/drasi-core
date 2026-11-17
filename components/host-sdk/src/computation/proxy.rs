@@ -325,6 +325,9 @@ pub struct NativeComponentProxy {
     processing: Option<super::processing::ProcessingBinding>,
     bootstrap: Option<Box<super::bootstrap_consumer::BootstrapBinding>>,
     graph_bootstrap: Option<BootstrapPorts>,
+    /// An ordinary query's source-input bootstrap, bound at start together
+    /// with any bootstrap edges from upstream components.
+    query_bootstrap: Option<Arc<dyn ComputationBootstrapProvider>>,
     bootstrap_relay: Option<Arc<BootstrapRelay>>,
     /// Serves this transformer's committed output on its bootstrap output.
     snapshot_server: Option<Arc<BootstrapSnapshotServer>>,
@@ -692,6 +695,7 @@ impl NativeComponentProxy {
             processing: None,
             bootstrap: None,
             graph_bootstrap: None,
+            query_bootstrap: None,
             bootstrap_relay: None,
             snapshot_server: None,
             live_hold_decided: false,
@@ -971,11 +975,7 @@ impl NativeComponentProxy {
             !self.activated && !self.pending && self.query_construction.is_none(),
             "ordinary query resources must bind once before activation"
         );
-        if let Some(provider) = &construction.bootstrap {
-            self.bind_bootstrap_provider(Arc::new(super::NativeBootstrapResource(
-                provider.clone(),
-            )))?;
-        }
+        self.query_bootstrap = construction.bootstrap.clone();
         if let Some(clock) = &construction.scheduling {
             self.processing
                 .as_ref()
@@ -1244,24 +1244,46 @@ impl NativeComponentProxy {
         if self.bootstrap.is_some() {
             return Ok(());
         }
-        let (Some(ports), Some(control)) = (&self.graph_bootstrap, &self.graph_control) else {
-            return Ok(());
+        let sources = self.query_bootstrap.take();
+        let edges = match (&self.graph_bootstrap, &self.graph_control) {
+            (Some(ports), Some(control)) if !ports.inputs().is_empty() => {
+                let scope = self
+                    .construction_scope
+                    .as_ref()
+                    .context("graph bootstrap requires the actual component construction scope")?;
+                let provider: Arc<dyn ComputationBootstrapProvider> = PipeBootstrapProvider::new(
+                    scope.graph_id.clone(),
+                    ports.clone(),
+                    control.clone(),
+                    self.processing
+                        .as_ref()
+                        .and_then(super::processing::ProcessingBinding::progress_owner),
+                )?;
+                Some(provider)
+            }
+            _ => None,
         };
-        if ports.inputs().is_empty() {
-            return Ok(());
-        }
-        let scope = self
-            .construction_scope
-            .as_ref()
-            .context("graph bootstrap requires the actual component construction scope")?;
-        let provider = PipeBootstrapProvider::new(
-            scope.graph_id.clone(),
-            ports.clone(),
-            control.clone(),
-            self.processing
-                .as_ref()
-                .and_then(super::processing::ProcessingBinding::progress_owner),
-        )?;
+        // A query reading both sources and upstream components bootstraps
+        // from each, as the ordinary pipeline does.
+        let provider: Arc<dyn ComputationBootstrapProvider> = match (sources, edges) {
+            (Some(sources), Some(edges)) => {
+                let scope = self
+                    .construction_scope
+                    .as_ref()
+                    .context("graph bootstrap requires the actual component construction scope")?;
+                Arc::new(CompositeBootstrapProvider::new(
+                    scope.instance_id.clone(),
+                    scope.graph_id.clone(),
+                    self.descriptor.id().clone(),
+                    vec![
+                        (ResourceId::try_new("source-inputs")?, sources),
+                        (ResourceId::try_new("component-inputs")?, edges),
+                    ],
+                )?)
+            }
+            (Some(provider), None) | (None, Some(provider)) => provider,
+            (None, None) => return Ok(()),
+        };
         self.bind_bootstrap_provider(Arc::new(super::NativeBootstrapResource(provider)))
     }
 }
@@ -1387,9 +1409,14 @@ impl ComputationComponent for NativeComponentProxy {
             ComponentRole::Source => {
                 // The provider's watermarks are the native source's own
                 // positions, so they are the handover boundary unchanged.
-                let relay = BootstrapRelay::new(Arc::new(|_, watermarks| Ok(watermarks.to_vec())));
+                // One relay serves every activation, so the published control
+                // handler stays current. Requests wait until `start` begins
+                // an activation with the bound provider input.
+                let relay = self.bootstrap_relay.get_or_insert_with(|| {
+                    BootstrapRelay::new(Arc::new(|_, watermarks| Ok(watermarks.to_vec())))
+                });
+                relay.end_activation();
                 relay.bind(ports);
-                self.bootstrap_relay = Some(relay);
             }
             ComponentRole::Transformer => {
                 if let Some(snapshot) = self
@@ -1678,6 +1705,9 @@ impl ComputationComponent for NativeComponentProxy {
             .flatten();
         self.inner
             .cancel_operations_except(Some(abi::operation::STOP));
+        if let Some(relay) = &self.bootstrap_relay {
+            relay.end_activation();
+        }
         if let Some(reads) = &self.output_reads {
             reads.advance();
         }
