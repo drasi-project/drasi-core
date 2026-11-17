@@ -243,6 +243,8 @@ mod lifecycle_events_tests;
 /// ```
 pub use lib_core::DrasiLib;
 
+pub use lib_core::{ShutdownCompletion, ShutdownOutcome};
+
 /// Error types for drasi-lib
 pub use error::{DrasiError, Result};
 

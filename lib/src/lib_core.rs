@@ -27,6 +27,33 @@ use crate::queries::QueryManager;
 use crate::state_guard::StateGuard;
 use drasi_core::middleware::MiddlewareTypeRegistry;
 
+/// Whether all instance-owned shutdown cleanup has been confirmed complete.
+///
+/// Completion is independent of the shutdown result: an error can remain after
+/// every owner has finished cleanup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownCompletion {
+    /// Cleanup remains owned, or its completion could not be confirmed.
+    Incomplete,
+    /// Graph, resource, adapter and worker cleanup finished, and any owned
+    /// configuration storage acknowledged close and its driver was joined.
+    Complete,
+}
+
+/// Authoritative cleanup completion paired with the original shutdown result.
+///
+/// A completed outcome can contain an error, such as a joined management-driver
+/// panic after configuration storage successfully closed. Callers must inspect
+/// both fields rather than treating completion as success.
+#[derive(Debug)]
+#[must_use = "inspect both cleanup completion and the shutdown result"]
+pub struct ShutdownOutcome {
+    /// Whether every instance-owned cleanup boundary has completed.
+    pub completion: ShutdownCompletion,
+    /// The shutdown result, preserving its original typed failure causes.
+    pub result: crate::error::Result<()>,
+}
+
 /// Core Drasi Server for continuous query processing
 ///
 /// `DrasiLib` is the main entry point for embedding Drasi functionality in your application.
@@ -767,7 +794,9 @@ impl DrasiLib {
     /// reopen the same path — and recover the prior state — within the same process.
     ///
     /// This method is idempotent — calling it on an already-stopped server will
-    /// still retry any incomplete cleanup.
+    /// still retry any incomplete cleanup. Use
+    /// [`shutdown_with_outcome()`](Self::shutdown_with_outcome) to distinguish
+    /// unfinished cleanup from errors remaining after cleanup completed.
     ///
     /// # Examples
     ///
@@ -782,6 +811,31 @@ impl DrasiLib {
     /// # }
     /// ```
     pub async fn shutdown(&self) -> crate::error::Result<()> {
+        self.shutdown_with_outcome().await.result
+    }
+
+    /// Shut down permanently and report cleanup completion independently of errors.
+    ///
+    /// This performs the same teardown as [`shutdown()`](Self::shutdown), with
+    /// the same overall deadline and typed failure causes. Completion requires
+    /// actual graph/resource disposal, pending-adapter cleanup, worker joins,
+    /// configuration-store close acknowledgement and the management-driver join.
+    /// Unknown or interrupted cleanup is [`ShutdownCompletion::Incomplete`].
+    ///
+    /// [`ShutdownCompletion::Complete`] does not imply success: a driver can
+    /// fail after its owned cleanup completed. Completed phases are not torn down
+    /// again on retry. Error retention follows the existing shutdown behavior;
+    /// callers needing a history across attempts should retain earlier errors.
+    pub async fn shutdown_with_outcome(&self) -> ShutdownOutcome {
+        let mut completion = ShutdownCompletion::Incomplete;
+        let result = self.shutdown_inner(&mut completion).await;
+        ShutdownOutcome { completion, result }
+    }
+
+    async fn shutdown_inner(
+        &self,
+        completion: &mut ShutdownCompletion,
+    ) -> crate::error::Result<()> {
         let deadline = self.lifecycle_deadline(
             "shutdown",
             self.config.shutdown_timeout_secs,
@@ -832,25 +886,67 @@ impl DrasiLib {
         if let Err(error) = runtime_shutdown {
             failures.push(error.context("shutting down instance adapters"));
         }
+        let processing_complete = match deadline
+            .wait("confirming instance cleanup", true, async {
+                let graph = self.instance_graph.shutdown_completion().await?;
+                let adapters = self.computation_runtime.shutdown_completion().await;
+                Ok::<_, anyhow::Error>(
+                    graph == ShutdownCompletion::Complete
+                        && adapters == ShutdownCompletion::Complete,
+                )
+            })
+            .await
+        {
+            Ok(Ok(complete)) => complete,
+            Ok(Err(error)) => {
+                failures.push(error.context("confirming instance cleanup"));
+                false
+            }
+            Err(error) => {
+                failures.push(anyhow::Error::from(error));
+                false
+            }
+        };
         drop(_lifecycle);
         // Store ownership must outlive every unfinished processing owner. A
         // terminal failure leaves none: retrying cannot change it, so release
         // configuration ownership too and keep reporting the failure; dropping
         // the last handle then releases the runtime and its state stores.
-        if failures
-            .iter()
-            .all(crate::computation::instance::shutdown_failure_is_terminal)
-        {
+        let terminal = !failures.is_empty()
+            && failures
+                .iter()
+                .all(crate::computation::instance::shutdown_failure_is_terminal);
+        if processing_complete || terminal {
             if let Some(management) = self.management.get() {
-                if let Err(error) = deadline
-                    .wait("closing configuration storage", true, management.close())
+                match deadline
+                    .wait(
+                        "closing configuration storage",
+                        true,
+                        management.close_with_outcome(),
+                    )
                     .await
-                    .map_err(anyhow::Error::from)
-                    .and_then(|result| result)
                 {
-                    failures.push(error.context("closing configuration store"));
+                    Ok((closed, result)) => {
+                        if processing_complete {
+                            *completion = closed;
+                        }
+                        if let Err(error) = result {
+                            failures.push(error.context("closing configuration store"));
+                        }
+                    }
+                    Err(error) => {
+                        failures.push(
+                            anyhow::Error::from(error).context("closing configuration store"),
+                        );
+                    }
                 }
+            } else if processing_complete {
+                *completion = ShutdownCompletion::Complete;
             }
+        } else if failures.is_empty() {
+            failures.push(
+                DrasiError::invalid_state("Instance shutdown cleanup remains unconfirmed").into(),
+            );
         }
         if !failures.is_empty() {
             return Err(DrasiError::Internal(

@@ -7,7 +7,7 @@ use super::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -244,6 +244,24 @@ fn valid_word(value: &str, dots: bool) -> bool {
         && !value.contains("..")
 }
 
+/// Optional host-owned acceptance policy, independent of any recorder backend.
+///
+/// The registry calls this synchronously while holding its registration lock,
+/// after all built-in validation, schema-conflict and capacity checks, but
+/// before accepting the definition or series. A successful commit is the last
+/// fallible validation step; an error leaves registry definitions and series
+/// unchanged and prevents the caller from invoking its recorder.
+///
+/// Implementations must bound their work and retained state, must not reenter
+/// the registry (including inspection), and must not call a recorder. On error
+/// they must leave their own committed state unchanged. Repeated registrations
+/// can reach the guard, so accepting an identical registration must be
+/// idempotent.
+pub trait MetricRegistrationGuard: std::fmt::Debug + Send + Sync {
+    /// Validates the registration and commits any guard-owned acceptance state.
+    fn validate_and_commit(&self, registration: &MetricRegistration) -> Result<()>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Schema {
     kind: MetricKind,
@@ -265,11 +283,13 @@ struct Registrations {
 
 /// One host-owned registry per recorder. Share its `Arc` across graphs and SDK
 /// integrations; retain definitions as long as that recorder retains instruments.
-/// This object neither installs nor calls a recorder.
+/// This object neither installs nor calls a recorder. Default construction has
+/// no host guard; use [`Self::new_with_guard`] to add an acceptance policy.
 #[derive(Debug)]
 pub struct MetricRegistrationState {
     limits: RegistrationLimits,
     registrations: Mutex<Registrations>,
+    guard: Option<Arc<dyn MetricRegistrationGuard>>,
 }
 
 impl Default for MetricRegistrationState {
@@ -277,16 +297,32 @@ impl Default for MetricRegistrationState {
         Self {
             limits: RegistrationLimits::default(),
             registrations: Mutex::new(Registrations::default()),
+            guard: None,
         }
     }
 }
 
 impl MetricRegistrationState {
+    /// Creates a registry with built-in validation only and no host guard.
     pub fn new(limits: RegistrationLimits) -> Result<Self> {
         limits.validate()?;
         Ok(Self {
             limits,
             registrations: Mutex::new(Registrations::default()),
+            guard: None,
+        })
+    }
+
+    /// Creates a registry with an additional host policy at its atomic
+    /// acceptance boundary. The guard follows [`MetricRegistrationGuard`]'s
+    /// bounded, non-reentrant and failure-atomic contract.
+    pub fn new_with_guard(
+        limits: RegistrationLimits,
+        guard: Arc<dyn MetricRegistrationGuard>,
+    ) -> Result<Self> {
+        Ok(Self {
+            guard: Some(guard),
+            ..Self::new(limits)?
         })
     }
 
@@ -295,7 +331,9 @@ impl MetricRegistrationState {
     }
 
     /// Validates and atomically accepts a definition/series before a caller
-    /// invokes its recorder. No lock is held across host recorder callbacks.
+    /// invokes its recorder. An optional guard commits under the registration
+    /// lock only after built-in checks pass. No registry lock is held across
+    /// host recorder callbacks.
     pub fn register(&self, registration: &MetricRegistration) -> Result<()> {
         registration.validate(&self.limits)?;
         let schema = Schema {
@@ -329,6 +367,9 @@ impl MetricRegistrationState {
         if new_series && state.series.len() >= self.limits.series {
             return Err(TelemetryError::Capacity("metric series"));
         }
+        if let Some(guard) = &self.guard {
+            guard.validate_and_commit(registration)?;
+        }
         if new_definition {
             state.definitions.insert(registration.name.clone(), schema);
         }
@@ -355,7 +396,7 @@ mod tests {
 
     fn scope(instance: &str) -> TelemetryScope {
         TelemetryScope::graph(instance, "graph").unwrap().component(
-            ComponentId::try_new("component").unwrap(),
+            ComponentId::try_new("064e948e-04b4-40d2-8dcd-32740a66e91f").unwrap(),
             ComponentRole::Source,
             ComponentSemanticKind::Source,
         )
@@ -541,6 +582,51 @@ mod tests {
         ));
         state.register(&custom("one", "count")).unwrap();
         assert_eq!(state.counts().unwrap(), (1, 2));
+    }
+
+    #[test]
+    fn guard_rejection_preserves_state_without_a_recorder() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        #[derive(Debug)]
+        struct Guard(AtomicBool);
+
+        impl MetricRegistrationGuard for Guard {
+            fn validate_and_commit(&self, _: &MetricRegistration) -> Result<()> {
+                if self.0.load(Ordering::SeqCst) {
+                    return Err(TelemetryError::Unsupported("test rejection"));
+                }
+                Ok(())
+            }
+        }
+
+        let guard = Arc::new(Guard(AtomicBool::new(true)));
+        assert!(MetricRegistrationState::new_with_guard(
+            RegistrationLimits {
+                series: 0,
+                ..Default::default()
+            },
+            guard.clone(),
+        )
+        .is_err());
+        let state = MetricRegistrationState::new_with_guard(
+            RegistrationLimits {
+                definitions: 1,
+                series: 1,
+                ..Default::default()
+            },
+            guard.clone(),
+        )
+        .unwrap();
+        let registration = custom("instance", "count");
+        assert_eq!(
+            state.register(&registration),
+            Err(TelemetryError::Unsupported("test rejection"))
+        );
+        assert_eq!(state.counts().unwrap(), (0, 0));
+        guard.0.store(false, Ordering::SeqCst);
+        state.register(&registration).unwrap();
+        assert_eq!(state.counts().unwrap(), (1, 1));
     }
 
     #[test]

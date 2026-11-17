@@ -304,7 +304,7 @@ async fn stop_total_deadline_retains_cleanup_and_blocks_restart_until_retry() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn shutdown_total_deadline_retains_the_driver_for_a_later_join() {
+async fn shutdown_outcome_total_deadline_retains_the_driver_for_a_later_join() {
     let (source, control) = ControlledSource::fixture(
         drasi_core_types::ComponentName::try_new("source").expect("fixture component name"),
     );
@@ -319,13 +319,23 @@ async fn shutdown_total_deadline_retains_the_driver_for_a_later_join() {
     core.start().await.unwrap();
     control.pending_stop.store(true, Ordering::Release);
     let began = tokio::time::Instant::now();
-    let error = core.shutdown().await.unwrap_err();
+    let outcome = core.shutdown_with_outcome().await;
+    assert!(matches!(
+        outcome.completion,
+        crate::ShutdownCompletion::Incomplete
+    ));
+    let error = outcome.result.unwrap_err();
     assert_eq!(began.elapsed(), Duration::from_secs(1));
     assert_lifecycle_timeout(&error, true);
     assert!(core.start().await.is_err());
     control.pending_stop.store(false, Ordering::Release);
     control.stop_release.notify_one();
-    core.shutdown().await.unwrap();
+    let outcome = core.shutdown_with_outcome().await;
+    assert!(matches!(
+        outcome.completion,
+        crate::ShutdownCompletion::Complete
+    ));
+    outcome.result.unwrap();
     assert!(!core.is_running().await);
 }
 
