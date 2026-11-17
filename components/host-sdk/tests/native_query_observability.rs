@@ -615,6 +615,191 @@ async fn non_atomic_evaluation_and_publication_keep_one_input_and_result_count()
     Ok(())
 }
 
+struct ChannelSource(
+    ComponentDescriptor,
+    Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<OutputEnvelope>>>,
+);
+#[async_trait::async_trait]
+impl ComputationComponent for ChannelSource {
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.0
+    }
+    async fn start(&mut self) -> Result<()> {
+        Ok(())
+    }
+    async fn stop(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+#[async_trait::async_trait]
+impl EnvelopeSource for ChannelSource {
+    async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
+        Ok(self.1.lock().await.recv().await)
+    }
+}
+
+struct ChannelSourceFactory {
+    descriptor: FactoryDescriptor,
+    incoming: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<OutputEnvelope>>>,
+}
+#[async_trait::async_trait]
+impl ComponentFactory for ChannelSourceFactory {
+    fn descriptor(&self) -> &FactoryDescriptor {
+        &self.descriptor
+    }
+    fn validate(&self, _: &ComponentSpecification) -> Result<()> {
+        Ok(())
+    }
+    async fn create(
+        &self,
+        context: ConstructionContext,
+    ) -> std::result::Result<ConstructedComponent, ComponentCreationError> {
+        Ok(ConstructedComponent::source(Box::new(ChannelSource(
+            context.specification.descriptor.clone(),
+            self.incoming.clone(),
+        ))))
+    }
+}
+
+/// DrasiLib requires its log runtime's layer on the process subscriber.
+fn component_logging() -> Result<ComponentLogRuntime> {
+    use tracing_subscriber::prelude::*;
+    static LOGGING: std::sync::OnceLock<ComponentLogRuntime> = std::sync::OnceLock::new();
+    if let Some(logging) = LOGGING.get() {
+        return Ok(logging.clone());
+    }
+    let logging = ComponentLogRuntime::new(LogPolicy::new("off")?)?;
+    tracing_subscriber::registry()
+        .with(logging.layer())
+        .try_init()?;
+    Ok(LOGGING.get_or_init(|| logging).clone())
+}
+
+/// The ordinary-query host path used by drasi-server: a live source, the
+/// plugin's ordinary query factory and a result subscription. Its processing
+/// work runs on a host runtime thread while the transform is polled elsewhere.
+async fn ordinary_query_processes_sequential_inputs(instance: &str) -> Result<()> {
+    use futures_util::StreamExt;
+    use std::collections::BTreeMap;
+    const INPUTS: u64 = 5;
+    const NAME: &str = "sequential";
+    let metrics = RecordingMetrics::default();
+    let plugin = plugin()?;
+    let native = plugin
+        .factories()
+        .iter()
+        .find(|factory| {
+            factory.metadata().implementation.name.as_ref() == "drasi.experimental/indexed-query"
+        })
+        .cloned()
+        .context("indexed query factory")?
+        .for_ordinary_queries()?;
+    let (sender, receiver) = tokio::sync::mpsc::channel(8);
+    let source_factory = Arc::new(ChannelSourceFactory {
+        descriptor: FactoryDescriptor {
+            implementation: ImplementationIdentity::try_new("test/sequential-input", "1")?,
+            role: ComponentRole::Source,
+            configuration_version: 1,
+            configuration: ConfigurationSchema::default(),
+            dependencies: BTreeMap::new(),
+        },
+        incoming: Arc::new(tokio::sync::Mutex::new(receiver)),
+    });
+    let source = ComponentId::generate();
+    let batch = ComponentBatch::builder()
+        .component(
+            ComponentName::try_new("source")?,
+            ComponentSpecification {
+                descriptor: ComponentDescriptor::try_new(
+                    source.clone(),
+                    vec![PortDescriptor::new(
+                        PortId::try_new("out")?,
+                        PortDirection::Output,
+                        GraphChangeCodec::schema().descriptor().clone(),
+                        PipeRequirements::default(),
+                    )],
+                )?,
+                role: ComponentRole::Source,
+                completion: None,
+                implementation: source_factory.descriptor.implementation.clone(),
+                configuration_version: 1,
+                configuration: BTreeMap::new(),
+                dependencies: BTreeMap::new(),
+            },
+            source_factory,
+        )
+        .bind_stream(
+            Endpoint::new(source.clone(), PortId::try_new("out")?),
+            StreamId::try_new("source/out")?,
+        )
+        .lifecycle_policy(source, LifecyclePolicy { auto_start: true })
+        .build()?;
+    let core = drasi_lib::DrasiLib::builder()
+        .with_id(instance)
+        .with_allow_external_component_ids(true)
+        .with_component_logging(component_logging()?)
+        .with_telemetry(
+            TelemetryOptions::new(
+                TelemetrySettings::new(TelemetryProfile::Persistence)
+                    .with_tracing(false)
+                    .with_sampling(RootSampling::Never),
+            )
+            .with_metric_context(MetricRegistrationContext::new(
+                Arc::new(metrics.clone()),
+                Default::default(),
+            )?),
+        )
+        .with_query_factory(native)
+        .with_query(
+            drasi_lib::Query::cypher(NAME)
+                .query("MATCH (n:Item) RETURN n.value AS value")
+                .from_input("source")
+                .enable_bootstrap(false)
+                .build()?,
+        )
+        .with_components(batch)
+        .build()
+        .await?;
+    let run = async {
+        core.start().await?;
+        let mut results = core.subscribe_query_results(NAME).await?.stream;
+        for sequence in 1..=INPUTS {
+            sender
+                .send(OutputEnvelope::new(
+                    PortId::try_new("out")?,
+                    input(sequence, &["Item"], 1)?.envelope,
+                ))
+                .await?;
+            tokio::time::timeout(Duration::from_secs(5), results.next())
+                .await
+                .with_context(|| format!("no result for input {sequence} of {INPUTS}"))?
+                .context("query result stream closed")??;
+        }
+        anyhow::ensure!(
+            core.get_query_results(NAME).await?.len() == INPUTS as usize,
+            "native query lost sequential results"
+        );
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    let shutdown = core.shutdown().await;
+    run?;
+    shutdown?;
+    assert_eq!(metrics.count("drasi.query.events_processed", &[]), INPUTS);
+    assert_eq!(metrics.count("drasi.query.results_emitted", &[]), INPUTS);
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ordinary_query_processes_sequential_inputs_current_thread() -> Result<()> {
+    ordinary_query_processes_sequential_inputs("ordinary-current").await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ordinary_query_processes_sequential_inputs_multi_thread() -> Result<()> {
+    ordinary_query_processes_sequential_inputs("ordinary-multi").await
+}
+
 #[cfg(feature = "otel-context")]
 mod traces {
     use super::*;
