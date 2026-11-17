@@ -162,7 +162,10 @@ pub fn decode_text_to_element_value(text: &str, type_oid: i32) -> Result<Element
     Ok(decode_text_to_postgres_value(text, type_oid as u32)?.to_element_value())
 }
 
-/// Back-compat alias used by existing tests in the source crate.
+/// Deprecated alias for [`decode_text_to_element_value`], kept for backward compatibility.
+///
+/// New code should call [`decode_text_to_element_value`] directly.
+#[deprecated(note = "Use decode_text_to_element_value instead")]
 pub fn decode_column_value_text(text: &str, type_oid: i32) -> Result<ElementValue> {
     decode_text_to_element_value(text, type_oid)
 }
@@ -309,7 +312,7 @@ mod tests {
 
     #[test]
     fn decode_timestamp_fractional() {
-        let ev = decode_column_value_text("2024-06-15 10:30:45.123456", 1114).unwrap();
+        let ev = decode_text_to_element_value("2024-06-15 10:30:45.123456", 1114).unwrap();
         let expected = NaiveDate::from_ymd_opt(2024, 6, 15)
             .unwrap()
             .and_hms_micro_opt(10, 30, 45, 123456)
@@ -320,11 +323,11 @@ mod tests {
     #[test]
     fn decode_bool_t_f() {
         assert_eq!(
-            decode_column_value_text("t", 16).unwrap(),
+            decode_text_to_element_value("t", 16).unwrap(),
             ElementValue::Bool(true)
         );
         assert_eq!(
-            decode_column_value_text("f", 16).unwrap(),
+            decode_text_to_element_value("f", 16).unwrap(),
             ElementValue::Bool(false)
         );
     }
