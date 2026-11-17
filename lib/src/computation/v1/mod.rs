@@ -262,6 +262,12 @@ mod output_bootstrap;
 pub use output_bootstrap::OutputBootstrapProvider;
 mod output_catalogue;
 pub use drasi_computation_contracts::{
+    check_dependency, check_edge, ComponentCapabilities, ComponentDescription,
+    DependencyCapabilities, DependencyRequirement, DurabilityRequirement, Incompatibility,
+    InputDelivery, InputDescription, OutputDescription, OutputIdentity, OutputRelation,
+    PortDescription, ProgressPersistence, ReplayAbility, ResourceCapabilities, ResourceDurability,
+};
+pub use drasi_computation_contracts::{
     OutputCapability, OutputCursor, OutputEndpoint, OutputFollow, OutputFollowHub,
     OutputFollowLimits, OutputPortReaders, OutputReadError, OutputReaders, OutputReplay,
     OutputSnapshot, OutputSnapshotFollow, ReplayProvider, SnapshotFollowProvider, SnapshotProvider,

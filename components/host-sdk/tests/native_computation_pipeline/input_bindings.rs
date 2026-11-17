@@ -32,6 +32,9 @@ impl BindingSource {
 
 #[async_trait]
 impl ComputationComponent for BindingSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

@@ -388,6 +388,9 @@ mod tests {
     struct Idle(ComponentDescriptor);
     #[async_trait]
     impl ComputationComponent for Idle {
+        fn description(&self) -> crate::computation::v1::ComponentDescription {
+            crate::computation::v1::ComponentDescription::undeclared()
+        }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.0
         }

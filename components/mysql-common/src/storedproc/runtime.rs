@@ -22,7 +22,7 @@ use drasi_computation_contracts::{
     lifecycle::{CancellationToken, StopMode},
     ChangeRoute, ComponentDescriptor, ComponentId, DeliveryBatch, DeliveryGuarantee, DeliveryItem,
     DeliveryScope, EnvelopeCodec, GraphChangeBatch, GraphChangeCodec, InputBinding, InputEnvelope,
-    PipeRequirements, PortDescriptor, PortDirection, PortId, SinkOutputs, VolatileProducerRefused,
+    PipeRequirements, PortDescriptor, PortDirection, PortId, SinkOutputs,
 };
 use drasi_reaction_common::OperationType;
 use std::{num::NonZeroUsize, sync::Arc, time::Duration};
@@ -450,7 +450,15 @@ impl MySqlStoredProcSink {
         anyhow::ensure!(self.started, "MySQL sink is not running");
         anyhow::ensure!(item.port.as_str() == "in", "unknown MySQL sink input port");
         if item.position.epoch().is_some() && !self.delivery_guarantee().is_at_least_once() {
-            return Err(VolatileProducerRefused.into());
+            // Internal invariant guard only: the graph refuses this pairing when
+            // it binds the edge.
+            return Err(
+                drasi_computation_contracts::Incompatibility::ProducerIdentity {
+                    required: DeliveryGuarantee::ExactlyOnce,
+                    identity: drasi_computation_contracts::OutputIdentity::Volatile,
+                }
+                .into(),
+            );
         }
         let effect = self.effect(&item)?;
         if self.sessions.live.as_ref().is_some_and(|live| live.busy) {

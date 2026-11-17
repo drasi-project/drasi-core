@@ -53,6 +53,16 @@ use crate::{
 /// standalone and transactional construction use this same immutable contract.
 pub trait Factory: Send + Sync + 'static {
     fn metadata(&self) -> FactoryMetadata;
+    /// The declared capabilities and requirements of the component this
+    /// factory would construct from `request`: a plain function of its
+    /// configuration, descriptor and the declared capabilities of its bound
+    /// resources. No construction, I/O or external state. The Host forwards
+    /// the answer unchanged and the graph checks every edge and resource
+    /// binding against it.
+    fn describe(
+        &self,
+        request: &crate::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_contracts::ComponentDescription>;
     /// Must agree with a nonempty Capabilities::update_modes declaration.
     fn supports_update_planning(&self) -> bool {
         false
@@ -1084,7 +1094,31 @@ static FACTORY_VTABLE: abi::FactoryVTable = abi::FactoryVTable {
     release: Some(release_factory),
     create: Some(create_component),
     assess: Some(update::assess),
+    describe: Some(describe_component),
 };
+unsafe extern "C" fn describe_component(raw: *mut c_void, input: BorrowedBytes) -> Reply {
+    transport::reply_boundary(|| {
+        let state = unsafe { state_ref::<FactoryState>(raw)? };
+        let bytes = unsafe { transport::borrowed_bytes(input, abi::MAX_METADATA_BYTES)? };
+        let request: crate::wire::DescribeRequest =
+            serde_json::from_slice(bytes).map_err(|error| {
+                Failure::protocol(format!("invalid native describe request: {error}"))
+            })?;
+        let description = state.plugin.definition.factories[state.index]
+            .describe(&request)
+            .map_err(Failure::from)?;
+        description
+            .validate(&request.descriptor)
+            .map_err(|reason| Failure::protocol(format!("invalid native description: {reason}")))?;
+        let bytes = serde_json::to_vec(&description)
+            .map_err(anyhow::Error::from)
+            .map_err(Failure::from)?;
+        if bytes.len() > abi::MAX_METADATA_BYTES {
+            return Err(Failure::protocol("native description exceeds size limit"));
+        }
+        Ok(bytes)
+    })
+}
 unsafe extern "C" fn release_factory(state: *mut c_void) {
     transport::drop_boundary(|| unsafe { drop(Box::from_raw(state.cast::<FactoryState>())) });
 }

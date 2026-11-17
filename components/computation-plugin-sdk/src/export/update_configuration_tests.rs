@@ -60,6 +60,12 @@ struct TestFactory {
 }
 
 impl Factory for TestFactory {
+    fn describe(
+        &self,
+        _request: &crate::wire::DescribeRequest,
+    ) -> anyhow::Result<crate::ComponentDescription> {
+        Ok(crate::ComponentDescription::undeclared())
+    }
     fn metadata(&self) -> FactoryMetadata {
         let mut configuration = definition().schema();
         configuration.allow_additional = self.allow_additional;

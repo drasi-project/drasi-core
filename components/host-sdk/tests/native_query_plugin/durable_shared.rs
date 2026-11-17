@@ -15,6 +15,9 @@ struct ReleasedSource {
 
 #[async_trait]
 impl ComputationComponent for ReleasedSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         self.source.descriptor()
     }
@@ -73,6 +76,9 @@ struct HeldSink {
 
 #[async_trait]
 impl ComputationComponent for HeldSink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         self.sink.descriptor()
     }

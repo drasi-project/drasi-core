@@ -13,10 +13,14 @@ use sha2::{Digest, Sha256};
 
 /// A consumer's configured delivery guarantee.
 ///
-/// `ExactlyOnce` (the default) accepts only producers with persistent
-/// progress. `AtLeastOnce` additionally accepts immediate in-memory query
-/// outputs: their delivery carries an epoch, deduplicates within one producer
-/// incarnation, and cannot resume across a process restart.
+/// `ExactlyOnce` (the default) accepts only producers with a durable output
+/// identity. `AtLeastOnce` additionally accepts producers with a volatile
+/// identity (in-memory queries and volatile graph producers): their delivery
+/// carries an epoch, deduplicates within one producer incarnation, and cannot
+/// resume across a process restart. A consumer declares its guarantee as its
+/// inputs' [`crate::InputDelivery`] in its [`crate::ComponentDescription`], and
+/// the graph checks it against the producer's declared output when the edge is
+/// bound ([`crate::check_edge`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DeliveryGuarantee {
@@ -30,14 +34,6 @@ impl DeliveryGuarantee {
         self == Self::AtLeastOnce
     }
 }
-
-/// Permanent refusal of a volatile producer by an exactly-once consumer.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "the producer is an in-memory query without persistent progress; use a persistent query \
-     or set deliveryGuarantee to atLeastOnce"
-)]
-pub struct VolatileProducerRefused;
 
 /// Epochs are lowercase SHA-256 hex digests.
 pub const DELIVERY_EPOCH_LEN: usize = 64;
@@ -270,7 +266,18 @@ pub fn batch_identity(
                 identity.query_id(),
             ))?
         }
-        (Some(_), _) => anyhow::bail!("only query producers may carry a delivery epoch"),
+        (Some(epoch), crate::output_identity::Producer::Graph(identity)) => {
+            anyhow::ensure!(valid_epoch(epoch), "invalid delivery epoch");
+            serde_json::to_vec(&(
+                "drasi.delivery-stream.volatile-graph.v1",
+                scope,
+                &input.port,
+                input.envelope.system().stream(),
+                identity.construction_scope(),
+                identity.graph_id(),
+                identity.component_id(),
+            ))?
+        }
     };
     Ok(DeliveryBatchIdentity {
         version: if candidate.epoch.is_some() { 2 } else { 1 },
@@ -406,9 +413,13 @@ impl DeliveryBatch {
 
     /// Derive a batch under the consumer's configured guarantee. Strict
     /// derivation is always tried first; only its missing-progress rejection of
-    /// an immediate in-memory query output falls back to the at-least-once
-    /// identity, and only for an `AtLeastOnce` consumer. An exactly-once
-    /// consumer receives the permanent [`VolatileProducerRefused`] error.
+    /// an output with a volatile producer identity falls back to the
+    /// at-least-once identity, and only for an `AtLeastOnce` consumer.
+    ///
+    /// The graph refuses incompatible producers when the edge is bound
+    /// ([`crate::check_edge`]); the permanent
+    /// [`crate::Incompatibility::ProducerIdentity`] error here is only an
+    /// internal invariant guard, never the compatibility check.
     pub fn new_with_guarantee(
         scope: DeliveryScope,
         input: InputEnvelope,
@@ -425,7 +436,11 @@ impl DeliveryBatch {
                     return Err(error);
                 };
                 if !guarantee.is_at_least_once() {
-                    return Err(VolatileProducerRefused.into());
+                    return Err(crate::Incompatibility::ProducerIdentity {
+                        required: DeliveryGuarantee::ExactlyOnce,
+                        identity: crate::OutputIdentity::Volatile,
+                    }
+                    .into());
                 }
                 candidate
             }

@@ -1068,6 +1068,9 @@ struct OneSource {
 
 #[async_trait]
 impl ComputationComponent for OneSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -1091,6 +1094,9 @@ struct OneSink {
 
 #[async_trait]
 impl ComputationComponent for OneSink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

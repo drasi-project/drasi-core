@@ -9,12 +9,11 @@
 //!   connection; the next operation reconnects).
 //! * **Restart (Stop):** `host`, `port`, `user`, `password`, `encryption`,
 //!   `trustServerCertificate`, `trustedCaPem`, `hostNameInCertificate`: the
-//!   connection and its credentials are established at start;
-//!   `deliveryGuarantee`: which producers the sink accepts is fixed for one
-//!   activation.
+//!   connection and its credentials are established at start.
 //! * **Recreate (Replace):** `outputs` and a change to the bound inputs: the
 //!   route aliases and delivery streams change, which is not a live update
-//!   (CW-94).
+//!   (CW-94); `deliveryGuarantee`: it is declared on the input port, so the
+//!   graph re-checks every producer against the new guarantee.
 //! * **Unsupported:** `database` and `progressTable`. They are the cursor's
 //!   identity: the cursor lives in that table in that database, so moving it
 //!   would restart every stream without its completed prefix (duplicate or
@@ -42,7 +41,7 @@ pub const FIELD_BOUNDARIES: [(&str, Option<UpdateBoundary>); 19] = [
     ("hostNameInCertificate", Some(UpdateBoundary::Stop)),
     ("progressTable", None),
     ("maxStreams", Some(UpdateBoundary::Pause)),
-    ("deliveryGuarantee", Some(UpdateBoundary::Stop)),
+    ("deliveryGuarantee", Some(UpdateBoundary::Replace)),
     ("outputs", Some(UpdateBoundary::Replace)),
     ("routes", Some(UpdateBoundary::Pause)),
     ("defaultTemplate", Some(UpdateBoundary::Pause)),
@@ -102,7 +101,7 @@ pub fn plan(
     planner.field(
         "deliveryGuarantee",
         c.delivery_guarantee != p.delivery_guarantee,
-        Stop,
+        Replace,
     );
     planner.field("outputs", c.outputs != p.outputs, Replace);
     planner.field("routes", c.routes != p.routes, Pause);

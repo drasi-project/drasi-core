@@ -165,6 +165,9 @@ struct Service {
 }
 #[async_trait]
 impl ComputationComponent for Service {
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        crate::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -365,6 +368,12 @@ impl RuntimeFactory {
 }
 #[async_trait]
 impl ComponentFactory for RuntimeFactory {
+    fn describe(
+        &self,
+        _context: &crate::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<crate::computation::v1::ComponentDescription> {
+        Ok(crate::computation::v1::ComponentDescription::undeclared())
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }

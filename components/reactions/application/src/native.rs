@@ -236,6 +236,9 @@ async fn finish_callback(callback: &mut Callback) -> Result<()> {
 
 #[async_trait]
 impl ComputationComponent for ApplicationReaction {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn configuration(&self) -> Result<serde_json::Value> {
         let properties = self
             .properties

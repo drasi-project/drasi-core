@@ -255,7 +255,10 @@ fn assess_classifies_every_field() -> Result<()> {
             Some(Stop),
         ),
         (with("maxProtocolBytes", json!(1 << 20)), Some(Stop)),
-        (with("deliveryGuarantee", json!("atLeastOnce")), Some(Stop)),
+        (
+            with("deliveryGuarantee", json!("atLeastOnce")),
+            Some(Replace),
+        ),
         (
             with(
                 "outputs",
@@ -285,6 +288,12 @@ fn assess_classifies_every_field() -> Result<()> {
 /// The factory, named for the conformance suite.
 struct MyFactory;
 impl Factory for MyFactory {
+    fn describe(
+        &self,
+        _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(drasi_computation_plugin_sdk::ComponentDescription::undeclared())
+    }
     fn metadata(&self) -> FactoryMetadata {
         MySqlStoredProcFactory.metadata()
     }

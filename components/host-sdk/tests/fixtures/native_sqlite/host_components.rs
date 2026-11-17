@@ -36,6 +36,9 @@ struct Capture {
 }
 #[async_trait::async_trait]
 impl ComputationComponent for Capture {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

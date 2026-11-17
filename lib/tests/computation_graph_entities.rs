@@ -100,6 +100,9 @@ fn service(
 
 #[async_trait]
 impl ComputationComponent for IdleService {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -246,6 +249,12 @@ fn factory(spec: &ComponentSpecification, fail: bool) -> Arc<ServiceFactory> {
 
 #[async_trait]
 impl ComponentFactory for ServiceFactory {
+    fn describe(
+        &self,
+        _context: &drasi_lib::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }
@@ -2250,11 +2259,9 @@ async fn native_provider_nodes_keep_real_ownership_realization_and_dependencies(
         .expect("declare indexes")
         .provide_resource(
             resource("source"),
-            ResourceHandle::new(
+            drasi_lib::computation::v1::QueryIndexProviderResource::handle(
                 ResourceRole::IndexBackend,
-                Arc::new(QueryIndexProviderResource(Arc::new(
-                    drasi_core::computation::InMemoryComputationProvider,
-                ))),
+                Arc::new(drasi_core::computation::InMemoryComputationProvider),
             ),
         )
         .expect("provide indexes")

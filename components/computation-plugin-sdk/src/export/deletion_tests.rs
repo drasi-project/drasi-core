@@ -16,6 +16,12 @@ use std::sync::atomic::AtomicUsize;
 struct TestFactory(Arc<AtomicUsize>);
 
 impl Factory for TestFactory {
+    fn describe(
+        &self,
+        _request: &crate::wire::DescribeRequest,
+    ) -> anyhow::Result<crate::ComponentDescription> {
+        Ok(crate::ComponentDescription::undeclared())
+    }
     fn metadata(&self) -> FactoryMetadata {
         FactoryMetadata {
             implementation: ImplementationIdentity::try_new("fixture/deletion", "1").unwrap(),

@@ -442,6 +442,12 @@ async fn bootstrap_coordination_validates_every_returned_handle_field() -> anyho
 
 struct OrdinaryFactory(bool);
 impl sdk::Factory for OrdinaryFactory {
+    fn describe(
+        &self,
+        _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(drasi_computation_plugin_sdk::ComponentDescription::undeclared())
+    }
     fn metadata(&self) -> sdk::FactoryMetadata {
         metadata()
     }

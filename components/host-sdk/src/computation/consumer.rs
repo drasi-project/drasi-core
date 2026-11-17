@@ -47,6 +47,14 @@ pub struct NativeConsumerProxy {
     disposing: bool,
 }
 impl NativeConsumerProxy {
+    /// Attach the plugin's declaration for this instance.
+    pub(super) fn with_description(
+        mut self,
+        description: drasi_lib::computation::v1::ComponentDescription,
+    ) -> Self {
+        self.component.set_description(description);
+        self
+    }
     pub(super) async fn new(
         component: NativeComponentProxy,
         extension: PluginConsumerV1,
@@ -237,6 +245,9 @@ fn codec(schemas: &[Arc<Schema>]) -> anyhow::Result<EnvelopeCodec> {
 }
 #[async_trait]
 impl ComputationComponent for NativeConsumerProxy {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        self.component.description()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         self.component.descriptor()
     }

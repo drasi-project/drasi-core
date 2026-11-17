@@ -25,7 +25,7 @@ limits are gone. There is no migration path; re-create the component.
 | `defaultTemplate` | object | none | `{added?, updated?, deleted?}` | no | In place |
 | `progressTable` | string | `drasi_delivery_progress` | identifier, at most 64; in `database` | no | Unsupported |
 | `maxStreams` | integer | `4096` | 1..=1048576 | no | In place |
-| `deliveryGuarantee` | string | `exactlyOnce` | `exactlyOnce`, `atLeastOnce` (see Delivery guarantee) | no | Restart |
+| `deliveryGuarantee` | string | `exactlyOnce` | `exactlyOnce`, `atLeastOnce` (see Delivery guarantee) | no | Replace |
 | `commandTimeoutMs` | integer | `30000` | 1..=86400000 | no | In place |
 | `connectTimeoutMs` | integer | `5000` | 1..=86400000 | no | In place |
 | `shutdownTimeoutMs` | integer | `10000` | 1..=86400000 | no | In place |
@@ -48,24 +48,30 @@ At least one command template (in `routes` or `defaultTemplate`) is required.
 
 ## Delivery guarantee
 
-`deliveryGuarantee` selects which producers the sink accepts:
+`deliveryGuarantee` selects which producers the sink accepts. The plugin's
+description of the sink declares the selected guarantee on its input, and the
+graph checks it against the producer's declared output when it binds the edge.
+An incompatible pairing never rejects the graph change: both components stay,
+the edge is failed and unbound, and the sink carries a terminal binding
+failure until either side's configuration changes or the edge is removed. It
+is never discovered at delivery. Producers whose outputs carry no producer
+identity, or that declare none, are refused under either guarantee.
 
-- `exactlyOnce` (default): only producers with persistent progress, such as
-  persistent queries. Each procedure call commits with its cursor row, so a
-  retry never repeats a completed call. Wiring an in-memory query to this
-  sink is refused when the graph configuration is accepted (the edge becomes
-  bindable, or either endpoint is created, replaced or updated), with the
-  error "the producer is an in-memory query without persistent progress; use
-  a persistent query or set deliveryGuarantee to atLeastOnce". The same
-  refusal is applied, permanently, at the first delivery if a volatile input
-  still arrives.
-- `atLeastOnce`: additionally accepts in-memory (volatile) queries. Their
-  outputs carry a per-run epoch; the cursor still deduplicates retries within
-  one producer run, but a process restart starts a new run whose outputs are
-  delivered against a fresh cursor (the stream row is overwritten, not
-  duplicated, so `maxStreams` is not consumed per run). Effects after a
-  restart may repeat work the previous run already did; nothing is resumed.
-  Persistent producers are still delivered exactly once.
+- `exactlyOnce` (default): only producers that declare a durable output
+  identity, such as persistent queries. Each procedure call commits with its
+  cursor row, so a retry never repeats a completed call. A producer with a
+  volatile identity (for example an in-memory query) is refused: "input
+  requires ExactlyOnce delivery keyed on producer identity, but the producer's
+  output identity is Volatile". Use a persistent producer or set
+  `deliveryGuarantee` to `atLeastOnce`.
+- `atLeastOnce`: additionally accepts producers with a volatile identity (for
+  example in-memory queries). Their outputs carry a per-run epoch; the cursor
+  still deduplicates retries within one producer run, but a process restart
+  starts a new run whose outputs are delivered against a fresh cursor (the
+  stream row is overwritten, not duplicated, so `maxStreams` is not consumed
+  per run). Effects after a restart may repeat work the previous run already
+  did; nothing is resumed. Persistent producers are still delivered exactly
+  once.
 
 ## Examples
 
@@ -179,8 +185,8 @@ another `progressTable`.
 | Boundary | Fields |
 |---|---|
 | In place (Pause) | `routes`, `defaultTemplate`, `maxStreams`, `commandTimeoutMs`, `connectTimeoutMs`, `shutdownTimeoutMs`, `connectRetryAttempts`, `reconnectBudgetMs` |
-| Restart (Stop) | `hostname`, `port`, `database`, `user`, `password`, `ssl`, `tlsCaPem`, `maxProtocolBytes`, `deliveryGuarantee` |
-| Replace | `outputs`, changed incoming edges |
+| Restart (Stop) | `hostname`, `port`, `database`, `user`, `password`, `ssl`, `tlsCaPem`, `maxProtocolBytes` |
+| Replace | `outputs`, changed incoming edges, `deliveryGuarantee` (declared on the input port) |
 | Unsupported | `progressTable` (the receipt identity; remove with Erase and add again) |
 
 An unchanged configuration is an in-place no-op. A proposed configuration that

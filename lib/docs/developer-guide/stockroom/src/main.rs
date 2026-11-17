@@ -303,6 +303,9 @@ impl<T: FileRow> FileSource<T> {
 
 #[async_trait]
 impl<T: FileRow> ComputationComponent for FileSource<T> {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -391,6 +394,9 @@ struct Audit {
 // ANCHOR: audit-component
 #[async_trait]
 impl ComputationComponent for Audit {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -519,6 +525,9 @@ fn reorder_messages(envelope: &ChangeEnvelope, previous: &ResultView) -> anyhow:
 
 #[async_trait]
 impl ComputationComponent for Alerts {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -1187,6 +1196,9 @@ mod tests {
 
     #[async_trait]
     impl ComputationComponent for LifecycleProbe {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.descriptor
         }
@@ -1234,6 +1246,12 @@ mod tests {
 
     #[async_trait]
     impl ComponentFactory for ProbeFactory {
+    fn describe(
+        &self,
+        _context: &drasi_lib::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
+    }
         fn descriptor(&self) -> &FactoryDescriptor {
             &self.descriptor
         }
@@ -1375,6 +1393,9 @@ mod tests {
 
     #[async_trait]
     impl ComputationComponent for FailsLater {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.descriptor
         }

@@ -366,9 +366,9 @@ async fn graph_with_options(
             &indexes_id,
             ResourceRole::IndexBackend,
             ResourceOwnership::Borrowed,
-            ResourceHandle::new(
+            drasi_lib::computation::v1::QueryIndexProviderResource::handle(
                 ResourceRole::IndexBackend,
-                Arc::new(QueryIndexProviderResource(indexes)),
+                indexes,
             ),
         )?;
         let mut query = query_factory.specification_from_config(id(name), json!({

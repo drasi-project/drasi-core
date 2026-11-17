@@ -176,6 +176,12 @@ impl QueryViewProvider for QueryReader {
 struct QueryFactory(Mutation);
 
 impl Factory for QueryFactory {
+    fn describe(
+        &self,
+        _request: &crate::wire::DescribeRequest,
+    ) -> anyhow::Result<crate::ComponentDescription> {
+        Ok(crate::ComponentDescription::undeclared())
+    }
     fn metadata(&self) -> FactoryMetadata {
         FactoryMetadata {
             implementation: ImplementationIdentity::try_new("fixture/reflected-query", "1")

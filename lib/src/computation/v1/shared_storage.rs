@@ -47,9 +47,9 @@ impl SharedStorageGroup {
     /// Bind this as the producer's IndexBackend resource with graph ownership.
     pub fn resource(self: &Arc<Self>) -> ResourceHandle {
         let provider: Arc<dyn ComputationIndexProvider> = self.clone();
-        ResourceHandle::new(
+        crate::computation::v1::QueryIndexProviderResource::handle(
             ResourceRole::IndexBackend,
-            Arc::new(QueryIndexProviderResource(provider.clone())),
+            provider.clone(),
         )
         .with_shared_identity(provider)
         .with_cleanup(self.clone())

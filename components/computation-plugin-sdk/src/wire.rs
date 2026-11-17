@@ -148,6 +148,93 @@ pub struct UpdateRequest {
     pub proposed: CreateRequest,
 }
 
+/// The input of a factory's pure describer: the creation request it would
+/// construct from, the component's descriptor and the declared capabilities
+/// of the resources bound to each of its dependencies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DescribeRequest {
+    pub request: CreateRequest,
+    pub descriptor: drasi_computation_contracts::ComponentDescriptor,
+    pub dependencies: drasi_computation_contracts::DependencyCapabilities,
+}
+
+impl DescribeRequest {
+    /// The declared durability of the single resource bound to `dependency`,
+    /// or `None` when nothing is bound to it.
+    pub fn bound_durability(
+        &self,
+        dependency: &str,
+    ) -> Option<drasi_computation_contracts::ResourceDurability> {
+        self.dependencies
+            .get(dependency)
+            .and_then(|resources| resources.first())
+            .map(|resource| resource.durability)
+    }
+
+    /// A source's description: outputs published through a Host admission
+    /// channel carry that channel's producer identity (durable or volatile, as
+    /// the channel declares); otherwise every output is `unadmitted`.
+    pub fn source_description(
+        &self,
+        unadmitted: drasi_computation_contracts::OutputDescription,
+        unadmitted_progress: drasi_computation_contracts::ProgressPersistence,
+    ) -> drasi_computation_contracts::ComponentDescription {
+        use drasi_computation_contracts::{
+            ComponentDescription, OutputDescription, ProgressPersistence, ResourceDurability,
+        };
+        let (output, progress) = match self.bound_durability("admission") {
+            None => (unadmitted, unadmitted_progress),
+            Some(ResourceDurability::Durable) => {
+                (OutputDescription::DURABLE, ProgressPersistence::Durable)
+            }
+            Some(ResourceDurability::Volatile) => {
+                (OutputDescription::VOLATILE, ProgressPersistence::Volatile)
+            }
+            Some(ResourceDurability::Undeclared) => (
+                OutputDescription::UNDECLARED,
+                ProgressPersistence::Undeclared,
+            ),
+        };
+        ComponentDescription::new(progress).with_outputs(&self.descriptor, output)
+    }
+
+    /// A transformer whose outputs carry a new volatile producer identity on
+    /// every construction.
+    pub fn volatile_transformer(&self) -> drasi_computation_contracts::ComponentDescription {
+        drasi_computation_contracts::ComponentDescription::new(
+            drasi_computation_contracts::ProgressPersistence::Volatile,
+        )
+        .with_outputs(
+            &self.descriptor,
+            drasi_computation_contracts::OutputDescription::VOLATILE,
+        )
+    }
+
+    /// A sink whose inputs do not key delivery on producer identity.
+    pub fn unkeyed_sink(&self) -> drasi_computation_contracts::ComponentDescription {
+        drasi_computation_contracts::ComponentDescription::new(
+            drasi_computation_contracts::ProgressPersistence::Stateless,
+        )
+        .with_inputs(
+            &self.descriptor,
+            drasi_computation_contracts::InputDelivery::Unkeyed,
+        )
+    }
+
+    /// A consumer sink whose inputs deliver keyed on producer identity with
+    /// `guarantee`.
+    pub fn consumer(
+        &self,
+        guarantee: drasi_computation_contracts::DeliveryGuarantee,
+    ) -> drasi_computation_contracts::ComponentDescription {
+        drasi_computation_contracts::ComponentDescription::new(
+            drasi_computation_contracts::ProgressPersistence::Durable,
+        )
+        .with_inputs(&self.descriptor, guarantee.into())
+    }
+}
+
 /// Approved plugin-authored intent for a retained object. The caller must first
 /// validate actual data boundaries and storage/downstream requirements; this
 /// payload and the factory's metadata cannot establish them. Encoded as bounded

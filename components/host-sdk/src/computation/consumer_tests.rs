@@ -68,6 +68,16 @@ struct BatchSource {
 }
 #[async_trait]
 impl ComputationComponent for BatchSource {
+    /// Its batch carries a restart-stable producer identity.
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::new(
+            drasi_lib::computation::v1::ProgressPersistence::Durable,
+        )
+        .with_outputs(
+            &self.descriptor,
+            drasi_lib::computation::v1::OutputDescription::DURABLE,
+        )
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -545,6 +555,130 @@ async fn native_consumer_graph_factory_requires_and_resolves_delivery_resource(
     Ok(())
 }
 
+/// A native consumer's describer declares its keyed inputs; behind an
+/// in-memory query the exactly-once edge fails on the consumer node while
+/// both nodes stay, and `atLeastOnce` binds.
+#[tokio::test(flavor = "current_thread")]
+async fn native_consumer_edges_follow_described_delivery() -> anyhow::Result<()> {
+    for (configuration, compatible) in [
+        (json!({}), false),
+        (json!({"deliveryGuarantee": "atLeastOnce"}), true),
+    ] {
+        let directory = tempfile::tempdir()?;
+        let factory = factory(plugin()?.as_ref(), sdk::ConsumerMode::External);
+        let mut configuration = configuration;
+        configuration["path"] = json!(directory.path().join("effects.db"));
+        let mut specification = factory.specification(id(424), configuration)?;
+        let delivery = ResourceId::try_new("delivery")?;
+        specification
+            .dependencies
+            .insert("consumer".into(), vec![delivery.clone()]);
+        let queries = Arc::new(ContinuousQueryFactory::default());
+        let mut query = queries.specification_from_config(
+            id(78),
+            json!({"query": "MATCH (n:items) RETURN n.id AS id", "stream": "query/out"}),
+        )?;
+        let memory = ResourceId::try_new("memory")?;
+        query
+            .dependencies
+            .insert("indexes".into(), vec![memory.clone()]);
+        let edge = EdgeDefinition::new(
+            Endpoint::new(id(78), PortId::try_new("out")?),
+            Endpoint::new(id(424), PortId::try_new("in")?),
+        );
+        let mut graph = ComputationGraph::builder(GRAPH)
+            .declare_resource(ResourceSpecification {
+                id: delivery.clone(),
+                role: ResourceRole::IndexBackend,
+                ownership: ResourceOwnership::Borrowed,
+                binding: "delivery".into(),
+            })?
+            .provide_resource(
+                delivery,
+                ResourceHandle::new(
+                    ResourceRole::IndexBackend,
+                    Arc::new(NativeConsumerResource {
+                        provider: provider(&directory.path().join("progress"))?,
+                        options: options(),
+                    }),
+                ),
+            )?
+            .declare_resource(ResourceSpecification {
+                id: memory.clone(),
+                role: ResourceRole::IndexBackend,
+                ownership: ResourceOwnership::Borrowed,
+                binding: "memory".into(),
+            })?
+            .provide_resource(
+                memory,
+                QueryIndexProviderResource::handle(
+                    ResourceRole::IndexBackend,
+                    Arc::new(drasi_core::computation::InMemoryComputationProvider),
+                ),
+            )?
+            .source(
+                ComponentName::try_new("feed")?,
+                Box::new(BatchSource {
+                    descriptor: ComponentDescriptor::try_new(
+                        id(77),
+                        vec![super::port(PortDirection::Output)],
+                    )?,
+                    input: None,
+                }),
+            )
+            .bind_stream(
+                Endpoint::new(id(77), PortId::try_new("out")?),
+                StreamId::try_new("feed/out")?,
+            )
+            .connect(
+                EdgeDefinition::new(
+                    Endpoint::new(id(77), PortId::try_new("out")?),
+                    Endpoint::new(id(78), PortId::try_new("in")?),
+                ),
+                Box::new(BoundedPipeConfig { capacity: 1 }),
+            )
+            .component(ComponentName::try_new("query")?, query, queries)
+            .bind_stream(edge.from.clone(), StreamId::try_new("query/out")?)
+            .component(ComponentName::try_new("consumer")?, specification, factory)
+            .connect(edge.clone(), Box::new(BoundedPipeConfig { capacity: 1 }))
+            .build()?;
+        let run = graph.run()?;
+        let control = run.control();
+        let (outcome, observed) = tokio::join!(run, async {
+            control.deployment_report().await?;
+            let mut changes = control.subscribe_observed();
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                changes.wait_for(|state| {
+                    matches!(
+                        state.relationships[&edge].binding,
+                        BindingState::Bound | BindingState::Failed
+                    )
+                }),
+            )
+            .await??;
+            let observed = control.observed();
+            control.cancel();
+            anyhow::Ok(observed)
+        });
+        assert!(matches!(outcome, Err(GraphError::Cancelled)), "{outcome:?}");
+        graph.dispose().await?;
+        let observed = observed?;
+        let consumer = &observed.components[&id(424)];
+        if compatible {
+            assert_eq!(observed.relationships[&edge].binding, BindingState::Bound);
+            assert!(consumer.failure.is_none(), "{consumer:?}");
+        } else {
+            assert_eq!(observed.relationships[&edge].binding, BindingState::Failed);
+            let failure = consumer.failure.as_ref().expect("binding failure");
+            assert_eq!(failure.phase, FailurePhase::Binding);
+            assert_eq!(failure.disposition, FailureDisposition::Terminal);
+            assert!(observed.components[&id(78)].failure.is_none());
+        }
+    }
+    Ok(())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn native_consumer_panic_requires_reconstruction_after_cleanup() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
@@ -979,7 +1113,7 @@ async fn native_consumer_delivers_volatile_queries_only_at_least_once_by_opt_in(
         .err()
         .ok_or_else(|| anyhow::anyhow!("the volatile input must be refused"))?;
     assert!(
-        format!("{error:#}").contains("set deliveryGuarantee to atLeastOnce"),
+        format!("{error:#}").contains("output identity is Volatile"),
         "{error:#}"
     );
     strict.handle(batch()?).await?;
@@ -1022,27 +1156,47 @@ async fn native_consumer_delivers_volatile_queries_only_at_least_once_by_opt_in(
 }
 
 #[test]
-fn native_consumer_factories_declare_their_producer_requirement() -> anyhow::Result<()> {
-    use drasi_lib::computation::v1::ComponentFactory;
+fn native_consumer_factories_describe_their_keyed_inputs() -> anyhow::Result<()> {
+    use drasi_lib::computation::v1::InputDelivery;
     let plugin = plugin()?;
     let external = factory(plugin.as_ref(), sdk::ConsumerMode::External);
     let transactional = factory(plugin.as_ref(), sdk::ConsumerMode::Transactional);
-    let specification = |factory: &NativeFactory, configuration: serde_json::Value| {
-        factory.specification(id(433), configuration)
+    let describe = |factory: &NativeFactory, configuration: serde_json::Value| {
+        let specification = factory.specification(id(433), configuration.clone())?;
+        let request = sdk::CreateRequest {
+            id: id(433),
+            implementation: specification.implementation.clone(),
+            configuration_version: specification.configuration_version,
+            configuration,
+            scope: None,
+            inputs: Vec::new(),
+            activation_credentials_bound: false,
+            update_directive: None,
+        };
+        let description =
+            factory.describe_request(&request, &specification.descriptor, Default::default())?;
+        anyhow::Ok(description.input(&PortId::try_new("in")?).delivery)
     };
-    for (configuration, required) in [
-        (json!({}), true),
-        (json!({"deliveryGuarantee": "exactlyOnce"}), true),
-        (json!({"deliveryGuarantee": "atLeastOnce"}), false),
+    for (configuration, delivery) in [
+        (json!({}), InputDelivery::ExactlyOnce),
+        (
+            json!({"deliveryGuarantee": "exactlyOnce"}),
+            InputDelivery::ExactlyOnce,
+        ),
+        (
+            json!({"deliveryGuarantee": "atLeastOnce"}),
+            InputDelivery::AtLeastOnce,
+        ),
     ] {
         assert_eq!(
-            external
-                .requires_persistent_producers(&specification(&external, configuration.clone())?)?,
-            required,
+            describe(&external, configuration.clone())?,
+            delivery,
             "{configuration}"
         );
-        assert!(transactional
-            .requires_persistent_producers(&specification(&transactional, configuration)?)?);
+        assert_eq!(
+            describe(&transactional, configuration)?,
+            InputDelivery::ExactlyOnce
+        );
     }
     Ok(())
 }

@@ -207,6 +207,9 @@ fn source_error(error: anyhow::Error) -> anyhow::Error {
 
 #[async_trait]
 impl ComputationComponent for MySqlSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         self.inner.descriptor()
     }

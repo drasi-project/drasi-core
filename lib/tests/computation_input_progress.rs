@@ -45,6 +45,9 @@ struct Tracked<T> {
 
 #[async_trait]
 impl<T: ComputationComponent> ComputationComponent for Tracked<T> {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         self.inner.descriptor()
     }
@@ -175,6 +178,9 @@ struct BatchSink {
 
 #[async_trait]
 impl ComputationComponent for BatchSink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -456,6 +462,9 @@ struct Continued {
 
 #[async_trait]
 impl ComputationComponent for Continued {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -612,6 +621,9 @@ fn invalid_volatile_input_roles_scopes_and_double_publication_are_rejected() {
         }
         #[async_trait]
         impl ComputationComponent for InvalidSink {
+            fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+                drasi_lib::computation::v1::ComponentDescription::undeclared()
+            }
             fn descriptor(&self) -> &ComponentDescriptor {
                 &self.descriptor
             }
@@ -715,6 +727,9 @@ struct InterruptedSink {
 
 #[async_trait]
 impl ComputationComponent for InterruptedSink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -896,6 +911,9 @@ mod query_row_provenance {
         ($type:ty) => {
             #[async_trait]
             impl ComputationComponent for $type {
+                fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+                    drasi_lib::computation::v1::ComponentDescription::undeclared()
+                }
                 fn descriptor(&self) -> &ComponentDescriptor {
                     &self.descriptor
                 }
@@ -995,6 +1013,9 @@ mod query_row_provenance {
     }
     #[async_trait]
     impl ComputationComponent for Relay {
+        fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+            drasi_lib::computation::v1::ComponentDescription::undeclared()
+        }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.descriptor
         }

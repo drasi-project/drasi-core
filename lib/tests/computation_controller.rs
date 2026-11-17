@@ -51,6 +51,9 @@ struct ControlledSource {
 
 #[async_trait]
 impl ComputationComponent for ControlledSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -113,6 +116,9 @@ struct ControlledSink {
 
 #[async_trait]
 impl ComputationComponent for ControlledSink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -349,6 +355,9 @@ struct ReadySource {
 
 #[async_trait]
 impl ComputationComponent for ReadySource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -380,6 +389,9 @@ struct ProgressSink {
 
 #[async_trait]
 impl ComputationComponent for ProgressSink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -691,6 +703,9 @@ struct ContinuingTransformer {
 
 #[async_trait]
 impl ComputationComponent for ContinuingTransformer {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -1324,6 +1339,9 @@ struct PendingStartSource {
 
 #[async_trait]
 impl ComputationComponent for PendingStartSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

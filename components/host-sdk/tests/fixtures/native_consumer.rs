@@ -12,6 +12,21 @@ use std::sync::Mutex;
 pub struct Factory(pub sdk::ConsumerMode);
 
 impl sdk::Factory for Factory {
+    /// Inputs deliver keyed on producer identity with the configured
+    /// `deliveryGuarantee` (a transactional consumer only exactly once).
+    fn describe(
+        &self,
+        request: &sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<sdk::ComponentDescription> {
+        let guarantee: sdk::DeliveryGuarantee = match self.0 {
+            sdk::ConsumerMode::Transactional => sdk::DeliveryGuarantee::ExactlyOnce,
+            sdk::ConsumerMode::External => {
+                serde_json::from_value(request.request.configuration["deliveryGuarantee"].clone())
+                    .unwrap_or_default()
+            }
+        };
+        Ok(request.consumer(guarantee))
+    }
     fn metadata(&self) -> sdk::FactoryMetadata {
         sdk::FactoryMetadata {
             implementation: ImplementationIdentity::try_new(

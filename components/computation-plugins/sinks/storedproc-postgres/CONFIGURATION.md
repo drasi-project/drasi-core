@@ -31,7 +31,7 @@ destination cursor owner.
 | `defaultTemplate` | object | none | `{added?, updated?, deleted?: {template}}` | no | Pause |
 | `progressTable` | string | `public.drasi_delivery_progress` | `schema.table`, lowercase identifiers (`[a-z_][a-z0-9_]*`, ≤ 63 bytes each) | no | Unsupported |
 | `maxStreams` | integer | `4096` | 1..=1,000,000 cursor rows for this consumer | no | Pause |
-| `deliveryGuarantee` | string | `exactlyOnce` | `exactlyOnce`, `atLeastOnce` (see Delivery guarantee) | no | Stop |
+| `deliveryGuarantee` | string | `exactlyOnce` | `exactlyOnce`, `atLeastOnce` (see Delivery guarantee) | no | Replace |
 | `commandTimeoutMs` | integer | `30000` | 1..=2,147,483,647; server `statement_timeout` per command, client waits 5 s longer | no | Pause |
 | `connectTimeoutMs` | integer | `10000` | 1..=3,600,000; one attempt: TCP, TLS and authentication | no | Stop |
 | `reconnectBudgetMs` | integer | `60000` | 0..=3,600,000; total reconnect and transient-retry time per operation; `0` = one attempt | no | Pause |
@@ -169,24 +169,30 @@ naming the missing schema or privilege, for example
 
 ### Delivery guarantee
 
-`deliveryGuarantee` selects which producers the sink accepts:
+`deliveryGuarantee` selects which producers the sink accepts. The plugin's
+description of the sink declares the selected guarantee on its input, and the
+graph checks it against the producer's declared output when it binds the edge.
+An incompatible pairing never rejects the graph change: both components stay,
+the edge is failed and unbound, and the sink carries a terminal binding
+failure until either side's configuration changes or the edge is removed. It
+is never discovered at delivery. Producers whose outputs carry no producer
+identity, or that declare none, are refused under either guarantee.
 
-- `exactlyOnce` (default): only producers with persistent progress, such as
-  persistent queries. Each procedure call commits with its cursor row, so a
-  retry never repeats a completed call. Wiring an in-memory query to this
-  sink is refused when the graph configuration is accepted (the edge becomes
-  bindable, or either endpoint is created, replaced or updated), with the
-  error "the producer is an in-memory query without persistent progress; use
-  a persistent query or set deliveryGuarantee to atLeastOnce". The same
-  refusal is applied, permanently, at the first delivery if a volatile input
-  still arrives.
-- `atLeastOnce`: additionally accepts in-memory (volatile) queries. Their
-  outputs carry a per-run epoch; the cursor still deduplicates retries within
-  one producer run, but a process restart starts a new run whose outputs are
-  delivered against a fresh cursor (the stream row is overwritten, not
-  duplicated, so `maxStreams` is not consumed per run). Effects after a
-  restart may repeat work the previous run already did; nothing is resumed.
-  Persistent producers are still delivered exactly once.
+- `exactlyOnce` (default): only producers that declare a durable output
+  identity, such as persistent queries. Each procedure call commits with its
+  cursor row, so a retry never repeats a completed call. A producer with a
+  volatile identity (for example an in-memory query) is refused: "input
+  requires ExactlyOnce delivery keyed on producer identity, but the producer's
+  output identity is Volatile". Use a persistent producer or set
+  `deliveryGuarantee` to `atLeastOnce`.
+- `atLeastOnce`: additionally accepts producers with a volatile identity (for
+  example in-memory queries). Their outputs carry a per-run epoch; the cursor
+  still deduplicates retries within one producer run, but a process restart
+  starts a new run whose outputs are delivered against a fresh cursor (the
+  stream row is overwritten, not duplicated, so `maxStreams` is not consumed
+  per run). Effects after a restart may repeat work the previous run already
+  did; nothing is resumed. Persistent producers are still delivered exactly
+  once.
 
 ### TLS and credentials
 
@@ -203,8 +209,8 @@ to consumer factories (DESIGN.md, Known limitations).
 | Boundary | Fields |
 |---|---|
 | Pause (in place, after a completed pause) | `routes`, `defaultTemplate`, `maxStreams`, `commandTimeoutMs`, `reconnectBudgetMs`, `shutdownTimeoutMs` |
-| Stop (restart) | `host`, `port`, `database`, `user`, `password`, `sslMode`, `allowRemotePlaintext`, `tlsCaPem`, `tlsClientCertificatePem`, `tlsClientPrivateKeyPem`, `connectTimeoutMs`, `deliveryGuarantee` |
-| Replace (recreate, cursor preserved) | `outputs`, incoming edges |
+| Stop (restart) | `host`, `port`, `database`, `user`, `password`, `sslMode`, `allowRemotePlaintext`, `tlsCaPem`, `tlsClientCertificatePem`, `tlsClientPrivateKeyPem`, `connectTimeoutMs` |
+| Replace (recreate, cursor preserved) | `outputs`, incoming edges, `deliveryGuarantee` (declared on the input port) |
 | Unsupported | `progressTable`, the graph identity: remove the component with Erase and add a new one |
 
 ## Lifecycle and removal

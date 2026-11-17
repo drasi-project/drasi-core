@@ -19,6 +19,7 @@ mod configuration_constraint;
 mod consumer_progress;
 #[doc(hidden)]
 pub mod delivery;
+mod description;
 mod element_image;
 mod element_patch;
 #[doc(hidden)]
@@ -71,6 +72,7 @@ pub use component_update::*;
 pub use configuration_constraint::ConfigurationConstraint;
 pub use consumer_progress::*;
 pub use data::*;
+pub use description::*;
 pub use drasi_core_types::{profiling, schema};
 pub use element_image::{ElementImage, ElementImageError};
 pub use element_patch::{ElementPatch, ElementPatchError, ElementPatchKind};
@@ -111,6 +113,6 @@ pub use scheduling::*;
 pub use bootstrap::*;
 pub use delivery::{
     DeliveryBatch, DeliveryBatchIdentity, DeliveryGuarantee, DeliveryHandler, DeliveryId,
-    DeliveryItem, DeliveryPosition, DeliveryScope, VolatileProducerRefused,
+    DeliveryItem, DeliveryPosition, DeliveryScope,
 };
 pub use output_identity::ReplayRejection;

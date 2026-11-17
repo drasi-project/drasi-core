@@ -109,6 +109,9 @@ struct Sink {
 struct Procedures(drasi_mysql_common::storedproc::runtime::MySqlStoredProcSink);
 #[async_trait]
 impl ComputationComponent for Procedures {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         self.0.descriptor()
     }
@@ -155,6 +158,9 @@ fn procedure_scope(component: ComponentId) -> DeliveryScope {
 }
 #[async_trait]
 impl ComputationComponent for Sink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

@@ -58,6 +58,13 @@ pub fn plugin() -> anyhow::Result<PluginDefinition> {
 drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
 
 impl Factory for MiddlewareFactory {
+    /// Outputs carry a new volatile producer identity on every construction.
+    fn describe(
+        &self,
+        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(request.volatile_transformer())
+    }
     fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
         Some(configuration_definition().details())
     }
@@ -84,6 +91,7 @@ impl Factory for MiddlewareFactory {
                 quiescent_bootstrap: Some(PortId::try_new("in").expect("constant port")),
                 bootstrap_optional: true,
                 output_snapshots: vec![PortId::try_new("out").expect("constant port")],
+                // Outputs carry a producer identity that is new on every construction.
                 ..Capabilities::default()
             },
         }

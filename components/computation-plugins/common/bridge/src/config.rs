@@ -422,3 +422,39 @@ pub fn identifier(value: &str) -> Result<()> {
     }
     Ok(())
 }
+
+/// The description of a bridge receiver (a source): a durable profile
+/// publishes through its (required durable) Host admission channel under a
+/// restart-stable producer identity; a volatile profile publishes under a new
+/// volatile identity on every construction.
+pub fn receiver_description(
+    descriptor: &drasi_lib::computation::v1::ComponentDescriptor,
+    profile: Profile,
+) -> drasi_lib::computation::v1::ComponentDescription {
+    use drasi_lib::computation::v1::{
+        ComponentDescription, DependencyRequirement, DurabilityRequirement, OutputDescription,
+        ProgressPersistence,
+    };
+    match profile {
+        Profile::Durable => ComponentDescription::new(ProgressPersistence::Durable)
+            .with_outputs(descriptor, OutputDescription::DURABLE)
+            .with_dependency(
+                "admission",
+                DependencyRequirement {
+                    durability: DurabilityRequirement::Durable,
+                },
+            ),
+        Profile::Volatile => ComponentDescription::new(ProgressPersistence::Volatile)
+            .with_outputs(descriptor, OutputDescription::VOLATILE),
+    }
+}
+
+/// The description of a bridge sender (a sink): its input does not key
+/// delivery on producer identity.
+pub fn sender_description(
+    descriptor: &drasi_lib::computation::v1::ComponentDescriptor,
+) -> drasi_lib::computation::v1::ComponentDescription {
+    use drasi_lib::computation::v1::{ComponentDescription, InputDelivery, ProgressPersistence};
+    ComponentDescription::new(ProgressPersistence::Stateless)
+        .with_inputs(descriptor, InputDelivery::Unkeyed)
+}

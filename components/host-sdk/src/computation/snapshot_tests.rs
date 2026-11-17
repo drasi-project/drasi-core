@@ -44,6 +44,12 @@ fn port(name: &str, direction: PortDirection) -> PortDescriptor {
 }
 
 impl sdk::Factory for Factory {
+    fn describe(
+        &self,
+        _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(drasi_computation_plugin_sdk::ComponentDescription::undeclared())
+    }
     fn metadata(&self) -> FactoryMetadata {
         let (role, ports, snapshot_inputs) = match self.0 {
             Claim::Exact => (

@@ -230,6 +230,9 @@ struct ReplaySource {
 
 #[async_trait::async_trait]
 impl ComputationComponent for ReplaySource {
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        crate::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -253,6 +256,9 @@ struct ReplaySink {
 
 #[async_trait::async_trait]
 impl ComputationComponent for ReplaySink {
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        crate::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

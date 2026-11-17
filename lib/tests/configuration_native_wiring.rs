@@ -60,6 +60,24 @@ impl ApplicationFactory {
 
 #[async_trait]
 impl ComponentFactory for ApplicationFactory {
+    /// The channel application source publishes under a volatile identity;
+    /// the application reaction declares nothing.
+    fn describe(
+        &self,
+        context: &ConstructionContext,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        use drasi_lib::computation::v1::{
+            ComponentDescription, OutputDescription, ProgressPersistence,
+        };
+        Ok(if self.descriptor.role == ComponentRole::Source {
+            ComponentDescription::new(ProgressPersistence::Volatile).with_outputs(
+                &context.specification.descriptor,
+                OutputDescription::VOLATILE,
+            )
+        } else {
+            ComponentDescription::undeclared()
+        })
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }

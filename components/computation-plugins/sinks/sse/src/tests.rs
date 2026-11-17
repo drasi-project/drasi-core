@@ -289,6 +289,12 @@ struct Observed {
 }
 
 impl Factory for Observed {
+    fn describe(
+        &self,
+        _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(drasi_computation_plugin_sdk::ComponentDescription::undeclared())
+    }
     fn metadata(&self) -> FactoryMetadata {
         SseFactory.metadata()
     }

@@ -20,6 +20,9 @@ struct IdleQueryInput(ComponentDescriptor);
 
 #[async_trait]
 impl ComputationComponent for IdleQueryInput {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }
@@ -37,6 +40,12 @@ struct IdleQueryInputFactory(FactoryDescriptor);
 
 #[async_trait]
 impl ComponentFactory for IdleQueryInputFactory {
+    fn describe(
+        &self,
+        _context: &drasi_lib::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.0
     }
@@ -219,6 +228,9 @@ struct StartGate {
 
 #[async_trait]
 impl ComputationComponent for Service {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -286,6 +298,12 @@ impl Factory {
 
 #[async_trait]
 impl ComponentFactory for Factory {
+    fn describe(
+        &self,
+        _context: &drasi_lib::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }
@@ -2054,6 +2072,12 @@ async fn blocked_creation_does_not_delay_durable_acceptance_and_cancelled_waits_
     }
     #[async_trait]
     impl ComponentFactory for BlockingFactory {
+        fn describe(
+            &self,
+            context: &drasi_lib::computation::v1::ConstructionContext,
+        ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+            self.inner.describe(context)
+        }
         fn descriptor(&self) -> &FactoryDescriptor {
             self.inner.descriptor()
         }
@@ -2372,6 +2396,12 @@ async fn pending_managed_construction_allows_unrelated_admission_and_component_s
     }
     #[async_trait]
     impl ComponentFactory for GatedFactory {
+        fn describe(
+            &self,
+            context: &drasi_lib::computation::v1::ConstructionContext,
+        ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+            self.inner.describe(context)
+        }
         fn descriptor(&self) -> &FactoryDescriptor {
             self.inner.descriptor()
         }

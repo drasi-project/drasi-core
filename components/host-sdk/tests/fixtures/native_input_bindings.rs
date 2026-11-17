@@ -14,6 +14,12 @@ use std::{io::Write, path::PathBuf, sync::Arc};
 pub struct Factory;
 
 impl sdk::Factory for Factory {
+    fn describe(
+        &self,
+        _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(drasi_computation_plugin_sdk::ComponentDescription::undeclared())
+    }
     fn metadata(&self) -> sdk::FactoryMetadata {
         sdk::FactoryMetadata {
             implementation: ImplementationIdentity::try_new("fixture/input-bindings", "1")
@@ -59,6 +65,12 @@ impl sdk::Factory for Factory {
 pub struct TransactionalFactory;
 
 impl sdk::Factory for TransactionalFactory {
+    fn describe(
+        &self,
+        _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(drasi_computation_plugin_sdk::ComponentDescription::undeclared())
+    }
     fn metadata(&self) -> sdk::FactoryMetadata {
         let mut metadata = Factory.metadata();
         metadata.implementation =
@@ -209,6 +221,12 @@ impl sdk::TransactionalComponent for Transformer {
 pub struct ConsumerFactory;
 
 impl sdk::Factory for ConsumerFactory {
+    fn describe(
+        &self,
+        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(request.consumer(drasi_computation_plugin_sdk::DeliveryGuarantee::ExactlyOnce))
+    }
     fn metadata(&self) -> sdk::FactoryMetadata {
         sdk::FactoryMetadata {
             implementation: ImplementationIdentity::try_new("fixture/input-binding-consumer", "1")

@@ -56,6 +56,16 @@ pub fn plugin() -> anyhow::Result<PluginDefinition> {
 drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
 
 impl Factory for HttpSourceFactory {
+    /// Outputs carry a new volatile producer identity per construction unless published through a Host admission channel.
+    fn describe(
+        &self,
+        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(request.source_description(
+            drasi_computation_plugin_sdk::OutputDescription::VOLATILE,
+            drasi_computation_plugin_sdk::ProgressPersistence::Volatile,
+        ))
+    }
     fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
         Some(HttpSourceConfig::definition().details())
     }
@@ -92,6 +102,8 @@ impl Factory for HttpSourceFactory {
                     ComponentUpdateMode::Recreate,
                 ],
                 erases_owned_state: true,
+                // Outputs carry a producer identity that is new on every construction
+                // (Host admission, when bound, publishes under its durable identity instead).
                 ..Capabilities::default()
             },
         }

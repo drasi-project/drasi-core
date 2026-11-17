@@ -1800,52 +1800,6 @@ fn validate_output_bindings(graph: &ComputationGraph, prepared: &Prepared) -> Gr
     Ok(())
 }
 
-/// Refuse to bind an exactly-once consumer input to a volatile producer, at
-/// configuration time. Only edges this reconciliation binds or whose endpoint
-/// it creates, replaces or updates are checked, so an unrelated change never
-/// fails on an existing pairing. Waiting edges are not yet bound and stay
-/// waits; the refusal fires when the edge becomes bindable.
-fn validate_producer_persistence(
-    plan: &ReconciliationPreview,
-    factories: &BTreeMap<ImplementationIdentity, Arc<dyn ComponentFactory>>,
-    resources: &BTreeMap<ResourceId, ResourceHandle>,
-) -> GraphResult<()> {
-    let changed = |id: &ComponentId| {
-        plan.create.contains(id) || plan.replace.contains(id) || plan.update.contains(id)
-    };
-    let nodes: BTreeMap<_, _> = plan
-        .desired
-        .components
-        .iter()
-        .map(|node| (node.descriptor.id(), node))
-        .collect();
-    for relationship in &plan.desired.relationships {
-        let edge = &relationship.definition;
-        if !plan.rebind.contains(edge)
-            && !changed(&edge.from.component)
-            && !changed(&edge.to.component)
-        {
-            continue;
-        }
-        let specification = |id: &ComponentId| match nodes.get(id).map(|node| &node.construction) {
-            Some(ComponentConstruction::Factory(spec)) => Some(spec),
-            _ => None,
-        };
-        let consumer = specification(&edge.to.component).and_then(|spec| {
-            factories
-                .get(&spec.implementation)
-                .map(|factory| (spec, factory.as_ref()))
-        });
-        super::super::validate_producer_persistence(
-            edge,
-            specification(&edge.from.component),
-            consumer,
-            resources,
-        )?;
-    }
-    Ok(())
-}
-
 fn prepare(
     graph: &PreparationSnapshot,
     plan: &ReconciliationPreview,
@@ -1952,7 +1906,6 @@ fn prepare(
         &plan.desired.resource_dependencies,
         &resources,
     )?;
-    validate_producer_persistence(plan, &factories, &resources)?;
     let mut components = BTreeMap::new();
     for node in &plan.desired.components {
         let id = node.descriptor.id();
@@ -4286,6 +4239,65 @@ async fn realize_component(
     })
 }
 
+/// Clear the edge-incompatibility failure of every component whose current
+/// edges are all compatible again (an endpoint changed or the edge was
+/// removed). Its incompatible edges that are now compatible return to
+/// Declared so the dependency-binding pass binds them.
+fn clear_resolved_incompatibilities(graph: &mut ComputationGraph) -> GraphResult<()> {
+    let failed: Vec<ComponentId> = graph
+        .observed()
+        .components
+        .iter()
+        .filter(|(_, observed)| {
+            observed
+                .failure
+                .as_ref()
+                .is_some_and(super::is_edge_incompatibility)
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in failed {
+        let mut compatible = true;
+        let mut reopened = Vec::new();
+        for edge in graph.edges.values() {
+            if edge.definition.to.component != id {
+                continue;
+            }
+            match super::check_edge_compatibility(graph, edge) {
+                Ok(()) => {
+                    if graph.observed().relationships[&edge.definition].binding
+                        == BindingState::Failed
+                    {
+                        reopened.push(edge.definition.clone());
+                    }
+                }
+                // Still incompatible, or an endpoint is busy: keep the
+                // failure until a later reconciliation can compare them.
+                Err(GraphError::Incompatible { .. } | GraphError::OperationInProgress) => {
+                    compatible = false
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if !compatible {
+            continue;
+        }
+        update(graph, |state| {
+            for edge in &reopened {
+                let observed = state.relationships.get_mut(edge).expect("relationship");
+                observed.binding = BindingState::Declared;
+                observed.failure = None;
+                observed.transition_time = Utc::now();
+            }
+            let observed = state.components.get_mut(&id).expect("component");
+            observed.failure = None;
+            observed.realization = RealizationState::Created;
+            observed.transition_time = Utc::now();
+        });
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn realize(
     graph: &mut ComputationGraph,
@@ -4369,6 +4381,15 @@ async fn realize(
         ) {
             continue;
         }
+        if let Err(error) = super::check_edge_compatibility(graph, &edge) {
+            if !matches!(error, GraphError::Incompatible { .. }) {
+                return Err(error);
+            }
+            let failed = failure(error, FailurePhase::Binding);
+            super::record_incompatible_edge(graph, &edge.definition, &failed);
+            report.failures.push(failed);
+            continue;
+        }
         update(graph, |state| {
             state
                 .relationships
@@ -4416,6 +4437,7 @@ async fn realize(
             }
         }
     }
+    clear_resolved_incompatibilities(graph)?;
     let candidates: BTreeSet<_> = plan
         .pause
         .iter()
@@ -4436,7 +4458,7 @@ async fn realize(
             matches!(
                 error.phase,
                 FailurePhase::Creation | FailurePhase::Validation
-            )
+            ) || super::is_edge_incompatibility(error)
         }) {
             continue;
         }

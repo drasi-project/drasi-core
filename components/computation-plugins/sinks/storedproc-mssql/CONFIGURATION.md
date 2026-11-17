@@ -21,7 +21,7 @@ configuration is one flat camelCase object; unknown fields are rejected.
 | `hostNameInCertificate` | string | `host` | host name | no | no | Restart |
 | `progressTable` | string | `dbo.drasi_delivery_progress` | `table` or `schema.table`; letters, digits, `_`; ≤ 128 per part | no | no | Unsupported |
 | `maxStreams` | integer | `4096` | 1–1 000 000 | no | no | InPlace |
-| `deliveryGuarantee` | string | `exactlyOnce` | `exactlyOnce`, `atLeastOnce` (see Delivery guarantee) | no | no | Restart |
+| `deliveryGuarantee` | string | `exactlyOnce` | `exactlyOnce`, `atLeastOnce` (see Delivery guarantee) | no | no | Recreate |
 | `outputs` | object | `{}` | `{alias: {component, port?}}` | no | no | Recreate |
 | `routes` | object | `{}` | `{alias: {added?, updated?, deleted?: {template}}}` | no | no | InPlace |
 | `defaultTemplate` | object | none | `{added?, updated?, deleted?: {template}}` | no | no | InPlace |
@@ -195,24 +195,30 @@ message that points here.
 
 ### Delivery guarantee
 
-`deliveryGuarantee` selects which producers the sink accepts:
+`deliveryGuarantee` selects which producers the sink accepts. The plugin's
+description of the sink declares the selected guarantee on its input, and the
+graph checks it against the producer's declared output when it binds the edge.
+An incompatible pairing never rejects the graph change: both components stay,
+the edge is failed and unbound, and the sink carries a terminal binding
+failure until either side's configuration changes or the edge is removed. It
+is never discovered at delivery. Producers whose outputs carry no producer
+identity, or that declare none, are refused under either guarantee.
 
-- `exactlyOnce` (default): only producers with persistent progress, such as
-  persistent queries. Each procedure call commits with its cursor row, so a
-  retry never repeats a completed call. Wiring an in-memory query to this
-  sink is refused when the graph configuration is accepted (the edge becomes
-  bindable, or either endpoint is created, replaced or updated), with the
-  error "the producer is an in-memory query without persistent progress; use
-  a persistent query or set deliveryGuarantee to atLeastOnce". The same
-  refusal is applied, permanently, at the first delivery if a volatile input
-  still arrives.
-- `atLeastOnce`: additionally accepts in-memory (volatile) queries. Their
-  outputs carry a per-run epoch; the cursor still deduplicates retries within
-  one producer run, but a process restart starts a new run whose outputs are
-  delivered against a fresh cursor (the stream row is overwritten, not
-  duplicated, so `maxStreams` is not consumed per run). Effects after a
-  restart may repeat work the previous run already did; nothing is resumed.
-  Persistent producers are still delivered exactly once.
+- `exactlyOnce` (default): only producers that declare a durable output
+  identity, such as persistent queries. Each procedure call commits with its
+  cursor row, so a retry never repeats a completed call. A producer with a
+  volatile identity (for example an in-memory query) is refused: "input
+  requires ExactlyOnce delivery keyed on producer identity, but the producer's
+  output identity is Volatile". Use a persistent producer or set
+  `deliveryGuarantee` to `atLeastOnce`.
+- `atLeastOnce`: additionally accepts producers with a volatile identity (for
+  example in-memory queries). Their outputs carry a per-run epoch; the cursor
+  still deduplicates retries within one producer run, but a process restart
+  starts a new run whose outputs are delivered against a fresh cursor (the
+  stream row is overwritten, not duplicated, so `maxStreams` is not consumed
+  per run). Effects after a restart may repeat work the previous run already
+  did; nothing is resumed. Persistent producers are still delivered exactly
+  once.
 
 ### Authentication
 
@@ -249,7 +255,7 @@ only) and logs a warning.
 | `maxStreams`, `retryBudgetMs` | InPlace (Pause) | Read per operation |
 | `commandTimeoutMs`, `connectTimeoutMs` | InPlace (Pause) | The idle connection is replaced; the next operation reconnects |
 | `host`, `port`, `user`, `password`, `encryption`, `trustServerCertificate`, `trustedCaPem`, `hostNameInCertificate` | Restart (Stop) | The connection and credentials are established at Start |
-| `deliveryGuarantee` | Restart (Stop) | Which producers the sink accepts is fixed for one activation |
+| `deliveryGuarantee` | Recreate (Replace) | Declared on the input port; the graph re-checks every producer against it |
 | `outputs`, bound inputs | Recreate (Replace) | Route aliases and delivery streams change (live rebinding is CW-94) |
 | `database`, `progressTable` | **Unsupported** | They locate the cursor. Moving it would lose every stream's completed prefix (duplicates or refused operations) and leave old rows behind. Remove the sink with Erase and create a new one |
 

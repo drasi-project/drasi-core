@@ -225,6 +225,9 @@ impl Arithmetic {
 
 #[async_trait]
 impl ComputationComponent for Arithmetic {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -1246,6 +1249,9 @@ struct JournalSource {
 
 #[async_trait]
 impl ComputationComponent for JournalSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -1305,6 +1311,9 @@ struct ReplayRelay {
 
 #[async_trait]
 impl ComputationComponent for ReplayRelay {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -1793,6 +1802,9 @@ async fn another_branch_cannot_borrow_the_transaction_owners_checkpoint() {
 }
 #[async_trait]
 impl ComputationComponent for FiniteSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -1813,6 +1825,9 @@ struct Collector {
 }
 #[async_trait]
 impl ComputationComponent for Collector {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -1871,9 +1886,9 @@ async fn factory_constructs_one_graph_node_and_durable_external_delivery_confirm
         .expect("declare")
         .provide_resource(
             indexes.clone(),
-            ResourceHandle::new(
+            drasi_lib::computation::v1::QueryIndexProviderResource::handle(
                 ResourceRole::IndexBackend,
-                Arc::new(QueryIndexProviderResource(provider.clone())),
+                provider.clone(),
             ),
         )
         .expect("provider")
@@ -2213,6 +2228,9 @@ struct NumberStep {
 }
 #[async_trait]
 impl ComputationComponent for NumberStep {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -2303,6 +2321,9 @@ struct QueryRows {
 }
 #[async_trait]
 impl ComputationComponent for QueryRows {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

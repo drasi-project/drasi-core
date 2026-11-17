@@ -883,6 +883,9 @@ impl QueryReplayTransformer {
 
 #[async_trait]
 impl ComputationComponent for QueryReplayTransformer {
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        crate::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -959,6 +962,9 @@ impl CheckpointedSink {
 
 #[async_trait]
 impl ComputationComponent for CheckpointedSink {
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        crate::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         self.inner.descriptor()
     }
@@ -1249,6 +1255,12 @@ impl Default for QueryReplayFactory {
 
 #[async_trait]
 impl super::ComponentFactory for QueryReplayFactory {
+    fn describe(
+        &self,
+        _context: &crate::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<crate::computation::v1::ComponentDescription> {
+        Ok(crate::computation::v1::ComponentDescription::undeclared())
+    }
     fn descriptor(&self) -> &super::FactoryDescriptor {
         &self.descriptor
     }
@@ -1357,6 +1369,9 @@ mod capability_tests {
 
     #[async_trait]
     impl ComputationComponent for Sink {
+        fn description(&self) -> crate::computation::v1::ComponentDescription {
+            crate::computation::v1::ComponentDescription::undeclared()
+        }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.descriptor
         }

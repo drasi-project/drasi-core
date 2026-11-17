@@ -44,6 +44,12 @@ impl SourceSchemaReader for Reader {
 struct SchemaFactory(Arc<Reader>);
 
 impl sdk::Factory for SchemaFactory {
+    fn describe(
+        &self,
+        _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(drasi_computation_plugin_sdk::ComponentDescription::undeclared())
+    }
     fn metadata(&self) -> FactoryMetadata {
         sdk::Factory::metadata(&TestFactory {
             role: ComponentRole::Source,

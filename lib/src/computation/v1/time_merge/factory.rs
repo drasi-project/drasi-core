@@ -116,6 +116,21 @@ fn recipe(specification: &ComponentSpecification) -> anyhow::Result<Recipe> {
 
 #[async_trait]
 impl ComponentFactory for SourceTimeMergeFactory {
+    /// Durable exactly when the recipe is persistent (it then requires its
+    /// own persistent storage owner).
+    fn describe(
+        &self,
+        context: &crate::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<crate::computation::v1::ComponentDescription> {
+        let persistent = matches!(
+            context.specification.configuration.get("persistent"),
+            Some(ConfigurationValue::Literal(serde_json::Value::Bool(true)))
+        );
+        Ok(super::time_merge_description(
+            &context.specification.descriptor,
+            persistent,
+        ))
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }

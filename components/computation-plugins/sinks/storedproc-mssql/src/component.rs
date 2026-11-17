@@ -405,7 +405,15 @@ impl DeliveryHandler for MsSqlStoredProcSink {
             "unknown SQL Server sink input port"
         );
         if item.position.epoch().is_some() && !self.config.delivery_guarantee.is_at_least_once() {
-            return Err(drasi_computation_contracts::VolatileProducerRefused.into());
+            // Internal invariant guard only: the graph refuses this pairing when
+            // the edge is configured.
+            return Err(
+                drasi_computation_contracts::Incompatibility::ProducerIdentity {
+                    required: drasi_computation_contracts::DeliveryGuarantee::ExactlyOnce,
+                    identity: drasi_computation_contracts::OutputIdentity::Volatile,
+                }
+                .into(),
+            );
         }
         let position = Position::from_item(&item)?;
         let Self {

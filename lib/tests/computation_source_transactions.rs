@@ -619,6 +619,9 @@ struct Source {
 
 #[async_trait]
 impl ComputationComponent for Source {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -642,6 +645,9 @@ struct Sink {
 
 #[async_trait]
 impl ComputationComponent for Sink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -748,9 +754,9 @@ async fn actual_graph_delivers_one_final_update_through_typed_transaction_and_re
                 .unwrap()
                 .provide_resource(
                     indexes,
-                    ResourceHandle::new(
+                    drasi_lib::computation::v1::QueryIndexProviderResource::handle(
                         ResourceRole::IndexBackend,
-                        Arc::new(QueryIndexProviderResource(provider(directory.path()))),
+                        provider(directory.path()),
                     ),
                 )
                 .unwrap()

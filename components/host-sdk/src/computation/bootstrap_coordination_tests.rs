@@ -91,7 +91,9 @@ fn metadata() -> sdk::FactoryMetadata {
         },
         role: ComponentRole::Source,
         completion: None,
-        capabilities: sdk::Capabilities::default(),
+        capabilities: sdk::Capabilities {
+            ..sdk::Capabilities::default()
+        },
         ports: vec![PortDescriptor::new(
             PortId::try_new("out").unwrap(),
             PortDirection::Output,
@@ -102,6 +104,12 @@ fn metadata() -> sdk::FactoryMetadata {
 }
 
 impl sdk::Factory for SourceFactory {
+    fn describe(
+        &self,
+        _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(drasi_computation_plugin_sdk::ComponentDescription::undeclared())
+    }
     fn metadata(&self) -> sdk::FactoryMetadata {
         metadata()
     }

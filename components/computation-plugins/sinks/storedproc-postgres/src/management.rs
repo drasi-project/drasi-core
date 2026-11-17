@@ -9,9 +9,10 @@
 //!   `shutdownTimeoutMs`.
 //! * Stop (restart): the connection: `host`, `port`, `database`, `user`,
 //!   `password`, `sslMode`, `allowRemotePlaintext`, the TLS material,
-//!   `connectTimeoutMs` and `deliveryGuarantee` (which producers the sink
-//!   accepts is fixed for one activation).
-//! * Replace (recreate, data preserved): `outputs` and the incoming edges.
+//!   and `connectTimeoutMs`.
+//! * Replace (recreate, data preserved): `outputs`, the incoming edges and
+//!   `deliveryGuarantee` (it is declared on the input port, so the graph
+//!   re-checks every producer).
 //! * Unsupported: `progressTable` and the graph identity. They change the
 //!   destination cursor's identity, so committed operations would no longer
 //!   be recognised. Remove the component (Erase) and add a new one instead.
@@ -72,7 +73,7 @@ pub fn plan(
     planner.field(
         "deliveryGuarantee",
         c.delivery_guarantee != p.delivery_guarantee,
-        Stop,
+        Replace,
     );
     planner.field("routes", c.routes != p.routes, Pause);
     planner.field(

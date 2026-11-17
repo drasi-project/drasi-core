@@ -31,6 +31,17 @@ struct BridgeSourceFactory(BridgeFactoryDefinition);
 
 #[async_trait]
 impl ComponentFactory for BridgeSourceFactory {
+    fn describe(
+        &self,
+        context: &drasi_lib::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        Ok(
+            drasi_computation_bridge_common::config::receiver_description(
+                &context.specification.descriptor,
+                self.0.configuration(context)?.profile,
+            ),
+        )
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         self.0.descriptor()
     }

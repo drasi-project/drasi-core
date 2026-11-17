@@ -581,7 +581,7 @@ async fn native_storedproc_delivers_in_memory_queries_only_at_least_once_by_opt_
     .await?;
     let error = strict.handle(first.clone()).await.unwrap_err();
     assert!(
-        format!("{error:#}").contains("set deliveryGuarantee to atLeastOnce"),
+        format!("{error:#}").contains("output identity is Volatile"),
         "{error:#}"
     );
     assert_eq!(count(&database).await?, 0);

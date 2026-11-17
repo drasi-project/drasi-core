@@ -141,17 +141,46 @@ impl Candidate {
         })
     }
 
-    /// Explicit, weaker derivation for an immediate in-memory query output.
-    ///
-    /// Accepts only a live (non-snapshot, non-progress-only) query output whose
-    /// recovery identity carries a volatile incarnation. The candidate's
-    /// `epoch` identifies that incarnation and generation; the delivery stream
-    /// key derived from it excludes both, so one destination cursor serves
-    /// every run of the producer. This never replaces [`Candidate::new`]:
-    /// persistent producers and every non-query producer are rejected here.
+    /// Explicit, weaker derivation for an output whose immediate producer has a
+    /// volatile identity: a live (non-snapshot, non-progress-only) in-memory
+    /// query output, or a graph producer output whose identity is not
+    /// persistent. The candidate's `epoch` identifies the producer incarnation
+    /// (and, for a query, its generation and configuration); the delivery
+    /// stream key derived from it excludes them, so one destination cursor
+    /// serves every run of the producer. This never replaces
+    /// [`Candidate::new`]: persistent producers and outputs without producer
+    /// identity are rejected here.
     pub fn new_volatile(envelope: &ChangeEnvelope, codec: &EnvelopeCodec) -> anyhow::Result<Self> {
         if !QueryChangeCodec::is_query_output(envelope) {
-            return Err(ReplayRejection::MissingProgress.into());
+            let progress = GraphProducerProgress::from_envelope(envelope)?
+                .ok_or(ReplayRejection::MissingProgress)?;
+            let identity = progress.identity().clone();
+            if identity.persistent() {
+                anyhow::bail!("graph output has persistent progress; use exactly-once delivery");
+            }
+            identity.validate()?;
+            anyhow::ensure!(
+                identity.stream() == envelope.system().stream(),
+                ReplayRejection::MissingProgress
+            );
+            for value in [
+                identity.construction_scope(),
+                identity.graph_id(),
+                identity.component_id().as_str(),
+            ] {
+                if value.len() > 256 {
+                    return Err(AdmissionRejection::IdentifierTooLong.into());
+                }
+            }
+            let mut epoch = Sha256::new();
+            epoch.update(b"drasi.delivery-epoch.graph.v1");
+            epoch.update(identity.incarnation().as_bytes());
+            return Ok(Self {
+                sequence: progress.sequence(),
+                digest: content_digest(envelope, codec, false)?,
+                producer: Producer::Graph(identity),
+                epoch: Some(format!("{:x}", epoch.finalize())),
+            });
         }
         if GraphProducerProgress::from_query_envelope(envelope)?
             .is_some_and(|progress| progress.identity().persistent())

@@ -46,6 +46,9 @@ impl Capture {
 
 #[async_trait]
 impl ComputationComponent for Capture {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -191,6 +194,9 @@ struct InputSource {
 
 #[async_trait]
 impl ComputationComponent for InputSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -237,6 +243,9 @@ struct AdmissionOnly {
 
 #[async_trait]
 impl ComputationComponent for AdmissionOnly {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -426,11 +435,9 @@ async fn durable_factories_use_real_acknowledged_pipes_and_preserve_complete_tra
         .declare_resource(declaration("sender-mapping", ResourceRole::IndexBackend))?
         .provide_resource(
             ResourceId::try_new("sender-mapping")?,
-            ResourceHandle::new(
+            drasi_lib::computation::v1::QueryIndexProviderResource::handle(
                 ResourceRole::IndexBackend,
-                Arc::new(QueryIndexProviderResource(provider(
-                    &directory.path().join("sender"),
-                ))),
+                provider(&directory.path().join("sender")),
             ),
         )?
         .connect(

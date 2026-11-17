@@ -647,6 +647,9 @@ struct FiniteSource {
 }
 #[async_trait]
 impl ComputationComponent for FiniteSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -672,6 +675,9 @@ struct RecordingSink {
 }
 #[async_trait]
 impl ComputationComponent for RecordingSink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -1954,6 +1960,9 @@ struct JournalIngress {
 }
 #[async_trait]
 impl ComputationComponent for JournalIngress {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

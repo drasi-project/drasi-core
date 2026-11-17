@@ -303,6 +303,9 @@ impl Drop for RemoteComponent {
 pub struct NativeComponentProxy {
     pub(super) inner: Arc<RemoteComponent>,
     descriptor: ComponentDescriptor,
+    /// The plugin's own declaration for this instance (its factory's pure
+    /// describer), forwarded unchanged.
+    description: drasi_lib::computation::v1::ComponentDescription,
     metadata: FactoryMetadata,
     creation_request: drasi_computation_plugin_sdk::CreateRequest,
     pub(super) codec: Arc<BinaryEnvelopeCodec>,
@@ -636,6 +639,7 @@ impl NativeComponentProxy {
         Ok(Self {
             inner,
             descriptor: actual.descriptor,
+            description: drasi_lib::computation::v1::ComponentDescription::undeclared(),
             metadata,
             creation_request: request.clone(),
             codec,
@@ -785,6 +789,20 @@ impl NativeComponentProxy {
     }
     /// Bind the plugin's management table exactly when this component's
     /// metadata declares instance management.
+    pub(super) fn set_description(
+        &mut self,
+        description: drasi_lib::computation::v1::ComponentDescription,
+    ) {
+        self.description = description;
+    }
+    /// Attach the plugin's declaration for this instance.
+    pub(super) fn with_description(
+        mut self,
+        description: drasi_lib::computation::v1::ComponentDescription,
+    ) -> Self {
+        self.description = description;
+        self
+    }
     pub(super) fn with_management(
         mut self,
         extension: Option<abi::management::PluginManagementV1>,
@@ -1118,6 +1136,9 @@ impl Drop for NativeComponentProxy {
 
 #[async_trait]
 impl ComputationComponent for NativeComponentProxy {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        self.description.clone()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -1863,6 +1884,9 @@ pub(super) struct NativeTransactionalProxy {
 }
 #[async_trait]
 impl ComputationComponent for NativeTransactionalProxy {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        self.component.description()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         self.component.descriptor()
     }

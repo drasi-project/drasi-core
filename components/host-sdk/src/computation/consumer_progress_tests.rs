@@ -522,6 +522,12 @@ fn consumer_progress_input_policy_cannot_be_exported_without_its_required_bindin
     }
     struct Factory;
     impl sdk::Factory for Factory {
+        fn describe(
+            &self,
+            _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+        ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+            Ok(drasi_computation_plugin_sdk::ComponentDescription::undeclared())
+        }
         fn metadata(&self) -> sdk::FactoryMetadata {
             let mut metadata = fixture::Factory(ComponentRole::Source, false).metadata();
             metadata.capabilities.control = false;
@@ -569,6 +575,9 @@ async fn consumer_progress_graph_factory_resolves_the_actual_typed_checkpoint_re
     struct Drain(ComponentDescriptor);
     #[async_trait]
     impl ComputationComponent for Drain {
+        fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+            drasi_lib::computation::v1::ComponentDescription::undeclared()
+        }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.0
         }
@@ -964,6 +973,9 @@ mod graph_fanout {
     }
     #[async_trait]
     impl ComputationComponent for Input {
+        fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+            drasi_lib::computation::v1::ComponentDescription::undeclared()
+        }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.descriptor
         }
@@ -1012,6 +1024,9 @@ mod graph_fanout {
     }
     #[async_trait]
     impl ComputationComponent for Capture {
+        fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+            drasi_lib::computation::v1::ComponentDescription::undeclared()
+        }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.descriptor
         }

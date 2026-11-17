@@ -64,59 +64,6 @@ use super::{
 
 pub type GraphResult<T> = std::result::Result<T, GraphError>;
 
-/// Whether the producer is known to lack persistent progress: a query whose
-/// actual index provider is volatile (in-memory). Unknown evidence (no
-/// constructed provider yet, or a non-query producer) is not a refusal; the
-/// consumer's first-delivery check remains the defence in depth.
-fn volatile_query_producer(
-    producer: &ComponentSpecification,
-    resources: &BTreeMap<ResourceId, ResourceHandle>,
-) -> bool {
-    producer
-        .dependencies
-        .get("indexes")
-        .and_then(|ids| ids.first())
-        .and_then(|id| resources.get(id))
-        .and_then(|handle| handle.get::<super::QueryIndexProviderResource>().ok())
-        .is_some_and(|provider| provider.0.is_volatile())
-}
-
-/// Configuration-time refusal of a bound edge from a volatile producer into
-/// an input whose factory requires persistent producer progress
-/// ([`ComponentFactory::requires_persistent_producers`]). The typed cause is
-/// [`drasi_computation_contracts::VolatileProducerRefused`].
-pub(super) fn validate_producer_persistence(
-    edge: &EdgeDefinition,
-    producer: Option<&ComponentSpecification>,
-    consumer: Option<(&ComponentSpecification, &dyn ComponentFactory)>,
-    resources: &BTreeMap<ResourceId, ResourceHandle>,
-) -> GraphResult<()> {
-    let (Some(producer), Some((specification, factory))) = (producer, consumer) else {
-        return Ok(());
-    };
-    let required = factory
-        .requires_persistent_producers(specification)
-        .map_err(|source| GraphError::Validation {
-            component: edge.to.component.clone(),
-            source,
-        })?;
-    if required && volatile_query_producer(producer, resources) {
-        return Err(GraphError::Validation {
-            component: edge.to.component.clone(),
-            source: anyhow::Error::new(drasi_computation_contracts::VolatileProducerRefused)
-                .context(format!(
-                    "input '{}' of component {} requires a producer with persistent progress, \
-                     but query {} uses an in-memory index provider: {}",
-                    edge.to.port,
-                    edge.to.component,
-                    edge.from.component,
-                    drasi_computation_contracts::VolatileProducerRefused
-                )),
-        });
-    }
-    Ok(())
-}
-
 /// Errors retain the original component/provider cause. A send failure may follow
 /// successful delivery to other branches; no rollback or retry is implied.
 #[derive(Debug, thiserror::Error)]
@@ -129,6 +76,17 @@ pub enum GraphError {
     Control(#[from] super::ControlError),
     #[error(transparent)]
     Recovery(#[from] super::RecoveryValidationError),
+    /// Two declarations cannot be connected (an edge or a resource binding),
+    /// or a constructed instance differs from its factory's declaration. The
+    /// node stays in the graph with this failure until either side changes.
+    #[error("component {component} is incompatible: {context}: {source}")]
+    Incompatible {
+        component: ComponentId,
+        phase: super::FailurePhase,
+        context: String,
+        #[source]
+        source: drasi_computation_contracts::Incompatibility,
+    },
     #[error("component {component} validation failed: {source}")]
     Validation {
         component: ComponentId,
@@ -531,6 +489,18 @@ enum Component {
 }
 
 impl Component {
+    /// A constructed component's own declared description; `None` for a
+    /// component that is not constructed yet.
+    pub(super) fn description(&self) -> Option<drasi_computation_contracts::ComponentDescription> {
+        match self {
+            Self::Source(component) => Some(component.description()),
+            Self::Transformer(component) => Some(component.description()),
+            Self::Sink(component) => Some(component.description()),
+            Self::Service(component) => Some(component.description()),
+            Self::Deferred { .. } | Self::Unresolved(_) => None,
+        }
+    }
+
     fn is_constructed(&self) -> bool {
         !matches!(self, Self::Deferred { .. } | Self::Unresolved(_))
     }
@@ -1197,26 +1167,6 @@ impl ComputationGraphBuilder {
             }
         }
         self.unbound_relationships = unbound;
-        {
-            let deferred = |id: &ComponentId| {
-                ids.get(id)
-                    .and_then(|index| match &self.components[*index].1 {
-                        Component::Deferred {
-                            specification,
-                            factory,
-                        } => Some((specification.as_ref(), factory.as_ref())),
-                        _ => None,
-                    })
-            };
-            for (edge, _) in &self.edges {
-                validate_producer_persistence(
-                    edge,
-                    deferred(&edge.from.component).map(|(spec, _)| spec),
-                    deferred(&edge.to.component),
-                    &self.resource_handles,
-                )?;
-            }
-        }
         let mut streams = BTreeSet::new();
         for (endpoint, stream) in self.streams {
             let (index, port) = resolve(&ids, &nodes, &endpoint)?;

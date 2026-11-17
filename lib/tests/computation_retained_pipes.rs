@@ -436,6 +436,9 @@ struct AcceptanceOnlySink(ComponentDescriptor);
 
 #[async_trait::async_trait]
 impl ComputationComponent for AcceptanceOnlySink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }

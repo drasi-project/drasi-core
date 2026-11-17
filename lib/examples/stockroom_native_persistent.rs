@@ -94,6 +94,9 @@ struct Inventory {
 
 #[async_trait]
 impl ComputationComponent for Inventory {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -175,6 +178,9 @@ struct Alerts {
 
 #[async_trait]
 impl ComputationComponent for Alerts {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

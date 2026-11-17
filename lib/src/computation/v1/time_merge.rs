@@ -703,6 +703,11 @@ fn port(name: &str) -> PortId {
 
 #[async_trait]
 impl ComputationComponent for SourceTimeMergeTransformer {
+    /// A persistent merge owns durable producer progress; a volatile merge
+    /// starts a new producer incarnation on every construction.
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        time_merge_description(&self.descriptor, self.transaction.is_some())
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -1019,5 +1024,21 @@ impl Transformer for SourceTimeMergeTransformer {
         guard.complete = true;
         self.publish();
         Ok(())
+    }
+}
+
+/// A persistent merge owns durable producer progress; a volatile merge
+/// starts a new producer incarnation on every construction.
+pub(super) fn time_merge_description(
+    descriptor: &ComponentDescriptor,
+    persistent: bool,
+) -> crate::computation::v1::ComponentDescription {
+    use crate::computation::v1::{ComponentDescription, OutputDescription, ProgressPersistence};
+    if persistent {
+        ComponentDescription::new(ProgressPersistence::Durable)
+            .with_outputs(descriptor, OutputDescription::DURABLE)
+    } else {
+        ComponentDescription::new(ProgressPersistence::Volatile)
+            .with_outputs(descriptor, OutputDescription::VOLATILE)
     }
 }

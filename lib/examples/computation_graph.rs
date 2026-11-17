@@ -179,6 +179,9 @@ impl FiniteReadings {
 
 #[async_trait]
 impl ComputationComponent for FiniteReadings {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -263,6 +266,9 @@ impl Arithmetic {
 
 #[async_trait]
 impl ComputationComponent for Arithmetic {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -307,6 +313,9 @@ struct CollectReadings {
 
 #[async_trait]
 impl ComputationComponent for CollectReadings {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

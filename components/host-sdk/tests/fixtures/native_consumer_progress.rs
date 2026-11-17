@@ -28,6 +28,12 @@ pub fn factories() -> Vec<Arc<dyn sdk::Factory>> {
 pub struct Factory(pub ComponentRole, pub bool);
 
 impl sdk::Factory for Factory {
+    fn describe(
+        &self,
+        _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(drasi_computation_plugin_sdk::ComponentDescription::undeclared())
+    }
     fn metadata(&self) -> sdk::FactoryMetadata {
         let directions = match self.0 {
             ComponentRole::Source => vec![PortDirection::Output],
@@ -461,6 +467,12 @@ impl sdk::NativeControlHandler for Commands {
 pub struct SinkFactory(pub SinkCompletion);
 
 impl sdk::Factory for SinkFactory {
+    fn describe(
+        &self,
+        _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(drasi_computation_plugin_sdk::ComponentDescription::undeclared())
+    }
     fn metadata(&self) -> sdk::FactoryMetadata {
         let mut metadata = sdk::Factory::metadata(&Factory(ComponentRole::Sink, false));
         metadata.implementation = ImplementationIdentity::try_new(

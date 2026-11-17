@@ -131,21 +131,25 @@ Format 2 tables (without `epoch`) are refused at Start, not migrated.
 
 ### Delivery guarantee and producer epochs
 
-`deliveryGuarantee: exactlyOnce` (the default) accepts only producers with
-persistent progress. The graph refuses, at configuration time, to bind this
-sink's input to a query on an in-memory index provider (the host's native
-factory reports the requirement through
-`ComponentFactory::requires_persistent_producers`); a volatile input that
-still arrives is refused permanently at the first delivery, in the plugin's
-own identity derivation, with "use a persistent query or set
-deliveryGuarantee to atLeastOnce".
+The factory's pure describer (`Factory::describe`) reads the sink's own
+`deliveryGuarantee` and declares it as the input's `InputDelivery` in the
+sink's `ComponentDescription`; the Host forwards the description unchanged.
+The graph compares it with the producer's declared output when it binds the
+edge (`check_edge`). `deliveryGuarantee: exactlyOnce` (the default) accepts
+only a `Durable`, replayable producer; a `Volatile` one fails the edge with
+`Incompatibility::ProducerIdentity`, and an `Untracked` or undeclared producer
+fails under either guarantee. The failure is recorded on the edge
+(`BindingState::Failed`) and on the sink node (terminal `Binding` failure);
+the graph change itself is accepted. The plugin's own check at delivery is an
+internal invariant guard, not the compatibility check.
 
-`deliveryGuarantee: atLeastOnce` additionally accepts an in-memory query.
+`deliveryGuarantee: atLeastOnce` additionally accepts a producer with a
+volatile identity: an in-memory query or a volatile graph producer.
 Its output has no persistent progress, so the host derives a weaker identity
 (`Candidate::new_volatile`): the stream key excludes the producer's per-run
 incarnation, and the item's `DeliveryPosition` (version 2) carries an
-`epoch`, a SHA-256 of the incarnation, query generation and configuration
-hash. The host delivers such a batch without its `DeliveryRunner` ledger
+`epoch`, a SHA-256 of the producer incarnation (and, for a query, its
+generation and configuration hash). The host delivers such a batch without its `DeliveryRunner` ledger
 (nothing can resume across a restart), calling the plugin per operation and
 stopping at the first failure. The cursor applies one extra rule: an item
 whose epoch differs from the row's treats the row as absent and overwrites
@@ -254,10 +258,8 @@ orphan this owner's rows. Remove the component (Erase) and add it again.
 - In-memory (volatile) queries are accepted only with
   `deliveryGuarantee: atLeastOnce`, and are then delivered at least once:
   deduplicated within one producer run, never resumed across a restart.
-  Without opt-in the pairing is refused at configuration time (see
-  Delivery guarantee and producer epochs). Volatile producers other than
-  queries are not detected at configuration time and are refused at the
-  first delivery.
+  Without opt-in the edge fails when it is bound (see Delivery guarantee and
+  producer epochs).
 - A failed delivery is retried without Stop/Start, through the host as well.
   A delivery the host cancels mid-flight still requires Stop before more
   input, because its batch may not have settled.

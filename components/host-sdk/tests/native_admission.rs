@@ -23,6 +23,12 @@ fn captured() -> &'static Mutex<Option<sdk::NativeAdmission>> {
 
 struct Factory;
 impl sdk::Factory for Factory {
+    fn describe(
+        &self,
+        _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(drasi_computation_plugin_sdk::ComponentDescription::undeclared())
+    }
     fn metadata(&self) -> sdk::FactoryMetadata {
         sdk::FactoryMetadata {
             implementation: ImplementationIdentity::try_new("probe/source", "1")
@@ -37,7 +43,9 @@ impl sdk::Factory for Factory {
                 PipeRequirements::default(),
             )],
             completion: None,
-            capabilities: sdk::Capabilities::default(),
+            capabilities: sdk::Capabilities {
+                ..sdk::Capabilities::default()
+            },
         }
     }
     fn supports_source_admission(&self) -> bool {
@@ -116,6 +124,9 @@ struct Sink {
 }
 #[async_trait]
 impl ComputationComponent for Sink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

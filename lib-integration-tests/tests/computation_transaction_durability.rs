@@ -51,6 +51,9 @@ struct ArithmeticStep {
 
 #[async_trait]
 impl ComputationComponent for ArithmeticStep {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -275,6 +278,9 @@ struct ReplaySource {
 
 #[async_trait]
 impl ComputationComponent for ReplaySource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -303,6 +309,9 @@ struct CrashSink {
 
 #[async_trait]
 impl ComputationComponent for CrashSink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

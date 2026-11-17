@@ -35,7 +35,7 @@ compatibility shims or automatic migration of old state are planned.
 
 | Work area | Entries |
 |---|---|
-| Managed updates and lifecycle | [Rebootstrap coordination](#cw-92), [named endpoints](#cw-93), [graph changes and live rebinding](#cw-94) (deferred), [plugin upgrade and configuration migration](#cw-95) (deferred), [late progress binding startup hold](#cw-104) |
+| Managed updates and lifecycle | [Rebootstrap coordination](#cw-92), [named endpoints](#cw-93), [graph changes and live rebinding](#cw-94) (deferred), [plugin upgrade and configuration migration](#cw-95) (deferred), [late progress binding startup hold](#cw-104), [declared component descriptions](#cw-106) |
 | Connectors and runtime boundaries | [Data connections](#cw-44), [old plugin support](#cw-63), [linked query entry points](#cw-80), [oversized query records](#cw-76) |
 | Native plugins: shared work | [Pause and stop](#cw-96), [erasing disposal](#cw-98), [conformance kit](#source-x-02), [configuration and secrets](#source-x-03), [update planning](#source-x-04), [retry policy](#source-x-05), [delivery contract](#sink-x-03), [observability](#source-x-07), [starter project](#dx-1), [packaging](#dx-10), [provider and transformer review](#cw-103) |
 | Native sources | [Network runtime](#plugin-source-network), [PostgreSQL](#plugin-source-postgres), [MySQL](#plugin-source-mysql), [SQL Server](#plugin-source-mssql), [SQLite](#plugin-source-sqlite), [HTTP](#plugin-source-http), [gRPC](#plugin-source-grpc), [bridge](#plugin-source-bridge), [counter and mock](#plugin-source-counter-mock) |
@@ -308,6 +308,51 @@ error; out-of-range versions leave stored state unchanged; secret references sta
 unresolved; an interrupted upgrade retries with the same operation ID; a broken
 chain fails registration; and the chosen option's loading rule is enforced with
 a clear error.
+
+<a id="cw-106"></a>
+
+### Finish declared component descriptions (CW-106)
+
+**Kind:** Improvement. **Area:** Core, Host SDK, native SDK. **Priority:** Medium.
+**Effort:** Medium.
+
+Components describe themselves through one `ComponentDescription`
+(component facts, per-port facts, per-dependency requirements). Factories
+declare it from their configuration and the declared `ResourceCapabilities`
+of bound resources, constructed components from the instance, and the graph
+compares descriptions when it binds edges and resources, recording a
+mismatch on the nodes. The model carries only producer identity and replay,
+input delivery, component progress persistence and resource durability so
+far.
+
+**What remains:**
+
+- QoS replay pipes that need producer identity are not yet checked against
+  the producer's description.
+- A native instance's description is its factory's describer answer; the
+  plugin's constructed object does not report its own description across the
+  ABI, so the instance-versus-factory check is meaningful only for in-process
+  components.
+- Native constructions outside the graph (for example the Host's ordinary
+  query adapter) derive the describer's resource capabilities from the bound
+  objects; resource handles created without `with_capabilities` stay
+  undeclared and satisfy no requirement.
+- Most sources declare their own progress persistence as `Undeclared`;
+  declare it where a requirement needs it.
+- The further facts identified by the compatibility audit (recovery and
+  control messages, ordering, bootstrap capabilities, archive and atomic
+  publication support, credential kinds) belong in this model rather than in
+  new mechanisms.
+
+**Evidence:** `drasi-core/components/computation-contracts/src/description.rs`;
+`drasi-core/lib/src/computation/v1/graph/controller.rs`
+(`declared_description`, `check_edge_compatibility`,
+`record_incompatible_edge`);
+`drasi-core/components/host-sdk/src/computation/factory.rs`
+(`describe_request`).
+
+**Done when:** every compatibility fact the graph relies on is declared in
+the description and checked when the edge or resource is bound.
 
 <a id="cw-104"></a>
 
@@ -3560,48 +3605,36 @@ Server authenticates with an Entra ID token.
 
 <a id="sp-11"></a>
 
-#### Finish the volatile-producer refusal for consumer sinks (SP-11)
+#### Let the HTTP consumer sink opt in to at-least-once delivery (SP-11)
 
-**Kind:** Issue. **Area:** Core, native sinks. **Priority:** Medium.
+**Kind:** Improvement. **Area:** Native sinks. **Priority:** Low.
 **Effort:** Small to medium.
 
-The decision is made and implemented: a stored-procedure sink may consume an
-in-memory query only with `deliveryGuarantee: atLeastOnce` (a volatile
-identity with a per-run epoch, destination cursor format 3). Without that
-opt-in, an exactly-once consumer input needs a producer with persistent
-progress. Two gaps remain.
+Compatibility is declared: each plugin's pure describer returns a
+`ComponentDescription`, and the graph compares the producer's output with
+the consumer's input when it binds the edge, recording a mismatch as a
+failed edge and a terminal binding failure on the consumer. The HTTP delivery
+consumer describes its inputs as `ExactlyOnce` only, so an edge from a
+producer with a volatile identity (for example an in-memory query) always
+fails.
 
-**What remains:**
+**What remains:** decide whether the HTTP consumer should offer
+`AtLeastOnce` too. That needs a `deliveryGuarantee` configuration field read
+by its describer and by `DeliveryHandler::delivery_guarantee`, and
+receiver-side handling of the per-run `epoch` the at-least-once identity
+carries (the receiver deduplicates by delivery identity today).
 
-1. Only volatile *query* producers (queries on an in-memory index provider)
-   are refused at configuration time by `validate_producer_persistence`. Any
-   other volatile producer, for example a source or transformer without
-   persistent progress, is accepted at configuration time and refused only at
-   the first delivery (`ReplayRejection::MissingProgress`). Extend the
-   configuration-time check to every producer whose progress is volatile, or
-   document which producers it covers.
-2. The HTTP consumer sink has no `deliveryGuarantee` option; it keeps the
-   default exactly-once guarantee and so cannot opt in to consume an
-   in-memory query. Add the option, or document the limit in its docs.
+**Example:** an HTTP delivery consumer behind an in-memory query: the edge is
+`Failed` with `Incompatibility::ProducerIdentity` on the consumer node.
 
-**Example:** an exactly-once MySQL stored-procedure sink fed directly by a
-source without persistent progress is accepted by the graph and fails at its
-first delivery; the same sink fed by an in-memory query is refused when the
-edge is configured.
+**Evidence:** `drasi-core/components/computation-plugins/sinks/http/src/lib.rs`
+(`HttpDeliveryFactory::describe`);
+`drasi-core/components/computation-contracts/src/description.rs`
+(`check_edge`).
 
-**Evidence:** `drasi-core/lib/src/computation/v1/graph.rs:71-120`
-(`volatile_query_producer`, `validate_producer_persistence`);
-`drasi-core/lib/src/computation/v1/graph/reconcile.rs:1802-1846`;
-`drasi-core/components/computation-contracts/src/output_identity.rs:64-84`
-(delivery-time `MissingProgress`);
-`drasi-core/components/computation-contracts/src/delivery.rs:351` (default
-guarantee); no `delivery_guarantee` override in
-`drasi-core/components/computation-plugins/sinks/http/src/consumer.rs`.
-
-**Done when:** every unsupported volatile pairing is refused at configuration
-time (or the remaining delivery-time cases are documented), and the HTTP
-consumer sink either supports `deliveryGuarantee: atLeastOnce` with a test or
-documents that it does not.
+**Done when:** the HTTP consumer either supports `deliveryGuarantee:
+atLeastOnce` with receiver deduplication tests, or its documentation states
+that it delivers exactly once only.
 
 <a id="sp-12"></a>
 

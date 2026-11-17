@@ -27,6 +27,9 @@ use drasi_lib::computation::v1::*;
 struct UnavailableSource(ComponentDescriptor);
 #[async_trait]
 impl ComputationComponent for UnavailableSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }

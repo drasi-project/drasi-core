@@ -292,6 +292,7 @@ pub struct ResourceHandle {
     value: Arc<dyn Any + Send + Sync>,
     cleanup: Option<Arc<dyn ResourceCleanup>>,
     identity: Option<Arc<dyn ResourceIdentity>>,
+    capabilities: drasi_computation_contracts::ResourceCapabilities,
 }
 
 trait ResourceIdentity: Send + Sync {
@@ -359,6 +360,7 @@ pub(crate) struct WeakResourceHandle {
     value: std::sync::Weak<dyn Any + Send + Sync>,
     cleanup: Option<std::sync::Weak<dyn ResourceCleanup>>,
     identity: Option<std::sync::Weak<dyn ResourceIdentity>>,
+    capabilities: drasi_computation_contracts::ResourceCapabilities,
 }
 
 impl WeakResourceHandle {
@@ -374,6 +376,7 @@ impl WeakResourceHandle {
                 Some(identity) => Some(identity.upgrade()?),
                 None => None,
             },
+            capabilities: self.capabilities,
         })
     }
 }
@@ -394,6 +397,7 @@ impl ResourceHandle {
             value: Arc::downgrade(&self.value),
             cleanup: self.cleanup.as_ref().map(Arc::downgrade),
             identity: self.identity.as_ref().map(Arc::downgrade),
+            capabilities: self.capabilities,
         }
     }
     pub fn new<T: Any + Send + Sync>(role: ResourceRole, value: Arc<T>) -> Self {
@@ -402,7 +406,22 @@ impl ResourceHandle {
             value,
             cleanup: None,
             identity: None,
+            capabilities: drasi_computation_contracts::ResourceCapabilities::UNDECLARED,
         }
+    }
+
+    /// Declare the capabilities this resource provides. Undeclared
+    /// capabilities satisfy no component requirement.
+    pub fn with_capabilities(
+        mut self,
+        capabilities: drasi_computation_contracts::ResourceCapabilities,
+    ) -> Self {
+        self.capabilities = capabilities;
+        self
+    }
+
+    pub fn capabilities(&self) -> drasi_computation_contracts::ResourceCapabilities {
+        self.capabilities
     }
 
     /// Identify the actual shared instance behind a binding wrapper.
@@ -649,18 +668,19 @@ pub trait ComponentFactory: Send + Sync {
     fn binds_inputs(&self) -> bool {
         false
     }
-    /// Whether this specification's inputs require producers with persistent
-    /// progress (an exactly-once consumer). Pure metadata over the
-    /// specification: no construction or I/O. The graph refuses, when an edge
-    /// becomes bindable or either endpoint is created, replaced or updated, to
-    /// connect such an input to a producer known to lack persistent progress
-    /// (a query on an in-memory index provider).
-    fn requires_persistent_producers(
+    /// The declared capabilities and requirements of the instance this
+    /// factory constructs from `context` (its resolved configuration and the
+    /// declared capabilities of its bound resources,
+    /// [`ConstructionContext::dependency_capabilities`]). Pure: no
+    /// construction, I/O or inspection of resource objects. The graph
+    /// compares the constructed instance's [`super::ComputationComponent::description`]
+    /// with this declaration (a mismatch is a creation failure), checks each
+    /// declared dependency requirement against its bound resources and each
+    /// bound edge against its peer's description.
+    fn describe(
         &self,
-        _specification: &ComponentSpecification,
-    ) -> anyhow::Result<bool> {
-        Ok(false)
-    }
+        context: &ConstructionContext,
+    ) -> anyhow::Result<drasi_computation_contracts::ComponentDescription>;
     /// Additional pure definition validation, after generic schema/dependency checks.
     fn validate(&self, specification: &ComponentSpecification) -> anyhow::Result<()>;
     fn validate_resources(
@@ -816,6 +836,12 @@ impl ConstructionContext {
 
     pub fn configuration(&self) -> &BTreeMap<Arc<str>, serde_json::Value> {
         &self.configuration
+    }
+
+    /// The declared capabilities of the resources bound to each dependency of
+    /// this specification, as [`ComponentFactory::describe`] sees them.
+    pub fn dependency_capabilities(&self) -> drasi_computation_contracts::DependencyCapabilities {
+        dependency_capabilities(&self.specification, &self.resources)
     }
 
     pub fn resources<T: Any + Send + Sync>(&self, dependency: &str) -> GraphResult<Vec<Arc<T>>> {
@@ -984,4 +1010,24 @@ pub(super) fn validate_specification(
         }
         super::topology(format!("invalid component definition: {error:#}"))
     })
+}
+
+/// The declared capabilities of the resources bound to each dependency of a
+/// specification. Unrealized resources are omitted.
+pub(crate) fn dependency_capabilities(
+    specification: &ComponentSpecification,
+    resources: &BTreeMap<ResourceId, ResourceHandle>,
+) -> drasi_computation_contracts::DependencyCapabilities {
+    specification
+        .dependencies
+        .iter()
+        .map(|(name, ids)| {
+            (
+                name.to_string(),
+                ids.iter()
+                    .filter_map(|id| resources.get(id).map(ResourceHandle::capabilities))
+                    .collect(),
+            )
+        })
+        .collect()
 }

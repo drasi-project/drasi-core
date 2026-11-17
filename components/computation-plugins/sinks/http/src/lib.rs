@@ -83,6 +83,13 @@ fn managed() -> Capabilities {
 }
 
 impl Factory for HttpSinkFactory {
+    /// Inputs do not key delivery on producer identity.
+    fn describe(
+        &self,
+        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(request.unkeyed_sink())
+    }
     fn supports_sink_batching(&self) -> bool {
         true
     }
@@ -130,6 +137,13 @@ impl Factory for HttpSinkFactory {
 }
 
 impl Factory for HttpDeliveryFactory {
+    /// A consumer that delivers exactly once, keyed on durable producer identity.
+    fn describe(
+        &self,
+        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(request.consumer(drasi_computation_plugin_sdk::DeliveryGuarantee::ExactlyOnce))
+    }
     fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
         Some(HttpDeliveryConfig::definition().details())
     }
@@ -153,7 +167,7 @@ impl Factory for HttpDeliveryFactory {
             configuration: HttpDeliveryConfig::definition().schema(),
             ports: vec![input_port()],
             completion: Some(SinkCompletion::Handled),
-            capabilities: managed(),
+            capabilities: Capabilities { ..managed() },
         }
     }
 

@@ -538,7 +538,7 @@ fn assess_matrix_classifies_every_field() {
         (
             "deliveryGuarantee",
             with(full_config(), "deliveryGuarantee", json!("atLeastOnce")),
-            Some(Stop),
+            Some(Replace),
         ),
         (
             "outputs",

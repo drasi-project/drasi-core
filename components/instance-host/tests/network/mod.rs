@@ -330,6 +330,9 @@ struct AdmissionInput {
 
 #[async_trait]
 impl ComputationComponent for AdmissionInput {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -681,10 +684,7 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
             (
                 "mapping",
                 ResourceRole::IndexBackend,
-                ResourceHandle::new(
-                    ResourceRole::IndexBackend,
-                    Arc::new(QueryIndexProviderResource(provider)),
-                ),
+                drasi_lib::computation::v1::QueryIndexProviderResource::handle(ResourceRole::IndexBackend, provider),
             ),
             (
                 "tls",

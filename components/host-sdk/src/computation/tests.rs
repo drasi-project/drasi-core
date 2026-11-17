@@ -115,6 +115,12 @@ struct TestFactory {
     transactional: bool,
 }
 impl sdk::Factory for TestFactory {
+    fn describe(
+        &self,
+        _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(drasi_computation_plugin_sdk::ComponentDescription::undeclared())
+    }
     fn metadata(&self) -> FactoryMetadata {
         let ports = match self.role {
             ComponentRole::Source => vec![port(PortDirection::Output)],
@@ -903,6 +909,9 @@ struct NotifyingSink {
 }
 #[async_trait]
 impl ComputationComponent for NotifyingSink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

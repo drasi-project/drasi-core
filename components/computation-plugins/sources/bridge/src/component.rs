@@ -115,6 +115,12 @@ impl BridgeSource {
 
 #[async_trait]
 impl ComputationComponent for BridgeSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_computation_bridge_common::config::receiver_description(
+            &self.descriptor,
+            self.config.profile,
+        )
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

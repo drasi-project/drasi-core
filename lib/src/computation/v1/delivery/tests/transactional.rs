@@ -433,6 +433,9 @@ struct StatefulSink {
 
 #[async_trait]
 impl ComputationComponent for StatefulSink {
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        crate::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

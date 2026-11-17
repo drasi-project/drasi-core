@@ -466,6 +466,9 @@ struct SharedSource {
 
 #[async_trait]
 impl ComputationComponent for SharedSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         self.inner.descriptor()
     }
@@ -489,6 +492,9 @@ struct SharedSink {
 
 #[async_trait]
 impl ComputationComponent for SharedSink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         self.inner.descriptor()
     }
@@ -654,6 +660,12 @@ impl IdenticalProducerFactory {
 
 #[async_trait]
 impl ComponentFactory for IdenticalProducerFactory {
+    fn describe(
+        &self,
+        context: &drasi_lib::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        self.inner.describe(context)
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }

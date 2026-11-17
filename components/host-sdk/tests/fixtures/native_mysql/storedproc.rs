@@ -623,7 +623,7 @@ async fn volatile_queries(
         .err()
         .context("the volatile input must be refused")?;
     assert!(
-        format!("{error:#}").contains("set deliveryGuarantee to atLeastOnce"),
+        format!("{error:#}").contains("output identity is Volatile"),
         "{error:#}"
     );
     assert_eq!(database.sql(audited).await?, "0");
@@ -664,19 +664,50 @@ async fn volatile_queries(
         "64\t3"
     );
     sink.stop(&crate::hooks::stop_ctx()).await?;
-    graph_refuses_volatile_queries(database, factory)?;
+    graph_refuses_volatile_queries(database, factory).await?;
     Ok(())
 }
 
-/// The graph refuses, at configuration time, to wire an exactly-once
-/// procedure sink to a query on an in-memory index provider, and accepts it
-/// with `deliveryGuarantee: atLeastOnce`.
-fn graph_refuses_volatile_queries(
+/// An idle source feeding the in-memory query, so the query is constructed
+/// and its outgoing edge is compared.
+struct IdleFeed(ComponentDescriptor);
+#[async_trait]
+impl ComputationComponent for IdleFeed {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::new(
+            drasi_lib::computation::v1::ProgressPersistence::Stateless,
+        )
+        .with_outputs(
+            &self.0,
+            drasi_lib::computation::v1::OutputDescription::UNTRACKED,
+        )
+    }
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.0
+    }
+    drasi_lib::passive_component_lifecycle!();
+}
+#[async_trait]
+impl EnvelopeSource for IdleFeed {
+    async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
+        std::future::pending().await
+    }
+}
+
+/// The graph refuses, when it binds the edge, to connect an exactly-once
+/// procedure sink to a query on an in-memory index provider: the edge fails
+/// and the sink node carries the terminal binding failure while both nodes
+/// stay in the graph. With `deliveryGuarantee: atLeastOnce` the edge binds.
+async fn graph_refuses_volatile_queries(
     database: &Database,
     factory: &Arc<computation::NativeFactory>,
 ) -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let build = |configuration: Value| -> Result<std::result::Result<(), GraphError>> {
+    let build = |mut configuration: Value| -> Result<ComputationGraph> {
+        // The sink's output aliases select this graph's query.
+        configuration["outputs"] = json!({
+            "query": {"component": database::fixture_id("graph-query"), "port": "out"}
+        });
         let queries = Arc::new(ContinuousQueryFactory::default());
         let mut query = queries.specification_from_config(
             id("graph-query"),
@@ -698,11 +729,9 @@ fn graph_refuses_volatile_queries(
             })?
             .provide_resource(
                 resource("memory"),
-                ResourceHandle::new(
+                drasi_lib::computation::v1::QueryIndexProviderResource::handle(
                     ResourceRole::IndexBackend,
-                    Arc::new(QueryIndexProviderResource(Arc::new(
-                        InMemoryComputationProvider,
-                    ))),
+                    Arc::new(InMemoryComputationProvider),
                 ),
             )?
             .declare_resource(ResourceSpecification {
@@ -737,33 +766,103 @@ fn graph_refuses_volatile_queries(
                     }),
                 ),
             )?
+            .source(
+                name("graph-feed"),
+                Box::new(IdleFeed(ComponentDescriptor::try_new(
+                    id("graph-feed"),
+                    vec![PortDescriptor::new(
+                        PortId::try_new("out")?,
+                        PortDirection::Output,
+                        GraphChangeCodec::schema().descriptor().clone(),
+                        PipeRequirements::default(),
+                    )],
+                )?)),
+            )
+            .bind_stream(endpoint("graph-feed", "out"), stream("graph-feed/out"))
+            .connect(
+                EdgeDefinition::new(endpoint("graph-feed", "out"), endpoint("graph-query", "in")),
+                Box::new(BoundedPipeConfig { capacity: 4 }),
+            )
             .component(name("graph-query"), query, queries)
             .component(name("procedures"), sink, factory.clone())
             .bind_stream(edge.from.clone(), stream("graph-query/out"))
             .connect(edge, Box::new(BoundedPipeConfig { capacity: 4 }));
-        Ok(builder.build().map(drop))
+        Ok(builder.build()?)
     };
-    let error = build(settings(database, CALL))?
-        .err()
-        .context("an exactly-once sink on an in-memory query must be refused")?;
-    let GraphError::Validation { source, .. } = &error else {
-        anyhow::bail!("expected a typed validation failure, got {error:#}");
+    let edge = EdgeDefinition::new(endpoint("graph-query", "out"), endpoint("procedures", "in"));
+    let deployed = |mut graph: ComputationGraph, edge: EdgeDefinition| async move {
+        let watched = edge.clone();
+        let run = graph.run()?;
+        let control = run.control();
+        let (outcome, observed) = tokio::join!(run, async {
+            control.deployment_report().await?;
+            // Deferred construction binds the edge after deployment; wait
+            // until it is either bound or failed.
+            let mut changes = control.subscribe_observed();
+            let settled = tokio::time::timeout(
+                Duration::from_secs(30),
+                changes.wait_for(|state| {
+                    state
+                        .relationships
+                        .get(&watched)
+                        .is_some_and(|relationship| {
+                            matches!(
+                                relationship.binding,
+                                BindingState::Bound | BindingState::Failed
+                            )
+                        })
+                }),
+            )
+            .await;
+            let observed = control.observed();
+            control.cancel();
+            anyhow::ensure!(
+                matches!(settled, Ok(Ok(_))),
+                "edge never settled: {:?}",
+                observed.components
+            );
+            Result::<_>::Ok(observed)
+        });
+        anyhow::ensure!(matches!(outcome, Err(GraphError::Cancelled)), "{outcome:?}");
+        graph.dispose().await?;
+        let observed = observed?;
+        Result::<_>::Ok((
+            observed.relationships[&edge].clone(),
+            observed.components[&id("procedures")].clone(),
+            observed.components[&id("graph-query")].clone(),
+        ))
     };
-    assert!(
-        source
-            .downcast_ref::<drasi_computation_contracts::VolatileProducerRefused>()
-            .is_some(),
-        "{error:#}"
+    let (relationship, sink, query) =
+        deployed(build(settings(database, CALL))?, edge.clone()).await?;
+    anyhow::ensure!(
+        relationship.binding == BindingState::Failed,
+        "{relationship:?}"
     );
-    assert!(
-        error
-            .to_string()
-            .contains("set deliveryGuarantee to atLeastOnce"),
-        "{error}"
+    let failure = sink
+        .failure
+        .clone()
+        .context("the sink carries the binding failure")?;
+    anyhow::ensure!(
+        failure.phase == FailurePhase::Binding
+            && failure.disposition == FailureDisposition::Terminal
+            && matches!(
+                failure.cause.as_ref(),
+                GraphError::Incompatible {
+                    source: Incompatibility::ProducerIdentity { .. },
+                    ..
+                }
+            ),
+        "{failure:?}"
     );
+    anyhow::ensure!(sink.realization == RealizationState::Blocked, "{sink:?}");
+    anyhow::ensure!(query.failure.is_none(), "{query:?}");
     let mut opted = settings(database, CALL);
     opted["deliveryGuarantee"] = json!("atLeastOnce");
-    build(opted)?.map_err(|error| anyhow::anyhow!("opted-in graph refused: {error:#}"))?;
+    let (relationship, sink, _) = deployed(build(opted)?, edge).await?;
+    anyhow::ensure!(
+        relationship.binding == BindingState::Bound && sink.failure.is_none(),
+        "{relationship:?} {sink:?}"
+    );
     Ok(())
 }
 

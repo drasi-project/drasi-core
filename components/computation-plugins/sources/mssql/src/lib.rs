@@ -84,6 +84,16 @@ impl MsSqlSourceFactory {
 }
 
 impl Factory for MsSqlSourceFactory {
+    /// Outputs carry only source replay progress unless published through a Host admission channel.
+    fn describe(
+        &self,
+        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(request.source_description(
+            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
+            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
+        ))
+    }
     fn metadata(&self) -> FactoryMetadata {
         FactoryMetadata {
             // Constant identifiers; validated by `ExportedPlugin::new`.
@@ -98,6 +108,8 @@ impl Factory for MsSqlSourceFactory {
                 management: true,
                 update_modes: vec![ComponentUpdateMode::InPlace, ComponentUpdateMode::Restart],
                 erases_owned_state: true,
+                // Outputs carry source replay progress, not a producer identity of their
+                // own (Host admission, when bound, publishes under its durable identity).
                 ..Capabilities::default()
             },
         }

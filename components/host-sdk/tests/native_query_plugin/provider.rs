@@ -48,6 +48,9 @@ struct IdleLiveInput(ComponentDescriptor);
 
 #[async_trait]
 impl ComputationComponent for IdleLiveInput {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }

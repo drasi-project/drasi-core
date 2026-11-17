@@ -161,9 +161,9 @@ impl ManagementResourceResolver for Resources {
                     }),
                 )
             }
-            "indexes" => ResourceHandle::new(
+            "indexes" => drasi_lib::computation::v1::QueryIndexProviderResource::handle(
                 ResourceRole::IndexBackend,
-                Arc::new(QueryIndexProviderResource(self.indexes[instance].clone())),
+                self.indexes[instance].clone(),
             ),
             "progress" => ResourceHandle::new(
                 ResourceRole::Checkpoint,
@@ -235,6 +235,9 @@ struct RecordingReaction {
 
 #[async_trait]
 impl ComputationComponent for RecordingReaction {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -293,6 +296,12 @@ impl ReactionFactory {
 }
 #[async_trait]
 impl ComponentFactory for ReactionFactory {
+    fn describe(
+        &self,
+        _context: &drasi_lib::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.0
     }

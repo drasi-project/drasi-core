@@ -616,6 +616,9 @@ impl LinearTransaction {
 
 #[async_trait]
 impl ComputationComponent for LinearTransaction {
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        crate::computation::v1::ComponentDescription::undeclared()
+    }
     fn recovery_contract(&self) -> super::ComponentRecovery {
         let contract = super::ComponentRecovery::transactional(self.store.transaction.resources())
             .expect("transaction store validates atomic resource participation")
@@ -816,6 +819,17 @@ impl TransactionTransformer {
 
 #[async_trait]
 impl ComputationComponent for TransactionTransformer {
+    /// Construction requires persistent atomic storage: outputs carry the
+    /// store's durable producer identity.
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        crate::computation::v1::ComponentDescription::new(
+            crate::computation::v1::ProgressPersistence::Durable,
+        )
+        .with_outputs(
+            self.descriptor(),
+            crate::computation::v1::OutputDescription::DURABLE,
+        )
+    }
     fn recovery_contract(&self) -> super::ComponentRecovery {
         self.processor().recovery_contract()
     }
@@ -943,6 +957,18 @@ impl Default for TransactionTransformerFactory {
 
 #[async_trait]
 impl ComponentFactory for TransactionTransformerFactory {
+    fn describe(
+        &self,
+        context: &crate::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<crate::computation::v1::ComponentDescription> {
+        Ok(crate::computation::v1::ComponentDescription::new(
+            crate::computation::v1::ProgressPersistence::Durable,
+        )
+        .with_outputs(
+            &context.specification.descriptor,
+            crate::computation::v1::OutputDescription::DURABLE,
+        ))
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }

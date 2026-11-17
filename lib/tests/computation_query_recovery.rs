@@ -375,6 +375,9 @@ impl RecoverySink {
 
 #[async_trait]
 impl ComputationComponent for RecoverySink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -781,6 +784,9 @@ struct LiveSource {
 }
 #[async_trait]
 impl ComputationComponent for LiveSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -803,6 +809,9 @@ struct LateBindingSource {
 
 #[async_trait]
 impl ComputationComponent for LateBindingSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -826,6 +835,9 @@ struct LateBindingSink {
 
 #[async_trait]
 impl ComputationComponent for LateBindingSink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -896,8 +908,7 @@ async fn bootstrapped_query_delivers_live_updates_to_second_batch_consumers() ->
                 drop(query);
                 first.declare_resource(ResourceSpecification {
                     id: indexes.clone(), role: ResourceRole::IndexBackend, ownership: ResourceOwnership::Borrowed, binding: Arc::from("indexes"),
-                })?.provide_resource(indexes, ResourceHandle::new(ResourceRole::IndexBackend,
-                    Arc::new(QueryIndexProviderResource(Arc::new(InMemoryComputationProvider)))))?
+                })?.provide_resource(indexes, drasi_lib::computation::v1::QueryIndexProviderResource::handle(ResourceRole::IndexBackend, Arc::new(InMemoryComputationProvider)))?
                     .declare_resource(ResourceSpecification {
                         id: bootstrap.clone(), role: ResourceRole::Bootstrap, ownership: ResourceOwnership::Borrowed, binding: Arc::from("bootstrap"),
                     })?.provide_resource(bootstrap, ResourceHandle::new(ResourceRole::Bootstrap,

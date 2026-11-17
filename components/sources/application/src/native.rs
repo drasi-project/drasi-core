@@ -150,6 +150,20 @@ impl ApplicationSource {
 
 #[async_trait]
 impl ComputationComponent for ApplicationSource {
+    /// Admitted input publishes under the admission channel's restart-stable
+    /// producer identity; channel input publishes under a new volatile
+    /// identity on every construction.
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        use drasi_lib::computation::v1::{
+            ComponentDescription, OutputDescription, ProgressPersistence,
+        };
+        match &self.input {
+            Input::Admission(_) => ComponentDescription::new(ProgressPersistence::Durable)
+                .with_outputs(&self.descriptor, OutputDescription::DURABLE),
+            Input::Channel(_) => ComponentDescription::new(ProgressPersistence::Volatile)
+                .with_outputs(&self.descriptor, OutputDescription::VOLATILE),
+        }
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

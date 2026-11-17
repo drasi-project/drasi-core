@@ -2283,8 +2283,8 @@ mod volatile_delivery_tests {
     use crate::delivery::{DeliveryBatch, DeliveryBatchIdentity, DeliveryGuarantee, DeliveryScope};
     use crate::output_identity::{is_missing_progress, Candidate, Producer};
     use crate::{
-        EnvelopeCodec, GraphProducerIdentity, GraphProducerProgress, InputEnvelope, PortId,
-        QueryRecoveryIdentity, QueryResultSnapshot, VolatileProducerRefused,
+        EnvelopeCodec, GraphProducerIdentity, GraphProducerProgress, Incompatibility,
+        InputEnvelope, OutputIdentity, PortId, QueryRecoveryIdentity, QueryResultSnapshot,
     };
     use std::num::NonZeroUsize;
 
@@ -2408,10 +2408,14 @@ mod volatile_delivery_tests {
         )
         .err()
         .unwrap();
-        assert!(error.downcast_ref::<VolatileProducerRefused>().is_some());
-        assert!(error
-            .to_string()
-            .contains("deliveryGuarantee to atLeastOnce"));
+        assert!(
+            error.downcast_ref::<Incompatibility>()
+                == Some(&Incompatibility::ProducerIdentity {
+                    required: DeliveryGuarantee::ExactlyOnce,
+                    identity: OutputIdentity::Volatile,
+                })
+        );
+        assert!(error.to_string().contains("output identity is Volatile"));
     }
 
     #[test]
@@ -2515,7 +2519,8 @@ mod volatile_delivery_tests {
             .is_err());
         }
 
-        // A volatile non-query graph producer is not an in-memory query.
+        // A volatile non-query graph producer has no restart-stable identity
+        // either; at-least-once delivers it under an incarnation epoch.
         let mut graph = ChangeEnvelope::new(
             crate::EnvelopeId::try_new("graph", bytes::Bytes::from_static(b"change")).unwrap(),
             encode(None, "query", &scope_projector, &[adding("a", 1)])
@@ -2535,6 +2540,31 @@ mod volatile_delivery_tests {
         assert!(is_missing_progress(
             &Candidate::new(&graph, &codec).err().unwrap()
         ));
-        assert!(Candidate::new_volatile(&graph, &codec).is_err());
+        let volatile = Candidate::new_volatile(&graph, &codec).unwrap();
+        assert_eq!(volatile.sequence, 1);
+        assert!(volatile.epoch.is_some());
+        let batch = DeliveryBatch::new_with_guarantee(
+            scope(),
+            input(graph.clone()),
+            &codec,
+            DeliveryGuarantee::AtLeastOnce,
+        )
+        .unwrap();
+        assert_eq!(batch.identity().epoch(), volatile.epoch.as_deref());
+        assert_eq!(
+            DeliveryBatch::new_with_guarantee(
+                scope(),
+                input(graph),
+                &codec,
+                DeliveryGuarantee::ExactlyOnce,
+            )
+            .err()
+            .unwrap()
+            .downcast_ref::<Incompatibility>(),
+            Some(&Incompatibility::ProducerIdentity {
+                required: DeliveryGuarantee::ExactlyOnce,
+                identity: OutputIdentity::Volatile,
+            })
+        );
     }
 }
