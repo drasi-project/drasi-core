@@ -76,6 +76,17 @@ pub enum GraphError {
     Control(#[from] super::ControlError),
     #[error(transparent)]
     Recovery(#[from] super::RecoveryValidationError),
+    /// Two declarations cannot be connected (an edge or a resource binding),
+    /// or a constructed instance differs from its factory's declaration. The
+    /// node stays in the graph with this failure until either side changes.
+    #[error("component {component} is incompatible: {context}: {source}")]
+    Incompatible {
+        component: ComponentId,
+        phase: super::FailurePhase,
+        context: String,
+        #[source]
+        source: drasi_computation_contracts::Incompatibility,
+    },
     #[error("component {component} validation failed: {source}")]
     Validation {
         component: ComponentId,
@@ -505,6 +516,19 @@ enum Component {
 }
 
 impl Component {
+    /// A constructed component's own declared description; `None` for a
+    /// component that is not constructed yet.
+    pub(super) fn description(&self) -> Option<drasi_computation_contracts::ComponentDescription> {
+        match self {
+            Self::Source(component) => Some(component.description()),
+            Self::Transformer(component) => Some(component.description()),
+            Self::Sink(component) => Some(component.description()),
+            Self::Service(component) => Some(component.description()),
+            Self::BootstrapProvider(component) => Some(component.description()),
+            Self::Deferred { .. } | Self::Unresolved(_) => None,
+        }
+    }
+
     fn is_constructed(&self) -> bool {
         !matches!(self, Self::Deferred { .. } | Self::Unresolved(_))
     }

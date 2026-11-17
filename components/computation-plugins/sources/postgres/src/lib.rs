@@ -90,6 +90,8 @@ fn metadata(mode: Mode) -> FactoryMetadata {
             management: true,
             update_modes: vec![ComponentUpdateMode::InPlace, ComponentUpdateMode::Restart],
             erases_owned_state: true,
+            // Outputs carry source replay progress, not a producer identity of their
+            // own (Host admission, when bound, publishes under its durable identity).
             ..Capabilities::default()
         },
     }
@@ -145,6 +147,16 @@ macro_rules! common_factory_methods {
 }
 
 impl Factory for PostgresSourceFactory {
+    /// Outputs carry only source replay progress unless published through a Host admission channel.
+    fn describe(
+        &self,
+        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(request.source_description(
+            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
+            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
+        ))
+    }
     common_factory_methods!(Mode::Transactions);
     fn supports_source_progress(&self) -> bool {
         true
@@ -176,6 +188,16 @@ impl Factory for PostgresSourceFactory {
 }
 
 impl Factory for PostgresRowsFactory {
+    /// Outputs carry only source replay progress unless published through a Host admission channel.
+    fn describe(
+        &self,
+        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(request.source_description(
+            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
+            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
+        ))
+    }
     common_factory_methods!(Mode::Rows);
     fn supports_source_progress(&self) -> bool {
         true
@@ -208,6 +230,16 @@ impl Factory for PostgresRowsFactory {
 }
 
 impl Factory for PostgresSharedRowsFactory {
+    /// Outputs carry only source replay progress unless published through a Host admission channel.
+    fn describe(
+        &self,
+        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(request.source_description(
+            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
+            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
+        ))
+    }
     common_factory_methods!(Mode::SharedRows);
     fn supports_consumer_progress(&self) -> bool {
         true
@@ -242,6 +274,16 @@ impl Factory for PostgresSharedRowsFactory {
 }
 
 impl Factory for PostgresSharedTransactionsFactory {
+    /// Outputs carry only source replay progress unless published through a Host admission channel.
+    fn describe(
+        &self,
+        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(request.source_description(
+            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
+            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
+        ))
+    }
     common_factory_methods!(Mode::SharedTransactions);
     fn supports_consumer_progress(&self) -> bool {
         true

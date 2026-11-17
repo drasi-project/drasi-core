@@ -108,6 +108,12 @@ impl Default for SqliteSourceFactory {
 
 #[async_trait]
 impl ComponentFactory for SqliteSourceFactory {
+    fn describe(
+        &self,
+        _context: &drasi_lib::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }

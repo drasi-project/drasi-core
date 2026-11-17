@@ -33,6 +33,9 @@ struct BlockingStop {
 
 #[async_trait::async_trait]
 impl ComputationComponent for BlockingStop {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -136,6 +139,9 @@ struct PendingQuery {
 
 #[async_trait::async_trait]
 impl ComputationComponent for PendingQuery {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -299,6 +305,9 @@ async fn native_query_stop_cancels_its_pending_start() -> anyhow::Result<()> {
 
 #[async_trait::async_trait]
 impl ComputationComponent for NativeInput {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -319,6 +328,9 @@ struct NativeOutput {
 
 #[async_trait::async_trait]
 impl ComputationComponent for NativeOutput {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

@@ -472,24 +472,32 @@ impl Database {
         .await
         .context("real SQL Server observation deadline")?
     }
+    /// Flat native settings (shared by the source and the bootstrap
+    /// providers) for the application login. `serverTimeZone` is taken from
+    /// the optional `DRASI_MSSQL_TEST_SERVER_TIME_ZONE` (required on SQL
+    /// Server 2019, which cannot report its time zone).
     pub fn settings(&self) -> Value {
-        json!({"connection":{
+        let mut settings = json!({
             "host":self.endpoint.host,"port":self.endpoint.port,"database":self.endpoint.database,
             "user":self.application.user,"password":self.application.password,
-            "tables":[format!("{}.Items",self.schema)],"encryption":"on",
-            "trust_server_certificate":self.endpoint.trust_certificate,"poll_interval_ms":25},
-            "barrier_table":format!("{}.DrasiBarrier",self.schema),"max_rows":100000,"max_bytes":16777216,
-            "operation_timeout_ms":15000,"shutdown_timeout_ms":15000})
+            "tables":[format!("{}.Items",self.schema)],"encryption":"required",
+            "trustServerCertificate":self.endpoint.trust_certificate,"pollIntervalMs":25,
+            "barrierTable":format!("{}.DrasiBarrier",self.schema),"maxRows":100000,"maxBytes":16777216,
+            "commandTimeoutMs":15000,"connectTimeoutMs":15000,"reconnectBudgetMs":10000});
+        if let Ok(zone) = std::env::var("DRASI_MSSQL_TEST_SERVER_TIME_ZONE") {
+            settings["serverTimeZone"] = json!(zone);
+        }
+        settings
     }
     pub fn read_only_settings(&self) -> Value {
         let mut settings = self.settings();
         settings
             .as_object_mut()
             .expect("settings")
-            .remove("barrier_table");
-        settings["connection"]["user"] = json!(self.reader.user);
-        settings["connection"]["password"] = json!(self.reader.password);
-        settings["connection"]["tables"] = json!([format!("{}.ReadOnlyItems", self.schema)]);
+            .remove("barrierTable");
+        settings["user"] = json!(self.reader.user);
+        settings["password"] = json!(self.reader.password);
+        settings["tables"] = json!([format!("{}.ReadOnlyItems", self.schema)]);
         settings
     }
     pub fn remove(&mut self) -> Result<()> {

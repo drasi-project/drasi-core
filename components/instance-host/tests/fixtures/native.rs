@@ -14,6 +14,12 @@ use serde::Deserialize;
 struct Factory;
 
 impl sdk::Factory for Factory {
+    fn describe(
+        &self,
+        _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(drasi_computation_plugin_sdk::ComponentDescription::undeclared())
+    }
     fn metadata(&self) -> sdk::FactoryMetadata {
         sdk::FactoryMetadata {
             implementation: ImplementationIdentity::try_new("fixture/instance-host", "1").unwrap(),

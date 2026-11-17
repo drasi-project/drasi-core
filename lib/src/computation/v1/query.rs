@@ -1292,6 +1292,14 @@ impl ComputationComponent for ContinuousQueryTransformer {
         Some(self.snapshot_server.clone())
     }
 
+    /// Outputs follow the durability its index provider declares.
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        indexed_description(
+            self.descriptor(),
+            index_provider_capabilities(self.provider.as_ref()).durability,
+        )
+    }
+
     #[cfg(feature = "test-support")]
     fn bind_query_test_support(
         &mut self,
@@ -1831,6 +1839,65 @@ impl Transformer for ContinuousQueryTransformer {
 
 pub struct QueryIndexProviderResource(pub Arc<dyn ComputationIndexProvider>);
 
+/// The capabilities an index provider declares about itself, for the
+/// resource handle that binds it: durable exactly when the provider is
+/// persistent.
+pub fn index_provider_capabilities(
+    provider: &dyn ComputationIndexProvider,
+) -> drasi_computation_contracts::ResourceCapabilities {
+    if provider.is_volatile() {
+        drasi_computation_contracts::ResourceCapabilities::VOLATILE
+    } else {
+        drasi_computation_contracts::ResourceCapabilities::DURABLE
+    }
+}
+
+impl QueryIndexProviderResource {
+    /// A resource handle binding `provider`, declaring its durability.
+    pub fn handle(
+        role: super::ResourceRole,
+        provider: Arc<dyn ComputationIndexProvider>,
+    ) -> super::ResourceHandle {
+        let capabilities = index_provider_capabilities(provider.as_ref());
+        super::ResourceHandle::new(role, Arc::new(Self(provider))).with_capabilities(capabilities)
+    }
+}
+
+/// The description of a component whose progress and outputs follow the
+/// durability its index provider declares: a durable provider gives durable,
+/// replayable outputs, a volatile one volatile outputs.
+pub fn indexed_description(
+    descriptor: &ComponentDescriptor,
+    durability: drasi_computation_contracts::ResourceDurability,
+) -> drasi_computation_contracts::ComponentDescription {
+    use drasi_computation_contracts::{
+        ComponentDescription, OutputDescription, ProgressPersistence, ResourceDurability,
+    };
+    let progress = match durability {
+        ResourceDurability::Durable => ProgressPersistence::Durable,
+        ResourceDurability::Volatile => ProgressPersistence::Volatile,
+        ResourceDurability::Undeclared => ProgressPersistence::Undeclared,
+    };
+    ComponentDescription::new(progress)
+        .with_outputs(descriptor, OutputDescription::following(durability))
+}
+
+/// The declared durability of the single resource bound to `dependency`
+/// (`Undeclared` when none is bound or it declares nothing).
+pub fn bound_durability(
+    context: &super::ConstructionContext,
+    dependency: &str,
+) -> drasi_computation_contracts::ResourceDurability {
+    context
+        .dependency_capabilities()
+        .get(dependency)
+        .and_then(|resources| resources.first())
+        .map_or(
+            drasi_computation_contracts::ResourceDurability::Undeclared,
+            |resource| resource.durability,
+        )
+}
+
 pub struct ContinuousQueryFactory {
     descriptor: FactoryDescriptor,
     constructor: Option<Arc<dyn super::QueryConstructor>>,
@@ -2103,6 +2170,16 @@ impl super::QueryAuthoring for ContinuousQueryFactory {
 
 #[async_trait]
 impl ComponentFactory for ContinuousQueryFactory {
+    /// Outputs follow the durability the bound index provider declares.
+    fn describe(
+        &self,
+        context: &crate::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<crate::computation::v1::ComponentDescription> {
+        Ok(indexed_description(
+            &context.specification.descriptor,
+            bound_durability(context, "indexes"),
+        ))
+    }
     fn supports_query_reconstruction(&self) -> bool {
         self.constructor
             .as_ref()

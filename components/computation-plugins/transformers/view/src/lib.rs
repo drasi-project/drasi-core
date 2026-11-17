@@ -70,6 +70,13 @@ mod native_exports {
 }
 
 impl Factory for ViewFactory {
+    /// Outputs carry a new volatile producer identity on every construction.
+    fn describe(
+        &self,
+        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(request.volatile_transformer())
+    }
     fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
         Some(configuration_definition().details())
     }
@@ -96,6 +103,7 @@ impl Factory for ViewFactory {
                 output_snapshots: vec![PortId::try_new("out").expect("constant port")],
                 output_progress: Some(OutputProgress::Origin),
                 erases_owned_state: true,
+                // Outputs carry a producer identity that is new on every construction.
                 ..Capabilities::default()
             },
         }

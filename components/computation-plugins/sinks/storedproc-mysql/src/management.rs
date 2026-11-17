@@ -9,7 +9,8 @@
 //!   `maxStreams`.
 //! * Stop (restart): the session — `hostname`, `port`, `database`, `user`,
 //!   `password`, `ssl`, `tlsCaPem` and `maxProtocolBytes`.
-//! * Replace: output aliases and the incoming edges.
+//! * Replace: output aliases, the incoming edges and `deliveryGuarantee` (it
+//!   is declared on the input port, so the graph re-checks every producer).
 //! * Unsupported: `progressTable`. The cursor table is the identity of the
 //!   exactly-once receipts. Moving it would drop the receipt of an operation
 //!   in flight (a possible duplicate) and orphan this owner's rows in the old
@@ -58,6 +59,11 @@ pub fn plan(
         "maxProtocolBytes",
         c.max_protocol_bytes != p.max_protocol_bytes,
         Stop,
+    );
+    planner.field(
+        "deliveryGuarantee",
+        c.delivery_guarantee != p.delivery_guarantee,
+        Replace,
     );
     planner.field("routes", c.routes != p.routes, Pause);
     planner.field(

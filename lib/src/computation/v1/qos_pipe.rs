@@ -987,8 +987,13 @@ impl QosChannel {
         Ok(channel)
     }
 
+    /// A resource handle binding this channel, declaring whether its
+    /// accepted envelopes (and the producer identity of a source it admits)
+    /// survive a process restart.
     pub fn resource(self: &Arc<Self>) -> ResourceHandle {
-        ResourceHandle::new(ResourceRole::StateStore, self.clone()).with_cleanup(self.clone())
+        ResourceHandle::new(ResourceRole::StateStore, self.clone())
+            .with_cleanup(self.clone())
+            .with_capabilities(storage_capabilities(self.durability))
     }
 
     pub fn durability(&self) -> drasi_core::interface::StorageDurability {
@@ -1930,6 +1935,21 @@ impl Pipe for QosPipe {
             .take()
             .map(|receiver| Box::new(receiver) as Box<dyn EnvelopeReceiver>)
             .ok_or(PipeError::ReceiverTaken)
+    }
+}
+
+/// The resource capabilities a storage durability declaration implies:
+/// durable exactly when the storage survives a process restart.
+pub fn storage_capabilities(
+    durability: drasi_core::interface::StorageDurability,
+) -> drasi_computation_contracts::ResourceCapabilities {
+    use drasi_core::interface::FailureSurvival;
+    match durability.process_restart {
+        FailureSurvival::Guaranteed => drasi_computation_contracts::ResourceCapabilities::DURABLE,
+        FailureSurvival::NotGuaranteed => {
+            drasi_computation_contracts::ResourceCapabilities::VOLATILE
+        }
+        FailureSurvival::Unknown => drasi_computation_contracts::ResourceCapabilities::UNDECLARED,
     }
 }
 

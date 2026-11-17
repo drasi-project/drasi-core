@@ -16,6 +16,9 @@ struct Inspectable(ComponentDescriptor);
 
 #[async_trait]
 impl ComputationComponent for Inspectable {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }

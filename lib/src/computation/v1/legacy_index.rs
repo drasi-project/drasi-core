@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{QueryIndexProviderResource, ResourceCleanup, ResourceHandle, ResourceRole};
+use super::{ResourceCleanup, ResourceHandle, ResourceRole};
 use async_trait::async_trait;
 use drasi_core::{
     computation::{
@@ -85,9 +85,9 @@ impl LegacyIndexProviderAdapter {
     /// The underlying instance-provided plugin/factory is only borrowed.
     pub fn resource(self: &Arc<Self>) -> ResourceHandle {
         let provider: Arc<dyn ComputationIndexProvider> = self.clone();
-        ResourceHandle::new(
+        crate::computation::v1::QueryIndexProviderResource::handle(
             ResourceRole::IndexBackend,
-            Arc::new(QueryIndexProviderResource(provider.clone())),
+            provider.clone(),
         )
         .with_shared_identity(provider)
         .with_cleanup(self.clone())

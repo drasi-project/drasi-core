@@ -364,6 +364,9 @@ async fn native_recovery_sqlite_replays_through_a_separate_binary_and_real_query
 struct Sink(ComponentDescriptor);
 #[async_trait]
 impl ComputationComponent for Sink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }
@@ -483,6 +486,12 @@ fn captured() -> &'static Mutex<Option<sdk::NativeSourceProgress>> {
 }
 struct ProbeFactory;
 impl Factory for ProbeFactory {
+    fn describe(
+        &self,
+        _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(drasi_computation_plugin_sdk::ComponentDescription::undeclared())
+    }
     fn metadata(&self) -> sdk::FactoryMetadata {
         sdk::FactoryMetadata {
             implementation: ImplementationIdentity::try_new("fixture/progress", "1").unwrap(),
@@ -508,7 +517,9 @@ impl Factory for ProbeFactory {
                 PipeRequirements::default(),
             )],
             completion: None,
-            capabilities: sdk::Capabilities::default(),
+            capabilities: sdk::Capabilities {
+                ..sdk::Capabilities::default()
+            },
         }
     }
     fn supports_source_admission(&self) -> bool {

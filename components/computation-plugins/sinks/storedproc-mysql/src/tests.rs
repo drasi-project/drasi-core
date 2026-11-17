@@ -81,7 +81,14 @@ fn factory_is_an_external_consumer_with_flat_published_configuration() -> Result
     assert_eq!(metadata.ports[0].id().as_str(), "in");
     let fields = &metadata.configuration.fields;
     assert!(fields["password"].secret);
-    for field in ["routes", "defaultTemplate", "user", "hostname", "tlsCaPem"] {
+    for field in [
+        "routes",
+        "defaultTemplate",
+        "user",
+        "hostname",
+        "tlsCaPem",
+        "deliveryGuarantee",
+    ] {
         assert!(!fields[field].secret, "{field}");
     }
     assert!(!fields.contains_key("settings"));
@@ -249,6 +256,10 @@ fn assess_classifies_every_field() -> Result<()> {
         ),
         (with("maxProtocolBytes", json!(1 << 20)), Some(Stop)),
         (
+            with("deliveryGuarantee", json!("atLeastOnce")),
+            Some(Replace),
+        ),
+        (
             with(
                 "outputs",
                 json!({"renamed": {"component": OUTPUT_COMPONENT_ID, "port": "out"}, "db.people": {"component": OUTPUT_COMPONENT_ID, "port": "out"}}),
@@ -277,6 +288,12 @@ fn assess_classifies_every_field() -> Result<()> {
 /// The factory, named for the conformance suite.
 struct MyFactory;
 impl Factory for MyFactory {
+    fn describe(
+        &self,
+        _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(drasi_computation_plugin_sdk::ComponentDescription::undeclared())
+    }
     fn metadata(&self) -> FactoryMetadata {
         MySqlStoredProcFactory.metadata()
     }

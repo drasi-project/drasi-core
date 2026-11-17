@@ -52,7 +52,7 @@ the task that drives it. It runs no other worker and opens no listener.
 | `Connection` | `src/connection.rs` | One connection attempt (TLS, timeouts), the owned driver task, graceful close and discard |
 | Planning | `src/management.rs` | Field-by-field update classification |
 | `Backoff` | `src/retry.rs` | Full-jitter exponential backoff (100 ms doubling to 5 s) within a budget |
-| `ProgressStore`, `DeliveryOwner`, `ProgressTable`, `DeliveryError` | `postgres-common/src/delivery/progress.rs` | Format-2 cursor protocol, table preparation, Erase, typed error classification |
+| `ProgressStore`, `DeliveryOwner`, `ProgressTable`, `DeliveryError` | `postgres-common/src/delivery/progress.rs` | Format-3 cursor protocol, table preparation, Erase, typed error classification |
 | `CompiledTemplate`, `build_native_render_input`, `SqlParam` | `postgres-common/src/sql.rs` | Parameter-only rendering, the change context, typed binding |
 | Parameter-only rule | `reaction-common/src/sql_template.rs` | The single validator shared by the stored-procedure sinks |
 
@@ -131,7 +131,7 @@ attempt of an operation whose first attempt reached the effect can repeat it:
   re-created with the same identity starts without destination receipts, so a
   replayed input is applied again (a duplicate, not a loss).
 
-### Cursor protocol (format 2)
+### Cursor protocol (format 3)
 
 One row per (owner, producer/consumer stream):
 
@@ -139,11 +139,12 @@ One row per (owner, producer/consumer stream):
 |---|---|
 | `owner` | Lowercase hex SHA-256 of `"drasi.storedproc/owner/v1\0" + graph_id + "\0" + component_id` (64 characters) |
 | `stream_key` | The runner's stable stream key (`drasi-delivery-stream-v1-<64 hex>`) |
-| `version` | `2` |
+| `version` | `3` |
 | `sequence` | Decimal producer sequence of the latest batch (`[1-9][0-9]{0,19}`) |
 | `digest` | The batch's canonical 32-byte content digest |
 | `operations` | Operations in that batch (> 0) |
 | `completed` | Completed prefix (0..=`operations`) |
+| `epoch` | Empty for exactly-once streams; otherwise the at-least-once producer epoch (64 hex) |
 
 Primary key `(owner, stream_key)`. For an operation at index `i` of batch
 `(sequence, digest, operations)`:
@@ -156,7 +157,40 @@ Primary key `(owner, stream_key)`. For an operation at index `i` of batch
   (otherwise "unfinished operations or a missing batch prefix"); the row rolls
   over to the new batch;
 - lower sequence: the receipt expired; rejected;
-- no row: `i` must be `0`; the owner's row count must be below `maxStreams`.
+- no row: `i` must be `0`; the owner's row count must be below `maxStreams`;
+- different non-empty epoch: the row is treated as absent and overwritten
+  (`i` must be `0`); an empty epoch on exactly one side is rejected.
+
+Format-2 tables are refused at Start, not migrated.
+
+### Delivery guarantee and producer epochs
+
+The factory's pure describer (`Factory::describe`) reads the sink's own
+`deliveryGuarantee` and declares it as the input's `InputDelivery` in the
+sink's `ComponentDescription`; the Host forwards the description unchanged.
+The graph compares it with the producer's declared output when it binds the
+edge (`check_edge`). `deliveryGuarantee: exactlyOnce` (the default) accepts
+only a `Durable`, replayable producer; a `Volatile` one fails the edge with
+`Incompatibility::ProducerIdentity`, and an `Untracked` or undeclared producer
+fails under either guarantee. The failure is recorded on the edge
+(`BindingState::Failed`) and on the sink node (terminal `Binding` failure);
+the graph change itself is accepted. The plugin's own check at delivery is an
+internal invariant guard, not the compatibility check.
+
+`deliveryGuarantee: atLeastOnce` additionally accepts a producer with a
+volatile identity: an in-memory query or a volatile graph producer.
+Its output has no persistent progress, so the host derives a weaker identity
+(`Candidate::new_volatile`): the stream key excludes the producer's per-run
+incarnation, and the item's `DeliveryPosition` (version 2) carries an
+`epoch`, a SHA-256 of the producer incarnation (and, for a query, its
+generation and configuration hash). The host delivers such a batch without its `DeliveryRunner` ledger
+(nothing can resume across a restart), calling the plugin per operation and
+stopping at the first failure. The cursor applies one extra rule: an item
+whose epoch differs from the row's treats the row as absent and overwrites
+it, so a new producer run starts a fresh cursor on the same row; the same
+epoch deduplicates exactly as before. Exactly-once items (empty epoch) never
+match an at-least-once row, nor the reverse (a permanent receipt conflict).
+
 
 Rejections are permanent (`DeliveryError::Rejected`), never silently skipped.
 A damaged row (wrong version, invalid sequence or digest) is rejected.
@@ -254,7 +288,7 @@ At start, in one transaction under advisory lock `(1146241363, 2)`:
 
 1. the schema must exist and the role must have `USAGE` on it;
 2. if the table exists, the role must have `SELECT`, `INSERT`, `UPDATE` and
-   `DELETE` on it, and it must have the format-2 columns;
+   `DELETE` on it, and it must have the format-3 columns;
 3. if it does not exist, the role must have `CREATE` on the schema; the sink
    then runs `CREATE TABLE IF NOT EXISTS`.
 
@@ -328,6 +362,10 @@ plus its destination cursor rows. Metrics (X-11) are not implemented.
   are at-least-once.
 - Lowering `maxStreams` below the number of existing rows blocks only new
   streams.
+- In-memory (volatile) queries are accepted only with
+  `deliveryGuarantee: atLeastOnce`, at least once and without resume across a
+  restart; without opt-in the edge fails when it is bound.
+  Volatile producers other than queries are refused at the first delivery.
 - The SDK conformance kit (`SinkConformance`) targets plain `NativeSink`s; this
   consumer's lifecycle is covered by its unit and live tests instead.
 

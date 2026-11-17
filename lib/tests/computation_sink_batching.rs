@@ -378,6 +378,9 @@ struct BatchSink {
 }
 #[async_trait]
 impl ComputationComponent for BatchSink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -531,6 +534,9 @@ struct ManualSource {
 }
 #[async_trait]
 impl ComputationComponent for ManualSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -554,6 +560,9 @@ struct GatedSink {
 }
 #[async_trait]
 impl ComputationComponent for GatedSink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

@@ -30,6 +30,9 @@ struct Output(ComponentDescriptor);
 
 #[async_trait]
 impl ComputationComponent for Output {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }
@@ -48,6 +51,9 @@ impl EnvelopeSink for Output {
 
 #[async_trait]
 impl ComputationComponent for Input {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

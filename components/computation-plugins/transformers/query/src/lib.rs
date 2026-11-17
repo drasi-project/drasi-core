@@ -17,9 +17,9 @@ use drasi_computation_contracts::{
     BootstrapCompletion, BootstrapStatus, ChangeEnvelope, ComponentDescriptor, ComponentRole,
     ComponentSemanticKind, ComponentUpdateData, ComponentUpdateMode, ComponentUpdatePlan,
     GraphChangeCodec, GraphProducerProgress, ImplementationIdentity, InputBinding, InputEnvelope,
-    OutputCursor, OutputEnvelope, OutputProgress, OutputReaders, PipeRequirements, PortDescriptor,
-    PortDirection, PortId, QueryChangeCodec, QueryDescription, QueryExecutionSettings,
-    ResultNodeProjector, StreamId, WakeupSource,
+    OutputCursor, OutputEnvelope, OutputIdentity, OutputProgress, OutputReaders, PipeRequirements,
+    PortDescriptor, PortDirection, PortId, QueryChangeCodec, QueryDescription,
+    QueryExecutionSettings, ResultNodeProjector, StreamId, WakeupSource,
 };
 use drasi_computation_plugin_sdk::{
     lifecycle::{
@@ -96,6 +96,27 @@ impl Default for IndexedQueryFactory {
 }
 
 impl Factory for IndexedQueryFactory {
+    /// Outputs follow the durability the Host's bound processing provider declares.
+    fn describe(
+        &self,
+        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        use drasi_computation_plugin_sdk::{
+            ComponentDescription, OutputDescription, ProgressPersistence, ResourceDurability,
+        };
+        let durability = request
+            .bound_durability("processing")
+            .unwrap_or(ResourceDurability::Undeclared);
+        let progress = match durability {
+            ResourceDurability::Durable => ProgressPersistence::Durable,
+            ResourceDurability::Volatile => ProgressPersistence::Volatile,
+            ResourceDurability::Undeclared => ProgressPersistence::Undeclared,
+        };
+        Ok(ComponentDescription::new(progress).with_outputs(
+            &request.descriptor,
+            OutputDescription::following(durability),
+        ))
+    }
     fn metadata(&self) -> FactoryMetadata {
         let input = || PortId::try_new("in").expect("constant port");
         let output = || PortId::try_new("out").expect("constant port");

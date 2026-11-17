@@ -62,6 +62,13 @@ pub(crate) const KEEP_ALIVE_COMMENT: &str = "keep-alive";
 pub struct SseFactory;
 
 impl Factory for SseFactory {
+    /// Inputs do not key delivery on producer identity.
+    fn describe(
+        &self,
+        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(request.unkeyed_sink())
+    }
     fn supports_output_snapshots(&self) -> bool {
         true
     }

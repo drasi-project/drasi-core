@@ -1,262 +1,325 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-use super::{quoted, table_name, NativeConfig};
-use crate::{MsSqlConnection, PrimaryKeyCache};
-use anyhow::{ensure, Context, Result};
-use drasi_core_types::schema::{NodeSchema, PropertySchema, PropertyType, SourceSchema};
+//! The selected tables, their capture instances, keys and value mapping, and
+//! the binding a committed cursor depends on.
+//!
+//! Decision D-7: the binding covers only the facts a cursor relies on — the
+//! database identity, each selected table's object, capture instance and key
+//! columns with their types. Host, port and non-key columns are not bound,
+//! so a DNS or availability-group listener rename keeps every cursor, and a
+//! non-key column change does not invalidate one.
+
+use super::{
+    error::{schema_changed, unsupported},
+    identifiers::{quoted, TableName},
+    session::{CaptureInstance, CdcSession, DatabaseIdentity, RawColumn, TableFacts},
+    values::ColumnKind,
+    NativeSettings,
+};
+use anyhow::{ensure, Result};
+use drasi_core_types::schema::{NodeSchema, PropertySchema, SourceSchema};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
-use tiberius::Client;
-use tokio::net::TcpStream;
-use tokio_util::compat::Compat;
 
-pub type SqlClient = Client<Compat<TcpStream>>;
-
+/// One captured column.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Column {
+    pub name: String,
+    pub type_name: String,
+    pub kind: ColumnKind,
+}
+
+/// One selected table.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Table {
     pub schema: String,
     pub name: String,
     pub object: i32,
+    /// The change table's object (0 for a read-only snapshot).
     pub capture_object: i32,
+    /// The capture instance (empty for a read-only snapshot).
     pub capture: String,
-    // SQL Server advances this retention low watermark without changing capture
-    // identity. Per-page min-LSN checks validate retention instead.
-    #[serde(skip_serializing)]
-    pub capture_start: Vec<u8>,
-    pub columns: Vec<(String, String, i16, u8, u8, bool)>,
+    pub columns: Vec<Column>,
     pub keys: Vec<String>,
+    /// Base types of the key columns in the source table.
+    pub key_types: Vec<String>,
 }
+
 impl Table {
+    /// `schema.table`, the element ID prefix.
     pub fn canonical(&self) -> String {
         format!("{}.{}", self.schema, self.name)
     }
+    /// `[schema].[table]`.
     pub fn sql(&self) -> String {
         format!("{}.{}", quoted(&self.schema), quoted(&self.name))
     }
+    /// `cdc.[capture_CT]`.
+    pub fn change_table(&self) -> String {
+        format!("cdc.{}", quoted(&format!("{}_CT", self.capture)))
+    }
+    /// The SELECT list with every value conversion.
     pub fn selection(&self) -> String {
         self.columns
             .iter()
-            .map(|c| quoted(&c.0))
+            .map(|column| column.kind.select(&column.name, &column.type_name))
             .collect::<Vec<_>>()
-            .join(",")
+            .join(", ")
+    }
+    /// Columns that are streamed as text or NULL without a schema type.
+    pub fn unmapped(&self) -> Vec<&Column> {
+        self.columns
+            .iter()
+            .filter(|column| column.kind.property_type().is_none())
+            .collect()
     }
 }
 
-#[derive(Clone)]
+/// The selected tables and their binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Catalog {
     pub tables: Vec<Table>,
     pub binding: [u8; 32],
 }
 
-impl Catalog {
-    /// A read-only table catalog; no CDC catalog, marker or administrative grant.
-    pub async fn read_snapshot(client: &mut SqlClient, config: &NativeConfig) -> Result<Self> {
-        ensure!(
-            !config.connection.tables.is_empty(),
-            "read-only SQL Server snapshot requires explicit tables"
-        );
-        let mut keys = PrimaryKeyCache::new();
-        keys.discover_keys(client, &config.connection).await?;
-        let mut tables = Vec::new();
-        for selected in &config.connection.tables {
-            let (schema, name) = table_name(selected)?;
-            let rows = client.query(
-                "SELECT s.name,t.name,t.object_id FROM sys.tables t JOIN sys.schemas s ON s.schema_id=t.schema_id \
-                 WHERE s.name=@P1 AND t.name=@P2",&[&schema,&name]).await?.into_first_result().await?;
-            let [row] = rows.as_slice() else {
-                anyhow::bail!("SQL Server snapshot table {selected} is missing or invisible");
-            };
-            let schema = row
-                .try_get::<&str, _>(0)?
-                .context("missing snapshot schema")?
-                .to_owned();
-            let name = row
-                .try_get::<&str, _>(1)?
-                .context("missing snapshot table")?
-                .to_owned();
-            let object: i32 = row.try_get(2)?.context("missing snapshot table object")?;
-            let columns = client
-                .query(
-                    "SELECT c.name,ty.name,c.max_length,c.precision,c.scale,c.is_nullable \
-                 FROM sys.columns c JOIN sys.types ty ON ty.user_type_id=c.user_type_id \
-                 WHERE c.object_id=@P1 ORDER BY c.column_id",
-                    &[&object],
-                )
-                .await?
-                .into_first_result()
-                .await?;
-            let mut mapped: Vec<(String, String, i16, u8, u8, bool)> = Vec::new();
-            for column in columns {
-                mapped.push((
-                    column
-                        .try_get::<&str, _>(0)?
-                        .context("missing snapshot column")?
-                        .into(),
-                    column
-                        .try_get::<&str, _>(1)?
-                        .context("missing snapshot type")?
-                        .into(),
-                    column.try_get(2)?.context("missing width")?,
-                    column.try_get(3)?.context("missing precision")?,
-                    column.try_get(4)?.context("missing scale")?,
-                    column.try_get(5)?.context("missing nullability")?,
-                ));
-            }
-            let table_keys = keys
-                .get(&format!("{schema}.{name}"))
-                .cloned()
-                .context("snapshot requires primary/custom keys")?;
-            ensure!(
-                !mapped.is_empty()
-                    && mapped
-                        .iter()
-                        .all(|column| property_type(&column.1).is_some()),
-                "unsupported SQL Server snapshot column type"
-            );
-            ensure!(
-                table_keys
-                    .iter()
-                    .all(|key| mapped.iter().any(|column| column.0 == *key)),
-                "snapshot key column is missing"
-            );
-            tables.push(Table {
-                schema,
-                name,
-                object,
-                capture_object: 0,
-                capture: String::new(),
-                capture_start: Vec::new(),
-                columns: mapped,
-                keys: table_keys,
-            });
-        }
-        let bytes = serde_json::to_vec(&tables)?;
-        Ok(Self {
-            tables,
-            binding: Sha256::digest(bytes).into(),
-        })
-    }
+#[derive(Serialize)]
+struct BoundTable<'a> {
+    schema: String,
+    name: String,
+    object: i32,
+    capture_object: i32,
+    capture: &'a str,
+    keys: Vec<String>,
+    key_types: Vec<String>,
+}
 
-    pub async fn read(client: &mut SqlClient, config: &NativeConfig) -> Result<Self> {
-        let rows = client.query(
-            "SELECT s.name, t.name, t.object_id, ct.object_id, ct.capture_instance, ct.start_lsn \
-             FROM cdc.change_tables ct JOIN sys.tables t ON t.object_id=ct.source_object_id \
-             JOIN sys.schemas s ON s.schema_id=t.schema_id ORDER BY s.name,t.name,ct.capture_instance", &[])
-            .await?.into_first_result().await?;
-        let selected = config
-            .connection
-            .tables
-            .iter()
-            .map(|t| table_name(t))
-            .collect::<Result<Vec<_>>>()?;
-        let barrier = config
-            .barrier_table
-            .as_deref()
-            .map(table_name)
-            .transpose()?;
-        let mut keys = PrimaryKeyCache::new();
-        keys.discover_keys(client, &config.connection).await?;
-        let mut tables = Vec::new();
-        let mut found = BTreeSet::new();
-        for row in rows {
-            let schema: &str = row.try_get(0)?.context("missing SQL Server table schema")?;
-            let name: &str = row.try_get(1)?.context("missing SQL Server table name")?;
-            if barrier.as_ref().is_some_and(|(s, n)| {
-                s.eq_ignore_ascii_case(schema) && n.eq_ignore_ascii_case(name)
-            }) {
-                continue;
-            }
-            if !selected.is_empty()
-                && !selected
-                    .iter()
-                    .any(|(s, n)| s.eq_ignore_ascii_case(schema) && n.eq_ignore_ascii_case(name))
-            {
-                continue;
-            }
-            let object: i32 = row.try_get(2)?.context("missing SQL Server table object")?;
-            ensure!(found.insert(object), "multiple CDC capture instances for {schema}.{name}; select one generation before activation");
-            let capture_object: i32 = row.try_get(3)?.context("missing CDC capture object")?;
-            let capture: &str = row.try_get(4)?.context("missing CDC capture instance")?;
-            let capture_start: &[u8] = row.try_get(5)?.unwrap_or(&[]);
-            let canonical = format!("{schema}.{name}");
-            let table_keys = keys
-                .get(&canonical)
-                .cloned()
-                .context(format!("no primary/custom key for {canonical}"))?;
-            let columns = client.query(
-                "SELECT cc.name, ty.name, cc.max_length, cc.precision, cc.scale, sc.is_nullable, \
-                 CASE WHEN sc.system_type_id=cc.system_type_id AND sc.max_length=cc.max_length \
-                 AND sc.precision=cc.precision AND sc.scale=cc.scale THEN 1 ELSE 0 END \
-                 FROM sys.columns cc JOIN sys.types ty ON ty.user_type_id=cc.user_type_id \
-                 LEFT JOIN sys.columns sc ON sc.object_id=@P1 AND sc.name=cc.name \
-                 WHERE cc.object_id=@P2 AND LEFT(cc.name,3)<>'__$' ORDER BY cc.column_id",
-                &[&object, &capture_object]).await?.into_first_result().await?;
-            let mut mapped: Vec<(String, String, i16, u8, u8, bool)> = Vec::new();
-            for col in columns {
-                let name: &str = col.try_get(0)?.context("missing CDC column")?;
-                ensure!(col.try_get::<i32,_>(6)? == Some(1), "SQL Server captured column {canonical}.{name} changed; explicit recapture/reset required");
-                mapped.push((
-                    name.into(),
-                    col.try_get::<&str, _>(1)?
-                        .context("missing CDC column type")?
-                        .into(),
-                    col.try_get(2)?.context("missing CDC width")?,
-                    col.try_get(3)?.context("missing CDC precision")?,
-                    col.try_get(4)?.context("missing CDC scale")?,
-                    col.try_get(5)?.context("missing CDC nullability")?,
-                ));
-            }
-            ensure!(
-                !mapped.is_empty()
-                    && table_keys
-                        .iter()
-                        .all(|key| mapped.iter().any(|c| c.0 == *key)),
-                "SQL Server CDC must capture every primary/custom key column"
-            );
-            ensure!(
-                mapped.iter().all(|c| property_type(&c.1).is_some()),
-                "unsupported SQL Server CDC column type in {canonical}"
-            );
-            tables.push(Table {
-                schema: schema.into(),
-                name: name.into(),
-                object,
-                capture_object,
-                capture: capture.into(),
-                capture_start: capture_start.to_vec(),
-                columns: mapped,
-                keys: table_keys,
-            });
-        }
-        ensure!(
-            !tables.is_empty() && tables.len() <= 256,
-            "SQL Server selection has no CDC-enabled tables or exceeds limit"
-        );
-        ensure!(
-            selected.is_empty() || tables.len() == selected.len(),
-            "one or more selected SQL Server tables are absent or not CDC-enabled"
-        );
-        let identity = client.query("SELECT CONVERT(nvarchar(36),service_broker_guid) FROM sys.databases WHERE name=DB_NAME()", &[])
-            .await?.into_first_result().await?;
-        let identity: &str = identity
-            .first()
-            .context("SQL Server database identity missing")?
-            .try_get(0)?
-            .context("SQL Server database identity is null")?;
-        let bytes = serde_json::to_vec(&(
-            identity,
-            &config.connection.host,
-            config.connection.port,
-            &config.connection.database,
-            &tables,
-        ))?;
-        Ok(Self {
-            tables,
-            binding: Sha256::digest(bytes).into(),
+/// The SHA-256 binding over the facts a cursor depends on.
+pub fn binding(database: &DatabaseIdentity, tables: &[Table]) -> Result<[u8; 32]> {
+    let mut bound: Vec<BoundTable<'_>> = tables
+        .iter()
+        .map(|table| BoundTable {
+            schema: table.schema.to_lowercase(),
+            name: table.name.to_lowercase(),
+            object: table.object,
+            capture_object: table.capture_object,
+            capture: &table.capture,
+            keys: table.keys.iter().map(|key| key.to_lowercase()).collect(),
+            key_types: table.key_types.iter().map(|t| t.to_lowercase()).collect(),
         })
+        .collect();
+    bound.sort_by(|a, b| (&a.schema, &a.name).cmp(&(&b.schema, &b.name)));
+    let mut hash = Sha256::new();
+    hash.update(b"drasi.mssql/binding/v2\0");
+    hash.update(database.guid.to_lowercase().as_bytes());
+    hash.update(b"\0");
+    hash.update(database.name.to_lowercase().as_bytes());
+    hash.update(b"\0");
+    hash.update(serde_json::to_vec(&bound)?);
+    Ok(hash.finalize().into())
+}
+
+fn column_type<'a>(columns: &'a [RawColumn], name: &str) -> Option<&'a RawColumn> {
+    columns
+        .iter()
+        .find(|column| column.name.eq_ignore_ascii_case(name))
+}
+
+/// Builds one table from its catalog facts: resolves keys (explicit
+/// `tableKeys` first), classifies columns and checks that every key column
+/// is captured and keyable.
+pub fn build_table(
+    settings: &NativeSettings,
+    capture: &CaptureInstance,
+    facts: TableFacts,
+) -> Result<Table> {
+    let name = TableName {
+        schema: capture.schema.clone(),
+        table: capture.table.clone(),
+    };
+    let canonical = format!("{}.{}", capture.schema, capture.table);
+    let keys = match settings.explicit_key(&name)? {
+        Some(keys) => keys,
+        None if !facts.primary_key.is_empty() => facts.primary_key.clone(),
+        None => {
+            return Err(unsupported(format!(
+                "{canonical} has no primary key; add a tableKeys entry"
+            )))
+        }
+    };
+    let columns: Vec<Column> = facts
+        .columns
+        .iter()
+        .map(|column| Column {
+            name: column.name.clone(),
+            type_name: column.type_name.clone(),
+            kind: ColumnKind::of(&column.type_name, column.precision),
+        })
+        .collect();
+    ensure!(!columns.is_empty(), "{canonical} has no readable columns");
+    let mut resolved = Vec::new();
+    let mut key_types = Vec::new();
+    for key in &keys {
+        let Some(column) = columns
+            .iter()
+            .find(|column| column.name.eq_ignore_ascii_case(key))
+        else {
+            return Err(unsupported(format!(
+                "key column {canonical}.{key} is not captured; the capture instance must include every key column"
+            )));
+        };
+        if !column.kind.keyable() {
+            return Err(unsupported(format!(
+                "key column {canonical}.{key} has type {}, which cannot form an element key",
+                column.type_name
+            )));
+        }
+        resolved.push(column.name.clone());
+        key_types.push(
+            column_type(&facts.source_columns, key)
+                .map_or_else(|| column.type_name.clone(), |c| c.type_name.clone()),
+        );
     }
+    Ok(Table {
+        schema: capture.schema.clone(),
+        name: capture.table.clone(),
+        object: capture.object,
+        capture_object: capture.capture_object,
+        capture: capture.capture.clone(),
+        columns,
+        keys: resolved,
+        key_types,
+    })
+}
+
+/// The capture instances the settings select, in catalog order. Explicit
+/// tables must each have exactly one capture instance; with no explicit
+/// tables, every captured table except the barrier is selected.
+pub fn select_captures(
+    settings: &NativeSettings,
+    captures: &[CaptureInstance],
+) -> Result<Vec<CaptureInstance>> {
+    let selected = settings.selected_tables()?;
+    let barrier = settings.barrier()?;
+    let mut chosen: Vec<CaptureInstance> = Vec::new();
+    for capture in captures {
+        if barrier
+            .as_ref()
+            .is_some_and(|barrier| barrier.matches(&capture.schema, &capture.table))
+        {
+            continue;
+        }
+        if !selected.is_empty()
+            && !selected
+                .iter()
+                .any(|table| table.matches(&capture.schema, &capture.table))
+        {
+            continue;
+        }
+        if chosen.iter().any(|other| other.object == capture.object) {
+            return Err(schema_changed(format!(
+                "{}.{} has more than one CDC capture instance; drop the old instance before (re)starting the source",
+                capture.schema, capture.table
+            )));
+        }
+        chosen.push(capture.clone());
+    }
+    for table in &selected {
+        ensure!(
+            chosen
+                .iter()
+                .any(|capture| table.matches(&capture.schema, &capture.table)),
+            "selected table {}.{} is missing or not CDC-enabled (or the login cannot see it)",
+            table.schema,
+            table.table
+        );
+    }
+    ensure!(
+        !chosen.is_empty(),
+        "no CDC-enabled table is selected; enable CDC on a table or fix tables"
+    );
+    ensure!(
+        chosen.len() <= super::settings::MAX_TABLES,
+        "more than {} CDC tables are selected; list tables explicitly",
+        super::settings::MAX_TABLES
+    );
+    Ok(chosen)
+}
+
+/// Reads the CDC catalog of the selected tables. With `check_permissions`,
+/// fails with an actionable message when the login cannot read a change
+/// table (MS-07).
+pub async fn read_catalog(
+    session: &mut dyn CdcSession,
+    settings: &NativeSettings,
+    check_permissions: bool,
+) -> Result<Catalog> {
+    let database = session.database().await?;
+    let captures = select_captures(settings, &session.capture_instances().await?)?;
+    let mut tables = Vec::new();
+    for capture in &captures {
+        let facts = session
+            .table_facts(capture.object, Some(capture.capture_object))
+            .await?;
+        let table = build_table(settings, capture, facts)?;
+        if check_permissions && !session.can_select(&table.change_table()).await? {
+            return Err(unsupported(format!(
+                "the login cannot read {} (change table of {}); grant SELECT on it, for example \
+                 GRANT SELECT ON {} TO <login user>, or use a member of the capture instance's \
+                 gating role with SELECT on the change table",
+                table.change_table(),
+                table.canonical(),
+                table.change_table()
+            )));
+        }
+        tables.push(table);
+    }
+    Ok(Catalog {
+        binding: binding(&database, &tables)?,
+        tables,
+    })
+}
+
+/// Reads the explicitly selected tables for a read-only snapshot: no CDC
+/// catalog, marker or administrative grant.
+pub async fn read_snapshot_catalog(
+    session: &mut dyn CdcSession,
+    settings: &NativeSettings,
+) -> Result<Catalog> {
+    let selected = settings.selected_tables()?;
+    ensure!(
+        !selected.is_empty(),
+        "a read-only SQL Server snapshot requires explicit tables"
+    );
+    let database = session.database().await?;
+    let mut tables = Vec::new();
+    for name in &selected {
+        let Some((object, schema, table)) = session.find_table(&name.schema, &name.table).await?
+        else {
+            anyhow::bail!(
+                "snapshot table {}.{} is missing or invisible to the login",
+                name.schema,
+                name.table
+            );
+        };
+        let facts = session.table_facts(object, None).await?;
+        let capture = CaptureInstance {
+            schema,
+            table,
+            object,
+            capture_object: 0,
+            capture: String::new(),
+        };
+        tables.push(build_table(settings, &capture, facts)?);
+    }
+    Ok(Catalog {
+        binding: binding(&database, &tables)?,
+        tables,
+    })
+}
+
+impl Catalog {
+    /// The published schema: one node label per table, as emitted.
     pub fn schema(&self) -> SourceSchema {
         SourceSchema {
             nodes: self
@@ -268,8 +331,8 @@ impl Catalog {
                         .columns
                         .iter()
                         .map(|column| PropertySchema {
-                            name: column.0.clone(),
-                            data_type: property_type(&column.1),
+                            name: column.name.clone(),
+                            data_type: column.kind.property_type(),
                             description: None,
                         })
                         .collect(),
@@ -278,29 +341,165 @@ impl Catalog {
             relations: Vec::new(),
         }
     }
-}
 
-fn property_type(name: &str) -> Option<PropertyType> {
-    match name {
-        "tinyint" | "smallint" | "int" | "bigint" => Some(PropertyType::Integer),
-        "decimal" | "numeric" | "float" | "real" | "money" | "smallmoney" => {
-            Some(PropertyType::Float)
-        }
-        "bit" => Some(PropertyType::Boolean),
-        "datetime" | "datetime2" | "datetimeoffset" | "smalldatetime" => {
-            Some(PropertyType::Timestamp)
-        }
-        "date" | "time" | "char" | "nchar" | "varchar" | "nvarchar" | "text" | "ntext"
-        | "uniqueidentifier" | "binary" | "varbinary" | "image" | "timestamp" => {
-            Some(PropertyType::String)
-        }
-        _ => None,
+    /// The table with `object`, if selected.
+    pub fn table(&self, object: i32) -> Option<&Table> {
+        self.tables.iter().find(|table| table.object == object)
     }
 }
 
-pub async fn describe_schema(config: &NativeConfig) -> Result<SourceSchema> {
-    let mut connection = MsSqlConnection::connect(&config.connection).await?;
-    Ok(Catalog::read(connection.client_mut(), config)
-        .await?
-        .schema())
+/// Reads the selected tables' schema with one short-lived session.
+pub async fn describe_schema(
+    session: &mut dyn CdcSession,
+    settings: &NativeSettings,
+) -> Result<SourceSchema> {
+    Ok(read_catalog(session, settings, false).await?.schema())
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use drasi_computation_contracts::source_failure;
+
+    pub(crate) fn raw(name: &str, type_name: &str) -> RawColumn {
+        RawColumn {
+            name: name.into(),
+            type_name: type_name.into(),
+            precision: 10,
+            scale: 0,
+        }
+    }
+
+    pub(crate) fn capture(table: &str, object: i32, capture: &str) -> CaptureInstance {
+        CaptureInstance {
+            schema: "dbo".into(),
+            table: table.into(),
+            object,
+            capture_object: object + 1000,
+            capture: capture.into(),
+        }
+    }
+
+    pub(crate) fn facts() -> TableFacts {
+        TableFacts {
+            columns: vec![raw("id", "int"), raw("value", "int"), raw("doc", "xml")],
+            source_columns: vec![raw("id", "int"), raw("value", "int"), raw("doc", "xml")],
+            primary_key: vec!["id".into()],
+        }
+    }
+
+    fn database() -> DatabaseIdentity {
+        DatabaseIdentity {
+            guid: "8D3E...".into(),
+            name: "app".into(),
+        }
+    }
+
+    fn settings() -> NativeSettings {
+        NativeSettings::new("app")
+    }
+
+    #[test]
+    fn binding_covers_keys_and_capture_but_not_non_key_columns_or_host() {
+        let table = build_table(&settings(), &capture("Items", 7, "dbo_Items"), facts()).unwrap();
+        let base = binding(&database(), std::slice::from_ref(&table)).unwrap();
+        let mut moved = settings();
+        moved.host = "sqlag-listener.corp".into();
+        moved.port = 14330;
+        let same = build_table(&moved, &capture("Items", 7, "dbo_Items"), facts()).unwrap();
+        assert_eq!(
+            binding(&database(), &[same]).unwrap(),
+            base,
+            "host rename keeps cursors"
+        );
+        let mut wider = facts();
+        wider.columns.push(raw("note", "nvarchar"));
+        let wider = build_table(&settings(), &capture("Items", 7, "dbo_Items"), wider).unwrap();
+        assert_eq!(
+            binding(&database(), &[wider]).unwrap(),
+            base,
+            "non-key column"
+        );
+        let recaptured =
+            build_table(&settings(), &capture("Items", 7, "dbo_Items_v2"), facts()).unwrap();
+        assert_ne!(binding(&database(), &[recaptured]).unwrap(), base);
+        let mut retyped = facts();
+        retyped.source_columns[0] = raw("id", "bigint");
+        let retyped = build_table(&settings(), &capture("Items", 7, "dbo_Items"), retyped).unwrap();
+        assert_ne!(binding(&database(), &[retyped]).unwrap(), base);
+        let mut other = database();
+        other.guid = "other".into();
+        assert_ne!(binding(&other, std::slice::from_ref(&table)).unwrap(), base);
+    }
+
+    #[test]
+    fn unmapped_columns_stream_without_rejecting_the_table() {
+        let table = build_table(&settings(), &capture("Items", 7, "dbo_Items"), facts()).unwrap();
+        assert_eq!(table.unmapped().len(), 1);
+        assert!(table
+            .selection()
+            .contains("CONVERT(nvarchar(max), [doc]) AS [doc]"));
+        let catalog = Catalog {
+            tables: vec![table],
+            binding: [0; 32],
+        };
+        let schema = catalog.schema();
+        assert_eq!(schema.nodes[0].label, "Items");
+        assert_eq!(schema.nodes[0].properties[2].data_type, None);
+    }
+
+    #[test]
+    fn keys_must_exist_be_captured_and_keyable() {
+        let mut keyless = facts();
+        keyless.primary_key.clear();
+        let error =
+            build_table(&settings(), &capture("Items", 7, "c"), keyless.clone()).unwrap_err();
+        assert!(matches!(
+            source_failure(&error),
+            Some(drasi_computation_contracts::SourceFailure::Unsupported(_))
+        ));
+        let mut explicit = settings();
+        explicit.table_keys = vec![super::super::settings::TableKey {
+            table: "dbo.Items".into(),
+            key_columns: vec!["value".into()],
+        }];
+        let table = build_table(&explicit, &capture("Items", 7, "c"), keyless).unwrap();
+        assert_eq!(table.keys, ["value"]);
+        let mut xml_key = facts();
+        xml_key.primary_key = vec!["doc".into()];
+        assert!(build_table(&settings(), &capture("Items", 7, "c"), xml_key).is_err());
+        let mut uncaptured = facts();
+        uncaptured.columns.remove(0);
+        assert!(build_table(&settings(), &capture("Items", 7, "c"), uncaptured).is_err());
+    }
+
+    #[test]
+    fn selection_ignores_unselected_tables_and_types_capture_changes() {
+        let captures = vec![
+            capture("Barrier", 1, "dbo_Barrier"),
+            capture("Items", 7, "dbo_Items"),
+            capture("Other", 9, "dbo_Other"),
+        ];
+        let mut explicit = settings();
+        explicit.tables = vec!["Items".into()];
+        explicit.barrier_table = Some("Barrier".into());
+        let chosen = select_captures(&explicit, &captures).unwrap();
+        assert_eq!(chosen.len(), 1);
+        let mut all = settings();
+        all.barrier_table = Some("dbo.Barrier".into());
+        assert_eq!(select_captures(&all, &captures).unwrap().len(), 2);
+        let mut doubled = captures.clone();
+        doubled.push(capture("Items", 7, "dbo_Items_v2"));
+        let error = select_captures(&explicit, &doubled).unwrap_err();
+        assert!(matches!(
+            source_failure(&error),
+            Some(drasi_computation_contracts::SourceFailure::SchemaChanged(_))
+        ));
+        let mut doubled_other = captures.clone();
+        doubled_other.push(capture("Other", 9, "dbo_Other_v2"));
+        select_captures(&explicit, &doubled_other).expect("unselected tables are ignored");
+        let mut missing = settings();
+        missing.tables = vec!["Absent".into()];
+        assert!(select_captures(&missing, &captures).is_err());
+    }
 }

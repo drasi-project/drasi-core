@@ -848,6 +848,20 @@ fn standard(
             PipeRequirements::default(),
         ));
     }
+    if role == ComponentRole::Source {
+        // The graph bootstrap ports the host adds to every source.
+        for (port, direction) in [
+            ("bootstrap", PortDirection::Input),
+            ("snapshot", PortDirection::Output),
+        ] {
+            ports.push(PortDescriptor::bootstrap(
+                PortId::try_new(port)?,
+                direction,
+                GraphChangeCodec::schema().descriptor().clone(),
+                PipeRequirements::default(),
+            ));
+        }
+    }
     add(
         config,
         name,

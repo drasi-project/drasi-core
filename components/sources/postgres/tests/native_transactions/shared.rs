@@ -154,6 +154,9 @@ struct Collect {
 }
 #[async_trait]
 impl ComputationComponent for Collect {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

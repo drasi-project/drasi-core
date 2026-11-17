@@ -20,11 +20,11 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use mysql_async::Value;
 use mysql_common::binlog::events::{OptionalMetadataField, TableMapEvent};
 use mysql_common::binlog::row::BinlogRow;
 use mysql_common::binlog::value::BinlogValue;
 use mysql_common::constants::ColumnType;
+use mysql_common::Value;
 use ordered_float::OrderedFloat;
 
 use drasi_core_types::models::{
@@ -92,15 +92,21 @@ impl MySqlDecoder {
         Ok(SourceChange::Delete { metadata })
     }
 
+    /// Decodes a binlog row image. `catalog` supplies each column's character
+    /// set, so text in non-UTF-8 character sets is transcoded losslessly.
     pub fn native_element(
         &self,
         table: &TableMapEvent<'_>,
         row: &BinlogRow,
         keys: &[String],
+        catalog: Option<&[crate::native::catalog::Column]>,
         timestamp: u64,
         max_bytes: usize,
     ) -> Result<Element> {
-        self.native_element_with_catalog(table, row, keys, None, timestamp, max_bytes)
+        if let Some(columns) = catalog {
+            anyhow::ensure!(columns.len() == row.len(), "MySQL catalog changed");
+        }
+        self.native_element_with_catalog(table, row, keys, catalog, false, timestamp, max_bytes)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -117,7 +123,15 @@ impl MySqlDecoder {
             columns.len() == row.len(),
             "positional MySQL catalog changed"
         );
-        self.native_element_with_catalog(table, row, keys, Some(columns), timestamp, max_bytes)
+        self.native_element_with_catalog(
+            table,
+            row,
+            keys,
+            Some(columns),
+            true,
+            timestamp,
+            max_bytes,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -127,6 +141,7 @@ impl MySqlDecoder {
         row: &BinlogRow,
         keys: &[String],
         columns: Option<&[crate::native::catalog::Column]>,
+        positional: bool,
         timestamp: u64,
         max_bytes: usize,
     ) -> Result<Element> {
@@ -136,7 +151,7 @@ impl MySqlDecoder {
         let mut properties = ElementPropertyMap::new();
         let mut parts = Vec::new();
         for (index, column) in row.columns_ref().iter().enumerate() {
-            let positional_name = columns.map(|_| format!("@{index}"));
+            let positional_name = positional.then(|| format!("@{index}"));
             let name = if let Some(name) = positional_name.as_deref() {
                 name
             } else {
@@ -146,7 +161,8 @@ impl MySqlDecoder {
             let value = row
                 .as_ref(index)
                 .context("native MySQL requires complete row images")?;
-            let hint = columns.map(|columns| &columns[index]);
+            let catalog = columns.map(|columns| &columns[index]);
+            let hint = catalog.filter(|_| positional);
             let binary = hint.map_or(column.character_set() == 63, |column| {
                 matches!(
                     column.sql_type.split(['(', ' ']).next(),
@@ -164,13 +180,19 @@ impl MySqlDecoder {
                         .any(|word| word == "unsigned")
                 },
             );
-            let normalized = hint
-                .map(|column| {
-                    positional_value(value, &contexts[index], column, binary, unsigned, max_bytes)
-                })
-                .transpose()?
-                .flatten()
-                .map(BinlogValue::Value);
+            let normalized = match (hint, catalog) {
+                (Some(column), _) => {
+                    positional_value(value, &contexts[index], column, binary, unsigned, max_bytes)?
+                }
+                (None, Some(column)) if !binary => match value {
+                    BinlogValue::Value(Value::Bytes(bytes)) => {
+                        transcode_text(bytes, column, max_bytes)?
+                    }
+                    _ => None,
+                },
+                _ => None,
+            }
+            .map(BinlogValue::Value);
             let mut value = strict_value(
                 normalized.as_ref().unwrap_or(value),
                 &contexts[index],
@@ -400,35 +422,67 @@ fn positional_value(
     if binary {
         return Ok(None);
     }
+    transcode_text(bytes, column, max_bytes)
+}
+
+/// Converts text stored in a non-UTF-8 character set to UTF-8, rejecting
+/// bytes that are invalid in that character set. `None` leaves the value as
+/// it is (already UTF-8, binary or without a character set).
+fn transcode_text(
+    bytes: &[u8],
+    column: &crate::native::catalog::Column,
+    max_bytes: usize,
+) -> Result<Option<Value>> {
+    if matches!(
+        column.sql_type.split(['(', ' ']).next(),
+        Some(
+            "geometry"
+                | "point"
+                | "linestring"
+                | "polygon"
+                | "multipoint"
+                | "multilinestring"
+                | "multipolygon"
+                | "geometrycollection"
+                | "geomcollection"
+                | "vector"
+                | "json"
+                | "enum"
+                | "set"
+                | "bit"
+        )
+    ) {
+        return Ok(None);
+    }
     let Some(charset) = column.charset.as_deref() else {
         return Ok(None);
     };
     if charset == "ascii" {
-        anyhow::ensure!(bytes.is_ascii(), "non-ASCII MySQL positional value");
+        anyhow::ensure!(bytes.is_ascii(), "non-ASCII MySQL value in an ascii column");
         return Ok(None);
     }
-    if matches!(charset, "utf8mb4" | "utf8mb3" | "utf8") {
+    if matches!(charset, "utf8mb4" | "utf8mb3" | "utf8" | "binary") {
         return Ok(None);
     }
-    let encoding = positional_encoding(charset)?;
+    let encoding = charset_encoding(charset)?;
     let mut decoder = encoding.new_decoder_without_bom_handling();
     let mut text = String::with_capacity(max_bytes.min(bytes.len().saturating_mul(4)));
     let (result, read) = decoder.decode_to_string_without_replacement(bytes, &mut text, true);
     anyhow::ensure!(
         result == encoding_rs::DecoderResult::InputEmpty && read == bytes.len(),
-        "invalid or oversized MySQL positional text"
+        "invalid or oversized MySQL {charset} text"
     );
     Ok(Some(Value::Bytes(text.into_bytes())))
 }
 
-pub(crate) fn positional_encoding(charset: &str) -> Result<&'static encoding_rs::Encoding> {
+pub(crate) fn charset_encoding(charset: &str) -> Result<&'static encoding_rs::Encoding> {
     match charset {
         "utf8mb4" | "utf8mb3" | "utf8" | "ascii" => Ok(encoding_rs::UTF_8),
         "latin1" => Ok(encoding_rs::WINDOWS_1252),
         "ucs2" | "utf16" => Ok(encoding_rs::UTF_16BE),
         "utf16le" => Ok(encoding_rs::UTF_16LE),
         _ => encoding_rs::Encoding::for_label(charset.as_bytes())
-            .with_context(|| format!("unsupported MySQL positional charset {charset}")),
+            .with_context(|| format!("unsupported MySQL character set {charset}")),
     }
 }
 
@@ -496,6 +550,18 @@ fn strict_value(
         BinlogValue::Value(Value::Double(value)) => {
             anyhow::ensure!(value.is_finite(), "non-finite MySQL double")
         }
+        BinlogValue::Value(Value::Bytes(bytes))
+            if context.col_type == Some(ColumnType::MYSQL_TYPE_GEOMETRY) =>
+        {
+            return Ok(ElementValue::String(
+                geometry_text(bytes, max_bytes)?.into(),
+            ));
+        }
+        BinlogValue::Value(Value::Bytes(bytes))
+            if context.col_type == Some(ColumnType::MYSQL_TYPE_VECTOR) =>
+        {
+            return vector_value(bytes);
+        }
         BinlogValue::Value(Value::Bytes(bytes)) => {
             if context.col_type == Some(ColumnType::MYSQL_TYPE_JSON) {
                 let value: serde_json::Value = serde_json::from_slice(bytes)?;
@@ -557,6 +623,170 @@ fn strict_value(
         );
     }
     binlog_value_to_element_value(value, Some(context))
+}
+
+/// A MySQL `VECTOR`: little-endian IEEE-754 single-precision values.
+fn vector_value(bytes: &[u8]) -> Result<ElementValue> {
+    anyhow::ensure!(
+        bytes.len().is_multiple_of(4),
+        "MySQL VECTOR length is not a multiple of four"
+    );
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| {
+            let value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            anyhow::ensure!(value.is_finite(), "non-finite MySQL VECTOR element");
+            Ok(ElementValue::Float(OrderedFloat(f64::from(value))))
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(ElementValue::List)
+}
+
+/// A MySQL geometry (4-byte little-endian SRID, then WKB) as extended WKT:
+/// `SRID=4326;POINT(1 2)`.
+pub fn geometry_text(bytes: &[u8], max_bytes: usize) -> Result<String> {
+    anyhow::ensure!(bytes.len() >= 9, "truncated MySQL geometry");
+    let srid = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let mut input = &bytes[4..];
+    let mut output = format!("SRID={srid};");
+    wkb(&mut input, &mut output, 0, max_bytes)?;
+    anyhow::ensure!(input.is_empty(), "trailing MySQL geometry data");
+    Ok(output)
+}
+
+fn wkb(input: &mut &[u8], output: &mut String, depth: usize, max_bytes: usize) -> Result<()> {
+    anyhow::ensure!(depth < 32, "MySQL geometry nesting exceeds supported depth");
+    let (&order, rest) = input.split_first().context("truncated MySQL geometry")?;
+    anyhow::ensure!(order <= 1, "invalid WKB byte order");
+    *input = rest;
+    let little = order == 1;
+    let kind = wkb_u32(input, little)?;
+    let name = match kind {
+        1 => "POINT",
+        2 => "LINESTRING",
+        3 => "POLYGON",
+        4 => "MULTIPOINT",
+        5 => "MULTILINESTRING",
+        6 => "MULTIPOLYGON",
+        7 => "GEOMETRYCOLLECTION",
+        _ => anyhow::bail!("unsupported WKB geometry type {kind}"),
+    };
+    output.push_str(name);
+    match kind {
+        1 => {
+            output.push('(');
+            wkb_point(input, output, little)?;
+            output.push(')');
+        }
+        2 => wkb_points(input, output, little)?,
+        3 => wkb_rings(input, output, little)?,
+        _ => {
+            let count = wkb_count(input, little, 9)?;
+            if count == 0 {
+                output.push_str(" EMPTY");
+            } else {
+                output.push('(');
+                for index in 0..count {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    // Members of MULTI* types carry their own header; WKT
+                    // lists them without the type name.
+                    let start = output.len();
+                    wkb(input, output, depth + 1, max_bytes)?;
+                    if kind != 7 {
+                        let member = output.split_off(start);
+                        let body = member
+                            .find('(')
+                            .map(|open| member[open..].to_string())
+                            .unwrap_or_else(|| " EMPTY".into());
+                        output.push_str(&body);
+                    }
+                }
+                output.push(')');
+            }
+        }
+    }
+    anyhow::ensure!(
+        output.len() <= max_bytes,
+        "MySQL geometry text exceeds byte limit"
+    );
+    Ok(())
+}
+
+fn wkb_u32(input: &mut &[u8], little: bool) -> Result<u32> {
+    anyhow::ensure!(input.len() >= 4, "truncated MySQL geometry");
+    let bytes = [input[0], input[1], input[2], input[3]];
+    *input = &input[4..];
+    Ok(if little {
+        u32::from_le_bytes(bytes)
+    } else {
+        u32::from_be_bytes(bytes)
+    })
+}
+
+/// A count whose elements need at least `element` bytes each.
+fn wkb_count(input: &mut &[u8], little: bool, element: usize) -> Result<usize> {
+    let count = usize::try_from(wkb_u32(input, little)?)?;
+    anyhow::ensure!(
+        count.saturating_mul(element) <= input.len(),
+        "MySQL geometry count exceeds its data"
+    );
+    Ok(count)
+}
+
+fn wkb_point(input: &mut &[u8], output: &mut String, little: bool) -> Result<()> {
+    anyhow::ensure!(input.len() >= 16, "truncated MySQL geometry point");
+    let read = |bytes: &[u8]| {
+        let bytes: [u8; 8] = bytes.try_into().unwrap_or_default();
+        if little {
+            f64::from_le_bytes(bytes)
+        } else {
+            f64::from_be_bytes(bytes)
+        }
+    };
+    let (x, y) = (read(&input[..8]), read(&input[8..16]));
+    *input = &input[16..];
+    anyhow::ensure!(
+        x.is_finite() && y.is_finite(),
+        "non-finite MySQL geometry coordinate"
+    );
+    output.push_str(&format!("{x} {y}"));
+    Ok(())
+}
+
+fn wkb_points(input: &mut &[u8], output: &mut String, little: bool) -> Result<()> {
+    let count = wkb_count(input, little, 16)?;
+    if count == 0 {
+        output.push_str(" EMPTY");
+        return Ok(());
+    }
+    output.push('(');
+    for index in 0..count {
+        if index > 0 {
+            output.push(',');
+        }
+        wkb_point(input, output, little)?;
+    }
+    output.push(')');
+    Ok(())
+}
+
+fn wkb_rings(input: &mut &[u8], output: &mut String, little: bool) -> Result<()> {
+    let count = wkb_count(input, little, 4)?;
+    if count == 0 {
+        output.push_str(" EMPTY");
+        return Ok(());
+    }
+    output.push('(');
+    for index in 0..count {
+        if index > 0 {
+            output.push(',');
+        }
+        wkb_points(input, output, little)?;
+    }
+    output.push(')');
+    Ok(())
 }
 
 fn validate_json_text(value: &serde_json::Value, depth: usize, budget: &mut usize) -> Result<()> {
@@ -888,8 +1118,96 @@ fn convert_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mysql_async::Value;
+    use mysql_common::Value;
     use ordered_float::OrderedFloat;
+
+    fn point(x: f64, y: f64) -> Vec<u8> {
+        let mut bytes = vec![1, 1, 0, 0, 0];
+        bytes.extend(x.to_le_bytes());
+        bytes.extend(y.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn geometries_decode_to_extended_wkt() -> Result<()> {
+        let mut value = 4326u32.to_le_bytes().to_vec();
+        value.extend(point(1.5, -2.0));
+        assert_eq!(geometry_text(&value, 1024)?, "SRID=4326;POINT(1.5 -2)");
+        let mut line = 0u32.to_le_bytes().to_vec();
+        line.extend([1, 2, 0, 0, 0, 2, 0, 0, 0]);
+        line.extend(0f64.to_le_bytes());
+        line.extend(0f64.to_le_bytes());
+        line.extend(1f64.to_le_bytes());
+        line.extend(1f64.to_le_bytes());
+        assert_eq!(geometry_text(&line, 1024)?, "SRID=0;LINESTRING(0 0,1 1)");
+        let mut multi = 0u32.to_le_bytes().to_vec();
+        multi.extend([1, 4, 0, 0, 0, 2, 0, 0, 0]);
+        multi.extend(point(1.0, 2.0));
+        multi.extend(point(3.0, 4.0));
+        assert_eq!(
+            geometry_text(&multi, 1024)?,
+            "SRID=0;MULTIPOINT((1 2),(3 4))"
+        );
+        let mut collection = 0u32.to_le_bytes().to_vec();
+        collection.extend([1, 7, 0, 0, 0, 1, 0, 0, 0]);
+        collection.extend(point(5.0, 6.0));
+        assert_eq!(
+            geometry_text(&collection, 1024)?,
+            "SRID=0;GEOMETRYCOLLECTION(POINT(5 6))"
+        );
+        let mut empty = 0u32.to_le_bytes().to_vec();
+        empty.extend([1, 7, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            geometry_text(&empty, 1024)?,
+            "SRID=0;GEOMETRYCOLLECTION EMPTY"
+        );
+        assert!(geometry_text(&value[..10], 1024).is_err());
+        let mut huge = 0u32.to_le_bytes().to_vec();
+        huge.extend([1, 2, 0, 0, 0, 0xff, 0xff, 0xff, 0x7f]);
+        assert!(
+            geometry_text(&huge, 1024).is_err(),
+            "counts are bounded by data"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn vectors_decode_to_float_lists() -> Result<()> {
+        let mut bytes = 1.5f32.to_le_bytes().to_vec();
+        bytes.extend((-2.0f32).to_le_bytes());
+        assert_eq!(
+            vector_value(&bytes)?,
+            ElementValue::List(vec![
+                ElementValue::Float(OrderedFloat(1.5)),
+                ElementValue::Float(OrderedFloat(-2.0))
+            ])
+        );
+        assert!(vector_value(&bytes[..3]).is_err());
+        assert!(vector_value(&f32::NAN.to_le_bytes()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn non_utf8_text_is_transcoded_from_the_catalog_charset() -> Result<()> {
+        let column = crate::native::catalog::Column {
+            name: "name".into(),
+            sql_type: "varchar(10)".into(),
+            key: false,
+            nullable: true,
+            charset: Some("latin1".into()),
+            collation: Some(8),
+        };
+        assert_eq!(
+            transcode_text(&[0x63, 0x61, 0x66, 0xe9], &column, 1024)?,
+            Some(Value::Bytes("café".as_bytes().to_vec()))
+        );
+        let utf8 = crate::native::catalog::Column {
+            charset: Some("utf8mb4".into()),
+            ..column
+        };
+        assert_eq!(transcode_text("café".as_bytes(), &utf8, 1024)?, None);
+        Ok(())
+    }
 
     #[test]
     fn positional_values_use_bounded_real_catalog_hints() -> Result<()> {
@@ -923,7 +1241,7 @@ mod tests {
             )?,
             Some(Value::UInt(u64::MAX))
         );
-        assert!(positional_encoding("not-a-real-charset").is_err());
+        assert!(charset_encoding("not-a-real-charset").is_err());
         Ok(())
     }
 

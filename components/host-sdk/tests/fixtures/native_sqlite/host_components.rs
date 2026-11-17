@@ -36,6 +36,9 @@ struct Capture {
 }
 #[async_trait::async_trait]
 impl ComputationComponent for Capture {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -112,6 +115,40 @@ fn settings(path: &Path) -> SqliteConfig {
         output_capacity: size(4),
         shutdown_timeout_ms: millis(5000),
     }
+}
+
+/// The flat camelCase factory configuration for an engine configuration.
+pub(crate) fn flat(config: &SqliteConfig, port: Option<u16>, coordinated: bool) -> Value {
+    let mut value = json!({
+        "stream": "sqlite/out",
+        "tables": config.tables,
+        "tableKeys": config
+            .table_keys
+            .iter()
+            .map(|key| json!({"table": key.table, "keyColumns": key.key_columns}))
+            .collect::<Vec<_>>(),
+        "maxTransactionChanges": config.transactions.max_changes,
+        "maxTransactionBytes": config.transactions.max_bytes,
+        "maxTransactionDurationMs": config.transactions.max_duration_ms,
+        "maxSqlBytes": config.max_sql_bytes,
+        "commandCapacity": config.command_capacity,
+        "outputCapacity": config.output_capacity,
+        "shutdownTimeoutMs": config.shutdown_timeout_ms,
+        "pageSize": config.transactions.max_changes,
+    });
+    if let Some(path) = &config.path {
+        value["path"] = json!(path);
+    }
+    if let Some(replay) = &config.replay {
+        value["maxJournalTransactions"] = json!(replay.max_transactions);
+        value["maxJournalBytes"] = json!(replay.max_bytes);
+        value["coordinatedSnapshot"] = json!(coordinated);
+    }
+    if let Some(port) = port {
+        value["restApi"] = json!(true);
+        value["restPort"] = json!(port);
+    }
+    value
 }
 
 fn load(package: &str) -> Result<Arc<NativePlugin>> {
@@ -210,13 +247,7 @@ async fn ordinary_graph(
         .context("SQLite changes factory")?;
     let mut config = settings(path);
     config.table_keys = keys.clone();
-    let source = factory.create_component(
-        id("source"),
-        json!({
-            "stream":"sqlite/out", "settings":config,
-            "rest_api":{"host":"127.0.0.1","port":port},
-        }),
-    )?;
+    let source = factory.create_component(id("source"), flat(&config, Some(port), false))?;
     let mut builder = ComponentBatch::builder()
         .source(
             drasi_lib::computation::v1::ComponentName::try_new("source")
@@ -231,10 +262,12 @@ async fn ordinary_graph(
             factory.metadata().implementation.name.as_ref() == "drasi.sqlite/file-bootstrap"
         }).context("SQLite file bootstrap")?.create_provider(
             id(name),
-            json!({"source":id("source"),"stream":"sqlite/out","settings":{
-                "path":path,"tables":["items"],"table_keys":keys,"max_tables":8,"max_bytes":1048576,
-                "max_duration_ms":5000,"output_capacity":2,"shutdown_timeout_ms":5000,
-            }}),
+            json!({"source":id("source"),"stream":"sqlite/out",
+                "path":path,"tables":["items"],
+                "tableKeys":keys.iter().map(|key| json!({"table":key.table,"keyColumns":key.key_columns})).collect::<Vec<_>>(),
+                "maxTables":8,"maxBytes":1048576,
+                "maxDurationMs":5000,"outputCapacity":2,"shutdownTimeoutMs":5000,
+            }),
             Some(drasi_computation_plugin_sdk::Scope {
                 instance_id: INSTANCE.into(), graph_id: ComponentBatch::GRAPH_ID.into(), generation: 1,
             }),
@@ -668,13 +701,8 @@ async fn transaction_graph(
         max_transactions: size(8),
         max_bytes: size(8 << 20),
     });
-    let mut specification = factory.specification(
-        id("source"),
-        json!({
-            "stream":"sqlite/out","settings":config,
-            "rest_api":{"host":"127.0.0.1","port":port},
-        }),
-    )?;
+    let mut specification =
+        factory.specification(id("source"), flat(&config, Some(port), false))?;
     let resource = ResourceId::try_new("progress")?;
     let handle = if mode == TransactionMode::Shared {
         specification
@@ -965,8 +993,244 @@ async fn persistent_replay(shared: bool) -> Result<()> {
         let cleanup = restarted.core.shutdown().await;
         result?;
         cleanup?;
+        drop(restarted);
+        erase_journal_and_reuse_file(&plugins, &path).await?;
     }
     Ok(())
+}
+
+fn journal_tables(path: &Path) -> Result<usize> {
+    Ok(rusqlite::Connection::open(path)?.query_row(
+        "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name LIKE '\\_\\_drasi\\_native\\_%' ESCAPE '\\'",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+/// SQ-03. Removing a journal source with erase drops exactly its journal
+/// tables, a second erase succeeds, and a source without a journal can then
+/// start on the same file.
+async fn erase_journal_and_reuse_file(plugins: &Plugins, path: &Path) -> Result<()> {
+    anyhow::ensure!(journal_tables(path)? > 0, "replay created no journal");
+    let factory = plugins
+        .source
+        .factories()
+        .iter()
+        .find(|factory| {
+            factory.metadata().implementation.name.as_ref()
+                == drasi_computation_source_sqlite::SQLITE_SHARED
+        })
+        .context("SQLite shared factory")?;
+    let mut config = settings(path);
+    config.output = SqliteOutput::Transactions;
+    config.replay = Some(SqliteReplayConfig {
+        max_transactions: size(8),
+        max_bytes: size(8 << 20),
+    });
+    let consumers = Arc::new(ConsumerProgressSet::new(
+        ComponentBatch::GRAPH_ID,
+        id("source"),
+        vec![Arc::new(QuerySourceProgress::new(
+            ComponentBatch::GRAPH_ID,
+            id("first"),
+        )?)],
+    )?);
+    let mut source = factory.create_component_with_consumer_progress(
+        id("source"),
+        flat(&config, None, false),
+        drasi_computation_plugin_sdk::Scope {
+            instance_id: INSTANCE.into(),
+            graph_id: ComponentBatch::GRAPH_ID.into(),
+            generation: 1,
+        },
+        consumers,
+    )?;
+    source.initialize(&crate::hooks::initialize_ctx()).await?;
+    tokio::time::timeout(DEADLINE, source.dispose(&crate::hooks::erase_ctx())).await??;
+    anyhow::ensure!(journal_tables(path)? == 0, "erase left journal tables");
+    anyhow::ensure!(
+        rusqlite::Connection::open(path)?.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name='items'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )? == 1,
+        "erase touched a user table"
+    );
+    let mut retry = factory.create_component_with_consumer_progress(
+        id("source"),
+        flat(&config, None, false),
+        drasi_computation_plugin_sdk::Scope {
+            instance_id: INSTANCE.into(),
+            graph_id: ComponentBatch::GRAPH_ID.into(),
+            generation: 2,
+        },
+        Arc::new(ConsumerProgressSet::new(
+            ComponentBatch::GRAPH_ID,
+            id("source"),
+            vec![Arc::new(QuerySourceProgress::new(
+                ComponentBatch::GRAPH_ID,
+                id("first"),
+            )?)],
+        )?),
+    )?;
+    retry.initialize(&crate::hooks::initialize_ctx()).await?;
+    tokio::time::timeout(DEADLINE, retry.dispose(&crate::hooks::erase_ctx())).await??;
+    let changes = plugins
+        .source
+        .factories()
+        .iter()
+        .find(|factory| {
+            factory.metadata().implementation.name.as_ref()
+                == drasi_computation_source_sqlite::SQLITE_CHANGES
+        })
+        .context("SQLite changes factory")?;
+    let mut reuse = changes.create_component(id("source"), flat(&settings(path), None, false))?;
+    reuse.initialize(&crate::hooks::initialize_ctx()).await?;
+    tokio::time::timeout(DEADLINE, reuse.start(&crate::hooks::start_ctx()))
+        .await?
+        .context("a source without a journal must start on the erased file")?;
+    tokio::time::timeout(DEADLINE, reuse.stop(&crate::hooks::stop_ctx())).await??;
+    Ok(())
+}
+
+/// SQ-02, SQ-05 and SQ-08 through the static and loaded library: in-memory
+/// refusal and initSql, bearer authentication, body limits, /api/sql and
+/// pause gating with Retry-After.
+async fn loaded_security_pause_and_memory() -> Result<()> {
+    const TOKEN: &str = "native-sqlite-test-token";
+    for dynamic in [false, true] {
+        let plugins = plugins(dynamic)?;
+        let factory = plugins
+            .source
+            .factories()
+            .iter()
+            .find(|factory| {
+                factory.metadata().implementation.name.as_ref()
+                    == drasi_computation_source_sqlite::SQLITE_CHANGES
+            })
+            .context("SQLite changes factory")?;
+        let error = match factory.create_component(id("source"), json!({"stream":"sqlite/out"})) {
+            Ok(_) => anyhow::bail!("in-memory source without initSql was accepted"),
+            Err(error) => format!("{error:#}"),
+        };
+        anyhow::ensure!(error.contains("initSql or sqlApi"), "{error}");
+        // The Host checks field types first: a literal null path is refused
+        // as a type error before the plugin sees it.
+        anyhow::ensure!(
+            factory
+                .create_component(id("source"), json!({"stream":"sqlite/out","path":null}))
+                .is_err(),
+            "null path was accepted"
+        );
+        anyhow::ensure!(
+            factory
+                .create_component(
+                    id("source"),
+                    json!({"stream":"sqlite/out","path":"a.db","restApi":true,"restHost":"0.0.0.0"}),
+                )
+                .is_err(),
+            "unauthenticated non-loopback REST was accepted"
+        );
+        let port = port()?;
+        let url = format!("http://127.0.0.1:{port}");
+        let client = reqwest::Client::builder().timeout(DEADLINE).build()?;
+        let mut source = factory.create_component(
+            id("source"),
+            json!({
+                "stream":"sqlite/out",
+                "initSql":"CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT NOT NULL)",
+                "restApi":true,"restPort":port,"authToken":TOKEN,"sqlApi":true,
+                "maxRequestBytes":512,
+            }),
+        )?;
+        source.initialize(&crate::hooks::initialize_ctx()).await?;
+        tokio::time::timeout(DEADLINE, source.start(&crate::hooks::start_ctx())).await??;
+        let result = async {
+            let insert = |id: i64, token: Option<&str>| {
+                let mut request = client
+                    .post(format!("{url}/api/tables/items"))
+                    .json(&json!({"id":id,"value":"memory"}));
+                if let Some(token) = token {
+                    request = request.bearer_auth(token);
+                }
+                request.send()
+            };
+            anyhow::ensure!(
+                insert(1, None).await?.status() == reqwest::StatusCode::UNAUTHORIZED,
+                "unauthenticated write accepted"
+            );
+            insert(1, Some(TOKEN)).await?.error_for_status()?;
+            anyhow::ensure!(
+                tokio::time::timeout(DEADLINE, source.next())
+                    .await??
+                    .is_some(),
+                "authenticated write produced no output"
+            );
+            let large = client
+                .post(format!("{url}/api/tables/items"))
+                .bearer_auth(TOKEN)
+                .json(&json!({"id":9,"value":"x".repeat(2048)}))
+                .send()
+                .await?;
+            anyhow::ensure!(
+                large.status() == reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+                "oversized body was not refused: {}",
+                large.status()
+            );
+            let rows: Value = client
+                .post(format!("{url}/api/sql"))
+                .bearer_auth(TOKEN)
+                .json(&json!({"query":{"sql":"SELECT count(*) AS n FROM items"}}))
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            anyhow::ensure!(rows == json!({"rows":[{"n":1}]}), "/api/sql read {rows}");
+            let denied = client
+                .post(format!("{url}/api/sql"))
+                .bearer_auth(TOKEN)
+                .json(&json!({"execute":[{"sql":"DROP TABLE items"}]}))
+                .send()
+                .await?;
+            anyhow::ensure!(
+                denied.status() == reqwest::StatusCode::BAD_REQUEST,
+                "DROP TABLE passed the authorizer"
+            );
+            tokio::time::timeout(DEADLINE, source.pause(&crate::hooks::pause_ctx())).await??;
+            let paused = insert(2, Some(TOKEN)).await?;
+            anyhow::ensure!(
+                paused.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE
+                    && paused.headers().contains_key("retry-after"),
+                "paused write was not refused with Retry-After: {}",
+                paused.status()
+            );
+            tokio::time::timeout(DEADLINE, source.resume(&crate::hooks::resume_ctx())).await??;
+            insert(2, Some(TOKEN)).await?.error_for_status()?;
+            anyhow::ensure!(
+                tokio::time::timeout(DEADLINE, source.next())
+                    .await??
+                    .is_some(),
+                "resumed write produced no output"
+            );
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let stopped = tokio::time::timeout(DEADLINE, source.stop(&crate::hooks::stop_ctx())).await;
+        result.with_context(|| format!("dynamic={dynamic}"))?;
+        stopped??;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn security_pause_and_memory_current_thread_static_and_dynamic() -> Result<()> {
+    loaded_security_pause_and_memory().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn security_pause_and_memory_multi_thread_static_and_dynamic() -> Result<()> {
+    loaded_security_pause_and_memory().await
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1176,12 +1440,8 @@ async fn cancelled_rest_cleanup() -> Result<()> {
                     == drasi_computation_source_sqlite::SQLITE_CHANGES
             })
             .context("SQLite changes factory")?;
-        let mut source = factory.create_component(
-            id("source"),
-            json!({
-                "stream":"sqlite/out","settings":config,"rest_api":{"host":"127.0.0.1","port":port},
-            }),
-        )?;
+        let mut source =
+            factory.create_component(id("source"), flat(&config, Some(port), false))?;
         source.initialize(&crate::hooks::initialize_ctx()).await?;
         source.start(&crate::hooks::start_ctx()).await?;
         let mut request = tokio::net::TcpStream::connect(&address).await?;
@@ -1385,32 +1645,34 @@ fn factory_modes_are_explicit_and_constructors_do_not_open_sqlite() -> Result<()
                 });
                 anyhow::ensure!(
                     factory
-                        .create_component(
-                            id("source"),
-                            json!({"stream":"sqlite/out","settings":config})
-                        )
+                        .create_component(id("source"), flat(&config, None, false))
                         .is_err(),
                     "replay factory accepted absent progress"
                 );
             } else {
-                let component = factory.create_component(
-                    id("source"),
-                    json!({"stream":"sqlite/out","settings":config}),
-                )?;
+                let component =
+                    factory.create_component(id("source"), flat(&config, None, false))?;
                 drop(component);
-                config.output = match config.output {
-                    SqliteOutput::Changes => SqliteOutput::Transactions,
-                    _ => SqliteOutput::Changes,
-                };
-                anyhow::ensure!(
-                    factory
-                        .create_component(
-                            id("source"),
-                            json!({"stream":"sqlite/out","settings":config})
-                        )
-                        .is_err(),
-                    "factory silently changed output mode"
-                );
+                // The factory fixes the mode: legacy nested or mode fields of
+                // another factory are rejected, never reinterpreted.
+                for foreign in [
+                    json!({"stream":"sqlite/out","settings":config}),
+                    {
+                        let mut value = flat(&config, None, false);
+                        value["output"] = json!("changes");
+                        value
+                    },
+                    {
+                        let mut value = flat(&config, None, false);
+                        value["coordinatedSnapshot"] = json!(false);
+                        value
+                    },
+                ] {
+                    anyhow::ensure!(
+                        factory.create_component(id("source"), foreign).is_err(),
+                        "factory accepted a foreign configuration field"
+                    );
+                }
             }
             anyhow::ensure!(!path.exists(), "constructor opened SQLite");
         }

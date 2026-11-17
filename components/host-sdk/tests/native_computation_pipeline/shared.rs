@@ -109,6 +109,9 @@ struct ReleasedSource {
 
 #[async_trait]
 impl ComputationComponent for ReleasedSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         self.inner.descriptor()
     }
@@ -364,9 +367,9 @@ async fn delivery_channels(
         channels.push(channel);
     }
     Ok((
-        ResourceHandle::new(
+        drasi_lib::computation::v1::QueryIndexProviderResource::handle(
             ResourceRole::IndexBackend,
-            Arc::new(QueryIndexProviderResource(provider)),
+            provider,
         ),
         channels
             .try_into()

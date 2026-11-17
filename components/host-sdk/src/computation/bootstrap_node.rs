@@ -90,6 +90,13 @@ impl ComponentFactory for NativeBootstrapNodeFactory {
         &self.descriptor
     }
 
+    fn describe(
+        &self,
+        _context: &drasi_lib::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        Ok(BootstrapProviderComponent::provider_description())
+    }
+
     fn specification_from_config(
         &self,
         id: ComponentId,

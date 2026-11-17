@@ -252,8 +252,8 @@ pub(super) async fn catalog_changes(dynamic: bool) -> Result<()> {
                 db.regrant_items_capture()?;
             }
             "keys" => {
-                settings["connection"]["table_keys"] =
-                    json!([{"table":format!("{}.Items",db.schema),"key_columns":["id","value"]}])
+                settings["tableKeys"] =
+                    json!([{"table":format!("{}.Items",db.schema),"keyColumns":["id","value"]}])
             }
             "retention" => {
                 db.sql("UPDATE {{schema}}.Items SET value=32 WHERE id=3;")?;

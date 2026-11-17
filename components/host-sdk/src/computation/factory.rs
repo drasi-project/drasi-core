@@ -467,6 +467,78 @@ impl NativeFactory {
     pub fn consumer_mode(&self) -> Option<drasi_computation_plugin_sdk::ConsumerMode> {
         self.consumer.map(|(mode, _)| mode)
     }
+    /// The creation request a graph construction context describes.
+    fn context_request(
+        &self,
+        context: &ConstructionContext,
+        update_directive: Option<drasi_computation_plugin_sdk::UpdateDirective>,
+    ) -> CreateRequest {
+        CreateRequest {
+            id: context.component_id.clone(),
+            implementation: context.specification.implementation.clone(),
+            configuration_version: context.specification.configuration_version,
+            configuration: serde_json::Value::Object(
+                context
+                    .configuration()
+                    .iter()
+                    .map(|(name, value)| (name.to_string(), value.clone()))
+                    .collect(),
+            ),
+            inputs: if self.metadata.capabilities.binds_inputs {
+                context.input_bindings().to_vec()
+            } else {
+                Vec::new()
+            },
+            activation_credentials_bound: false,
+            update_directive,
+            scope: Some(Scope {
+                instance_id: context.instance_id.to_string(),
+                graph_id: context.graph_id.to_string(),
+                generation: context.generation.0,
+            }),
+        }
+    }
+    /// Ask the plugin's pure describer for the instance `request` constructs.
+    pub(super) fn describe_request(
+        &self,
+        request: &CreateRequest,
+        descriptor: &ComponentDescriptor,
+        dependencies: drasi_lib::computation::v1::DependencyCapabilities,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        let payload = serde_json::to_vec(&drasi_computation_plugin_sdk::wire::DescribeRequest {
+            request: request.clone(),
+            descriptor: descriptor.clone(),
+            dependencies,
+        })?;
+        anyhow::ensure!(
+            payload.len() <= abi::MAX_METADATA_BYTES,
+            "native describe request exceeds size limit"
+        );
+        let table = unsafe { checked_table(self.raw.vtable)? };
+        let response = unsafe {
+            drasi_computation_plugin_sdk::transport::take_reply(table
+                .describe
+                .expect("validated factory describer")(
+                self.raw.state,
+                abi::BorrowedBytes::new(&payload),
+            ))?
+        };
+        anyhow::ensure!(
+            response.len() <= abi::MAX_METADATA_BYTES,
+            "native description exceeds size limit"
+        );
+        let description: drasi_lib::computation::v1::ComponentDescription =
+            serde_json::from_slice(&response)?;
+        description
+            .validate(descriptor)
+            .map_err(|reason| anyhow::anyhow!("invalid native description: {reason}"))?;
+        anyhow::ensure!(
+            self.consumer.is_none() || description.has_keyed_inputs(),
+            "native consumer {} must declare the delivery guarantee of its identity-keyed inputs",
+            self.metadata.implementation.name
+        );
+        Ok(description)
+    }
     fn supports_input_progress(&self) -> bool {
         self.descriptor.dependencies.contains_key("input_progress")
     }
@@ -1013,6 +1085,23 @@ impl NativeFactory {
         identity: Option<Arc<super::NativeIdentityResource>>,
         processing: Option<super::processing::ProcessingBinding>,
     ) -> anyhow::Result<NativeComponentProxy> {
+        // The declared capabilities of the bindings this construction holds,
+        // for the plugin's describer: an admission channel's producer
+        // identity and a processing provider's durability.
+        let mut dependencies = drasi_lib::computation::v1::DependencyCapabilities::new();
+        if let Some(admission) = &admission {
+            dependencies.insert(
+                "admission".into(),
+                vec![if admission.identity().persistent() {
+                    drasi_lib::computation::v1::ResourceCapabilities::DURABLE
+                } else {
+                    drasi_lib::computation::v1::ResourceCapabilities::VOLATILE
+                }],
+            );
+        }
+        if let Some(processing) = &processing {
+            dependencies.insert("processing".into(), vec![processing.capabilities()]);
+        }
         request.activation_credentials_bound = identity.is_some();
         anyhow::ensure!(
             request.inputs.is_empty() || self.metadata.capabilities.binds_inputs,
@@ -1259,14 +1348,16 @@ impl NativeFactory {
                 super::proxy::SourceCoordinator::new(coordinator, owned, graph)
             })
             .transpose()?;
-        component
+        let component = component
             .with_identity(activation_identity)
             .with_source_coordinator(source_coordinator)
             .with_processing(processing)
             .with_output_snapshots(output_snapshots)
             .with_source_schema(self.source_schema)?
             .with_output_reads(self.output_reads, self.output_follow)?
-            .with_management(self.management)
+            .with_management(self.management)?;
+        let description = self.describe_request(&request, component.descriptor(), dependencies)?;
+        Ok(component.with_description(description))
     }
 }
 impl Drop for NativeFactory {
@@ -1279,6 +1370,20 @@ impl Drop for NativeFactory {
 impl ComponentFactory for NativeFactory {
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
+    }
+    /// The plugin's own declaration, from its pure describer, for the
+    /// resolved configuration and the declared capabilities of the bound
+    /// resources. The Host interprets none of the configuration.
+    fn describe(
+        &self,
+        context: &ConstructionContext,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        let request = self.context_request(context, None);
+        self.describe_request(
+            &request,
+            &context.specification.descriptor,
+            context.dependency_capabilities(),
+        )
     }
     fn port_formats(&self) -> Option<&PortFormatCatalogue> {
         self.port_formats.as_ref()
@@ -1457,6 +1562,10 @@ impl ComponentFactory for NativeFactory {
     ) -> std::result::Result<ConstructedComponent, ComponentCreationError> {
         self.validate(&context.specification)
             .map_err(ComponentCreationError::terminal)?;
+        // The instance carries the declaration the graph checks: the plugin's
+        // answer for this context's declared resource capabilities.
+        let description =
+            ComponentFactory::describe(self, &context).map_err(ComponentCreationError::terminal)?;
         let directive = context.update_directive().map(update_directive);
         if self.consumer.is_some() {
             let resource = context
@@ -1501,7 +1610,9 @@ impl ComponentFactory for NativeFactory {
                 )
                 .await
                 .map_err(ComponentCreationError::terminal)?;
-            return Ok(ConstructedComponent::sink(Box::new(proxy)));
+            return Ok(ConstructedComponent::sink(Box::new(
+                proxy.with_description(description),
+            )));
         }
         let progress = if context
             .specification
@@ -1746,6 +1857,7 @@ impl ComponentFactory for NativeFactory {
                 .await
                 .map_err(ComponentCreationError::terminal)?;
         }
+        let proxy = proxy.with_description(description);
         Ok(match self.metadata.role {
             ComponentRole::Source => ConstructedComponent::source(Box::new(proxy)),
             ComponentRole::Transformer => ConstructedComponent::transformer(Box::new(proxy)),

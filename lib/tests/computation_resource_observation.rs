@@ -62,6 +62,9 @@ struct Idle(ComponentDescriptor);
 
 #[async_trait]
 impl ComputationComponent for Idle {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }
@@ -343,6 +346,12 @@ struct BindingProbe<T> {
 
 #[async_trait]
 impl<T: Any + Send + Sync> ComponentFactory for BindingProbe<T> {
+    fn describe(
+        &self,
+        _context: &drasi_lib::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }

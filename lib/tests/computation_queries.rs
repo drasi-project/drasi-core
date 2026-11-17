@@ -58,6 +58,9 @@ struct StopGate {
 }
 #[async_trait]
 impl ComputationComponent for Source {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -124,6 +127,9 @@ struct Sink {
 }
 #[async_trait]
 impl ComputationComponent for Sink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -786,6 +792,219 @@ async fn consumer_progress_lifecycle_multi_thread() {
     .unwrap();
 }
 
+/// A consumer-progress producer whose Start, like the MySQL source, waits
+/// until every actual input owner has published readiness.
+struct ReadyWaitingSource {
+    descriptor: ComponentDescriptor,
+    consumers: Arc<ConsumerProgressSet>,
+}
+#[async_trait]
+impl ComputationComponent for ReadyWaitingSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.descriptor
+    }
+    fn recovery_contract(&self) -> ComponentRecovery {
+        ComponentRecovery::default().with_consumer_progress(self.consumers.clone())
+    }
+    async fn start(
+        &mut self,
+        _context: &drasi_lib::computation::v1::StartContext,
+    ) -> anyhow::Result<()> {
+        self.consumers.read_only().wait_ready().await?;
+        Ok(())
+    }
+    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+    drasi_lib::passive_component_lifecycle!(@hook stop, StopContext);
+    drasi_lib::passive_component_lifecycle!(@hook dispose, DisposeContext);
+}
+#[async_trait]
+impl EnvelopeSource for ReadyWaitingSource {
+    async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
+        std::future::pending().await
+    }
+}
+
+/// A sink whose creation finishes only after the source-to-query edges have
+/// bound, so the query-to-sink edges bind in a later deferred pass.
+struct LateSink {
+    descriptor: ComponentDescriptor,
+    inputs_bound: tokio::sync::watch::Receiver<bool>,
+}
+#[async_trait]
+impl ComputationComponent for LateSink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.descriptor
+    }
+    async fn initialize(
+        &mut self,
+        _context: &drasi_lib::computation::v1::InitializeContext,
+    ) -> anyhow::Result<()> {
+        self.inputs_bound.wait_for(|bound| *bound).await?;
+        Ok(())
+    }
+    drasi_lib::passive_component_lifecycle!(@hook start, StartContext);
+    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+    drasi_lib::passive_component_lifecycle!(@hook stop, StopContext);
+    drasi_lib::passive_component_lifecycle!(@hook dispose, DisposeContext);
+}
+#[async_trait]
+impl EnvelopeSink for LateSink {
+    fn completion(&self) -> SinkCompletion {
+        SinkCompletion::Handled
+    }
+    async fn handle(&mut self, _input: InputEnvelope) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+/// The source's Start waits for both queries, which can start only after the
+/// later query-to-sink edges bind. Neither that binding nor the queries'
+/// activation may wait for the source's unfinished start group: the queries
+/// have already settled in it and wait for their own later activation.
+async fn staggered_bindings_start_a_consumer_progress_graph() {
+    let core = drasi_lib::DrasiLib::builder()
+        .with_allow_external_component_ids(true)
+        .with_query_factory(
+            FactoryRegistry::standard()
+                .get(&ImplementationIdentity::try_new("drasi/continuous-query", "1").unwrap())
+                .unwrap()
+                .clone(),
+        )
+        .build()
+        .await
+        .unwrap();
+    let graph_id = core
+        .computation_control()
+        .unwrap()
+        .desired_snapshot()
+        .id
+        .to_string();
+    let (bound, inputs_bound) = tokio::sync::watch::channel(false);
+    let name = |value: &str| ComponentName::try_new(value).unwrap();
+    let mut builder = ComputationGraph::builder(graph_id.as_str())
+        .bind_stream(endpoint("source", "out"), stream("source/out"));
+    let mut owners = Vec::new();
+    for query in ["left", "right"] {
+        let owner = Arc::new(QuerySourceProgress::new(graph_id.as_str(), id(query)).unwrap());
+        let mut definition = definition("MATCH (n:Person) RETURN n.name AS name");
+        definition.graph_id = graph_id.clone();
+        definition.id = id(query);
+        definition.output_stream = stream(&format!("{query}/out"));
+        let transformer =
+            ContinuousQueryTransformer::new(definition, Arc::new(InMemoryComputationProvider))
+                .await
+                .unwrap()
+                .with_source_progress(owner.clone())
+                .unwrap();
+        owners.push(owner);
+        let sink = format!("{query}-one");
+        builder = builder
+            .transformer(name(query), Box::new(transformer))
+            .sink(
+                name(&sink),
+                Box::new(LateSink {
+                    descriptor: ComponentDescriptor::try_new(
+                        id(&sink),
+                        vec![PortDescriptor::new(
+                            port("in"),
+                            PortDirection::Input,
+                            QueryChangeCodec::schema().descriptor().clone(),
+                            PipeRequirements::default(),
+                        )],
+                    )
+                    .unwrap(),
+                    inputs_bound: inputs_bound.clone(),
+                }),
+            )
+            .bind_stream(endpoint(query, "out"), stream(&format!("{query}/out")))
+            .connect(
+                EdgeDefinition::new(endpoint("source", "out"), endpoint(query, "in")),
+                Box::new(BoundedPipeConfig { capacity: 1 }),
+            )
+            .connect(
+                EdgeDefinition::new(endpoint(query, "out"), endpoint(&sink, "in")),
+                Box::new(BoundedPipeConfig { capacity: 1 }),
+            );
+    }
+    let source = ReadyWaitingSource {
+        descriptor: ComponentDescriptor::try_new(
+            id("source"),
+            vec![PortDescriptor::new(
+                port("out"),
+                PortDirection::Output,
+                GraphChangeCodec::schema().descriptor().clone(),
+                PipeRequirements::default(),
+            )],
+        )
+        .unwrap(),
+        consumers: Arc::new(
+            ConsumerProgressSet::new(graph_id.as_str(), id("source"), owners).unwrap(),
+        ),
+    };
+    let batch = builder
+        .source(name("source"), Box::new(source))
+        .build_components()
+        .unwrap();
+    // The source-to-query binding still awaits its start report for up to the
+    // cleanup timeout, but a reservation that outlived it would never start.
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let control = core.computation_control().unwrap();
+        let inputs = ["left", "right"]
+            .map(|query| EdgeDefinition::new(endpoint("source", "out"), endpoint(query, "in")));
+        // Observation has no change stream here, so release the sinks by polling.
+        let gate = tokio::spawn(async move {
+            while !inputs.iter().all(|edge| {
+                control
+                    .observed()
+                    .relationships
+                    .get(edge)
+                    .is_some_and(|state| state.binding == BindingState::Bound)
+            }) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            bound.send_replace(true);
+        });
+        core.add_components(batch).await.unwrap();
+        core.start().await.unwrap();
+        for component in ["source", "left", "right", "left-one", "right-one"] {
+            core.component_by_name(&name(component))
+                .unwrap()
+                .wait_started()
+                .await
+                .unwrap();
+        }
+        gate.await.unwrap();
+    })
+    .await
+    .unwrap_or_else(|_| {
+        let observed = core.computation_control().unwrap().observed();
+        panic!(
+            "staggered bindings must not wait for the blocked source start: {:#?}",
+            observed.components
+        )
+    });
+    core.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn staggered_consumer_progress_bindings_current_thread() {
+    staggered_bindings_start_a_consumer_progress_graph().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn staggered_consumer_progress_bindings_multi_thread() {
+    staggered_bindings_start_a_consumer_progress_graph().await;
+}
+
 struct OrdinalPosition;
 
 impl InputPositionComparator for OrdinalPosition {
@@ -836,6 +1055,9 @@ struct GraphRelay {
 
 #[async_trait]
 impl ComputationComponent for GraphRelay {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

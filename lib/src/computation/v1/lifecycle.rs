@@ -444,6 +444,7 @@ impl GraphError {
             Self::Contract(_)
             | Self::Recovery(_)
             | Self::Validation { .. }
+            | Self::Incompatible { .. }
             | Self::DuplicateComponentId { .. }
             | Self::DuplicateComponentName { .. }
             | Self::ExternalComponentId { .. }

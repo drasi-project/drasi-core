@@ -1,7 +1,7 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! Format-2 destination delivery cursor, owned per consumer.
+//! Format-3 destination delivery cursor, owned per consumer.
 //!
 //! One PostgreSQL transaction commits an operation's effect and the advance of
 //! its destination cursor together, so a retried operation whose earlier
@@ -21,15 +21,26 @@
 //! operation count and completed prefix. A retry of a completed operation is
 //! acknowledged without an effect; an older batch, a conflicting payload, an
 //! operation gap or an unfinished prefix is rejected.
+//!
+//! Format 3 adds an `epoch` column: empty for exactly-once streams, otherwise
+//! the at-least-once producer epoch carried by the item's position. An
+//! at-least-once item whose epoch differs from the stored row's treats the row
+//! as absent and overwrites it (a new producer run starts a fresh cursor); the
+//! same epoch deduplicates as before. Exactly-once items never match an
+//! at-least-once row, nor the reverse. Format-2 tables are refused, not
+//! migrated.
 
 use async_trait::async_trait;
-use drasi_computation_contracts::DeliveryItem;
+use drasi_computation_contracts::{
+    delivery::{cursor_epoch, valid_cursor_epoch, CursorEpoch},
+    DeliveryItem,
+};
 use sha2::{Digest, Sha256};
 use std::{fmt, future::Future, time::Duration};
 use tokio_postgres::{Client, IsolationLevel, Row, Statement, Transaction};
 
 /// The cursor row format written by [`ProgressStore`].
-pub const PROGRESS_FORMAT_VERSION: i16 = 2;
+pub const PROGRESS_FORMAT_VERSION: i16 = 3;
 /// The default progress table.
 pub const DEFAULT_PROGRESS_TABLE: &str = "public.drasi_delivery_progress";
 /// The default number of streams one owner may keep.
@@ -110,7 +121,7 @@ fn validate_identifier(part: &str, value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The `CREATE TABLE IF NOT EXISTS` statement for a format-2 progress table.
+/// The `CREATE TABLE IF NOT EXISTS` statement for a format-3 progress table.
 /// Operators who pre-create the table for a least-privilege role run exactly
 /// this statement.
 pub fn create_table_sql(table: &ProgressTable) -> String {
@@ -118,11 +129,12 @@ pub fn create_table_sql(table: &ProgressTable) -> String {
         "CREATE TABLE IF NOT EXISTS {} (
     owner TEXT NOT NULL CHECK (owner ~ '^[0-9a-f]{{64}}$'),
     stream_key TEXT NOT NULL,
-    version SMALLINT NOT NULL CHECK (version = 2),
+    version SMALLINT NOT NULL CHECK (version = 3),
     sequence TEXT NOT NULL CHECK (sequence ~ '^[1-9][0-9]{{0,19}}$'),
     digest BYTEA NOT NULL CHECK (octet_length(digest) = 32),
     operations BIGINT NOT NULL CHECK (operations > 0),
     completed BIGINT NOT NULL CHECK (completed >= 0 AND completed <= operations),
+    epoch TEXT NOT NULL CHECK (epoch = '' OR epoch ~ '^[0-9a-f]{{64}}$'),
     PRIMARY KEY (owner, stream_key)
 )",
         table.qualified()
@@ -310,7 +322,10 @@ pub enum ProgressTableError {
         object: String,
         hint: &'static str,
     },
-    #[error("progress table {table} exists but does not have the format-2 layout: {source}")]
+    #[error(
+        "progress table {table} exists but does not have the format-3 layout (earlier formats \
+         are not migrated; drop it or choose another progressTable): {source}"
+    )]
     Incompatible {
         table: String,
         #[source]
@@ -359,7 +374,7 @@ pub struct PreparedProgress {
     advance: Statement,
 }
 
-/// One consumer's view of a format-2 progress table.
+/// One consumer's view of a format-3 progress table.
 #[derive(Clone, Debug)]
 pub struct ProgressStore {
     table: ProgressTable,
@@ -396,7 +411,7 @@ impl ProgressStore {
         self.max_streams
     }
 
-    /// Verifies that the progress table exists with the format-2 layout and
+    /// Verifies that the progress table exists with the format-3 layout and
     /// that the current role can use it, creating it under an advisory lock
     /// when it is absent and the role may create it. Safe to repeat and to run
     /// concurrently. `limit` bounds each statement.
@@ -504,8 +519,8 @@ impl ProgressStore {
             transaction
                 .execute(
                     &format!(
-                        "SELECT owner, stream_key, version, sequence, digest, operations, completed \
-                         FROM {} WHERE false",
+                        "SELECT owner, stream_key, version, sequence, digest, operations, completed, \
+                         epoch FROM {} WHERE false",
                         self.table.qualified()
                     ),
                     &[],
@@ -549,7 +564,7 @@ impl ProgressStore {
             read: timed(
                 limit,
                 client.prepare(&format!(
-                    "SELECT version, sequence, digest, operations, completed FROM {table}
+                    "SELECT version, sequence, digest, operations, completed, epoch FROM {table}
                      WHERE owner = $1 AND stream_key = $2 FOR UPDATE"
                 )),
             )
@@ -568,16 +583,16 @@ impl ProgressStore {
                 limit,
                 client.prepare(&format!(
                     "INSERT INTO {table}
-                     (owner, stream_key, version, sequence, digest, operations, completed)
-                     VALUES ($1, $2, {PROGRESS_FORMAT_VERSION}, $3, $4, $5, 0)"
+                     (owner, stream_key, version, sequence, digest, operations, completed, epoch)
+                     VALUES ($1, $2, {PROGRESS_FORMAT_VERSION}, $3, $4, $5, 0, $6)"
                 )),
             )
             .await?,
             rollover: timed(
                 limit,
                 client.prepare(&format!(
-                    "UPDATE {table} SET sequence = $3, digest = $4, operations = $5, completed = 0
-                     WHERE owner = $1 AND stream_key = $2"
+                    "UPDATE {table} SET sequence = $3, digest = $4, operations = $5, completed = 0,
+                     epoch = $6 WHERE owner = $1 AND stream_key = $2"
                 )),
             )
             .await?,
@@ -694,6 +709,10 @@ impl ProgressStore {
         let operation = i64::try_from(item.position.operation())
             .map_err(|_| rejected("operation index exceeds the cursor range"))?;
         let digest = item.content_digest.as_slice();
+        let epoch = item.position.epoch().unwrap_or_default();
+        if !valid_cursor_epoch(epoch) {
+            return Err(rejected("invalid delivery epoch"));
+        }
         let mut row = timed(
             limit,
             transaction.query_opt(&prepared.read, &[&owner, &stream]),
@@ -713,9 +732,36 @@ impl ProgressStore {
             )
             .await?;
         }
-        let completed = match row {
-            Some(row) => {
-                let previous = Cursor::read(&row)?;
+        let previous = row.as_ref().map(Cursor::read).transpose()?;
+        let completed = match previous {
+            Some(previous)
+                if cursor_epoch(&previous.epoch, epoch).map_err(rejected)? == CursorEpoch::New =>
+            {
+                // A new producer run: the previous epoch's cursor is absent
+                // for this item, which must start its batch.
+                if operation != 0 {
+                    return Err(rejected(
+                        "destination delivery is missing its first operation",
+                    ));
+                }
+                timed(
+                    limit,
+                    transaction.execute(
+                        &prepared.rollover,
+                        &[
+                            &owner,
+                            &stream,
+                            &sequence.to_string(),
+                            &digest,
+                            &operations,
+                            &epoch,
+                        ],
+                    ),
+                )
+                .await?;
+                0
+            }
+            Some(previous) => {
                 if sequence < previous.sequence {
                     return Err(rejected("destination delivery receipt expired"));
                 }
@@ -739,7 +785,14 @@ impl ProgressStore {
                         limit,
                         transaction.execute(
                             &prepared.rollover,
-                            &[&owner, &stream, &sequence.to_string(), &digest, &operations],
+                            &[
+                                &owner,
+                                &stream,
+                                &sequence.to_string(),
+                                &digest,
+                                &operations,
+                                &epoch,
+                            ],
                         ),
                     )
                     .await?;
@@ -767,7 +820,14 @@ impl ProgressStore {
                     limit,
                     transaction.execute(
                         &prepared.insert,
-                        &[&owner, &stream, &sequence.to_string(), &digest, &operations],
+                        &[
+                            &owner,
+                            &stream,
+                            &sequence.to_string(),
+                            &digest,
+                            &operations,
+                            &epoch,
+                        ],
                     ),
                 )
                 .await?;
@@ -825,6 +885,7 @@ struct Cursor {
     digest: Vec<u8>,
     operations: i64,
     completed: i64,
+    epoch: String,
 }
 
 impl Cursor {
@@ -838,6 +899,7 @@ impl Cursor {
             digest: row.try_get("digest").map_err(DeliveryError::Database)?,
             operations: row.try_get("operations").map_err(DeliveryError::Database)?,
             completed: row.try_get("completed").map_err(DeliveryError::Database)?,
+            epoch: row.try_get("epoch").map_err(DeliveryError::Database)?,
         };
         if version == PROGRESS_FORMAT_VERSION
             && sequence > 0
@@ -846,6 +908,7 @@ impl Cursor {
             && cursor.operations > 0
             && cursor.completed >= 0
             && cursor.completed <= cursor.operations
+            && valid_cursor_epoch(&cursor.epoch)
         {
             Ok(cursor)
         } else {
@@ -922,7 +985,8 @@ mod tests {
             sql.starts_with("CREATE TABLE IF NOT EXISTS \"public\".\"drasi_delivery_progress\"")
         );
         assert!(sql.contains("PRIMARY KEY (owner, stream_key)"));
-        assert!(sql.contains("CHECK (version = 2)"));
+        assert!(sql.contains("CHECK (version = 3)"));
+        assert!(sql.contains("epoch TEXT NOT NULL"));
     }
 
     #[test]

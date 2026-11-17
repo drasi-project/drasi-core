@@ -54,6 +54,8 @@ impl Endpoint {
                 MySqlTlsMode::Disabled
             },
             tls_ca_pem: config.tls_ca_pem.clone(),
+            tls_client_cert_pem: None,
+            tls_client_key_pem: None,
             // A SQL session never registers as a replica; the shared
             // connection settings require these binlog-only values.
             server_id: NonZeroU32::MAX,
@@ -88,21 +90,8 @@ impl ConnectPolicy {
 /// Connection failures worth another attempt: transport errors and timeouts,
 /// server overload (1040 too many connections, 1203 user connection limit),
 /// server shutdown (1053). Authentication and authorization fail at once.
-pub fn connect_retryable(error: &anyhow::Error) -> bool {
-    match error
-        .chain()
-        .take(64)
-        .find_map(|cause| cause.downcast_ref::<MySqlServerError>())
-    {
-        Some(error) => matches!(error.code, 1040 | 1053 | 1203),
-        None => error.chain().take(64).any(|cause| {
-            cause.downcast_ref::<std::io::Error>().is_some()
-                || cause
-                    .downcast_ref::<tokio::time::error::Elapsed>()
-                    .is_some()
-        }),
-    }
-}
+/// Shared with the native source in [`crate::native::errors`].
+pub use crate::native::errors::connect_retryable;
 
 /// Full-jitter exponential backoff: uniform in `[0, min(cap, base * 2^n)]`.
 pub fn backoff(attempt: u32) -> Duration {

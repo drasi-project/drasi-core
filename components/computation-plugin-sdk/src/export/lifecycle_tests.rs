@@ -171,6 +171,12 @@ struct ProbeFactory {
 }
 
 impl Factory for ProbeFactory {
+    fn describe(
+        &self,
+        _request: &crate::wire::DescribeRequest,
+    ) -> anyhow::Result<crate::ComponentDescription> {
+        Ok(crate::ComponentDescription::undeclared())
+    }
     fn metadata(&self) -> FactoryMetadata {
         let directions = match self.options.role {
             ComponentRole::Source => vec![("out", PortDirection::Output)],

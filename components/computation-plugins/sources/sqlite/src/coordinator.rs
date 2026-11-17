@@ -1,9 +1,13 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+//! Pairs a journal source with its coordinated bootstrap providers: the
+//! providers snapshot the file before the source admits live writes, and the
+//! source/provider binding is retired together.
+
 use crate::{
     component::{Progress, SqliteSource},
-    Configuration,
+    config::{Mode, SourceConfig},
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -53,19 +57,33 @@ impl Snapshots {
     }
 }
 
+/// Set once the coordinator stops; every member then refuses work.
+#[derive(Clone, Default)]
+struct Retired(Arc<AtomicBool>);
+
+impl Retired {
+    fn ensure_active(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.0.load(Ordering::Acquire),
+            "SQLite source/bootstrap binding is retired"
+        );
+        Ok(())
+    }
+
+    fn retire(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
 pub(crate) struct SourceBinding {
     snapshots: Arc<Snapshots>,
     pub owner: Arc<OwnedSemaphorePermit>,
-    retired: Arc<AtomicBool>,
+    retired: Retired,
 }
 
 impl SourceBinding {
     pub fn ensure_active(&self) -> Result<()> {
-        anyhow::ensure!(
-            !self.retired.load(Ordering::Acquire),
-            "SQLite source/bootstrap binding is retired"
-        );
-        Ok(())
+        self.retired.ensure_active()
     }
 
     pub fn live_boundary(&self, progress: &Observed) -> Result<(Uuid, OwnedMutexGuard<()>)> {
@@ -84,16 +102,22 @@ impl SourceBinding {
 
 pub(crate) struct Coordinator {
     request: CreateRequest,
+    config: SourceConfig,
     members: BTreeMap<ComponentId, SourceProgressView>,
     snapshots: Arc<Snapshots>,
     source_owner: Arc<Semaphore>,
     current_source: Arc<Mutex<Weak<OwnedSemaphorePermit>>>,
-    retired: Arc<AtomicBool>,
+    retired: Retired,
 }
 
 impl Coordinator {
-    pub fn new(request: &CreateRequest, progress: SourceBootstrapProgress) -> Result<Self> {
-        let config: Configuration = serde_json::from_value(request.configuration.clone())?;
+    /// `config` is the request's configuration, already parsed and validated
+    /// by the factory.
+    pub fn new(
+        request: &CreateRequest,
+        config: SourceConfig,
+        progress: SourceBootstrapProgress,
+    ) -> Result<Self> {
         anyhow::ensure!(
             config.coordinated_snapshot,
             "SQLite coordination must be explicitly configured"
@@ -102,7 +126,8 @@ impl Coordinator {
             .scope
             .as_ref()
             .context("SQLite coordination requires graph scope")?;
-        let stream = StreamId::try_new(config.stream)?;
+        let stream = StreamId::try_new(config.stream.clone())?;
+        let engine = config.sqlite()?;
         let (members, snapshots) = match progress {
             SourceBootstrapProgress::Single(reader) => {
                 anyhow::ensure!(
@@ -110,8 +135,17 @@ impl Coordinator {
                     "SQLite coordinator progress belongs to another graph or source"
                 );
                 let members = BTreeMap::from([(reader.component_id().clone(), reader.clone())]);
-                let snapshot =
-                    SqliteSnapshot::new(request.id.clone(), stream, config.settings, reader)?;
+                anyhow::ensure!(
+                    config.mode == Mode::Replay,
+                    "SQLite single-owner coordination requires the replay factory"
+                );
+                let snapshot = SqliteSnapshot::new_with_options(
+                    request.id.clone(),
+                    stream,
+                    engine,
+                    config.connection(),
+                    reader,
+                )?;
                 (members, Snapshots::Single(Arc::new(snapshot)))
             }
             SourceBootstrapProgress::Shared { consumers, members } => {
@@ -120,10 +154,15 @@ impl Coordinator {
                         && consumers.producer_id() == &request.id,
                     "SQLite coordinator consumer set belongs to another graph or source"
                 );
-                let snapshots = SqliteConsumerSnapshots::new(
+                anyhow::ensure!(
+                    config.mode == Mode::Shared,
+                    "SQLite shared coordination requires the shared factory"
+                );
+                let snapshots = SqliteConsumerSnapshots::new_with_options(
                     request.id.clone(),
                     stream,
-                    config.settings,
+                    engine,
+                    config.connection(),
                     consumers,
                     members.clone(),
                 )?;
@@ -132,20 +171,17 @@ impl Coordinator {
         };
         Ok(Self {
             request: request.clone(),
+            config,
             members,
             snapshots: Arc::new(snapshots),
             source_owner: Arc::new(Semaphore::new(1)),
             current_source: Arc::new(Mutex::new(Weak::new())),
-            retired: Arc::new(AtomicBool::new(false)),
+            retired: Retired::default(),
         })
     }
 
     fn ensure_active(&self) -> Result<()> {
-        anyhow::ensure!(
-            !self.retired.load(Ordering::Acquire),
-            "SQLite source/bootstrap binding is retired"
-        );
-        Ok(())
+        self.retired.ensure_active()
     }
 
     fn validate_request(&self, request: &CreateRequest) -> Result<()> {
@@ -177,11 +213,10 @@ impl NativeSourceBootstrapCoordinator for Coordinator {
     fn create_source(
         &self,
         request: &CreateRequest,
-        _: ControlSender,
+        control: ControlSender,
         live: SourceBootstrapLiveProgress,
     ) -> Result<CreatedComponent> {
         self.validate_request(request)?;
-        let config: Configuration = serde_json::from_value(request.configuration.clone())?;
         let scope = request
             .scope
             .as_ref()
@@ -217,20 +252,13 @@ impl NativeSourceBootstrapCoordinator for Coordinator {
             .current_source
             .lock()
             .map_err(|_| anyhow::anyhow!("SQLite source lease poisoned"))? = Arc::downgrade(&owner);
-        let mut source = SqliteSource::build(
-            request.id.clone(),
-            StreamId::try_new(config.stream)?,
-            config.settings,
-            progress,
-        )?
-        .with_coordinator(SourceBinding {
-            snapshots: self.snapshots.clone(),
-            owner,
-            retired: self.retired.clone(),
-        });
-        if let Some(rest) = config.rest_api {
-            source = source.with_rest_api(rest)?;
-        }
+        let source = SqliteSource::build(request.id.clone(), self.config.clone(), progress)?
+            .with_control(control)
+            .with_coordinator(SourceBinding {
+                snapshots: self.snapshots.clone(),
+                owner,
+                retired: self.retired.clone(),
+            });
         self.ensure_active()?;
         Ok(Component::Source(Box::new(source)).into())
     }
@@ -277,7 +305,7 @@ impl NativeSourceBootstrapCoordinator for Coordinator {
     }
 
     async fn stop(&self) -> Result<()> {
-        self.retired.store(true, Ordering::Release);
+        self.retired.retire();
         match self.snapshots.as_ref() {
             Snapshots::Single(snapshot) => snapshot.stop().await?,
             Snapshots::Shared(snapshots) => {
@@ -298,18 +326,14 @@ enum ProviderSnapshot {
 struct Provider {
     snapshot: ProviderSnapshot,
     progress: SourceProgressView,
-    retired: Arc<AtomicBool>,
+    retired: Retired,
     instance: String,
     source: Arc<Mutex<Weak<OwnedSemaphorePermit>>>,
 }
 
 impl Provider {
     fn ensure_active(&self) -> Result<()> {
-        anyhow::ensure!(
-            !self.retired.load(Ordering::Acquire),
-            "SQLite source/bootstrap binding is retired"
-        );
-        Ok(())
+        self.retired.ensure_active()
     }
 
     fn ensure_source_owner(&self) -> Result<()> {

@@ -99,7 +99,7 @@ async fn postgres_erase_drops_only_managed_slots_idempotently_and_refuses_active
         .await
         .expect_err("an active owned slot is never dropped");
     assert!(
-        matches!(cdc_error(&error), Some(PostgresCdcError::SlotActive(_))),
+        matches!(cdc_error(&error), Some(PostgresCdcError::StateInUse(_))),
         "{error:#}"
     );
     source.stop(&lifecycle_ctx::stop()).await?;

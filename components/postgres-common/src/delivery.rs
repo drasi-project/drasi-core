@@ -5,7 +5,7 @@
 //!
 //! [`PostgresDeliveryHandler`] is the format-1 destination used by the legacy
 //! reaction (`public.drasi_delivery_stream_v1`). The native sink uses the
-//! per-consumer format-2 cursor in [`progress`].
+//! per-consumer format-3 cursor in [`progress`].
 
 pub mod progress;
 
@@ -103,6 +103,10 @@ impl<E: PostgresDeliveryEffect> PostgresDeliveryHandler<E> {
         item: DeliveryItem<'_>,
     ) -> Result<()> {
         item.position.validate()?;
+        anyhow::ensure!(
+            item.position.epoch().is_none(),
+            "the format-1 delivery cursor accepts only exactly-once delivery"
+        );
         let stream = item.position.stream().to_owned();
         let sequence = item.position.sequence();
         let operations = i64::try_from(item.position.operations())?;

@@ -1050,11 +1050,9 @@ fn declarative_durability_requires_persistent_dependencies_and_lossless_transpor
         ),
         (
             indexes_id,
-            ResourceHandle::new(
+            drasi_lib::computation::v1::QueryIndexProviderResource::handle(
                 ResourceRole::IndexBackend,
-                Arc::new(QueryIndexProviderResource(Arc::new(
-                    InMemoryComputationProvider,
-                ))),
+                Arc::new(InMemoryComputationProvider),
             ),
         ),
     ]);
@@ -1640,6 +1638,9 @@ struct ProgressSource {
 }
 #[async_trait]
 impl ComputationComponent for ProgressSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -1657,6 +1658,9 @@ impl EnvelopeSource for ProgressSource {
 struct ProgressSink(ComponentDescriptor);
 #[async_trait]
 impl ComputationComponent for ProgressSink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }
@@ -2190,6 +2194,9 @@ struct GatedSource {
 }
 #[async_trait]
 impl ComputationComponent for GatedSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -2214,6 +2221,9 @@ struct SignalSink {
 }
 #[async_trait]
 impl ComputationComponent for SignalSink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -2317,9 +2327,9 @@ async fn declared_graph_confirms_wakeup_continuation_and_live_fanout_only_after_
         (
             provider_id,
             ResourceRole::IndexBackend,
-            ResourceHandle::new(
+            drasi_lib::computation::v1::QueryIndexProviderResource::handle(
                 ResourceRole::IndexBackend,
-                Arc::new(QueryIndexProviderResource(provider.clone())),
+                provider.clone(),
             ),
         ),
         (

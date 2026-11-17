@@ -95,6 +95,9 @@ fn component_id(value: u128) -> ComponentId {
 
 #[async_trait]
 impl ComputationComponent for Service {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

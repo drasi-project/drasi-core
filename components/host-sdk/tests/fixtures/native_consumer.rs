@@ -12,6 +12,21 @@ use std::sync::Mutex;
 pub struct Factory(pub sdk::ConsumerMode);
 
 impl sdk::Factory for Factory {
+    /// Inputs deliver keyed on producer identity with the configured
+    /// `deliveryGuarantee` (a transactional consumer only exactly once).
+    fn describe(
+        &self,
+        request: &sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<sdk::ComponentDescription> {
+        let guarantee: sdk::DeliveryGuarantee = match self.0 {
+            sdk::ConsumerMode::Transactional => sdk::DeliveryGuarantee::ExactlyOnce,
+            sdk::ConsumerMode::External => {
+                serde_json::from_value(request.request.configuration["deliveryGuarantee"].clone())
+                    .unwrap_or_default()
+            }
+        };
+        Ok(request.consumer(guarantee))
+    }
     fn metadata(&self) -> sdk::FactoryMetadata {
         sdk::FactoryMetadata {
             implementation: ImplementationIdentity::try_new(
@@ -25,7 +40,7 @@ impl sdk::Factory for Factory {
             role: ComponentRole::Sink,
             configuration_version: 1,
             configuration: sdk::ConfigSchema {
-                fields: ["path", "mode", "signal"]
+                fields: ["path", "mode", "signal", "deliveryGuarantee"]
                     .into_iter()
                     .map(|name| {
                         (
@@ -197,6 +212,9 @@ impl std::error::Error for Retry {}
 impl DeliveryHandler for Handler {
     fn retryable(&self, error: &anyhow::Error) -> bool {
         error.is::<Retry>()
+    }
+    fn delivery_guarantee(&self) -> drasi_computation_contracts::DeliveryGuarantee {
+        serde_json::from_value(self.configuration["deliveryGuarantee"].clone()).unwrap_or_default()
     }
     async fn handle(&mut self, item: DeliveryItem<'_>) -> anyhow::Result<()> {
         self.injected_failure(item.position.operation()).await?;

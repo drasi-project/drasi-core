@@ -282,6 +282,9 @@ mod persistent_progress {
     }
     #[async_trait]
     impl ComputationComponent for Sink {
+        fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+            drasi_lib::computation::v1::ComponentDescription::undeclared()
+        }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.descriptor
         }
@@ -775,9 +778,9 @@ mod persistent_progress {
             (
                 "indexes",
                 ResourceRole::IndexBackend,
-                ResourceHandle::new(
+                drasi_lib::computation::v1::QueryIndexProviderResource::handle(
                     ResourceRole::IndexBackend,
-                    Arc::new(QueryIndexProviderResource(indexes.clone())),
+                    indexes.clone(),
                 ),
             ),
             (

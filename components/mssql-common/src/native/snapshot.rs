@@ -2,10 +2,15 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::{
-    catalog::SqlClient, element_size, engine::element, quoted, table_name, Catalog, Cursor,
-    NativeConfig, Work,
+    catalog::{read_catalog, read_snapshot_catalog},
+    element, element_size,
+    markers::new_marker,
+    quoted,
+    session::CdcSession,
+    sql_session::{properties, TiberiusConnector, TiberiusSession},
+    Catalog, Cursor, NativeSettings, Work,
 };
-use crate::{Lsn, MsSqlConnection};
+use crate::{client::Authentication, Lsn};
 use anyhow::{ensure, Context, Result};
 use drasi_core_types::models::SourceChange;
 use futures_util::TryStreamExt;
@@ -250,23 +255,38 @@ impl Drop for SnapshotRows {
     }
 }
 
+/// Starts a snapshot of the selected tables on an owned worker.
+///
+/// `marker_prefix` selects a coordinated snapshot: it requires
+/// `barrierTable`, and the marker it writes carries this prefix (see
+/// [`super::markers`]) so the paired source's erasing removal can find an
+/// orphan. Without it, the snapshot is read-only and returns no CDC cut.
 pub fn start_snapshot(
-    config: NativeConfig,
+    settings: NativeSettings,
+    authentication: Authentication,
     source: String,
     labels: Vec<String>,
-    coordinated: bool,
+    marker_prefix: Option<String>,
 ) -> Result<(Arc<SnapshotRun>, SnapshotRows)> {
-    config.validate()?;
+    settings.validate()?;
     ensure!(
-        coordinated == config.barrier_table.is_some(),
-        "SQL Server snapshot mode and marker configuration disagree"
+        marker_prefix.is_some() == settings.barrier_table.is_some(),
+        "SQL Server snapshot mode and barrierTable disagree"
     );
     SnapshotRun::spawn(
-        config.max_rows,
-        config.max_bytes,
-        config.timeout(),
+        settings.max_rows,
+        settings.max_bytes,
+        settings.command_timeout(),
         move |sender, cancel| {
-            database_snapshot(config, source, labels, coordinated, sender, cancel)
+            database_snapshot(
+                settings,
+                authentication,
+                source,
+                labels,
+                marker_prefix,
+                sender,
+                cancel,
+            )
         },
     )
 }
@@ -276,94 +296,163 @@ fn check_cancel(cancel: &watch::Receiver<bool>) -> Result<()> {
 }
 
 async fn database_snapshot(
-    config: NativeConfig,
+    settings: NativeSettings,
+    authentication: Authentication,
     source: String,
     labels: Vec<String>,
-    coordinated: bool,
+    marker_prefix: Option<String>,
     sender: Sender,
     cancel: watch::Receiver<bool>,
 ) -> Completion {
-    let mut connection = match MsSqlConnection::connect(&config.connection).await {
-        Ok(connection) => connection,
-        Err(error) => {
-            return Completion {
-                operation_error: Some(format!("{error:#}")),
-                ..Default::default()
-            }
-        }
+    let failed = |error: anyhow::Error| Completion {
+        operation_error: Some(format!("{error:#}")),
+        ..Default::default()
     };
+    let connector = TiberiusConnector::new(&settings, &authentication);
+    let mut session = match connector.client().await {
+        Ok(client) => TiberiusSession::new(client),
+        Err(error) => return failed(error),
+    };
+    let coordinated = marker_prefix.is_some();
     let mut marker = if coordinated {
-        match MsSqlConnection::connect(&config.connection).await {
-            Ok(connection) => Some(connection),
-            Err(error) => {
-                return Completion {
-                    operation_error: Some(format!("{error:#}")),
-                    ..Default::default()
-                }
-            }
+        match connector.client().await {
+            Ok(client) => Some(TiberiusSession::new(client)),
+            Err(error) => return failed(error),
         }
     } else {
         None
     };
-    let token = uuid::Uuid::new_v4();
-    let mut marker_table = None;
+    let token = match marker_prefix.as_deref().map(new_marker).transpose() {
+        Ok(token) => token,
+        Err(error) => return failed(error),
+    };
+    let mut marker_table: Option<String> = None;
     let mut marker_attempted = false;
-    let client = connection.client_mut();
-    let result=async {
+    let result = async {
         check_cancel(&cancel)?;
-        let catalog=if coordinated {Some(Catalog::read(client,&config).await?)} else {None};
-        let isolation=if coordinated {"SERIALIZABLE"} else {"SNAPSHOT"};
-        client.simple_query(format!("SET LOCK_TIMEOUT {}; SET TRANSACTION ISOLATION LEVEL {isolation}; BEGIN TRANSACTION",
-            i32::try_from(config.operation_timeout_ms)?)).await?.into_results().await?;
-        let catalog=match catalog {Some(catalog)=>catalog,None=>Catalog::read_snapshot(client,&config).await?};
-        let boundary=if let Some(marker)=marker.as_mut() {
+        let catalog = if coordinated {
+            Some(read_catalog(&mut session, &settings, false).await?)
+        } else {
+            None
+        };
+        let isolation = if coordinated { "SERIALIZABLE" } else { "SNAPSHOT" };
+        session
+            .client_mut()
+            .simple_query(format!(
+                "SET LOCK_TIMEOUT {}; SET TRANSACTION ISOLATION LEVEL {isolation}; BEGIN TRANSACTION",
+                i32::try_from(settings.command_timeout_ms)?
+            ))
+            .await?
+            .into_results()
+            .await?;
+        let catalog = match catalog {
+            Some(catalog) => catalog,
+            None => read_snapshot_catalog(&mut session, &settings).await?,
+        };
+        let boundary = if let (Some(marker), Some(token)) = (marker.as_mut(), token.as_deref()) {
             for table in &catalog.tables {
                 check_cancel(&cancel)?;
-                client.simple_query(format!("SELECT TOP (1) 1 AS locked FROM {} WITH (TABLOCK,HOLDLOCK)",table.sql()))
-                    .await?.into_results().await?;
+                session
+                    .client_mut()
+                    .simple_query(format!(
+                        "SELECT TOP (1) 1 AS locked FROM {} WITH (TABLOCK, HOLDLOCK)",
+                        table.sql()
+                    ))
+                    .await?
+                    .into_results()
+                    .await?;
             }
-            let (schema,name)=table_name(config.barrier_table.as_deref().context("CDC barrier missing")?)?;
-            marker_table=Some(format!("{}.{}",quoted(&schema),quoted(&name)));
-            let marker=marker.client_mut();
-            let captures=marker.query(
-                "SELECT ct.capture_instance FROM cdc.change_tables ct JOIN sys.tables t ON t.object_id=ct.source_object_id \
-                 JOIN sys.schemas s ON s.schema_id=t.schema_id WHERE s.name=@P1 AND t.name=@P2",&[&schema,&name])
-                .await?.into_first_result().await?;
-            ensure!(captures.len()==1,"SQL Server barrier must have exactly one CDC capture instance");
-            let capture=captures[0].try_get::<&str,_>(0)?.context("missing barrier capture")?.to_owned();
+            let barrier = settings.barrier()?.context("barrierTable missing")?;
+            marker_table = Some(barrier.sql());
+            let captures = marker
+                .capture_instances()
+                .await?
+                .into_iter()
+                .filter(|capture| barrier.matches(&capture.schema, &capture.table))
+                .collect::<Vec<_>>();
+            ensure!(
+                captures.len() == 1,
+                "the SQL Server barrier table must have exactly one CDC capture instance"
+            );
+            let change_table = format!("cdc.{}", quoted(&format!("{}_CT", captures[0].capture)));
             check_cancel(&cancel)?;
-            marker_attempted=true;
-            marker.execute(format!("INSERT INTO {} (token) VALUES (@P1)",marker_table.as_ref().context("marker table")?),&[&token]).await?;
-            let deadline=tokio::time::Instant::now()+config.timeout();
-            let boundary=loop {
+            marker_attempted = true;
+            marker
+                .client_mut()
+                .execute(
+                    format!(
+                        "INSERT INTO {} (token) VALUES (CONVERT(uniqueidentifier, @P1))",
+                        barrier.sql()
+                    ),
+                    &[&token],
+                )
+                .await?;
+            let deadline = tokio::time::Instant::now() + settings.command_timeout();
+            let boundary = loop {
                 check_cancel(&cancel)?;
-                let rows=marker.query(format!("SELECT __$start_lsn FROM cdc.{} WHERE token=@P1 AND __$operation=2",
-                    quoted(&format!("{capture}_CT"))),&[&token]).await?.into_first_result().await?;
-                if let Some(row)=rows.first() {
-                    break *Lsn::from_bytes(row.try_get::<&[u8],_>(0)?.context("barrier LSN missing")?)?.as_bytes();
+                let rows = marker
+                    .client_mut()
+                    .query(
+                        format!(
+                            "SELECT __$start_lsn FROM {change_table} \
+                             WHERE token = CONVERT(uniqueidentifier, @P1) AND __$operation = 2"
+                        ),
+                        &[&token],
+                    )
+                    .await?
+                    .into_first_result()
+                    .await?;
+                if let Some(row) = rows.first() {
+                    break *Lsn::from_bytes(
+                        row.try_get::<&[u8], _>(0)?.context("barrier LSN missing")?,
+                    )?
+                    .as_bytes();
                 }
-                ensure!(tokio::time::Instant::now()<deadline,"SQL Server CDC barrier capture timed out");
+                ensure!(
+                    tokio::time::Instant::now() < deadline,
+                    "SQL Server CDC barrier capture timed out; check that the capture job runs"
+                );
                 tokio::time::sleep(Duration::from_millis(25)).await;
             };
-            Some(Cursor::boundary(catalog.binding,boundary))
-        } else {None};
-        stream_tables(client,&config,&source,&labels,&catalog,&sender,&cancel).await?;
-        let verified=if coordinated {Catalog::read(client,&config).await?} else {Catalog::read_snapshot(client,&config).await?};
-        ensure!(verified.binding==catalog.binding,"SQL Server schema changed during snapshot");
-        if let Some(boundary)=&boundary {
-            for table in &catalog.tables {
-                let min=super::engine::lsn(client,"SELECT sys.fn_cdc_get_min_lsn(@P1)",&[&table.capture]).await?;
-                ensure!(min!=[0;10] && min<=boundary.lsn,"SQL Server snapshot CDC boundary expired before completion");
+            Some(Cursor::boundary(catalog.binding, boundary))
+        } else {
+            None
+        };
+        stream_tables(&mut session, &settings, &source, &labels, &catalog, &sender, &cancel)
+            .await?;
+        let verified = if coordinated {
+            read_catalog(&mut session, &settings, false).await?
+        } else {
+            read_snapshot_catalog(&mut session, &settings).await?
+        };
+        ensure!(
+            verified.binding == catalog.binding,
+            "SQL Server schema changed during the snapshot"
+        );
+        if let Some(boundary) = &boundary {
+            let captures: Vec<&str> = catalog.tables.iter().map(|t| t.capture.as_str()).collect();
+            for min in session.min_lsns(&captures).await? {
+                ensure!(
+                    min != [0; 10] && min <= boundary.lsn,
+                    "SQL Server snapshot CDC boundary expired before completion"
+                );
             }
         }
         check_cancel(&cancel)?;
-        client.simple_query("COMMIT TRANSACTION").await?.into_results().await?;
-        Ok::<_,anyhow::Error>(boundary)
-    }.await;
+        session
+            .client_mut()
+            .simple_query("COMMIT TRANSACTION")
+            .await?
+            .into_results()
+            .await?;
+        Ok::<_, anyhow::Error>(boundary)
+    }
+    .await;
     // No SQL future is abandoned on cancellation. An in-flight FETCH contains
     // at most the configured bounded batch; cleanup drains it before rollback.
     let rollback = async {
-        client
+        session
+            .client_mut()
             .simple_query(
                 "IF CURSOR_STATUS('global','drasi_native_snapshot')>=0 CLOSE drasi_native_snapshot;
             IF CURSOR_STATUS('global','drasi_native_snapshot')>=-1 DEALLOCATE drasi_native_snapshot;
@@ -383,7 +472,7 @@ async fn database_snapshot(
                 .client_mut()
                 .execute(
                     format!(
-                        "DELETE FROM {} WHERE token=@P1",
+                        "DELETE FROM {} WHERE token = CONVERT(uniqueidentifier, @P1)",
                         marker_table.as_ref().context("owned marker table lost")?
                     ),
                     &[&token],
@@ -394,7 +483,10 @@ async fn database_snapshot(
     }
     .await;
     let cleanup_error = if rollback.is_err() || cleanup.is_err() {
-        Some(format!("SQL Server snapshot cleanup not confirmed for token {token}: rollback={rollback:?}, marker={cleanup:?}"))
+        Some(format!(
+            "SQL Server snapshot cleanup not confirmed for marker {token:?}: rollback={rollback:?}, \
+             marker={cleanup:?}; the source's erasing removal deletes orphaned markers"
+        ))
     } else {
         None
     };
@@ -413,17 +505,18 @@ async fn database_snapshot(
 }
 
 async fn stream_tables(
-    client: &mut SqlClient,
-    config: &NativeConfig,
+    session: &mut TiberiusSession,
+    settings: &NativeSettings,
     source: &str,
     labels: &[String],
     catalog: &Catalog,
     sender: &Sender,
     cancel: &watch::Receiver<bool>,
 ) -> Result<()> {
-    let batch = config.max_rows.min(64);
+    let batch = settings.max_rows.min(64);
     let fetch = "FETCH NEXT FROM drasi_native_snapshot;".repeat(batch);
-    let timestamp = chrono::Utc::now().timestamp_millis() as u64;
+    let timestamp = u64::try_from(chrono::Utc::now().timestamp_millis())?;
+    let client = session.client_mut();
     for table in &catalog.tables {
         if !labels.is_empty()
             && !labels.iter().any(|label| {
@@ -452,9 +545,9 @@ async fn stream_tables(
             let mut count = 0;
             while let Some(row) = rows.try_next().await? {
                 check_cancel(cancel)?;
-                let element = element(source, table, &row, timestamp)?;
+                let node = element(source, table, properties(table, &row, 0)?, timestamp)?;
                 drop(row);
-                sender.send(SourceChange::Insert { element }).await?;
+                sender.send(SourceChange::Insert { element: node }).await?;
                 count += 1;
             }
             if count < batch {

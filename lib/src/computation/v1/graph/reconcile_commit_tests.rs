@@ -56,6 +56,9 @@ impl Drop for ConstructionAttempt {
 struct RemovalService(ComponentDescriptor, Arc<RemovalAcquisition>);
 #[async_trait]
 impl crate::computation::v1::ComputationComponent for RemovalService {
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        crate::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }
@@ -92,6 +95,12 @@ impl crate::computation::v1::ComputationService for RemovalService {
 }
 #[async_trait]
 impl ComponentFactory for RemovalFactory {
+    fn describe(
+        &self,
+        _context: &crate::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<crate::computation::v1::ComponentDescription> {
+        Ok(crate::computation::v1::ComponentDescription::undeclared())
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }
@@ -295,6 +304,9 @@ async fn destructive_declaration_removal_retains_acquisitions_and_constructed_ow
 }
 #[async_trait]
 impl crate::computation::v1::ComputationComponent for Source {
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        crate::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }
@@ -309,6 +321,9 @@ impl crate::computation::v1::EnvelopeSource for Source {
 struct Sink(ComponentDescriptor);
 #[async_trait]
 impl crate::computation::v1::ComputationComponent for Sink {
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        crate::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }
@@ -352,6 +367,12 @@ impl SinkFactory {
 
 #[async_trait]
 impl ComponentFactory for SinkFactory {
+    fn describe(
+        &self,
+        _context: &crate::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<crate::computation::v1::ComponentDescription> {
+        Ok(crate::computation::v1::ComponentDescription::undeclared())
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.0
     }
@@ -393,6 +414,9 @@ struct StartingService {
 
 #[async_trait]
 impl crate::computation::v1::ComputationComponent for StartingService {
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        crate::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -724,6 +748,9 @@ struct ProgressSource {
 
 #[async_trait]
 impl crate::computation::v1::ComputationComponent for ProgressSource {
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        crate::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -748,6 +775,9 @@ struct ProgressSink {
 
 #[async_trait]
 impl crate::computation::v1::ComputationComponent for ProgressSink {
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        crate::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -1169,6 +1199,9 @@ struct StartupBindingSource {
 
 #[async_trait]
 impl crate::computation::v1::ComputationComponent for StartupBindingSource {
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        crate::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -1254,6 +1287,12 @@ impl StartupBindingSourceFactory {
 
 #[async_trait]
 impl ComponentFactory for StartupBindingSourceFactory {
+    fn describe(
+        &self,
+        _context: &crate::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<crate::computation::v1::ComponentDescription> {
+        Ok(crate::computation::v1::ComponentDescription::undeclared())
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }
@@ -1549,6 +1588,9 @@ impl Drop for StopReservationRun {
 
 #[async_trait]
 impl crate::computation::v1::ComputationComponent for StopReservationService {
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        crate::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

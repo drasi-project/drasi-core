@@ -185,6 +185,9 @@ fn relay_source() -> (RelaySource, SourceHandle) {
 
 #[async_trait]
 impl ComputationComponent for RelaySource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -286,6 +289,9 @@ struct Sink {
 
 #[async_trait]
 impl ComputationComponent for Sink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -954,6 +960,9 @@ fn probe(name: &str) -> Probe {
 
 #[async_trait]
 impl ComputationComponent for Probe {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -1167,6 +1176,9 @@ struct DurableProbe {
 
 #[async_trait]
 impl ComputationComponent for DurableProbe {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -1303,6 +1315,9 @@ struct DelayedProvider {
 
 #[async_trait]
 impl ComputationComponent for DelayedProvider {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         self.inner.descriptor()
     }

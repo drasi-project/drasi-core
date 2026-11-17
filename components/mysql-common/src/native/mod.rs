@@ -16,10 +16,13 @@ use std::{
 pub mod binlog;
 pub mod catalog;
 pub mod connection;
+pub mod ddl;
+pub mod errors;
 pub mod progress;
 pub mod rows;
 pub mod schema;
 pub mod session;
+pub mod settings;
 pub mod snapshot;
 pub mod source;
 pub mod standalone_snapshot;
@@ -27,6 +30,7 @@ pub mod standalone_snapshot;
 mod tests;
 pub use crate::dto::SslModeDto as MySqlTlsMode;
 pub use connection::MySqlServerError;
+pub use settings::{MySqlSourceSettings, MySqlTableKey, StartFrom};
 pub use snapshot::MySqlSnapshot;
 pub use source::MySqlSource;
 
@@ -40,6 +44,12 @@ pub struct MySqlConnectionConfig {
     pub password: String,
     pub ssl_mode: MySqlTlsMode,
     pub tls_ca_pem: Option<String>,
+    /// Client certificate chain (PEM) presented for mutual TLS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_client_cert_pem: Option<String>,
+    /// PKCS#8 private key (PEM) of the client certificate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_client_key_pem: Option<String>,
     pub server_id: NonZeroU32,
     pub heartbeat_interval_ms: NonZeroU64,
 }
@@ -58,8 +68,7 @@ impl MySqlConnectionConfig {
             !self.host.trim().is_empty()
                 && self.port != 0
                 && (credentials_bound || !self.user.is_empty())
-                && crate::is_valid_identifier(&self.database)
-                && self.database.len() <= 64
+                && settings::validate_identifier("database", &self.database).is_ok()
                 && [&self.host, &self.database, &self.user, &self.password]
                     .iter()
                     .all(|value| !value.contains('\0')),
@@ -77,11 +86,21 @@ impl MySqlConnectionConfig {
                 <= max_bytes / 2,
             "MySQL connection settings exceed protocol byte limit"
         );
+        for pem in [
+            &self.tls_ca_pem,
+            &self.tls_client_cert_pem,
+            &self.tls_client_key_pem,
+        ] {
+            anyhow::ensure!(
+                pem.as_ref().is_none_or(|pem| !pem.is_empty()
+                    && pem.len() <= 64 * 1024
+                    && pem.len() <= max_bytes),
+                "MySQL TLS PEM material must fit protocol limit and 64 KiB"
+            );
+        }
         anyhow::ensure!(
-            self.tls_ca_pem.as_ref().is_none_or(|pem| !pem.is_empty()
-                && pem.len() <= 64 * 1024
-                && pem.len() <= max_bytes),
-            "MySQL CA certificate must fit protocol limit and 64 KiB"
+            self.tls_client_cert_pem.is_some() == self.tls_client_key_pem.is_some(),
+            "MySQL client certificate and key must be configured together"
         );
         Ok(())
     }
@@ -97,6 +116,7 @@ impl fmt::Debug for MySqlConnectionConfig {
             .field("user", &self.user)
             .field("password", &"[REDACTED]")
             .field("ssl_mode", &self.ssl_mode)
+            .field("client_certificate", &self.tls_client_cert_pem.is_some())
             .field("server_id", &self.server_id)
             .finish_non_exhaustive()
     }
@@ -149,6 +169,14 @@ pub struct MySqlConfig {
     pub transactions: SourceTransactionLimits,
     pub max_protocol_bytes: NonZeroUsize,
     pub io_timeout_ms: NonZeroU64,
+    /// Total time to keep reconnecting after a transport failure; `0`
+    /// disables reconnection.
+    #[serde(default = "default_reconnect_budget_ms")]
+    pub reconnect_budget_ms: u64,
+}
+
+fn default_reconnect_budget_ms() -> u64 {
+    settings::DEFAULT_RECONNECT_BUDGET_MS
 }
 
 impl MySqlConfig {
@@ -191,9 +219,13 @@ impl MySqlConfig {
         anyhow::ensure!(
             self.tables
                 .iter()
-                .all(|table| table.len() <= 64 && crate::is_valid_identifier(table))
+                .all(|table| settings::validate_identifier("table", table).is_ok())
                 && self.tables.iter().collect::<BTreeSet<_>>().len() == self.tables.len(),
             "native MySQL requires distinct valid table names"
+        );
+        anyhow::ensure!(
+            self.reconnect_budget_ms <= settings::MAX_RECONNECT_BUDGET_MS,
+            "MySQL reconnect budget is at most one day"
         );
         anyhow::ensure!(
             self.table_keys
@@ -206,8 +238,7 @@ impl MySqlConfig {
         );
         for key in &self.table_keys {
             anyhow::ensure!(
-                key.table.len() <= 64
-                    && crate::is_valid_identifier(&key.table)
+                settings::validate_identifier("table", &key.table).is_ok()
                     && (self.tables.is_empty() || self.tables.contains(&key.table))
                     && !key.key_columns.is_empty()
                     && key.key_columns.iter().collect::<BTreeSet<_>>().len()
@@ -242,6 +273,19 @@ impl MySqlConfig {
 
     pub fn timeout(&self) -> Duration {
         Duration::from_millis(self.io_timeout_ms.get())
+    }
+
+    /// The reconnect budget, or `None` when reconnection is disabled.
+    pub fn reconnect_budget(&self) -> Option<Duration> {
+        (self.reconnect_budget_ms > 0).then(|| Duration::from_millis(self.reconnect_budget_ms))
+    }
+
+    /// The configuration with activation credentials applied.
+    pub fn with_credentials(&self, user: String, password: String) -> Self {
+        let mut config = self.clone();
+        config.connection.user = user;
+        config.connection.password = password;
+        config
     }
 }
 

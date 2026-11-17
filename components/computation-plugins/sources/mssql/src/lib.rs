@@ -1,30 +1,45 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-mod source;
+//! Native SQL Server CDC source (`drasi.mssql/changes`).
+//!
+//! One worker per activation polls the selected tables' CDC change tables
+//! over one reused connection, in bounded pages, and emits one envelope per
+//! row change to a fixed set of consumers with per-consumer replay. It
+//! pauses at page boundaries, reconnects after transport failures, fails
+//! with typed errors on schema or retention problems, supports managed
+//! updates, and deletes its own orphaned snapshot markers on erasing
+//! removal.
+//!
+//! See `DESIGN.md` and `CONFIGURATION.md` in this crate. Live SQL Server
+//! qualification is deferred (CW-78).
+
+mod component;
+pub mod config;
+mod management;
+mod progress;
+mod worker;
+
 use anyhow::{Context, Result};
+use config::SourceConfig;
 use drasi_computation_contracts::{
-    ComponentRole, GraphChangeCodec, ImplementationIdentity, StreamId,
+    ComponentRole, ComponentUpdateMode, GraphChangeCodec, ImplementationIdentity,
 };
 use drasi_computation_plugin_sdk::{
-    Capabilities, Component, ConfigSchema, ConfigType, ControlSender, CreateRequest,
-    CreatedComponent, Factory, FactoryMetadata, NativeConsumerProgress, PluginDefinition,
+    lifecycle::Assessment, ActivationCredentialContext, Capabilities, Component, ConfigDetails,
+    ControlSender, CreateRequest, CreatedComponent, Factory, FactoryMetadata,
+    NativeConsumerProgress, PluginDefinition, UpdateRequest,
 };
-pub use drasi_mssql_common::native::NativeConfig as MsSqlConfig;
-use serde::{Deserialize, Serialize};
-pub use source::MsSqlSource;
 use std::sync::Arc;
+
+pub use component::{tiberius_connectors, ConnectorFactory, MsSqlSource};
+pub use drasi_mssql_common::native::NativeSettings;
 
 pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
 pub const MSSQL_SOURCE: &str = "drasi.mssql/changes";
-pub struct MsSqlSourceFactory;
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Configuration {
-    pub stream: String,
-    pub settings: MsSqlConfig,
-}
+/// Factory for `drasi.mssql/changes`.
+pub struct MsSqlSourceFactory;
 
 pub fn plugin() -> Result<PluginDefinition> {
     PluginDefinition::new(
@@ -35,27 +50,93 @@ pub fn plugin() -> Result<PluginDefinition> {
     )
 }
 
+impl MsSqlSourceFactory {
+    /// Creates the source with `connectors` (tests inject an in-memory
+    /// database; the factory uses Tiberius).
+    pub fn create_source(
+        &self,
+        request: &CreateRequest,
+        progress: &NativeConsumerProgress,
+        connectors: ConnectorFactory,
+    ) -> Result<MsSqlSource> {
+        self.metadata()
+            .configuration
+            .validate(&request.configuration)?;
+        let config = SourceConfig::from_value(&request.configuration)?;
+        let scope = request
+            .scope
+            .as_ref()
+            .context("SQL Server source requires graph scope")?;
+        let reader = progress.reader();
+        anyhow::ensure!(
+            reader.graph_id() == scope.graph_id && reader.producer_id() == &request.id,
+            "SQL Server consumer progress belongs to another graph or producer"
+        );
+        MsSqlSource::new(
+            request.id.clone(),
+            config,
+            reader,
+            progress.consumer_ids(),
+            request.activation_credentials_bound,
+            connectors,
+        )
+    }
+}
+
 impl Factory for MsSqlSourceFactory {
+    /// Outputs carry only source replay progress unless published through a Host admission channel.
+    fn describe(
+        &self,
+        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(request.source_description(
+            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
+            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
+        ))
+    }
     fn metadata(&self) -> FactoryMetadata {
-        let mut configuration = ConfigSchema::from_fields([
-            ("stream", ConfigType::String, true),
-            ("settings", ConfigType::Object, true),
-        ]);
-        configuration
-            .fields
-            .get_mut("settings")
-            .expect("settings")
-            .secret = true;
         FactoryMetadata {
+            // Constant identifiers; validated by `ExportedPlugin::new`.
             implementation: ImplementationIdentity::try_new(MSSQL_SOURCE, "1")
-                .expect("implementation"),
+                .expect("constant implementation"),
             role: ComponentRole::Source,
             configuration_version: 1,
-            configuration,
+            configuration: config::definition().schema(),
             ports: MsSqlSource::ports().expect("constant port descriptor"),
             completion: None,
-            capabilities: Capabilities::default(),
+            capabilities: Capabilities {
+                management: true,
+                update_modes: vec![ComponentUpdateMode::InPlace, ComponentUpdateMode::Restart],
+                erases_owned_state: true,
+                // Outputs carry source replay progress, not a producer identity of their
+                // own (Host admission, when bound, publishes under its durable identity).
+                ..Capabilities::default()
+            },
         }
+    }
+    fn configuration_details(&self) -> Option<ConfigDetails> {
+        Some(config::definition().details())
+    }
+    fn supports_update_planning(&self) -> bool {
+        true
+    }
+    fn assess(&self, request: &UpdateRequest) -> Result<Assessment> {
+        management::assess(request)
+    }
+    fn supports_activation_credentials(&self) -> bool {
+        true
+    }
+    fn activation_credential_context(
+        &self,
+        request: &CreateRequest,
+    ) -> Result<ActivationCredentialContext> {
+        let config = SourceConfig::from_value(&request.configuration)?;
+        let context = ActivationCredentialContext {
+            hostname: config.settings.host,
+            port: config.settings.port,
+        };
+        context.validate()?;
+        Ok(context)
     }
     fn supports_consumer_progress(&self) -> bool {
         true
@@ -66,28 +147,13 @@ impl Factory for MsSqlSourceFactory {
     fn create_with_consumer_progress(
         &self,
         request: &CreateRequest,
-        _: ControlSender,
+        _control: ControlSender,
         progress: NativeConsumerProgress,
     ) -> Result<CreatedComponent> {
-        self.metadata()
-            .configuration
-            .validate(&request.configuration)?;
-        let configuration: Configuration = serde_json::from_value(request.configuration.clone())?;
-        let scope = request
-            .scope
-            .as_ref()
-            .context("SQL Server source requires graph scope")?;
-        let reader = progress.reader();
-        anyhow::ensure!(
-            reader.graph_id() == scope.graph_id && reader.producer_id() == &request.id,
-            "SQL Server consumer scope mismatch"
-        );
-        Ok(Component::Source(Box::new(MsSqlSource::new(
-            request.id.clone(),
-            StreamId::try_new(configuration.stream)?,
-            configuration.settings,
-            reader,
-            progress.consumer_ids(),
+        Ok(Component::Source(Box::new(self.create_source(
+            request,
+            &progress,
+            tiberius_connectors(),
         )?))
         .into())
     }
@@ -99,6 +165,7 @@ drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn factory_metadata_constructs_without_database_io() -> Result<()> {
         drasi_computation_plugin_sdk::ExportedPlugin::new(plugin()?)?;
@@ -111,64 +178,51 @@ mod tests {
         assert_eq!(metadata.ports.len(), 1);
         assert_eq!(metadata.ports[0].id().as_str(), "out");
         assert_eq!(
-            metadata.ports[0].direction(),
-            drasi_computation_contracts::PortDirection::Output
-        );
-        assert_eq!(
             metadata.ports[0].schema(),
             GraphChangeCodec::schema().descriptor()
         );
-        let id = drasi_computation_contracts::ComponentId::generate();
-        let descriptor = MsSqlSource::describe(id.clone())?;
-        assert_eq!(descriptor.id(), &id);
-        assert_eq!(descriptor.ports(), metadata.ports.as_slice());
+        assert!(metadata.capabilities.management && metadata.capabilities.erases_owned_state);
+        assert!(metadata.configuration.fields["password"].secret);
+        assert!(!metadata.configuration.fields.contains_key("settings"));
         assert!(MsSqlSourceFactory.supports_consumer_progress());
-        assert!(metadata.configuration.fields["settings"].secret);
+        assert!(MsSqlSourceFactory.supports_activation_credentials());
+        let details = MsSqlSourceFactory
+            .configuration_details()
+            .context("configuration details")?;
+        details.validate_schema(&metadata.configuration)?;
         Ok(())
     }
-}
 
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) mod lifecycle_ctx {
-    use drasi_computation_plugin_sdk::lifecycle::{
-        ApplyContext, CancellationToken, DisposeContext, DisposeReason, InitializeContext,
-        OperationScope, PauseContext, ResumeContext, StartContext, StateIntent, StopContext,
-        StopMode, UpdateBoundary,
-    };
+    #[test]
+    fn activation_context_names_the_configured_endpoint() -> Result<()> {
+        let request = drasi_computation_plugin_sdk::testing::create_request(
+            &MsSqlSourceFactory,
+            &drasi_computation_contracts::ComponentId::generate(),
+            serde_json::json!({"stream": "s/out", "host": "sql.corp", "port": 14330, "database": "d"}),
+        );
+        let context = MsSqlSourceFactory.activation_credential_context(&request)?;
+        assert_eq!(
+            (context.hostname.as_str(), context.port),
+            ("sql.corp", 14330)
+        );
+        Ok(())
+    }
 
-    pub(crate) fn scope() -> OperationScope {
-        OperationScope::new("test", "component", 1, None, CancellationToken::new())
-    }
-    pub(crate) fn initialize() -> InitializeContext {
-        InitializeContext::new(scope())
-    }
-    pub(crate) fn start() -> StartContext {
-        StartContext::new(scope(), None)
-    }
-    pub(crate) fn start_with(
-        credentials: drasi_computation_plugin_sdk::ActivationCredentials,
-    ) -> StartContext {
-        StartContext::new(scope(), Some(credentials))
-    }
-    pub(crate) fn pause() -> PauseContext {
-        PauseContext::new(scope())
-    }
-    pub(crate) fn resume() -> ResumeContext {
-        ResumeContext::new(scope())
-    }
-    pub(crate) fn stop() -> StopContext {
-        StopContext::new(scope(), StopMode::Drain)
-    }
-    pub(crate) fn dispose() -> DisposeContext {
-        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
-            .expect("valid dispose context")
-    }
-    pub(crate) fn erase() -> DisposeContext {
-        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
-            .expect("valid dispose context")
-    }
-    pub(crate) fn apply(boundary: UpdateBoundary) -> ApplyContext {
-        ApplyContext::new(scope(), boundary)
+    #[test]
+    fn the_sdk_assessment_matrix_agrees_with_the_classification() -> Result<()> {
+        let suite = drasi_computation_plugin_sdk::testing::SourceConformance::new(
+            &MsSqlSourceFactory,
+            "585da1dd-2d7d-5cec-bcf7-e84ac13a88f8",
+        )?;
+        let base = serde_json::json!({"stream": "items/out", "database": "app", "user": "drasi", "password": "p"});
+        let cases: Vec<_> = management::tests_cases()
+            .into_iter()
+            .map(|(field, value, boundary)| {
+                let mut proposed = base.clone();
+                proposed[field] = value;
+                (proposed, boundary)
+            })
+            .collect();
+        suite.assess_matrix(&base, &cases)
     }
 }

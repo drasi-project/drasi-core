@@ -2275,3 +2275,296 @@ mod profiling_tests {
             .is_none());
     }
 }
+
+#[cfg(test)]
+mod volatile_delivery_tests {
+    use super::test_support::*;
+    use super::*;
+    use crate::delivery::{DeliveryBatch, DeliveryBatchIdentity, DeliveryGuarantee, DeliveryScope};
+    use crate::output_identity::{is_missing_progress, Candidate, Producer};
+    use crate::{
+        EnvelopeCodec, GraphProducerIdentity, GraphProducerProgress, Incompatibility,
+        InputEnvelope, OutputIdentity, PortId, QueryRecoveryIdentity, QueryResultSnapshot,
+    };
+    use std::num::NonZeroUsize;
+
+    fn codec() -> EnvelopeCodec {
+        let mut codec = EnvelopeCodec::new(NonZeroUsize::new(64 * 1024).unwrap());
+        codec.register_schema(GraphChangeCodec::schema()).unwrap();
+        codec
+    }
+
+    fn volatile(incarnation: u128, generation: u64) -> ChangeEnvelope {
+        let mut envelope = encode(
+            None,
+            "query",
+            &projector("query/dataset"),
+            &[adding("a", 1)],
+        );
+        QueryRecoveryIdentity::try_new(
+            "graph",
+            component("query"),
+            7,
+            Some(uuid::Uuid::from_u128(incarnation)),
+        )
+        .unwrap()
+        .annotate(&mut envelope, &component("query"))
+        .unwrap();
+        QueryChangeCodec::set_generation(&mut envelope, &component("query"), generation).unwrap();
+        envelope
+    }
+
+    fn input(envelope: ChangeEnvelope) -> InputEnvelope {
+        InputEnvelope {
+            port: PortId::try_new("in").unwrap(),
+            envelope,
+        }
+    }
+
+    fn scope() -> DeliveryScope {
+        DeliveryScope::new("instance".into(), "graph".into(), component("upstream")).unwrap()
+    }
+
+    #[test]
+    fn strict_derivation_still_rejects_volatile_query_output() {
+        let error = Candidate::new(&volatile(1, 0), &codec()).err().unwrap();
+        assert!(is_missing_progress(&error));
+        let error = DeliveryBatch::new(scope(), input(volatile(1, 0)), &codec())
+            .err()
+            .unwrap();
+        assert!(is_missing_progress(&error));
+    }
+
+    #[test]
+    fn volatile_stream_is_stable_across_incarnations_and_epoch_changes() {
+        let codec = codec();
+        let first = Candidate::new_volatile(&volatile(1, 0), &codec).unwrap();
+        let restarted = Candidate::new_volatile(&volatile(2, 0), &codec).unwrap();
+        let reset = Candidate::new_volatile(&volatile(1, 1), &codec).unwrap();
+        assert!(matches!(first.producer, Producer::Query { .. }));
+        let epochs = [&first, &restarted, &reset].map(|c| c.epoch.clone().unwrap());
+        assert_ne!(epochs[0], epochs[1]);
+        assert_ne!(epochs[0], epochs[2]);
+        assert_eq!(
+            epochs[0],
+            Candidate::new_volatile(&volatile(1, 0), &codec)
+                .unwrap()
+                .epoch
+                .unwrap()
+        );
+        let identity = |envelope| {
+            DeliveryBatchIdentity::for_input_at_least_once(&scope(), &input(envelope), &codec)
+                .unwrap()
+        };
+        let (a, b, c) = (
+            identity(volatile(1, 0)),
+            identity(volatile(2, 0)),
+            identity(volatile(1, 3)),
+        );
+        assert_eq!(a.stream(), b.stream());
+        assert_eq!(a.stream(), c.stream());
+        assert_ne!(a.epoch(), b.epoch());
+        assert_eq!(a.epoch(), first.epoch.as_deref());
+
+        let batch = DeliveryBatch::new_with_guarantee(
+            scope(),
+            input(volatile(1, 0)),
+            &codec,
+            DeliveryGuarantee::AtLeastOnce,
+        )
+        .unwrap();
+        assert_eq!(batch.identity(), &a);
+        let item = batch.item(0).unwrap();
+        item.position.validate().unwrap();
+        assert_eq!(item.position.epoch(), a.epoch());
+        assert_eq!(item.position.stream(), a.stream());
+        assert_eq!(item.batch_identity().unwrap(), a);
+        let encoded = serde_json::to_value(&item.position).unwrap();
+        assert_eq!(encoded["version"], 2);
+        let decoded: crate::DeliveryPosition = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(decoded, item.position);
+        let mut stripped = encoded;
+        stripped.as_object_mut().unwrap().remove("epoch");
+        let stripped: crate::DeliveryPosition = serde_json::from_value(stripped).unwrap();
+        assert!(stripped.validate().is_err());
+        // Operation identities remain per run.
+        let other = DeliveryBatch::new_with_guarantee(
+            scope(),
+            input(volatile(2, 0)),
+            &codec,
+            DeliveryGuarantee::AtLeastOnce,
+        )
+        .unwrap();
+        assert_ne!(other.item(0).unwrap().id, item.id);
+    }
+
+    #[test]
+    fn exactly_once_consumers_refuse_volatile_output_permanently() {
+        let error = DeliveryBatch::new_with_guarantee(
+            scope(),
+            input(volatile(1, 0)),
+            &codec(),
+            DeliveryGuarantee::ExactlyOnce,
+        )
+        .err()
+        .unwrap();
+        assert!(
+            error.downcast_ref::<Incompatibility>()
+                == Some(&Incompatibility::ProducerIdentity {
+                    required: DeliveryGuarantee::ExactlyOnce,
+                    identity: OutputIdentity::Volatile,
+                })
+        );
+        assert!(error.to_string().contains("output identity is Volatile"));
+    }
+
+    #[test]
+    fn strict_derivation_is_unchanged_and_never_carries_an_epoch() {
+        let codec = codec();
+        let mut stored = encode(
+            None,
+            "query",
+            &projector("query/dataset"),
+            &[adding("a", 1)],
+        );
+        let identity = GraphProducerIdentity::new(
+            "instance".into(),
+            "graph".into(),
+            component("query"),
+            stored.system().stream().clone(),
+            true,
+        )
+        .unwrap();
+        GraphProducerProgress::annotate(&mut stored, &identity, 1).unwrap();
+        let strict = Candidate::new(&stored, &codec).unwrap();
+        assert!(strict.epoch.is_none());
+        for guarantee in [
+            DeliveryGuarantee::ExactlyOnce,
+            DeliveryGuarantee::AtLeastOnce,
+        ] {
+            let batch = DeliveryBatch::new_with_guarantee(
+                scope(),
+                input(stored.clone()),
+                &codec,
+                guarantee,
+            )
+            .unwrap();
+            let expected = DeliveryBatch::new(scope(), input(stored.clone()), &codec).unwrap();
+            assert_eq!(batch.identity(), expected.identity());
+            assert!(batch.identity().epoch().is_none());
+            let item = batch.item(0).unwrap();
+            assert!(item.position.epoch().is_none());
+            assert_eq!(serde_json::to_value(&item.position).unwrap()["version"], 1);
+            assert!(serde_json::to_value(&item.position)
+                .unwrap()
+                .get("epoch")
+                .is_none());
+        }
+        // Persistent producers are never re-derived as volatile.
+        assert!(Candidate::new_volatile(&stored, &codec).is_err());
+    }
+
+    #[test]
+    fn volatile_derivation_rejects_snapshots_progress_and_non_query_producers() {
+        let codec = codec();
+        let scope_projector = projector("query/dataset");
+        let annotate = |mut envelope: ChangeEnvelope| {
+            QueryRecoveryIdentity::try_new(
+                "graph",
+                component("query"),
+                7,
+                Some(uuid::Uuid::from_u128(1)),
+            )
+            .unwrap()
+            .annotate(&mut envelope, &component("query"))
+            .unwrap();
+            envelope
+        };
+        let snapshot = annotate(
+            QueryChangeCodec::snapshot_envelope(
+                &scope_projector,
+                &component("query"),
+                &QueryResultSnapshot {
+                    projector: scope_projector.clone(),
+                    rows: im::HashMap::new(),
+                    as_of_sequence: 4,
+                    generation: 0,
+                },
+                &component("query"),
+                system("query/out", 2),
+            )
+            .unwrap(),
+        );
+        assert!(QueryChangeCodec::is_snapshot(&snapshot));
+        assert!(Candidate::new_volatile(&snapshot, &codec).is_err());
+        let progress = annotate(
+            QueryChangeCodec::progress_envelope(
+                &scope_projector,
+                &component("query"),
+                4,
+                0,
+                &component("query"),
+                system("query/out", 3),
+            )
+            .unwrap(),
+        );
+        assert!(Candidate::new_volatile(&progress, &codec).is_err());
+        for envelope in [snapshot, progress] {
+            assert!(DeliveryBatch::new_with_guarantee(
+                scope(),
+                input(envelope),
+                &codec,
+                DeliveryGuarantee::AtLeastOnce
+            )
+            .is_err());
+        }
+
+        // A volatile non-query graph producer has no restart-stable identity
+        // either; at-least-once delivers it under an incarnation epoch.
+        let mut graph = ChangeEnvelope::new(
+            crate::EnvelopeId::try_new("graph", bytes::Bytes::from_static(b"change")).unwrap(),
+            encode(None, "query", &scope_projector, &[adding("a", 1)])
+                .changes()
+                .clone(),
+            system("graph/out", 1),
+        );
+        let identity = GraphProducerIdentity::new(
+            "instance".into(),
+            "graph".into(),
+            component("foreign"),
+            graph.system().stream().clone(),
+            false,
+        )
+        .unwrap();
+        GraphProducerProgress::annotate(&mut graph, &identity, 1).unwrap();
+        assert!(is_missing_progress(
+            &Candidate::new(&graph, &codec).err().unwrap()
+        ));
+        let volatile = Candidate::new_volatile(&graph, &codec).unwrap();
+        assert_eq!(volatile.sequence, 1);
+        assert!(volatile.epoch.is_some());
+        let batch = DeliveryBatch::new_with_guarantee(
+            scope(),
+            input(graph.clone()),
+            &codec,
+            DeliveryGuarantee::AtLeastOnce,
+        )
+        .unwrap();
+        assert_eq!(batch.identity().epoch(), volatile.epoch.as_deref());
+        assert_eq!(
+            DeliveryBatch::new_with_guarantee(
+                scope(),
+                input(graph),
+                &codec,
+                DeliveryGuarantee::ExactlyOnce,
+            )
+            .err()
+            .unwrap()
+            .downcast_ref::<Incompatibility>(),
+            Some(&Incompatibility::ProducerIdentity {
+                required: DeliveryGuarantee::ExactlyOnce,
+                identity: OutputIdentity::Volatile,
+            })
+        );
+    }
+}

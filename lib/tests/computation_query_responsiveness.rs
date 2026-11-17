@@ -103,6 +103,9 @@ struct ReadySource {
 }
 #[async_trait]
 impl ComputationComponent for ReadySource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -126,6 +129,9 @@ struct Counter {
 }
 #[async_trait]
 impl ComputationComponent for Counter {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

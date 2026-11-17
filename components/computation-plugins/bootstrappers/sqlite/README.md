@@ -1,7 +1,10 @@
 # Native SQLite bootstrappers
 
-Independent native bootstrap library, implementation/configuration version `1`.
-It exports no processing component, dummy service or Source-plugin callback.
+Independent native bootstrap library (ComputationGraph ABI 4.0),
+implementation/configuration version `1`. It exports no processing component,
+dummy service or Source-plugin callback. Configuration is flat camelCase and
+uses the same field names (`path`, `tables`, `tableKeys`, `stream`) as the
+[native SQLite source](../../sources/sqlite).
 
 | Factory | Initialization | Progress binding |
 |---|---|---|
@@ -18,7 +21,7 @@ Load `libdrasi_computation_bootstrap_sqlite.dylib` on macOS,
 `drasi_computation_bootstrap_sqlite.dll` on Windows. The native bootstrap
 extension supplies its query-scoped factory. The component-factory list is
 intentionally empty; hosts must validate the bootstrap catalogue as well.
-Use a matching ABI-2 host with bootstrap-only catalogue support; an empty
+Use an ABI 4.0 host with bootstrap-only catalogue support; an empty
 processing-factory list is not an empty bootstrap catalogue.
 
 ## File snapshots
@@ -26,21 +29,24 @@ processing-factory list is not an empty bootstrap catalogue.
 `drasi.sqlite/file-bootstrap` configuration:
 
 ```json
-{
-  "source": "sqlite",
-  "stream": "sqlite/out",
-  "settings": {
-    "path": "data/example.db",
-    "tables": ["sensors"],
-    "table_keys": [],
-    "max_tables": 64,
-    "max_bytes": 1048576,
-    "max_duration_ms": 30000,
-    "output_capacity": 64,
-    "shutdown_timeout_ms": 5000
-  }
-}
+{"source": "<source component id>", "stream": "sqlite/out", "path": "data/example.db", "tables": ["sensors"]}
 ```
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `source` | component ID, required | — | the source whose identities the rows use |
+| `stream` | string, required | — | the source's output stream |
+| `path` | string, required | — | existing file, opened read-only |
+| `tables` | array | `[]` (all) | must match the source |
+| `tableKeys` | array of `{"table", "keyColumns"}` | `[]` | must match the source |
+| `maxTables` | integer ≥ 1 | `1024` | |
+| `maxBytes` | integer 1..=2147483647 | `16777216` | bounds schema metadata and each row |
+| `maxDurationMs` | integer 1..=2147483647 | `300000` | whole snapshot, and the busy timeout |
+| `outputCapacity` | integer ≥ 1 | `16` | rows buffered ahead of the query |
+| `shutdownTimeoutMs` | integer ≥ 1 | `10000` | worker stop bound |
+
+The previous nested `settings` object (snake_case) is rejected; move its
+fields to the top level in camelCase.
 
 Construction validates configuration only; it does not open the file or start
 workers. The factory needs the query's explicit instance/graph scope. It does not
@@ -49,8 +55,8 @@ bind a source-progress reader.
 The provider opens an existing file read-only, streams one consistent SQLite
 read transaction, and uses `drasi-sqlite-common` for the same typed keys and
 physical-rowid mapping as native live capture. All limits are positive;
-`max_bytes` bounds schema metadata and each row independently, while
-`output_capacity` provides backpressure rather than whole-snapshot collection.
+`maxBytes` bounds schema metadata and each row independently, while
+`outputCapacity` provides backpressure rather than whole-snapshot collection.
 Dropping a stream requests cancellation. Awaited stop retains unfinished workers
 after timeout/cancellation and fences stale stream generations.
 
@@ -91,7 +97,7 @@ remain quiescent until initialization completes.
 
 Use `drasi.sqlite/coordinated-bootstrap` with
 `drasi.sqlite/replay-transactions`, or `drasi.sqlite/shared-bootstrap` with
-`drasi.sqlite/shared-transactions`. Set `coordinated_snapshot: true` in the
+`drasi.sqlite/shared-transactions`. Set `coordinatedSnapshot: true` in the
 source configuration. Paired factory configuration is deliberately only:
 
 ```json
@@ -122,7 +128,10 @@ ownership. Resource retirement is permanent. Incomplete loading
 requires explicit recovery; completed/missing state and unsafe membership changes
 are not silently repaired.
 
-See the [source binding and Server examples](../../sources/sqlite/README.md#rust-handles-and-internal-coordination)
+The source's `initSql` also runs on the snapshot connection, so tables it
+creates exist before the snapshot reads them.
+
+See the [source binding](../../sources/sqlite/README.md#host-bindings)
 for `single`/`shared` configurations and the
 [existing Rust initialization contract](../../../sources/sqlite/README.md#coordinated-native-initial-loading)
 for recovery limits. There is no public DrasiLib SQL API, SQL service across the

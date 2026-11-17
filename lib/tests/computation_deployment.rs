@@ -70,6 +70,12 @@ fn factory(fail: bool, creates: Arc<AtomicUsize>) -> Arc<SourceFactory> {
 
 #[async_trait]
 impl ComponentFactory for SourceFactory {
+    fn describe(
+        &self,
+        _context: &drasi_lib::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }
@@ -596,6 +602,12 @@ impl Drop for ActiveConstruction {
 
 #[async_trait]
 impl ComponentFactory for PendingFactory {
+    fn describe(
+        &self,
+        _context: &drasi_lib::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }

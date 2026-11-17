@@ -427,6 +427,9 @@ async fn managed_graph_constructs_the_existing_query_engine_from_persisted_recip
     }
     #[async_trait]
     impl ComputationComponent for Sink {
+        fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+            drasi_lib::computation::v1::ComponentDescription::undeclared()
+        }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.descriptor
         }
@@ -462,6 +465,12 @@ async fn managed_graph_constructs_the_existing_query_engine_from_persisted_recip
     }
     #[async_trait]
     impl ComponentFactory for SinkFactory {
+        fn describe(
+            &self,
+            _context: &drasi_lib::computation::v1::ConstructionContext,
+        ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+            Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
+        }
         fn descriptor(&self) -> &FactoryDescriptor {
             &self.descriptor
         }
@@ -853,6 +862,9 @@ impl HostCapture {
 }
 #[async_trait]
 impl ComputationComponent for HostCapture {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -1666,6 +1678,9 @@ impl StableSource {
 }
 #[async_trait]
 impl ComputationComponent for StableSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

@@ -49,6 +49,13 @@ pub fn plugin() -> anyhow::Result<PluginDefinition> {
 drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
 
 impl Factory for LogSinkFactory {
+    /// Inputs do not key delivery on producer identity.
+    fn describe(
+        &self,
+        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(request.unkeyed_sink())
+    }
     fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
         Some(LogSinkConfig::definition().details())
     }

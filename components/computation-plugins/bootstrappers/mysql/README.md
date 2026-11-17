@@ -16,15 +16,20 @@ The owned connection layer supports `mysql_native_password` and
 | `drasi.mysql/shared-row-bootstrap` | One actual row-query owner, including memory queries |
 | `drasi.mysql/snapshot` | Query-scoped repeatable-read snapshot without a replication or handover claim |
 
-All factories require `source`, `stream`, secret-referenced `settings` and query
-scope. Coordinated factories also require the actual query's `sourceProgress`
-capability. Bind the provider to that query's single bootstrap slot, not to a
-fake owner. Use the same source/stream/settings as the live native source and
-explicitly select snapshot locking mode.
+All factories take one flat camelCase object: the same shared settings as the
+native MySQL source (see the source's
+[CONFIGURATION.md](../../sources/mysql/CONFIGURATION.md)) plus `source` (the
+paired source's component ID) and `stream`. Only `password` and
+`tlsClientKeyPem` are secret; use secret references for them. Coordinated
+factories also accept `retention` (`server` or `untilProcessed`), require
+`startFrom: snapshot` and the actual query's `sourceProgress` capability. Bind
+the provider to that query's single bootstrap slot, not to a fake owner. Use the
+same values as the live native source; the handover is bound to its selected
+tables, keys, stream and identity.
 
 The `snapshot` factory is the exception to the progress requirement: it takes no
-`sourceProgress`, requires an explicit table allowlist, `output: changes`,
-`replay: null` and `start: {mode: end}`, and performs no global read lock, binlog
+`sourceProgress`, requires an explicit `tables` allowlist and `startFrom: end`, and rejects
+`retention`, and performs no global read lock, binlog
 query or replication registration. It reuses the same owned connection, bounded
 binary cursor, key/value decoding and server-observed cleanup as coordinated
 loading. It returns no source watermark or durable handover record. This
@@ -32,7 +37,7 @@ preserves standalone initial loading without treating a cursor sampled after
 starting a read transaction as a gap-free CDC boundary. Use the coordinated
 factories when initialization must hand over to replayable live changes.
 
-Standalone settings support manual `table_keys`, the non-PK `id` fallback and
+Standalone settings support manual `tableKeys`, the non-PK `id` fallback and
 views under SELECT-only credentials. An optional factory-level `labels` array
 restricts scanning to requested names in the configured allowlist; names outside
 that allowlist are logged and excluded, and unrequested tables are not inspected.
@@ -49,7 +54,7 @@ the snapshot, uses `FLUSH TABLES WITH READ LOCK` to establish a consistent InnoD
 binlog boundary, and releases the global lock before scanning. It pins selected
 table definitions and streams through bounded binary server cursors. Initial
 and live rows share typed `mysql:v1:` identities and value conversions.
-`settings.table_keys` supplies explicit graph key columns when the database
+`tableKeys` supplies explicit graph key columns when the database
 primary key is not the intended identity. Their actual values must be non-null;
 nullable column declarations alone do not prevent loading.
 

@@ -11,8 +11,9 @@ use drasi_computation_plugin_sdk::{
     BootstrapFactory, BootstrapFactoryMetadata, ConfigSchema, ConfigType, CreateRequest,
     NativeBootstrapProvider, NativeSourceProgress, PluginDefinition, Scope,
 };
-use drasi_mssql_common::native::{self, Cursor, NativeConfig, SnapshotRun};
-use serde::{Deserialize, Serialize};
+use drasi_mssql_common::native::{
+    self, markers, settings::SETTINGS_FIELDS, Cursor, NativeSettings, SnapshotRun,
+};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -25,14 +26,86 @@ pub const MSSQL_SNAPSHOT: &str = "drasi.mssql/snapshot";
 pub struct MsSqlBootstrapFactory;
 pub struct MsSqlReadOnlySnapshotFactory;
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// A provider's configuration: `source`, `stream` and optional `labels`
+/// beside the same flat settings the native source accepts, so both select
+/// the same tables and keys and compute one binding. Only `password` is
+/// secret.
+#[derive(Clone, Debug)]
 pub struct Configuration {
     pub source: ComponentId,
     pub stream: StreamId,
-    pub settings: NativeConfig,
-    #[serde(default)]
     pub labels: Vec<String>,
+    /// How long `stop` waits for snapshot cleanup (bootstrap only).
+    pub stop_timeout_ms: u64,
+    pub settings: NativeSettings,
+}
+
+/// Default `stopTimeoutMs`.
+pub const DEFAULT_STOP_TIMEOUT_MS: u64 = 30_000;
+
+impl Configuration {
+    pub fn from_value(value: &serde_json::Value) -> Result<Self> {
+        let mut object = value
+            .as_object()
+            .context("SQL Server bootstrap configuration must be an object")?
+            .clone();
+        let mut text = |name: &str| match object.remove(name) {
+            Some(serde_json::Value::String(value)) => Ok(value),
+            Some(_) => anyhow::bail!("{name} must be a string"),
+            None => anyhow::bail!("{name} is required"),
+        };
+        let source = ComponentId::try_new(text("source")?)?;
+        let stream = StreamId::try_new(text("stream")?)?;
+        let labels = match object.remove("labels") {
+            None => Vec::new(),
+            Some(value) => serde_json::from_value(value).context("labels must be strings")?,
+        };
+        let stop_timeout_ms = match object.remove("stopTimeoutMs") {
+            None => DEFAULT_STOP_TIMEOUT_MS,
+            Some(value) => value
+                .as_u64()
+                .filter(|ms| (1..=3_600_000).contains(ms))
+                .context("stopTimeoutMs must be an integer in 1..=3600000")?,
+        };
+        let settings = NativeSettings::from_value(serde_json::Value::Object(object))?;
+        Ok(Self {
+            source,
+            stream,
+            labels,
+            stop_timeout_ms,
+            settings,
+        })
+    }
+}
+
+fn metadata(implementation: &str, source_progress: bool) -> BootstrapFactoryMetadata {
+    let mut fields = vec![
+        ("source", ConfigType::ComponentId, true),
+        ("stream", ConfigType::String, true),
+        ("labels", ConfigType::Array, false),
+        ("stopTimeoutMs", ConfigType::Integer, false),
+    ];
+    for name in SETTINGS_FIELDS {
+        let kind = match *name {
+            "port" | "connectTimeoutMs" | "commandTimeoutMs" | "pollIntervalMs" | "maxRows"
+            | "maxBytes" | "reconnectBudgetMs" => ConfigType::Integer,
+            "trustServerCertificate" => ConfigType::Boolean,
+            "tables" | "tableKeys" => ConfigType::Array,
+            _ => ConfigType::String,
+        };
+        fields.push((name, kind, *name == "database"));
+    }
+    let mut configuration = ConfigSchema::from_fields(fields);
+    if let Some(password) = configuration.fields.get_mut("password") {
+        password.secret = true;
+    }
+    BootstrapFactoryMetadata {
+        implementation: ImplementationIdentity::try_new(implementation, "1")
+            .expect("constant implementation"),
+        configuration_version: 1,
+        configuration,
+        source_progress,
+    }
 }
 
 pub fn plugin() -> Result<PluginDefinition> {
@@ -49,24 +122,7 @@ pub fn plugin() -> Result<PluginDefinition> {
 }
 impl BootstrapFactory for MsSqlBootstrapFactory {
     fn metadata(&self) -> BootstrapFactoryMetadata {
-        let mut configuration = ConfigSchema::from_fields([
-            ("source", ConfigType::ComponentId, true),
-            ("stream", ConfigType::String, true),
-            ("settings", ConfigType::Object, true),
-            ("labels", ConfigType::Array, false),
-        ]);
-        configuration
-            .fields
-            .get_mut("settings")
-            .expect("settings")
-            .secret = true;
-        BootstrapFactoryMetadata {
-            implementation: ImplementationIdentity::try_new(MSSQL_BOOTSTRAP, "1")
-                .expect("implementation"),
-            configuration_version: 1,
-            configuration,
-            source_progress: true,
-        }
+        metadata(MSSQL_BOOTSTRAP, true)
     }
     fn create(
         &self,
@@ -76,7 +132,7 @@ impl BootstrapFactory for MsSqlBootstrapFactory {
         self.metadata()
             .configuration
             .validate(&request.configuration)?;
-        let configuration: Configuration = serde_json::from_value(request.configuration.clone())?;
+        let configuration = Configuration::from_value(&request.configuration)?;
         let progress = progress
             .context("SQL Server bootstrap requires query-owned progress")?
             .reader();
@@ -96,11 +152,7 @@ impl BootstrapFactory for MsSqlBootstrapFactory {
 
 impl BootstrapFactory for MsSqlReadOnlySnapshotFactory {
     fn metadata(&self) -> BootstrapFactoryMetadata {
-        let mut metadata = MsSqlBootstrapFactory.metadata();
-        metadata.implementation =
-            ImplementationIdentity::try_new(MSSQL_SNAPSHOT, "1").expect("implementation");
-        metadata.source_progress = false;
-        metadata
+        metadata(MSSQL_SNAPSHOT, false)
     }
     fn create(
         &self,
@@ -114,7 +166,7 @@ impl BootstrapFactory for MsSqlReadOnlySnapshotFactory {
         self.metadata()
             .configuration
             .validate(&request.configuration)?;
-        let config: Configuration = serde_json::from_value(request.configuration.clone())?;
+        let config = Configuration::from_value(&request.configuration)?;
         let mut provider = MsSqlBootstrap::read_only(config)?;
         provider.scope = Some((
             request
@@ -143,16 +195,17 @@ impl MsSqlBootstrap {
     }
     fn construct(config: Configuration, progress: Option<SourceProgressView>) -> Result<Self> {
         config.settings.validate()?;
+        // Bootstrap factories receive no activation credentials.
+        config.settings.validate_credentials(false)?;
         if progress.is_some() {
             ensure!(
                 config.settings.barrier_table.is_some(),
-                "coordinated SQL Server bootstrap requires pre-provisioned barrier_table"
+                "coordinated SQL Server bootstrap requires a pre-provisioned barrierTable"
             );
         } else {
             ensure!(
-                config.settings.barrier_table.is_none()
-                    && !config.settings.connection.tables.is_empty(),
-                "read-only SQL Server snapshot requires explicit tables and no barrier_table"
+                config.settings.barrier_table.is_none() && !config.settings.tables.is_empty(),
+                "read-only SQL Server snapshot requires explicit tables and no barrierTable"
             );
         }
         Ok(Self {
@@ -205,11 +258,23 @@ impl NativeBootstrapProvider for MsSqlBootstrap {
             "SQL Server snapshot requires successful stop before reuse"
         );
         let generation = self.generation.load(Ordering::Acquire);
+        let marker_prefix = match (&self.progress, &self.scope) {
+            (Some(progress), _) => Some(markers::marker_prefix(
+                progress.graph_id(),
+                self.config.source.as_str(),
+            )),
+            (None, _) => None,
+        };
+        self.config
+            .settings
+            .connection()
+            .warn_about_transport("Native SQL Server bootstrap");
         let (run, rows) = native::start_snapshot(
             self.config.settings.clone(),
+            self.config.settings.literal_authentication(),
             self.config.source.to_string(),
             self.config.labels.clone(),
-            self.progress.is_some(),
+            marker_prefix,
         )?;
         *current = Some(run.clone());
         drop(current);
@@ -298,7 +363,10 @@ impl NativeBootstrapProvider for MsSqlBootstrap {
         self.generation.fetch_add(1, Ordering::AcqRel);
         let run = self.run.lock().await.clone();
         if let Some(run) = run {
-            run.stop(self.config.settings.shutdown_timeout()).await?;
+            run.stop(std::time::Duration::from_millis(
+                self.config.stop_timeout_ms,
+            ))
+            .await?;
             let mut current = self.run.lock().await;
             if current
                 .as_ref()
@@ -328,21 +396,55 @@ mod tests {
         Ok(())
     }
 
+    fn value() -> serde_json::Value {
+        serde_json::json!({
+            "source": SOURCE_ID, "stream": "items/out", "host": "no-constructor-io",
+            "database": "d", "user": "reader", "password": "p", "tables": ["dbo.Items"]
+        })
+    }
+
     #[test]
     fn standalone_mode_is_read_only_and_does_not_claim_cdc_progress() -> Result<()> {
-        let config: Configuration = serde_json::from_value(serde_json::json!({
-            "source":SOURCE_ID,"stream":"items/out","settings":{
-                "connection":{"host":"no-constructor-io","database":"d","user":"reader","tables":["dbo.Items"]}
-            }
-        }))?;
+        let config = Configuration::from_value(&value())?;
         let provider = MsSqlBootstrap::read_only(config.clone())?;
         assert!(provider.recovery_reader().is_none());
         let mut marker = config.clone();
         marker.settings.barrier_table = Some("dbo.Barrier".into());
         assert!(MsSqlBootstrap::read_only(marker).is_err());
         let mut empty = config;
-        empty.settings.connection.tables.clear();
+        empty.settings.tables.clear();
         assert!(MsSqlBootstrap::read_only(empty).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn configuration_is_flat_and_shares_the_source_settings() -> Result<()> {
+        let metadata = MsSqlBootstrapFactory.metadata();
+        metadata.configuration.validate(&value())?;
+        let secrets: Vec<_> = metadata
+            .configuration
+            .fields
+            .iter()
+            .filter(|(_, field)| field.secret)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert_eq!(secrets, ["password"], "password is the only secret");
+        for name in SETTINGS_FIELDS {
+            assert!(metadata.configuration.fields.contains_key(*name), "{name}");
+        }
+        let mut legacy = value();
+        legacy["settings"] = serde_json::json!({"connection": {}});
+        assert!(Configuration::from_value(&legacy).is_err());
+        let mut unknown = value();
+        unknown["pasword"] = serde_json::json!("x");
+        assert!(Configuration::from_value(&unknown).is_err());
+        let mut no_password = value();
+        no_password.as_object_mut().unwrap().remove("password");
+        let config = Configuration::from_value(&no_password)?;
+        assert!(
+            MsSqlBootstrap::read_only(config).is_err(),
+            "bootstrap providers have no activation credentials"
+        );
         Ok(())
     }
 }

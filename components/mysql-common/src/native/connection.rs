@@ -81,6 +81,8 @@ fn validate_binary_type(kind: ColumnType) -> Result<()> {
                 | MYSQL_TYPE_SET
                 | MYSQL_TYPE_BIT
                 | MYSQL_TYPE_JSON
+                | MYSQL_TYPE_GEOMETRY
+                | MYSQL_TYPE_VECTOR
                 | MYSQL_TYPE_NULL
         ),
         "unsupported MySQL cursor column type {kind:?}"
@@ -483,6 +485,14 @@ impl Connection {
                 connector.add_root_certificate(
                     native_tls::Certificate::from_der(certificate.as_bytes())
                         .context("invalid MySQL CA certificate")?,
+                );
+            }
+            if let (Some(certificate), Some(key)) =
+                (&config.tls_client_cert_pem, &config.tls_client_key_pem)
+            {
+                connector.identity(
+                    native_tls::Identity::from_pkcs8(certificate.as_bytes(), key.as_bytes())
+                        .context("invalid MySQL client certificate or PKCS#8 key")?,
                 );
             }
             let connector = tokio_native_tls::TlsConnector::from(connector.build()?);

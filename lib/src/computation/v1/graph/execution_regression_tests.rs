@@ -21,6 +21,9 @@ struct DrainingProgressProducer {
 
 #[async_trait::async_trait]
 impl ComputationComponent for DrainingProgressProducer {
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        crate::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -78,6 +81,9 @@ impl EnvelopeSource for DrainingProgressProducer {
 struct ProgressResultsSink(ComponentDescriptor);
 #[async_trait::async_trait]
 impl ComputationComponent for ProgressResultsSink {
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        crate::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }
@@ -421,6 +427,9 @@ struct Service {
 }
 #[async_trait::async_trait]
 impl ComputationComponent for Service {
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        crate::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

@@ -67,6 +67,9 @@ struct Source {
 
 #[async_trait]
 impl ComputationComponent for Source {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -131,6 +134,9 @@ impl Drop for Sink {
 }
 #[async_trait]
 impl ComputationComponent for Sink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     async fn initialize(
         &mut self,
         _context: &drasi_lib::computation::v1::InitializeContext,
@@ -1410,6 +1416,12 @@ impl Factory {
 }
 #[async_trait]
 impl ComponentFactory for Factory {
+    fn describe(
+        &self,
+        _context: &drasi_lib::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }
@@ -2853,6 +2865,9 @@ struct GatedTransform {
 }
 #[async_trait]
 impl ComputationComponent for GatedTransform {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -3285,6 +3300,12 @@ impl ProducerFactory {
 
 #[async_trait]
 impl ComponentFactory for ProducerFactory {
+    fn describe(
+        &self,
+        _context: &drasi_lib::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }
@@ -3346,6 +3367,9 @@ struct FiniteSource {
 }
 #[async_trait]
 impl ComputationComponent for FiniteSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -3845,6 +3869,12 @@ impl GatedFactory {
 }
 #[async_trait]
 impl ComponentFactory for GatedFactory {
+    fn describe(
+        &self,
+        _context: &drasi_lib::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }
@@ -3874,6 +3904,9 @@ struct StallingService {
 }
 #[async_trait]
 impl ComputationComponent for StallingService {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

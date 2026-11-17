@@ -11,73 +11,28 @@
 
 use crate::{
     config::{MsSqlStoredProcConfig, ProgressTable},
-    delivery::{
-        ConnectTimeout, Connector, CursorRow, DeliveryError, Position, Session,
-        PROGRESS_FORMAT_VERSION,
-    },
+    delivery::{Connector, CursorRow, DeliveryError, Position, Session, PROGRESS_FORMAT_VERSION},
 };
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use drasi_mssql_common::sql::{self, RenderedCommand, SqlClient};
 use futures_util::TryStreamExt;
 use std::time::Duration;
-use tiberius::{AuthMethod, Query};
+use tiberius::Query;
 
 /// Error number raised when first-stream admission cannot take its lock.
 /// Classified as retryable.
 pub const ADMISSION_LOCK_ERROR: u32 = 59_101;
 
-/// How a session authenticates. Never printed.
-#[derive(Clone, PartialEq, Eq)]
-pub enum Authentication {
-    /// SQL Server authentication.
-    Sql { user: String, password: String },
-    /// A Microsoft Entra ID access token (Tiberius `AADToken`).
-    AccessToken { token: String },
-}
-
-impl std::fmt::Debug for Authentication {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Sql { .. } => "Sql([REDACTED])",
-            Self::AccessToken { .. } => "AccessToken([REDACTED])",
-        })
-    }
-}
-
-impl Authentication {
-    fn method(&self) -> AuthMethod {
-        match self {
-            Self::Sql { user, password } => AuthMethod::sql_server(user, password),
-            Self::AccessToken { token } => AuthMethod::aad_token(token),
-        }
-    }
-}
+/// How a session authenticates; shared with the native SQL Server source.
+pub use drasi_mssql_common::client::Authentication;
 
 /// Builds the Tiberius configuration for the sink's settings.
 pub fn tiberius_config(
     config: &MsSqlStoredProcConfig,
     authentication: &Authentication,
 ) -> tiberius::Config {
-    let mut tiberius = tiberius::Config::new();
-    tiberius.host(&config.host);
-    tiberius.port(config.port);
-    tiberius.database(&config.database);
-    tiberius.application_name("drasi-native-storedproc-mssql");
-    tiberius.encryption(config.encryption.level());
-    // `validate` makes these mutually exclusive; Tiberius panics otherwise.
-    if config.trust_server_certificate {
-        tiberius.trust_cert();
-    } else if let Some(pem) = &config.trusted_ca_pem {
-        tiberius.trust_cert_ca_bundle(pem.as_bytes().to_vec());
-    }
-    if let Some(name) = &config.host_name_in_certificate {
-        tiberius.hostname_in_certificate(name);
-    }
-    tiberius.command_timeout(Some(config.command_timeout()));
-    tiberius.handshake_timeout(Some(config.connect_timeout()));
-    tiberius.authentication(authentication.method());
-    tiberius
+    config.connection_settings().tiberius_config(authentication)
 }
 
 /// Opens [`TiberiusSession`]s.
@@ -103,10 +58,8 @@ impl Connector for TiberiusConnector {
 
     async fn connect(&self) -> Result<TiberiusSession> {
         let mut client =
-            tokio::time::timeout(self.connect_timeout, sql::connect(self.config.clone()))
-                .await
-                .map_err(|_| ConnectTimeout(self.connect_timeout))?
-                .context("connecting to SQL Server")?;
+            drasi_mssql_common::client::connect_within(self.config.clone(), self.connect_timeout)
+                .await?;
         drain(
             client
                 .simple_query("SET XACT_ABORT ON; SET NOCOUNT ON;")
@@ -131,7 +84,7 @@ async fn drain(mut stream: tiberius::QueryStream<'_>) -> Result<()> {
     Ok(())
 }
 
-/// The progress table DDL (format 2). Columns are NVARCHAR so the bound
+/// The progress table DDL (format 3; `epoch` is empty for exactly-once rows). Columns are NVARCHAR so the bound
 /// string parameters seek the primary key without conversion.
 pub fn create_table_sql(table: &str) -> String {
     format!(
@@ -143,6 +96,7 @@ pub fn create_table_sql(table: &str) -> String {
             digest VARBINARY(32) NOT NULL CHECK (DATALENGTH(digest) = 32),
             operations BIGINT NOT NULL CHECK (operations > 0),
             completed BIGINT NOT NULL CHECK (completed >= 0 AND completed <= operations),
+            epoch NVARCHAR(64) NOT NULL,
             PRIMARY KEY (owner, stream_key)
         )"
     )
@@ -213,13 +167,16 @@ impl Session for TiberiusSession {
             }
         }
         let shape = format!(
-            "SELECT TOP (0) owner, stream_key, version, sequence, digest, operations, completed \
-             FROM {table}"
+            "SELECT TOP (0) owner, stream_key, version, sequence, digest, operations, completed, \
+             epoch FROM {table}"
         );
         drain(self.client.simple_query(shape).await?)
             .await
             .with_context(|| {
-                format!("the progress table {table} does not have the format-2 columns")
+                format!(
+                    "the progress table {table} does not have the format-3 columns (earlier \
+                     formats are not migrated; drop it or configure another progressTable)"
+                )
             })
     }
 
@@ -234,7 +191,7 @@ impl Session for TiberiusSession {
 
     async fn read_cursor(&mut self, owner: &str, stream: &str) -> Result<Option<CursorRow>> {
         let mut query = Query::new(format!(
-            "SELECT version, sequence, digest, operations, completed FROM {} \
+            "SELECT version, sequence, digest, operations, completed, epoch FROM {} \
              WITH (UPDLOCK, HOLDLOCK) WHERE owner = @P1 AND stream_key = @P2",
             self.table
         ));
@@ -252,6 +209,7 @@ impl Session for TiberiusSession {
             digest: row.try_get::<&[u8], _>(2)?.context("NULL digest")?.to_vec(),
             operations: row.try_get::<i64, _>(3)?.context("NULL operations")?,
             completed: row.try_get::<i64, _>(4)?.context("NULL completed")?,
+            epoch: row.try_get::<&str, _>(5)?.context("NULL epoch")?.to_owned(),
         }))
     }
 
@@ -277,8 +235,8 @@ impl Session for TiberiusSession {
 
     async fn insert_cursor(&mut self, owner: &str, position: &Position) -> Result<()> {
         let mut query = Query::new(format!(
-            "INSERT INTO {} (owner, stream_key, version, sequence, digest, operations, completed) \
-             VALUES (@P1, @P2, {PROGRESS_FORMAT_VERSION}, @P3, @P4, @P5, 0)",
+            "INSERT INTO {} (owner, stream_key, version, sequence, digest, operations, completed, \
+             epoch) VALUES (@P1, @P2, {PROGRESS_FORMAT_VERSION}, @P3, @P4, @P5, 0, @P6)",
             self.table
         ));
         query.bind(owner);
@@ -286,6 +244,7 @@ impl Session for TiberiusSession {
         query.bind(position.sequence.to_string());
         query.bind(position.digest.to_vec());
         query.bind(position.operations);
+        query.bind(position.epoch.as_str());
         query.execute(&mut self.client).await?;
         Ok(())
     }
@@ -293,7 +252,7 @@ impl Session for TiberiusSession {
     async fn rollover_cursor(&mut self, owner: &str, position: &Position) -> Result<()> {
         let mut query = Query::new(format!(
             "UPDATE {} SET version = {PROGRESS_FORMAT_VERSION}, sequence = @P3, digest = @P4, \
-             operations = @P5, completed = 0 WHERE owner = @P1 AND stream_key = @P2",
+             operations = @P5, completed = 0, epoch = @P6 WHERE owner = @P1 AND stream_key = @P2",
             self.table
         ));
         query.bind(owner);
@@ -301,6 +260,7 @@ impl Session for TiberiusSession {
         query.bind(position.sequence.to_string());
         query.bind(position.digest.to_vec());
         query.bind(position.operations);
+        query.bind(position.epoch.as_str());
         query.execute(&mut self.client).await?;
         Ok(())
     }

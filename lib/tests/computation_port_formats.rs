@@ -62,6 +62,9 @@ macro_rules! component_impl {
     ($type:ty) => {
         #[async_trait]
         impl ComputationComponent for $type {
+            fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+                drasi_lib::computation::v1::ComponentDescription::undeclared()
+            }
             fn descriptor(&self) -> &ComponentDescriptor {
                 &self.descriptor
             }
@@ -179,6 +182,12 @@ impl FormatFactory {
 
 #[async_trait]
 impl ComponentFactory for FormatFactory {
+    fn describe(
+        &self,
+        _context: &drasi_lib::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }

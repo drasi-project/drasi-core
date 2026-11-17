@@ -11,6 +11,7 @@ use drasi_lib::computation::v1::{
 use shared_tests::fixture_attribution::{Attribution, Fixture};
 use testcontainers::{runners::AsyncRunner, ContainerRequest, ImageExt};
 use testcontainers_modules::mysql::Mysql;
+mod production;
 mod rows;
 mod shared;
 mod snapshot;
@@ -48,6 +49,8 @@ pub(super) fn config(port: u16, output: MySqlOutput) -> MySqlConfig {
             password: "root".into(),
             ssl_mode: MySqlTlsMode::Disabled,
             tls_ca_pem: None,
+            tls_client_cert_pem: None,
+            tls_client_key_pem: None,
             server_id: NonZeroU32::new(874).unwrap(),
             heartbeat_interval_ms: NonZeroU64::new(100).unwrap(),
         },
@@ -63,6 +66,7 @@ pub(super) fn config(port: u16, output: MySqlOutput) -> MySqlConfig {
         },
         max_protocol_bytes: NonZeroUsize::new(1024 * 1024).unwrap(),
         io_timeout_ms: NonZeroU64::new(5000).unwrap(),
+        reconnect_budget_ms: 0,
     }
 }
 
@@ -377,15 +381,17 @@ async fn native_retention_and_schema_failures_do_not_modify_server_settings_or_c
         .await?;
     apply(&mut query, next(&mut source).await?).await?;
     let checkpoint = owner.snapshot().checkpoints.clone();
+    // A key type change fences with a typed schema change and leaves the
+    // committed cursor untouched; restarting is refused for the same reason.
     database
         .admin
-        .execute("ALTER TABLE items ADD COLUMN extra INT")
+        .execute("ALTER TABLE items MODIFY id BIGINT NOT NULL")
         .await?;
     assert!(next(&mut source)
         .await
         .unwrap_err()
         .to_string()
-        .contains("schema recovery"));
+        .contains("schema changed incompatibly"));
     assert_eq!(owner.snapshot().checkpoints, checkpoint);
     source.stop(&lifecycle_ctx::stop()).await?;
     assert!(source
@@ -393,7 +399,7 @@ async fn native_retention_and_schema_failures_do_not_modify_server_settings_or_c
         .await
         .unwrap_err()
         .to_string()
-        .contains("binding"));
+        .contains("schema changed incompatibly"));
     source.stop(&lifecycle_ctx::stop()).await?;
     query.stop(&lifecycle_ctx::stop()).await?;
     database.admin.close().await?;
@@ -556,14 +562,16 @@ async fn native_column_types_preserve_values_and_unsupported_types_fail_before_s
     database.admin.execute("DROP TABLE items").await?;
     database
         .admin
-        .execute("CREATE TABLE items (id INT PRIMARY KEY, p POINT)")
+        .execute("CREATE TABLE items (id VARCHAR(64), PRIMARY KEY (id(8)))")
         .await?;
+    // Spatial types are supported; a prefix primary key is refused before
+    // any row is streamed.
     assert!(source
         .start(&lifecycle_ctx::start())
         .await
         .unwrap_err()
         .to_string()
-        .contains("unsupported native MySQL column type"));
+        .contains("full-column primary keys"));
     source.stop(&lifecycle_ctx::stop()).await?;
     database.admin.close().await?;
     Ok(())

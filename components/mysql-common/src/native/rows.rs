@@ -123,9 +123,14 @@ pub fn checkpoint(
             .context("MySQL row checkpoint has no cursor")?,
     )?;
     anyhow::ensure!(
-        position.position.binding == binding && position.sequence == checkpoint.sequence,
-        "MySQL row checkpoint binding or sequence mismatch"
+        position.sequence == checkpoint.sequence,
+        "MySQL row checkpoint sequence mismatch"
     );
+    if position.position.binding != binding {
+        return Err(super::errors::schema_changed(
+            "the committed MySQL row cursor is bound to different selected tables, keys or binding format",
+        ));
+    }
     Ok(Some(position))
 }
 

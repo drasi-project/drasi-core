@@ -303,6 +303,9 @@ fn output_evidence(envelope: &ChangeEnvelope) -> Result<Value> {
 
 #[async_trait]
 impl ComputationComponent for Capture {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -609,9 +612,9 @@ async fn fixture(
         };
         let storage_resource = match &group {
             Some(group) => group.resource(),
-            None => ResourceHandle::new(
+            None => drasi_lib::computation::v1::QueryIndexProviderResource::handle(
                 ResourceRole::IndexBackend,
-                Arc::new(QueryIndexProviderResource(processor_provider)),
+                processor_provider,
             ),
         };
         builder = builder

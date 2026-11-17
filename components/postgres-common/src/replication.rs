@@ -579,7 +579,7 @@ pub async fn drop_owned_slots(config: &PostgresTransactionConfig) -> Result<Vec<
             continue;
         }
         if field(row, 1)? == "true" {
-            return Err(PostgresCdcError::SlotActive(slot).into());
+            return Err(PostgresCdcError::StateInUse(slot).into());
         }
         owned.push(slot);
     }
@@ -594,7 +594,7 @@ pub async fn drop_owned_slots(config: &PostgresTransactionConfig) -> Result<Vec<
             Ok(_) => log::info!("Dropped managed PostgreSQL replication slot {slot}"),
             Err(error) if sqlstate(&error) == Some("42704") => {}
             Err(error) if sqlstate(&error) == Some("55006") => {
-                return Err(PostgresCdcError::SlotActive(slot.clone()).into())
+                return Err(PostgresCdcError::StateInUse(slot.clone()).into())
             }
             Err(error) => return Err(error.context(format!("cannot drop replication slot {slot}"))),
         }

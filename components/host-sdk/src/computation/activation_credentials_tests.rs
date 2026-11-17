@@ -452,6 +452,9 @@ async fn activation_credentials_multi_thread() -> anyhow::Result<()> {
 struct PendingSource(ComponentDescriptor);
 #[async_trait]
 impl ComputationComponent for PendingSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }

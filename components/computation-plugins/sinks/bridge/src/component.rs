@@ -136,6 +136,9 @@ impl BridgeSink {
 
 #[async_trait]
 impl ComputationComponent for BridgeSink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_computation_bridge_common::config::sender_description(&self.descriptor)
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

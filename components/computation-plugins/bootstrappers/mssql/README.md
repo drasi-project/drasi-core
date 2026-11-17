@@ -1,23 +1,40 @@
 # Native SQL Server bootstrap providers
 
-**User-approved deferral: this family is parked, not qualified or complete.**
+**Live SQL Server qualification is explicitly deferred by the user (CW-78);
+this family is verified by unit tests and database-free Host checks only.**
 
 One bootstrap-role crate exports two explicit factories, both through the real
-static SDK and ABI 2.0.0 / wire 2 dynamic library:
+static SDK and the native ABI 4.0 dynamic library:
 
 | Factory | Permissions and behavior |
 |---|---|
-| `drasi.mssql/snapshot` | Standalone **read-only** table snapshot. Explicit `tables`, primary/custom keys, SELECT/catalog visibility and the same database SNAPSHOT-isolation option required by the old bootstrapper. No CDC catalogs, marker, DDL or data writes. Returns **no CDC handover watermark**. |
-| `drasi.mssql/bootstrap` | Opt-in coordinated CDC snapshot. Requires actual query progress and an explicitly configured, administrator-provisioned CDC `barrier_table`. Writes/deletes its uniquely identified marker and holds shared table locks until snapshot COMMIT. |
+| `drasi.mssql/snapshot` | Standalone **read-only** table snapshot. Explicit `tables`, primary/custom keys, SELECT/catalog visibility and the database's SNAPSHOT-isolation option. No CDC catalogs, marker, DDL or data writes. Returns **no CDC handover watermark**. |
+| `drasi.mssql/bootstrap` | Opt-in coordinated CDC snapshot. Requires actual query progress and an explicitly configured, administrator-provisioned CDC `barrierTable`. Writes and deletes its own marker and holds shared table locks until snapshot COMMIT. |
 
-Both accept `source`, `stream`, secret-bearing `settings` (the source's
-`NativeConfig`), and optional `labels`. Schema-qualified table identities and
-type conversion agree with the source. Read-only mode requires
-`settings.barrier_table` to be absent; coordinated mode requires it.
-Unknown labels produce no rows, without releasing the coordinated table fence.
-Rows flow through an owned, row/byte-bounded channel with backpressure. `max_rows`
+## Configuration
+
+Both take one flat camelCase object: `source` (the paired source's component
+ID), `stream`, optional `labels` and optional `stopTimeoutMs` (how long
+`stop` waits for snapshot cleanup, default `30000`), beside **the same
+settings the native source accepts** (see the source's
+[CONFIGURATION.md](../../sources/mssql/CONFIGURATION.md)). `password` is the
+only secret. Bootstrap factories receive no activation credentials, so they
+always use `user` and `password`; encryption is required by default, as for
+the source. Read-only mode requires `barrierTable` to be absent and
+`tables` to be explicit; coordinated mode requires `barrierTable`.
+
+```json
+{"source": "585da1dd-2d7d-5cec-bcf7-e84ac13a88f8", "stream": "orders/out",
+ "labels": ["Orders"], "host": "sql.internal", "database": "shop",
+ "user": "drasi_cdc", "password": {"secret": "mssql-password"},
+ "tables": ["dbo.Orders"], "barrierTable": "drasi.Barrier"}
+```
+
+Schema-qualified table identities and
+type conversion agree with the source. Unknown labels produce no rows, without releasing the coordinated table fence.
+Rows flow through an owned, row/byte-bounded channel with backpressure. `maxRows`
 limits queued rows and each server-cursor FETCH batch, **not total snapshot size**.
-`max_bytes` counts actual serialized graph-record payload bytes, not Debug output;
+`maxBytes` counts actual serialized graph-record payload bytes, not Debug output;
 one oversized individual record fails rather than being truncated. A worker may
 also hold the currently decoded row and driver/catalog state.
 
@@ -62,16 +79,25 @@ no sysadmin or KILL privileges. A DBA provisions CDC and a table such as
 `dbo.DrasiBarrier(token uniqueidentifier primary key)` once; the application
 needs INSERT/DELETE on it plus appropriate selected/CDC-table SELECT.
 
-There is no public DrasiLib SQL API or general SQL service. A process crash may
-leave a marker row; the token is connector-owned but automated crash-time marker
-garbage collection is not implemented. Do not configure a retention cleanup
-policy that could delete an in-flight marker.
+There is no public DrasiLib SQL API or general SQL service.
+
+### Marker ownership (decision D-1)
+
+Each marker's `token` starts with 64 bits derived from the graph and the
+paired **source** (`SHA-256("drasi.mssql/marker/v1", graph, source)`),
+followed by 64 random bits, so every marker belongs to exactly one source.
+The provider deletes its marker after each attempt. A process crash or a
+failed cleanup may leave one behind; **the source owns those markers** and
+deletes every marker with its prefix on erasing removal, idempotently. The
+providers do not sweep: they have no erase hook, and a sweep at snapshot
+start could delete the marker of another snapshot still in progress. Do not
+configure a retention cleanup policy that could delete an in-flight marker.
 
 ## Qualification
 
-**Not fully qualified.** The current ARM64 Podman environment cannot start a
-usable real SQL Server amd64 instance. Static/dynamic metadata and shared decoder
-tests are not proof of concurrent snapshot correctness. Concurrent writers,
+**Not qualified: live qualification is deferred by the user (CW-78).**
+Static/dynamic metadata, configuration and shared decoder tests are not proof
+of concurrent snapshot correctness. Concurrent writers,
 multi-table transactions, lock timeout/rollback, marker cleanup failure, stream
 cancellation, and read-only least-privilege behavior require real-server
 qualification. A read-only snapshot must never be advertised as coordinated

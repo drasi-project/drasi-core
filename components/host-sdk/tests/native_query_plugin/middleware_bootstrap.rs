@@ -2,11 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
-use drasi_computation_source_sqlite::{SqliteConfig, SqliteOutput};
-use std::{
-    net::TcpListener,
-    num::{NonZeroU64, NonZeroUsize},
-};
+use std::net::TcpListener;
 
 fn source_library() -> PathBuf {
     library().with_file_name(format!(
@@ -24,28 +20,17 @@ fn source(path: &Path, rest_port: u16) -> Result<ComponentAddition> {
         .find(|factory| factory.metadata().implementation.name.as_ref() == "drasi.sqlite/changes")
         .context("existing native SQLite changes factory missing")?
         .clone();
-    let settings = SqliteConfig {
-        path: Some(path.to_owned()),
-        tables: vec!["items".into()],
-        table_keys: Vec::new(),
-        output: SqliteOutput::Changes,
-        replay: None,
-        transactions: SourceTransactionLimits {
-            max_changes: NonZeroUsize::new(64).expect("positive bound"),
-            max_bytes: NonZeroUsize::new(1 << 20).expect("positive bound"),
-            max_duration_ms: NonZeroU64::new(5000).expect("positive deadline"),
-        },
-        max_sql_bytes: NonZeroUsize::new(65536).expect("positive bound"),
-        command_capacity: NonZeroUsize::new(8).expect("positive bound"),
-        output_capacity: NonZeroUsize::new(4).expect("positive bound"),
-        shutdown_timeout_ms: NonZeroU64::new(5000).expect("positive deadline"),
-    };
     let specification = factory.specification(
         ComponentId::try_new("a112a85e-ae22-5dd7-a624-6080d73fbb5e")?,
         json!({
             "stream": "sqlite/out",
-            "settings": settings,
-            "rest_api": {"host": "127.0.0.1", "port": rest_port}
+            "path": path,
+            "tables": ["items"],
+            "outputCapacity": 4,
+            "shutdownTimeoutMs": 5000,
+            "restApi": true,
+            "restHost": "127.0.0.1",
+            "restPort": rest_port
         }),
     )?;
     Ok(ComponentAddition::from_specification(

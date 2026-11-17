@@ -681,6 +681,12 @@ async fn resource_removal_requires_dependents_to_be_removed_explicitly_or_cascad
 struct UserFactory(FactoryDescriptor);
 #[async_trait]
 impl ComponentFactory for UserFactory {
+    fn describe(
+        &self,
+        _context: &drasi_lib::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.0
     }

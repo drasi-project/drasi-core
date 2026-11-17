@@ -19,6 +19,10 @@ fn defaults_are_published_and_applied() -> Result<()> {
     assert!(!config.trust_server_certificate);
     assert_eq!(config.progress_table, DEFAULT_PROGRESS_TABLE);
     assert_eq!(config.max_streams, DEFAULT_MAX_STREAMS);
+    assert_eq!(
+        config.delivery_guarantee,
+        drasi_computation_contracts::DeliveryGuarantee::ExactlyOnce
+    );
     assert_eq!(config.command_timeout_ms, DEFAULT_COMMAND_TIMEOUT_MS);
     assert_eq!(config.connect_timeout_ms, DEFAULT_CONNECT_TIMEOUT_MS);
     assert_eq!(config.retry_budget_ms, DEFAULT_RETRY_BUDGET_MS);
@@ -34,6 +38,7 @@ fn defaults_are_published_and_applied() -> Result<()> {
         ("trustServerCertificate", json!(false)),
         ("progressTable", json!(DEFAULT_PROGRESS_TABLE)),
         ("maxStreams", json!(DEFAULT_MAX_STREAMS)),
+        ("deliveryGuarantee", json!("exactlyOnce")),
         ("commandTimeoutMs", json!(DEFAULT_COMMAND_TIMEOUT_MS)),
         ("connectTimeoutMs", json!(DEFAULT_CONNECT_TIMEOUT_MS)),
         ("retryBudgetMs", json!(DEFAULT_RETRY_BUDGET_MS)),
@@ -61,6 +66,7 @@ fn configuration_round_trips_through_construction() -> Result<()> {
     full["hostNameInCertificate"] = json!("sql.example");
     full["progressTable"] = json!("drasi.progress");
     full["maxStreams"] = json!(8);
+    full["deliveryGuarantee"] = json!("atLeastOnce");
     full["routes"] = json!({"q": {"deleted": {"template": "EXEC dbo.d {{param before.id}}"}}});
     full["commandTimeoutMs"] = json!(1000);
     full["connectTimeoutMs"] = json!(2000);
@@ -126,6 +132,7 @@ fn invalid_and_legacy_configuration_is_rejected() {
         ("progressTable", json!("1table")),
         ("maxStreams", json!(0)),
         ("maxStreams", json!(1_000_001)),
+        ("deliveryGuarantee", json!("at_least_once")),
         ("commandTimeoutMs", json!(0)),
         ("commandTimeoutMs", json!(3_600_001)),
         ("connectTimeoutMs", json!(0)),
@@ -231,7 +238,8 @@ fn progress_tables_are_validated_and_bracket_quoted() -> Result<()> {
     for column in [
         "owner NVARCHAR(64)",
         "stream_key NVARCHAR(128)",
-        "CHECK (version = 2)",
+        "CHECK (version = 3)",
+        "epoch NVARCHAR(64)",
         "sequence NVARCHAR(20)",
         "digest VARBINARY(32)",
         "operations BIGINT",

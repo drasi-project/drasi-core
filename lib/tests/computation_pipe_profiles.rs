@@ -318,6 +318,9 @@ struct DrainingSource {
 
 #[async_trait]
 impl ComputationComponent for DrainingSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         self.inner.descriptor()
     }
@@ -368,6 +371,9 @@ struct PrimedSink {
 
 #[async_trait]
 impl ComputationComponent for PrimedSink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

@@ -194,6 +194,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ComputationComponent for Service {
+        fn description(&self) -> crate::computation::v1::ComponentDescription {
+            crate::computation::v1::ComponentDescription::undeclared()
+        }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.0
         }

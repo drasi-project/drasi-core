@@ -1112,6 +1112,9 @@ struct RemovalProbe {
 
 #[async_trait::async_trait]
 impl ComputationComponent for RemovalProbe {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

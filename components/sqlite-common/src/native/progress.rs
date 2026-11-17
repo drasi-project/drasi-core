@@ -87,3 +87,55 @@ impl Updates {
         }
     }
 }
+
+/// Waits for the single persistent owner and returns its reader and first
+/// snapshot, advancing `sequence` past the owner's last transport sequence.
+pub async fn prepare_single(
+    reader: SourceProgressView,
+    stream: &drasi_computation_contracts::StreamId,
+    sequence: &std::sync::atomic::AtomicU64,
+) -> Result<(Reader, Observed)> {
+    let snapshot = reader.wait_ready().await?;
+    anyhow::ensure!(
+        snapshot.persistent,
+        "native SQLite replay requires persistent source progress"
+    );
+    sequence.fetch_max(
+        snapshot
+            .transport_sequences
+            .get(stream)
+            .copied()
+            .unwrap_or(0),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    Ok((Reader::Single(reader), Observed::Single(snapshot)))
+}
+
+/// Waits for every consumer of the fixed group and returns the group reader
+/// and its first snapshot. When `members` is given, the recovered membership
+/// must equal it.
+pub async fn prepare_group(
+    reader: ConsumerProgressView,
+    members: Option<&[ComponentId]>,
+    stream: &drasi_computation_contracts::StreamId,
+    sequence: &std::sync::atomic::AtomicU64,
+) -> Result<(Reader, Observed)> {
+    let snapshot = reader.wait_ready().await?;
+    if let Some(members) = members {
+        anyhow::ensure!(
+            snapshot.consumers.keys().eq(members.iter()),
+            "SQLite consumer membership changed"
+        );
+    }
+    for (consumer, state) in &snapshot.consumers {
+        anyhow::ensure!(
+            state.persistent && state.recovered,
+            "native SQLite replay requires persistent recovered progress for consumer {consumer}"
+        );
+        sequence.fetch_max(
+            state.transport_sequences.get(stream).copied().unwrap_or(0),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+    Ok((Reader::Group(reader), Observed::Group(snapshot)))
+}

@@ -181,6 +181,12 @@ struct RegisteredFactory(Arc<Factory>);
 
 #[async_trait]
 impl ComponentFactory for RegisteredFactory {
+    fn describe(
+        &self,
+        _context: &drasi_lib::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.0.descriptor
     }
@@ -279,6 +285,9 @@ impl Counter {
 
 #[async_trait]
 impl ComputationComponent for Counter {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

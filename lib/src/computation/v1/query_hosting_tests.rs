@@ -354,11 +354,9 @@ fn retired_query_execution_mode_is_rejected() -> anyhow::Result<()> {
         })?
         .provide_resource(
             resource,
-            super::super::ResourceHandle::new(
+            crate::computation::v1::QueryIndexProviderResource::handle(
                 ResourceRole::IndexBackend,
-                Arc::new(QueryIndexProviderResource(Arc::new(
-                    drasi_core::computation::InMemoryComputationProvider,
-                ))),
+                Arc::new(drasi_core::computation::InMemoryComputationProvider),
             ),
         )?
         .component(

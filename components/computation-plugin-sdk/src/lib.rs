@@ -5,8 +5,10 @@
 //! and capability contracts. No legacy Source/Reaction interfaces are involved.
 
 pub use drasi_computation_contracts::{
-    ComponentUpdateData, ComponentUpdateMode, ComponentUpdatePlan, PortFormatAlternative,
-    PortFormatCatalogue, SinkBatching,
+    ComponentDescription, ComponentUpdateData, ComponentUpdateMode, ComponentUpdatePlan,
+    DeliveryGuarantee, DependencyCapabilities, DependencyRequirement, DurabilityRequirement,
+    InputDelivery, OutputDescription, PortFormatAlternative, PortFormatCatalogue,
+    ProgressPersistence, ResourceCapabilities, ResourceDurability, SinkBatching,
 };
 pub use drasi_computation_plugin_abi as abi;
 pub mod activation_credentials;

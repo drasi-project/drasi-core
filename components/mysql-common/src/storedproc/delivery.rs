@@ -1,7 +1,7 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! Destination cursor shared by the stored-procedure sinks (format version 2).
+//! Destination cursor shared by the stored-procedure sinks (format version 3).
 //!
 //! One MySQL transaction commits an operation's procedure effect together
 //! with the operation's row in the cursor table:
@@ -9,13 +9,21 @@
 //! ```text
 //! owner      CHAR(64)      lowercase hex SHA-256("drasi.storedproc/owner/v1\0" graph "\0" component)
 //! stream_key VARCHAR(128)  the host DeliveryPosition stream
-//! version    SMALLINT      2
+//! version    SMALLINT      3
 //! sequence   VARCHAR(20)   decimal producer sequence of the current batch
 //! digest     BINARY(32)    canonical batch digest
 //! operations BIGINT        operations in the current batch
 //! completed  BIGINT        completed operation prefix of the current batch
+//! epoch      VARCHAR(64)   '' (exactly-once) or the at-least-once producer epoch
 //! PRIMARY KEY (owner, stream_key), InnoDB
 //! ```
+//!
+//! An at-least-once item (one whose position carries a volatile producer
+//! epoch) whose epoch differs from the stored row's treats the row as absent
+//! and overwrites it: a new producer run starts a fresh cursor. The same epoch
+//! deduplicates exactly as an exactly-once stream does. An exactly-once item
+//! never matches an at-least-once row, nor the reverse. Format 2 tables are
+//! refused, not migrated.
 //!
 //! The protocol mirrors the PostgreSQL destination: lock the stream row
 //! (`FOR UPDATE`); reject an expired receipt (older sequence) or a conflicting
@@ -33,7 +41,7 @@ use sha2::{Digest, Sha256};
 use std::{fmt, future::Future, time::Duration};
 
 /// Cursor table format version written to every row.
-pub const PROGRESS_FORMAT_VERSION: i64 = 2;
+pub const PROGRESS_FORMAT_VERSION: i64 = 3;
 /// Default cursor table, in the configured database.
 pub const DEFAULT_PROGRESS_TABLE: &str = "drasi_delivery_progress";
 /// Default per-owner stream capacity.
@@ -106,8 +114,9 @@ impl ProgressTable {
              digest BINARY(32) NOT NULL, \
              operations BIGINT NOT NULL, \
              completed BIGINT NOT NULL, \
+             epoch VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL, \
              PRIMARY KEY (owner, stream_key), \
-             CHECK (version = 2), \
+             CHECK (version = 3), \
              CHECK (operations > 0), \
              CHECK (completed >= 0 AND completed <= operations)\
              ) ENGINE=InnoDB",
@@ -284,11 +293,20 @@ struct Cursor {
     digest: Vec<u8>,
     operations: i64,
     completed: i64,
+    epoch: String,
+}
+
+use drasi_computation_contracts::delivery::{
+    cursor_epoch, valid_cursor_epoch as valid_epoch, CursorEpoch,
+};
+
+fn epoch_match(stored: &str, incoming: &str) -> Result<CursorEpoch> {
+    cursor_epoch(stored, incoming).map_err(|reason| MySqlDeliveryError::Receipt(reason).into())
 }
 
 impl Cursor {
     fn read(row: &[Option<Vec<u8>>]) -> Result<Self> {
-        ensure!(row.len() == 5, "invalid destination delivery progress row");
+        ensure!(row.len() == 6, "invalid destination delivery progress row");
         let version: i64 = field(row, 0)?.parse()?;
         let encoded = field(row, 1)?;
         let sequence = encoded
@@ -299,6 +317,12 @@ impl Cursor {
             digest: row[2].clone().context("missing destination digest")?,
             operations: field(row, 3)?.parse()?,
             completed: field(row, 4)?.parse()?,
+            epoch: match row[5].as_deref() {
+                Some(epoch) => std::str::from_utf8(epoch)
+                    .context("invalid destination delivery epoch")?
+                    .to_owned(),
+                None => anyhow::bail!("missing destination delivery epoch"),
+            },
         };
         ensure!(
             version == PROGRESS_FORMAT_VERSION
@@ -307,8 +331,9 @@ impl Cursor {
                 && cursor.digest.len() == 32
                 && cursor.operations > 0
                 && cursor.completed >= 0
-                && cursor.completed <= cursor.operations,
-            "invalid destination delivery progress (expected format version 2)"
+                && cursor.completed <= cursor.operations
+                && valid_epoch(&cursor.epoch),
+            "invalid destination delivery progress (expected format version 3)"
         );
         Ok(cursor)
     }
@@ -331,6 +356,7 @@ struct Keys {
     digest: String,
     operations: i64,
     operation: i64,
+    epoch: String,
 }
 
 impl Keys {
@@ -345,6 +371,10 @@ impl Keys {
         );
         let stream = item.position.stream();
         ensure!(
+            valid_epoch(item.position.epoch().unwrap_or_default()),
+            "invalid delivery epoch"
+        );
+        ensure!(
             stream.len() <= 128
                 && stream
                     .bytes()
@@ -358,6 +388,7 @@ impl Keys {
             digest: hex(&item.content_digest),
             operations: i64::try_from(item.position.operations())?,
             operation: i64::try_from(item.position.operation())?,
+            epoch: item.position.epoch().unwrap_or_default().to_owned(),
         })
     }
 }
@@ -382,7 +413,7 @@ impl Operation<'_> {
             .query(
                 connection,
                 &format!(
-                    "SELECT version, sequence, digest, operations, completed FROM {} WHERE {} FOR UPDATE",
+                    "SELECT version, sequence, digest, operations, completed, epoch FROM {} WHERE {} FOR UPDATE",
                     self.table.quoted(),
                     keys.filter
                 ),
@@ -451,6 +482,25 @@ impl Operation<'_> {
             row = self.read(connection, keys).await?;
         }
         let completed = match row {
+            Some(previous) if epoch_match(&previous.epoch, &keys.epoch)? == CursorEpoch::New => {
+                // A new producer run: the previous epoch's cursor is absent
+                // for this item, which must start its batch.
+                ensure!(
+                    keys.operation == 0,
+                    MySqlDeliveryError::Receipt(
+                        "destination delivery is missing its first operation"
+                    )
+                );
+                self.execute(
+                    connection,
+                    &format!(
+                        "UPDATE {table} SET sequence='{}', digest=X'{}', operations={}, completed=0, epoch='{}' WHERE {}",
+                        keys.sequence, keys.digest, keys.operations, keys.epoch, keys.filter
+                    ),
+                )
+                .await?;
+                0
+            }
             Some(previous) => {
                 ensure!(
                     keys.sequence >= previous.sequence,
@@ -511,9 +561,9 @@ impl Operation<'_> {
                 self.execute(
                     connection,
                     &format!(
-                        "INSERT INTO {table} (owner, stream_key, version, sequence, digest, operations, completed) \
-                         VALUES ('{}', '{}', {PROGRESS_FORMAT_VERSION}, '{}', X'{}', {}, 0)",
-                        self.owner, keys.stream, keys.sequence, keys.digest, keys.operations
+                        "INSERT INTO {table} (owner, stream_key, version, sequence, digest, operations, completed, epoch) \
+                         VALUES ('{}', '{}', {PROGRESS_FORMAT_VERSION}, '{}', X'{}', {}, 0, '{}')",
+                        self.owner, keys.stream, keys.sequence, keys.digest, keys.operations, keys.epoch
                     ),
                 )
                 .await?;
@@ -570,7 +620,7 @@ pub async fn ensure_table(
     timeout: Duration,
 ) -> Result<()> {
     let probe = format!(
-        "SELECT owner, stream_key, version, sequence, digest, operations, completed FROM {} LIMIT 0",
+        "SELECT owner, stream_key, version, sequence, digest, operations, completed, epoch FROM {} LIMIT 0",
         table.quoted()
     );
     match bounded(timeout, connection.query(&probe)).await {
@@ -600,7 +650,8 @@ pub async fn ensure_table(
         }
         Err(error) if server_error(&error).is_some_and(|error| error.code == 1054) => {
             return Err(error.context(format!(
-                "{} exists but is not a format version 2 delivery progress table",
+                "{} exists but is not a format version 3 delivery progress table (earlier formats are \
+                 not migrated; drop the table or configure another progressTable)",
                 table.quoted()
             )));
         }
@@ -649,6 +700,7 @@ pub async fn ensure_table(
         ("digest", "binary"),
         ("operations", "bigint"),
         ("completed", "bigint"),
+        ("epoch", "varchar"),
     ];
     ensure!(
         actual.len() == expected.len()
@@ -656,7 +708,7 @@ pub async fn ensure_table(
                 |((name, kind), (expected_name, expected_kind))| name == expected_name
                     && kind == expected_kind
             ),
-        "{} does not have the format version 2 delivery progress columns",
+        "{} does not have the format version 3 delivery progress columns",
         table.quoted()
     );
     let key = bounded(
@@ -788,33 +840,73 @@ mod tests {
 
     #[test]
     fn cursor_rows_are_validated() -> Result<()> {
+        let epoch = "a".repeat(64);
+        let row_with = |version: &str,
+                        sequence: &str,
+                        digest: usize,
+                        operations: &str,
+                        completed: &str,
+                        epoch: &str| {
+            vec![
+                Some(version.as_bytes().to_vec()),
+                Some(sequence.as_bytes().to_vec()),
+                Some(vec![7; digest]),
+                Some(operations.as_bytes().to_vec()),
+                Some(completed.as_bytes().to_vec()),
+                Some(epoch.as_bytes().to_vec()),
+            ]
+        };
         let row =
             |version: &str, sequence: &str, digest: usize, operations: &str, completed: &str| {
-                vec![
-                    Some(version.as_bytes().to_vec()),
-                    Some(sequence.as_bytes().to_vec()),
-                    Some(vec![7; digest]),
-                    Some(operations.as_bytes().to_vec()),
-                    Some(completed.as_bytes().to_vec()),
-                ]
+                row_with(version, sequence, digest, operations, completed, "")
             };
-        let cursor = Cursor::read(&row("2", "17", 32, "3", "1"))?;
+        let cursor = Cursor::read(&row("3", "17", 32, "3", "1"))?;
         assert_eq!(
             (cursor.sequence, cursor.operations, cursor.completed),
             (17, 3, 1)
         );
+        assert!(cursor.epoch.is_empty());
+        let cursor = Cursor::read(&row_with("3", "17", 32, "3", "1", &epoch))?;
+        assert_eq!(cursor.epoch, epoch);
+        let mut missing = row("3", "17", 32, "3", "1");
+        missing[5] = None;
         for bad in [
-            row("1", "17", 32, "3", "1"),
-            row("2", "017", 32, "3", "1"),
-            row("2", "0", 32, "3", "1"),
-            row("2", "17", 31, "3", "1"),
-            row("2", "17", 32, "0", "0"),
-            row("2", "17", 32, "3", "4"),
-            row("2", "17", 32, "3", "-1"),
+            row("2", "17", 32, "3", "1"),
+            row("3", "017", 32, "3", "1"),
+            row("3", "0", 32, "3", "1"),
+            row("3", "17", 31, "3", "1"),
+            row("3", "17", 32, "0", "0"),
+            row("3", "17", 32, "3", "4"),
+            row("3", "17", 32, "3", "-1"),
+            row_with("3", "17", 32, "3", "1", "A"),
+            row_with("3", "17", 32, "3", "1", &"A".repeat(64)),
+            row_with("3", "17", 32, "3", "1", &"a".repeat(63)),
+            missing,
+            row("3", "17", 32, "3", "1")[..5].to_vec(),
         ] {
             assert!(Cursor::read(&bad).is_err());
         }
         assert_eq!(hex_decode(&hex(&[0, 1, 254, 255])), [0, 1, 254, 255]);
+        Ok(())
+    }
+
+    #[test]
+    fn epochs_restart_volatile_cursors_and_never_cross_guarantees() -> Result<()> {
+        let (first, second) = ("a".repeat(64), "b".repeat(64));
+        assert_eq!(epoch_match("", "")?, CursorEpoch::Same);
+        assert_eq!(epoch_match(&first, &first)?, CursorEpoch::Same);
+        assert_eq!(epoch_match(&first, &second)?, CursorEpoch::New);
+        for (stored, incoming) in [("", first.as_str()), (first.as_str(), "")] {
+            let error = epoch_match(stored, incoming).unwrap_err();
+            assert!(matches!(
+                error.downcast_ref::<MySqlDeliveryError>(),
+                Some(MySqlDeliveryError::Receipt(_))
+            ));
+            assert!(!retryable(&error));
+        }
+        let table = ProgressTable::new("app", "drasi_delivery_progress")?;
+        assert!(table.create_statement().contains("CHECK (version = 3)"));
+        assert!(table.create_statement().contains("epoch VARCHAR(64)"));
         Ok(())
     }
 }

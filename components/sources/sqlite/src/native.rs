@@ -24,7 +24,7 @@ mod snapshot;
 #[cfg(test)]
 mod tests;
 pub use consumer_snapshot::{SqliteConsumerSnapshot, SqliteConsumerSnapshots};
-use drasi_sqlite_common::native::runtime::{SqliteRuntime, StartContext};
+use drasi_sqlite_common::native::runtime::{RestSettings, SqliteRuntime, StartContext};
 use drasi_sqlite_common::native::{handle, journal, progress};
 pub use drasi_sqlite_common::native::{
     SqliteConfig, SqliteOutput, SqliteParam, SqliteReplayConfig, SqliteRow,
@@ -240,6 +240,9 @@ impl SqliteSource {
 
 #[async_trait]
 impl ComputationComponent for SqliteSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -283,60 +286,37 @@ impl ComputationComponent for SqliteSource {
         let mut initialization_lease = None;
         let progress = match &self.progress {
             Some(progress) => {
-                let snapshot = progress.wait_ready().await?;
-                anyhow::ensure!(
-                    snapshot.persistent,
-                    "native SQLite replay requires persistent consumer progress"
-                );
-                self.sequence.fetch_max(
-                    snapshot
-                        .transport_sequences
-                        .get(&self.stream)
-                        .copied()
-                        .unwrap_or(0),
-                    std::sync::atomic::Ordering::Relaxed,
-                );
-                let bootstrap = if let Some(provider) = &self.snapshot {
-                    let (epoch, lease) = provider.live_boundary(&snapshot)?;
-                    initialization_lease = Some(lease);
-                    Some(epoch)
-                } else {
-                    None
+                let (reader, observed) =
+                    progress::prepare_single(progress.read_only(), &self.stream, &self.sequence)
+                        .await?;
+                let bootstrap = match (&self.snapshot, &observed) {
+                    (Some(provider), progress::Observed::Single(snapshot)) => {
+                        let (epoch, lease) = provider.live_boundary(snapshot)?;
+                        initialization_lease = Some(lease);
+                        Some(epoch)
+                    }
+                    _ => None,
                 };
-                Some((
-                    progress::Reader::Single(progress.read_only()),
-                    progress::Observed::Single(snapshot),
-                    bootstrap,
-                ))
+                Some((reader, observed, bootstrap))
             }
             None => match &self.consumer_progress {
                 Some(consumers) => {
-                    let reader = consumers.read_only();
-                    let snapshot = reader.wait_ready().await?;
-                    for (consumer, state) in &snapshot.consumers {
-                        anyhow::ensure!(state.persistent && state.recovered,
-                            "native SQLite replay requires persistent recovered progress for consumer {consumer}");
-                        self.sequence.fetch_max(
-                            state
-                                .transport_sequences
-                                .get(&self.stream)
-                                .copied()
-                                .unwrap_or(0),
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
-                    }
-                    let bootstrap = if let Some(snapshots) = &self.consumer_snapshots {
-                        let (epoch, lease) = snapshots.live_boundary(&snapshot)?;
-                        initialization_lease = Some(lease);
-                        Some(epoch)
-                    } else {
-                        None
+                    let (reader, observed) = progress::prepare_group(
+                        consumers.read_only(),
+                        None,
+                        &self.stream,
+                        &self.sequence,
+                    )
+                    .await?;
+                    let bootstrap = match (&self.consumer_snapshots, &observed) {
+                        (Some(snapshots), progress::Observed::Group(snapshot)) => {
+                            let (epoch, lease) = snapshots.live_boundary(snapshot)?;
+                            initialization_lease = Some(lease);
+                            Some(epoch)
+                        }
+                        _ => None,
                     };
-                    Some((
-                        progress::Reader::Group(reader),
-                        progress::Observed::Group(snapshot),
-                        bootstrap,
-                    ))
+                    Some((reader, observed, bootstrap))
                 }
                 None => None,
             },
@@ -347,32 +327,71 @@ impl ComputationComponent for SqliteSource {
                     source: self.descriptor.id().clone(),
                     stream: self.stream.clone(),
                     config: self.config.clone(),
+                    connection: Default::default(),
                     sequence: self.sequence.clone(),
-                    rest_api: self.rest_api.clone(),
+                    rest: self.rest_api.clone().map(RestSettings::legacy),
                     progress,
                 },
                 Arc::new((self.client_owner.clone(), initialization_lease)),
             )
             .await
     }
-    async fn stop(&mut self, _context: &drasi_lib::computation::v1::StopContext) -> Result<()> {
-        self.runtime.stop().await?;
+    /// Stops REST admission and the worker together; `Drain` lets the open
+    /// transaction finish, `Abort` rolls it back. On expiry the error is
+    /// retryable and the workers stay owned.
+    async fn stop(&mut self, context: &drasi_lib::computation::v1::StopContext) -> Result<()> {
+        let mode = match context.mode() {
+            drasi_lib::computation::v1::StopMode::Abort => {
+                drasi_lib::computation::v1::StopMode::Abort
+            }
+            _ => drasi_lib::computation::v1::StopMode::Drain,
+        };
+        self.runtime.stop(mode, context.deadline()).await?;
         self.cleanup_required = false;
         Ok(())
     }
 
-    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
-    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
-    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+    async fn initialize(
+        &mut self,
+        _context: &drasi_lib::computation::v1::InitializeContext,
+    ) -> Result<()> {
+        self.config.validate()
+    }
 
+    /// Refuses REST and handle writes and parks the worker at its next
+    /// transaction boundary, as the native plugin does.
+    async fn pause(&mut self, context: &drasi_lib::computation::v1::PauseContext) -> Result<()> {
+        self.runtime
+            .pause(context.deadline(), context.cancellation())
+            .await
+    }
+
+    async fn resume(&mut self, _context: &drasi_lib::computation::v1::ResumeContext) -> Result<()> {
+        self.runtime.resume();
+        Ok(())
+    }
+
+    /// Under `Erase`, a journal source drops its own journal tables in one
+    /// transaction (idempotent; a journal owned by another source is left in
+    /// place). Volatile sources own nothing.
     async fn dispose(
         &mut self,
         context: &drasi_lib::computation::v1::DisposeContext,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(
-            !context.erases_owned_state(),
-            "this component does not support permanent state removal"
+            !self.cleanup_required,
+            "dispose requires a stopped native SQLite source"
         );
+        if !context.erases_owned_state() || self.config.replay.is_none() {
+            return Ok(());
+        }
+        let Some(path) = self.config.path.clone() else {
+            return Ok(());
+        };
+        let source = self.descriptor.id().clone();
+        let timeout = self.config.transactions.duration();
+        tokio::task::spawn_blocking(move || journal::erase_owned(&path, &source, timeout))
+            .await??;
         Ok(())
     }
 }

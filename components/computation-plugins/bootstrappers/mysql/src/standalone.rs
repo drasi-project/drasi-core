@@ -8,16 +8,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct MySqlStandaloneBootstrapFactory;
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Configuration {
-    source: String,
-    stream: String,
-    settings: MySqlConfig,
-    #[serde(default)]
-    labels: Vec<String>,
-}
-
 struct Provider {
     instance: String,
     graph: String,
@@ -69,18 +59,7 @@ impl NativeBootstrapProvider for Provider {
 
 impl BootstrapFactory for MySqlStandaloneBootstrapFactory {
     fn metadata(&self) -> BootstrapFactoryMetadata {
-        let mut metadata = metadata(MYSQL_STANDALONE_BOOTSTRAP);
-        metadata.source_progress = false;
-        metadata.configuration.fields.insert(
-            "labels".into(),
-            drasi_computation_plugin_sdk::ConfigField {
-                constraint: None,
-                value_type: ConfigType::Array,
-                required: false,
-                secret: false,
-            },
-        );
-        metadata
+        metadata(MYSQL_STANDALONE_BOOTSTRAP, Kind::Standalone)
     }
     fn create(
         &self,
@@ -94,7 +73,8 @@ impl BootstrapFactory for MySqlStandaloneBootstrapFactory {
             progress.is_none(),
             "standalone MySQL snapshot has no recovery owner"
         );
-        let config: Configuration = serde_json::from_value(request.configuration.clone())?;
+        let config = BootstrapConfig::from_value(Kind::Standalone, &request.configuration)?;
+        let settings = config.engine_config(Kind::Standalone)?;
         let scope = request
             .scope
             .as_ref()
@@ -106,12 +86,8 @@ impl BootstrapFactory for MySqlStandaloneBootstrapFactory {
             graph: scope.graph_id.clone(),
             query: request.id.clone(),
             refresh_pending: AtomicBool::new(false),
-            inner: StandaloneSnapshot::new(
-                ComponentId::try_new(config.source)?,
-                StreamId::try_new(config.stream)?,
-                config.settings,
-            )?
-            .for_labels(&config.labels),
+            inner: StandaloneSnapshot::new(config.source, config.stream, settings)?
+                .for_labels(&config.labels),
         }))
     }
 }

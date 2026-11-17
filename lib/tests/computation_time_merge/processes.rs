@@ -61,6 +61,9 @@ struct Ingress(Arc<SourceAdmission>, ComponentDescriptor);
 
 #[async_trait]
 impl ComputationComponent for Ingress {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.1
     }
@@ -85,6 +88,9 @@ struct Sink {
 
 #[async_trait]
 impl ComputationComponent for Sink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

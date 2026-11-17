@@ -20,6 +20,7 @@ mod configuration_constraint;
 mod consumer_progress;
 #[doc(hidden)]
 pub mod delivery;
+mod description;
 mod element_image;
 mod element_patch;
 #[doc(hidden)]
@@ -54,9 +55,11 @@ mod query_identity;
 mod query_joins;
 mod query_read;
 mod query_recovery;
+pub mod reconnect;
 mod scheduling;
 mod snapshot;
 mod snapshot_consumer;
+pub mod source_failure;
 mod source_schema;
 #[doc(hidden)]
 pub mod source_transaction;
@@ -70,6 +73,7 @@ pub use component_update::*;
 pub use configuration_constraint::ConfigurationConstraint;
 pub use consumer_progress::*;
 pub use data::*;
+pub use description::*;
 pub use drasi_core_types::{profiling, schema};
 pub use element_image::{ElementImage, ElementImageError};
 pub use element_patch::{ElementPatch, ElementPatchError, ElementPatchKind};
@@ -88,6 +92,7 @@ pub use progress::*;
 pub use query_codec::*;
 pub use snapshot::*;
 pub use snapshot_consumer::SnapshotConsumer;
+pub use source_failure::{is_permanent_source_failure, source_failure, SourceFailure};
 pub use source_schema::SourceSchemaReader;
 pub use source_transaction::*;
 
@@ -109,7 +114,7 @@ pub use scheduling::*;
 pub use bootstrap::*;
 pub use bootstrap_session::*;
 pub use delivery::{
-    DeliveryBatch, DeliveryBatchIdentity, DeliveryHandler, DeliveryId, DeliveryItem,
-    DeliveryPosition, DeliveryScope,
+    DeliveryBatch, DeliveryBatchIdentity, DeliveryGuarantee, DeliveryHandler, DeliveryId,
+    DeliveryItem, DeliveryPosition, DeliveryScope,
 };
 pub use output_identity::ReplayRejection;

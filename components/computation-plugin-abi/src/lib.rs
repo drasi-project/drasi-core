@@ -248,6 +248,12 @@ pub struct FactoryVTable {
     /// is an `unsupported` Assessment; a failure to assess is an error, never an
     /// implicit Replace.
     pub assess: Option<unsafe extern "C" fn(*mut c_void, BorrowedBytes) -> Reply>,
+    /// Required pure describer. Input is a JSON DescribeRequest (the creation
+    /// request, the component descriptor and the declared capabilities of the
+    /// resources bound to each dependency); success returns a JSON
+    /// ComponentDescription, each bounded by MAX_METADATA_BYTES. No
+    /// construction, I/O or inspection of external state.
+    pub describe: Option<unsafe extern "C" fn(*mut c_void, BorrowedBytes) -> Reply>,
 }
 
 #[repr(C)]
@@ -423,8 +429,9 @@ mod tests {
         assert_eq!(offset_of!(Metadata, target), 16);
         assert_eq!(size_of::<Metadata>(), 16 + 4 * p);
         assert_eq!(size_of::<PluginVTable>(), 16 + 3 * p);
-        assert_eq!(size_of::<FactoryVTable>(), 16 + 3 * p);
+        assert_eq!(size_of::<FactoryVTable>(), 16 + 4 * p);
         assert_eq!(offset_of!(FactoryVTable, assess), 16 + 2 * p);
+        assert_eq!(offset_of!(FactoryVTable, describe), 16 + 3 * p);
         assert_eq!(size_of::<ComponentVTable>(), 16 + 5 * p);
         assert_eq!(size_of::<OperationVTable>(), 16 + 3 * p);
         assert_eq!(size_of::<Wake>(), 16 + 4 * p);

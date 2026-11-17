@@ -1147,6 +1147,14 @@ pub struct BootstrapProviderComponent {
 }
 
 impl BootstrapProviderComponent {
+    /// Every provider node's description, shared with factories that build
+    /// them: the node keeps no progress of its own and its bootstrap outputs
+    /// declare no producer identity, since each serves a requesting consumer's
+    /// own session.
+    pub fn provider_description() -> super::ComponentDescription {
+        super::ComponentDescription::new(super::ProgressPersistence::Stateless)
+    }
+
     /// A node with a single graph-change bootstrap output,
     /// [`BOOTSTRAP_PROVIDER_OUTPUT_PORT`].
     pub fn new(id: ComponentId, factory: BootstrapProviderFactory) -> anyhow::Result<Self> {
@@ -1198,6 +1206,10 @@ impl BootstrapProviderComponent {
 impl ComputationComponent for BootstrapProviderComponent {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
+    }
+
+    fn description(&self) -> super::ComponentDescription {
+        Self::provider_description()
     }
 
     fn bind_bootstrap(&mut self, ports: BootstrapPorts) {

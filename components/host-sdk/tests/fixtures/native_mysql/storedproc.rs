@@ -302,7 +302,7 @@ async fn large_input(database: &Database, factory: &computation::NativeFactory) 
                 owner("bulk-procedures")
             ))
             .await?,
-        "5000\t5000\t2"
+        "5000\t5000\t3"
     );
     Ok(())
 }
@@ -558,6 +558,314 @@ async fn plugin_retry_without_restart(database: &Database) -> Result<()> {
     Ok(())
 }
 
+/// One live output of an in-memory (volatile) query: its recovery identity
+/// carries a per-run incarnation and it has no persistent progress.
+fn volatile_input(incarnation: &str, sequence: u64, id: i64, value: &str) -> Result<InputEnvelope> {
+    use drasi_core_types::evaluation::{
+        context::QueryPartEvaluationContext, variable_value::VariableValue,
+    };
+    let query = self::id("left");
+    let mut envelope = QueryChangeCodec::encode_evaluation(
+        None,
+        &query,
+        SystemMetadata::new(stream(&format!("{query}/out")), sequence),
+        &ResultNodeProjector::try_new("test/native-mysql-volatile/out", None)?,
+        &[QueryPartEvaluationContext::Adding {
+            after: [
+                ("id".into(), VariableValue::Integer(id.into())),
+                ("value".into(), VariableValue::from(value)),
+            ]
+            .into(),
+            row_signature: id as u64,
+        }],
+        QueryOutputMetadata {
+            query_id: query.clone(),
+            input_origin: None,
+            timestamp: chrono::DateTime::from_timestamp(1_700_000_000, 0).context("timestamp")?,
+            metadata: Default::default(),
+            profiling: None,
+        },
+    )?
+    .context("volatile query output")?;
+    let identity: QueryRecoveryIdentity = serde_json::from_value(json!({
+        "construction_scope": INSTANCE, "graph_id": ComponentBatch::GRAPH_ID,
+        "query_id": query.as_str(), "configuration_hash": 7, "incarnation": incarnation
+    }))?;
+    identity.annotate(&mut envelope, &query)?;
+    Ok(InputEnvelope {
+        port: PortId::try_new("in")?,
+        envelope,
+    })
+}
+
+/// An in-memory query is refused without opt-in and delivered at least once
+/// (deduplicated within one producer run) with `deliveryGuarantee:
+/// atLeastOnce`; a new run starts a fresh cursor on the same stream row.
+async fn volatile_queries(
+    database: &Database,
+    factory: &Arc<computation::NativeFactory>,
+) -> Result<()> {
+    const FIRST: &str = "6d1c2f0e-0d8b-4f43-9a5e-2a3b8c1d0e01";
+    const SECOND: &str = "6d1c2f0e-0d8b-4f43-9a5e-2a3b8c1d0e02";
+    let directory = tempfile::tempdir()?;
+    let audited = "SELECT COUNT(*) FROM audit WHERE id BETWEEN 9701 AND 9703";
+    let mut strict = consumer(
+        factory,
+        "strict-procedures",
+        settings(database, CALL),
+        &directory.path().join("strict"),
+    )
+    .await?;
+    strict.start(&crate::hooks::start_ctx()).await?;
+    let error = strict
+        .handle(volatile_input(FIRST, 1, 9701, "refused")?)
+        .await
+        .err()
+        .context("the volatile input must be refused")?;
+    assert!(
+        format!("{error:#}").contains("output identity is Volatile"),
+        "{error:#}"
+    );
+    assert_eq!(database.sql(audited).await?, "0");
+    strict.stop(&crate::hooks::stop_ctx()).await?;
+
+    let mut configuration = settings(database, CALL);
+    configuration["deliveryGuarantee"] = json!("atLeastOnce");
+    let mut sink = consumer(
+        factory,
+        "volatile-procedures",
+        configuration,
+        &directory.path().join("volatile"),
+    )
+    .await?;
+    sink.start(&crate::hooks::start_ctx()).await?;
+    let first = volatile_input(FIRST, 1, 9701, "first")?;
+    sink.handle(first.clone()).await?;
+    sink.handle(first).await?;
+    sink.handle(volatile_input(FIRST, 2, 9702, "second")?)
+        .await?;
+    assert_eq!(
+        database.sql(audited).await?,
+        "2",
+        "deduplicated within a run"
+    );
+    // A restarted producer reuses low sequences under a new epoch.
+    sink.handle(volatile_input(SECOND, 1, 9703, "restarted")?)
+        .await?;
+    assert_eq!(database.sql(audited).await?, "3");
+    assert_eq!(rows_of(database, "volatile-procedures").await?, "1");
+    assert_eq!(
+        database
+            .sql(&format!(
+                "SELECT LENGTH(epoch), version FROM drasi_delivery_progress WHERE owner='{}'",
+                owner("volatile-procedures")
+            ))
+            .await?,
+        "64\t3"
+    );
+    sink.stop(&crate::hooks::stop_ctx()).await?;
+    graph_refuses_volatile_queries(database, factory).await?;
+    Ok(())
+}
+
+/// An idle source feeding the in-memory query, so the query is constructed
+/// and its outgoing edge is compared.
+struct IdleFeed(ComponentDescriptor);
+#[async_trait]
+impl ComputationComponent for IdleFeed {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::new(
+            drasi_lib::computation::v1::ProgressPersistence::Stateless,
+        )
+        .with_outputs(
+            &self.0,
+            drasi_lib::computation::v1::OutputDescription::UNTRACKED,
+        )
+    }
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.0
+    }
+    drasi_lib::passive_component_lifecycle!();
+}
+#[async_trait]
+impl EnvelopeSource for IdleFeed {
+    async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
+        std::future::pending().await
+    }
+}
+
+/// The graph refuses, when it binds the edge, to connect an exactly-once
+/// procedure sink to a query on an in-memory index provider: the edge fails
+/// and the sink node carries the terminal binding failure while both nodes
+/// stay in the graph. With `deliveryGuarantee: atLeastOnce` the edge binds.
+async fn graph_refuses_volatile_queries(
+    database: &Database,
+    factory: &Arc<computation::NativeFactory>,
+) -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let build = |mut configuration: Value| -> Result<ComputationGraph> {
+        // The sink's output aliases select this graph's query.
+        configuration["outputs"] = json!({
+            "query": {"component": database::fixture_id("graph-query"), "port": "out"}
+        });
+        let queries = Arc::new(ContinuousQueryFactory::default());
+        let mut query = queries.specification_from_config(
+            id("graph-query"),
+            json!({"query": "MATCH (n:items) RETURN n.id AS id", "stream": "graph-query/out"}),
+        )?;
+        query
+            .dependencies
+            .insert("indexes".into(), vec![resource("memory")]);
+        // The password is a secret reference, as in the other graph proofs.
+        let sink = sink_specification(factory, &configuration)?;
+        let edge =
+            EdgeDefinition::new(endpoint("graph-query", "out"), endpoint("procedures", "in"));
+        let builder = ComputationGraph::builder(ComponentBatch::GRAPH_ID)
+            .declare_resource(ResourceSpecification {
+                id: resource("memory"),
+                role: ResourceRole::IndexBackend,
+                ownership: ResourceOwnership::Borrowed,
+                binding: "memory".into(),
+            })?
+            .provide_resource(
+                resource("memory"),
+                drasi_lib::computation::v1::QueryIndexProviderResource::handle(
+                    ResourceRole::IndexBackend,
+                    Arc::new(InMemoryComputationProvider),
+                ),
+            )?
+            .declare_resource(ResourceSpecification {
+                id: resource("settings"),
+                role: ResourceRole::SecretStore,
+                ownership: ResourceOwnership::Borrowed,
+                binding: "settings".into(),
+            })?
+            .provide_resource(
+                resource("settings"),
+                ResourceHandle::new(
+                    ResourceRole::SecretStore,
+                    Arc::new(ConfigurationResolverResource(Arc::new(Settings {
+                        source: database.source_settings(),
+                        sink: database.sink_settings(),
+                    }))),
+                ),
+            )?
+            .declare_resource(ResourceSpecification {
+                id: resource("delivery"),
+                role: ResourceRole::IndexBackend,
+                ownership: ResourceOwnership::Borrowed,
+                binding: "delivery".into(),
+            })?
+            .provide_resource(
+                resource("delivery"),
+                ResourceHandle::new(
+                    ResourceRole::IndexBackend,
+                    Arc::new(computation::NativeConsumerResource {
+                        provider: rocks(&directory.path().join("delivery"))?,
+                        options: delivery_options(),
+                    }),
+                ),
+            )?
+            .source(
+                name("graph-feed"),
+                Box::new(IdleFeed(ComponentDescriptor::try_new(
+                    id("graph-feed"),
+                    vec![PortDescriptor::new(
+                        PortId::try_new("out")?,
+                        PortDirection::Output,
+                        GraphChangeCodec::schema().descriptor().clone(),
+                        PipeRequirements::default(),
+                    )],
+                )?)),
+            )
+            .bind_stream(endpoint("graph-feed", "out"), stream("graph-feed/out"))
+            .connect(
+                EdgeDefinition::new(endpoint("graph-feed", "out"), endpoint("graph-query", "in")),
+                Box::new(BoundedPipeConfig { capacity: 4 }),
+            )
+            .component(name("graph-query"), query, queries)
+            .component(name("procedures"), sink, factory.clone())
+            .bind_stream(edge.from.clone(), stream("graph-query/out"))
+            .connect(edge, Box::new(BoundedPipeConfig { capacity: 4 }));
+        Ok(builder.build()?)
+    };
+    let edge = EdgeDefinition::new(endpoint("graph-query", "out"), endpoint("procedures", "in"));
+    let deployed = |mut graph: ComputationGraph, edge: EdgeDefinition| async move {
+        let watched = edge.clone();
+        let run = graph.run()?;
+        let control = run.control();
+        let (outcome, observed) = tokio::join!(run, async {
+            control.deployment_report().await?;
+            // Deferred construction binds the edge after deployment; wait
+            // until it is either bound or failed.
+            let mut changes = control.subscribe_observed();
+            let settled = tokio::time::timeout(
+                Duration::from_secs(30),
+                changes.wait_for(|state| {
+                    state
+                        .relationships
+                        .get(&watched)
+                        .is_some_and(|relationship| {
+                            matches!(
+                                relationship.binding,
+                                BindingState::Bound | BindingState::Failed
+                            )
+                        })
+                }),
+            )
+            .await;
+            let observed = control.observed();
+            control.cancel();
+            anyhow::ensure!(
+                matches!(settled, Ok(Ok(_))),
+                "edge never settled: {:?}",
+                observed.components
+            );
+            Result::<_>::Ok(observed)
+        });
+        anyhow::ensure!(matches!(outcome, Err(GraphError::Cancelled)), "{outcome:?}");
+        graph.dispose().await?;
+        let observed = observed?;
+        Result::<_>::Ok((
+            observed.relationships[&edge].clone(),
+            observed.components[&id("procedures")].clone(),
+            observed.components[&id("graph-query")].clone(),
+        ))
+    };
+    let (relationship, sink, query) =
+        deployed(build(settings(database, CALL))?, edge.clone()).await?;
+    anyhow::ensure!(
+        relationship.binding == BindingState::Failed,
+        "{relationship:?}"
+    );
+    let failure = sink
+        .failure
+        .clone()
+        .context("the sink carries the binding failure")?;
+    anyhow::ensure!(
+        failure.phase == FailurePhase::Binding
+            && failure.disposition == FailureDisposition::Terminal
+            && matches!(
+                failure.cause.as_ref(),
+                GraphError::Incompatible {
+                    source: Incompatibility::ProducerIdentity { .. },
+                    ..
+                }
+            ),
+        "{failure:?}"
+    );
+    anyhow::ensure!(sink.realization == RealizationState::Blocked, "{sink:?}");
+    anyhow::ensure!(query.failure.is_none(), "{query:?}");
+    let mut opted = settings(database, CALL);
+    opted["deliveryGuarantee"] = json!("atLeastOnce");
+    let (relationship, sink, _) = deployed(build(opted)?, edge).await?;
+    anyhow::ensure!(
+        relationship.binding == BindingState::Bound && sink.failure.is_none(),
+        "{relationship:?} {sink:?}"
+    );
+    Ok(())
+}
+
 pub(crate) async fn proofs(dynamic: bool) -> Result<()> {
     let mut database = Database::new().await?;
     database.initialize().await?;
@@ -570,6 +878,7 @@ pub(crate) async fn proofs(dynamic: bool) -> Result<()> {
         reconnect_after_kill(&database, &factory).await?;
         erase_twice(&database, &factory).await?;
         stream_capacity(&database, &factory).await?;
+        volatile_queries(&database, &factory).await?;
         if !dynamic {
             plugin_retry_without_restart(&database).await?;
         }

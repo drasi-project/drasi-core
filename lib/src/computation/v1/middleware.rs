@@ -490,8 +490,37 @@ impl MiddlewareTransformer {
     }
 }
 
+/// The description of durable or volatile middleware: durable middleware owns
+/// persistent producer progress in its (required durable) index provider;
+/// volatile middleware starts a new producer incarnation on every construction.
+fn middleware_description(
+    descriptor: &drasi_computation_contracts::ComponentDescriptor,
+    durable: bool,
+) -> crate::computation::v1::ComponentDescription {
+    use crate::computation::v1::{
+        ComponentDescription, DependencyRequirement, DurabilityRequirement, OutputDescription,
+        ProgressPersistence,
+    };
+    if durable {
+        ComponentDescription::new(ProgressPersistence::Durable)
+            .with_outputs(descriptor, OutputDescription::DURABLE)
+            .with_dependency(
+                "indexes",
+                DependencyRequirement {
+                    durability: DurabilityRequirement::Durable,
+                },
+            )
+    } else {
+        ComponentDescription::new(ProgressPersistence::Volatile)
+            .with_outputs(descriptor, OutputDescription::VOLATILE)
+    }
+}
+
 #[async_trait]
 impl ComputationComponent for MiddlewareTransformer {
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        middleware_description(self.descriptor(), self.durable.is_some())
+    }
     fn recovery_contract(&self) -> super::ComponentRecovery {
         match &self.durable {
             Some(store) => {
@@ -811,6 +840,19 @@ fn literal<'a>(spec: &'a ComponentSpecification, name: &str) -> Option<&'a serde
 
 #[async_trait]
 impl ComponentFactory for MiddlewareTransformerFactory {
+    /// Durable exactly when the specification configures durability.
+    fn describe(
+        &self,
+        context: &crate::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<crate::computation::v1::ComponentDescription> {
+        Ok(middleware_description(
+            &context.specification.descriptor,
+            context
+                .specification
+                .configuration
+                .contains_key("durability"),
+        ))
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }

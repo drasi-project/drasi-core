@@ -35,14 +35,17 @@ All of these inputs must be supplied explicitly:
 | `DRASI_MSSQL_TEST_APP_USER` / `DRASI_MSSQL_TEST_APP_PASSWORD` | Separate minimally privileged native source/sink SQL login |
 | `DRASI_MSSQL_TEST_READER_USER` / `DRASI_MSSQL_TEST_READER_PASSWORD` | Separate standalone snapshot-only SQL login |
 | `DRASI_MSSQL_TEST_STATE_ROOT` | Existing canonical, owner-only directory in the approved project/session area, for actual RocksDB reopen tests; not `/tmp`, `/private/tmp`, or `/var/tmp` |
+| `DRASI_MSSQL_TEST_SERVER_TIME_ZONE` | Optional `sys.time_zone_info` name passed as `serverTimeZone`; **required on SQL Server 2019**, which cannot report its time zone (`CURRENT_TIMEZONE_ID()` needs 2022) |
 | `DRASI_NATIVE_PLUGIN_DIR` | Absolute directory containing all three freshly rebuilt native MSSQL dynamic libraries |
 
 Inject credentials and the ownership token using an approved secret/configuration
 mechanism. Do not commit them, put passwords in command-line arguments, print
 them, or copy them into examples. The fixture passes passwords to SQLCMD through
 its child environment, and redacts credentials from fixture command diagnostics.
-Environment credentials are also resolved into native `settings`; they are not
-saved in the Server's generated configuration.
+Environment credentials are resolved into the native components' flat settings
+(the same object for the source and both bootstrap providers); the source's
+`password` is a secret reference resolved by the fixture's secret store, and
+is not saved in the Server's generated configuration.
 
 ### Administrator provisioning (outside the fixture)
 

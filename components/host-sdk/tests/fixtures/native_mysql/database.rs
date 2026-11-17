@@ -316,13 +316,16 @@ impl Database {
             DELIMITER ;\n")).await?;
         Ok(())
     }
+    /// The flat native MySQL source configuration (without `stream` and
+    /// `persistent`). `retention` is kept for the tracked factories and the
+    /// coordinated bootstrap providers; untracked users remove it.
     pub(crate) fn source_settings(&self) -> Value {
         json!({
-            "connection":{"host":"127.0.0.1","port":self.port,"database":"test","user":"root","password":"native-test",
-                "ssl_mode":"disabled","tls_ca_pem":null,"server_id":811,"heartbeat_interval_ms":100},
-            "tables":["items"],"start":{"mode":"snapshot","lock_timeout_ms":5000},"output":"changes","replay":"server",
-            "transactions":{"max_changes":64,"max_bytes":1048576,"max_duration_ms":10000},
-            "max_protocol_bytes":1048576,"io_timeout_ms":10000
+            "host":"127.0.0.1","port":self.port,"database":"test","user":"root","password":"native-test",
+            "sslMode":"disabled","serverId":811,"heartbeatIntervalMs":100,
+            "tables":["items"],"startFrom":"snapshot","snapshotLockTimeoutMs":5000,"retention":"server",
+            "maxTransactionChanges":64,"maxTransactionBytes":1048576,"maxTransactionDurationMs":10000,
+            "maxProtocolBytes":1048576,"ioTimeoutMs":10000
         })
     }
     pub(crate) fn sink_settings(&self) -> Value {

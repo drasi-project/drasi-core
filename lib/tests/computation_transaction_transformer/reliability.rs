@@ -30,6 +30,12 @@ impl IdenticalRecipeFactory {
 
 #[async_trait]
 impl ComponentFactory for IdenticalRecipeFactory {
+    fn describe(
+        &self,
+        context: &drasi_lib::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        self.inner.describe(context)
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }
@@ -86,6 +92,9 @@ struct Source {
 }
 #[async_trait]
 impl ComputationComponent for Source {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -206,9 +215,9 @@ async fn draining_replacement() -> TestResult<()> {
             })?
             .provide_resource(
                 indexes,
-                ResourceHandle::new(
+                drasi_lib::computation::v1::QueryIndexProviderResource::handle(
                     ResourceRole::IndexBackend,
-                    Arc::new(QueryIndexProviderResource(provider)),
+                    provider,
                 ),
             )?
             .declare_resource(ResourceSpecification {

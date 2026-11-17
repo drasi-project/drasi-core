@@ -39,6 +39,9 @@ struct Drain {
 }
 #[async_trait]
 impl ComputationComponent for Drain {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -96,7 +99,10 @@ impl Harness {
         for (index, name) in ["a", "b"].into_iter().enumerate() {
             let provider = bootstrap.create_provider(
                 id(name),
-                json!({"source":"items","stream":stream("items"),"settings":settings}),
+                crate::provider_config(
+                    &settings,
+                    json!({"source":id("items").as_str(),"stream":stream("items")}),
+                ),
                 Some(drasi_computation_plugin_sdk::Scope {
                     instance_id: "mssql-coverage".into(),
                     graph_id: ComponentBatch::GRAPH_ID.into(),
@@ -162,16 +168,7 @@ impl Harness {
                 );
         }
         let factory = native[0].factories()[0].clone();
-        let mut specification =
-            factory.specification(id("items"), json!({"stream":stream("items"),"settings":{}}))?;
-        specification.configuration.insert(
-            "settings".into(),
-            ConfigurationValue::Reference {
-                resource: resource("settings"),
-                key: "source".into(),
-                secret: true,
-            },
-        );
+        let (mut specification, secrets) = crate::source_specification(&factory, &settings)?;
         specification
             .dependencies
             .insert("consumer_progress".into(), vec![resource("consumers")]);
@@ -182,7 +179,7 @@ impl Harness {
                 ResourceHandle::new(
                     ResourceRole::SecretStore,
                     Arc::new(ConfigurationResolverResource(Arc::new(Settings(
-                        BTreeMap::from([("source".into(), settings)]),
+                        secrets.clone(),
                     )))),
                 ),
             ),

@@ -1236,11 +1236,9 @@ async fn both_network_paths_use_one_host_query_evaluation_per_input() -> Result<
             })?
             .provide_resource(
                 indexes,
-                ResourceHandle::new(
+                drasi_lib::computation::v1::QueryIndexProviderResource::handle(
                     ResourceRole::IndexBackend,
-                    Arc::new(QueryIndexProviderResource(Arc::new(
-                        InMemoryComputationProvider,
-                    ))),
+                    Arc::new(InMemoryComputationProvider),
                 ),
             )?
             .component(

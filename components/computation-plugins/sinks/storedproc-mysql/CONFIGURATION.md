@@ -25,6 +25,7 @@ limits are gone. There is no migration path; re-create the component.
 | `defaultTemplate` | object | none | `{added?, updated?, deleted?}` | no | In place |
 | `progressTable` | string | `drasi_delivery_progress` | identifier, at most 64; in `database` | no | Unsupported |
 | `maxStreams` | integer | `4096` | 1..=1048576 | no | In place |
+| `deliveryGuarantee` | string | `exactlyOnce` | `exactlyOnce`, `atLeastOnce` (see Delivery guarantee) | no | Replace |
 | `commandTimeoutMs` | integer | `30000` | 1..=86400000 | no | In place |
 | `connectTimeoutMs` | integer | `5000` | 1..=86400000 | no | In place |
 | `shutdownTimeoutMs` | integer | `10000` | 1..=86400000 | no | In place |
@@ -44,6 +45,33 @@ At least one command template (in `routes` or `defaultTemplate`) is required.
   parameters. It does not limit the input size.
 - `maxStreams` bounds the cursor rows (one per producer stream) this
   component may hold.
+
+## Delivery guarantee
+
+`deliveryGuarantee` selects which producers the sink accepts. The plugin's
+description of the sink declares the selected guarantee on its input, and the
+graph checks it against the producer's declared output when it binds the edge.
+An incompatible pairing never rejects the graph change: both components stay,
+the edge is failed and unbound, and the sink carries a terminal binding
+failure until either side's configuration changes or the edge is removed. It
+is never discovered at delivery. Producers whose outputs carry no producer
+identity, or that declare none, are refused under either guarantee.
+
+- `exactlyOnce` (default): only producers that declare a durable output
+  identity, such as persistent queries. Each procedure call commits with its
+  cursor row, so a retry never repeats a completed call. A producer with a
+  volatile identity (for example an in-memory query) is refused: "input
+  requires ExactlyOnce delivery keyed on producer identity, but the producer's
+  output identity is Volatile". Use a persistent producer or set
+  `deliveryGuarantee` to `atLeastOnce`.
+- `atLeastOnce`: additionally accepts producers with a volatile identity (for
+  example in-memory queries). Their outputs carry a per-run epoch; the cursor
+  still deduplicates retries within one producer run, but a process restart
+  starts a new run whose outputs are delivered against a fresh cursor (the
+  stream row is overwritten, not duplicated, so `maxStreams` is not consumed
+  per run). Effects after a restart may repeat work the previous run already
+  did; nothing is resumed. Persistent producers are still delivered exactly
+  once.
 
 ## Examples
 
@@ -135,8 +163,9 @@ CREATE TABLE application.drasi_delivery_progress (
   digest BINARY(32) NOT NULL,
   operations BIGINT NOT NULL,
   completed BIGINT NOT NULL,
+  epoch VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   PRIMARY KEY (owner, stream_key),
-  CHECK (version = 2),
+  CHECK (version = 3),
   CHECK (operations > 0),
   CHECK (completed >= 0 AND completed <= operations)
 ) ENGINE=InnoDB;
@@ -147,6 +176,9 @@ these types, and `PRIMARY KEY (owner, stream_key)`. Without `CREATE` and
 without the table, Start fails with a message naming the missing privilege.
 Many components (and graphs) may share one table; rows are separated by
 `owner`, and each owner's stream count is bounded by its `maxStreams`.
+This is format version 3 (it adds `epoch`). A format 2 table is refused at
+Start, not migrated: drop it (after its streams have drained) or configure
+another `progressTable`.
 
 ## Updates
 
@@ -154,7 +186,7 @@ Many components (and graphs) may share one table; rows are separated by
 |---|---|
 | In place (Pause) | `routes`, `defaultTemplate`, `maxStreams`, `commandTimeoutMs`, `connectTimeoutMs`, `shutdownTimeoutMs`, `connectRetryAttempts`, `reconnectBudgetMs` |
 | Restart (Stop) | `hostname`, `port`, `database`, `user`, `password`, `ssl`, `tlsCaPem`, `maxProtocolBytes` |
-| Replace | `outputs`, changed incoming edges |
+| Replace | `outputs`, changed incoming edges, `deliveryGuarantee` (declared on the input port) |
 | Unsupported | `progressTable` (the receipt identity; remove with Erase and add again) |
 
 An unchanged configuration is an in-place no-op. A proposed configuration that

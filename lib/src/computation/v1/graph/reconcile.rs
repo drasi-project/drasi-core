@@ -4270,6 +4270,65 @@ async fn realize_component(
     })
 }
 
+/// Clear the edge-incompatibility failure of every component whose current
+/// edges are all compatible again (an endpoint changed or the edge was
+/// removed). Its incompatible edges that are now compatible return to
+/// Declared so the dependency-binding pass binds them.
+fn clear_resolved_incompatibilities(graph: &mut ComputationGraph) -> GraphResult<()> {
+    let failed: Vec<ComponentId> = graph
+        .observed()
+        .components
+        .iter()
+        .filter(|(_, observed)| {
+            observed
+                .failure
+                .as_ref()
+                .is_some_and(super::is_edge_incompatibility)
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in failed {
+        let mut compatible = true;
+        let mut reopened = Vec::new();
+        for edge in graph.edges.values() {
+            if edge.definition.to.component != id {
+                continue;
+            }
+            match super::check_edge_compatibility(graph, edge) {
+                Ok(()) => {
+                    if graph.observed().relationships[&edge.definition].binding
+                        == BindingState::Failed
+                    {
+                        reopened.push(edge.definition.clone());
+                    }
+                }
+                // Still incompatible, or an endpoint is busy: keep the
+                // failure until a later reconciliation can compare them.
+                Err(GraphError::Incompatible { .. } | GraphError::OperationInProgress) => {
+                    compatible = false
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if !compatible {
+            continue;
+        }
+        update(graph, |state| {
+            for edge in &reopened {
+                let observed = state.relationships.get_mut(edge).expect("relationship");
+                observed.binding = BindingState::Declared;
+                observed.failure = None;
+                observed.transition_time = Utc::now();
+            }
+            let observed = state.components.get_mut(&id).expect("component");
+            observed.failure = None;
+            observed.realization = RealizationState::Created;
+            observed.transition_time = Utc::now();
+        });
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn realize(
     graph: &mut ComputationGraph,
@@ -4353,6 +4412,15 @@ async fn realize(
         ) {
             continue;
         }
+        if let Err(error) = super::check_edge_compatibility(graph, &edge) {
+            if !matches!(error, GraphError::Incompatible { .. }) {
+                return Err(error);
+            }
+            let failed = failure(error, FailurePhase::Binding);
+            super::record_incompatible_edge(graph, &edge.definition, &failed);
+            report.failures.push(failed);
+            continue;
+        }
         update(graph, |state| {
             state
                 .relationships
@@ -4400,6 +4468,7 @@ async fn realize(
             }
         }
     }
+    clear_resolved_incompatibilities(graph)?;
     let candidates: BTreeSet<_> = plan
         .pause
         .iter()
@@ -4420,7 +4489,7 @@ async fn realize(
             matches!(
                 error.phase,
                 FailurePhase::Creation | FailurePhase::Validation
-            )
+            ) || super::is_edge_incompatibility(error)
         }) {
             continue;
         }

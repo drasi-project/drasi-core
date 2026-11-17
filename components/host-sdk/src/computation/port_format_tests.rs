@@ -45,6 +45,12 @@ impl RecordValidator for NoRecords {
 struct FormatFactory;
 
 impl sdk::Factory for FormatFactory {
+    fn describe(
+        &self,
+        _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(drasi_computation_plugin_sdk::ComponentDescription::undeclared())
+    }
     fn metadata(&self) -> FactoryMetadata {
         let mut metadata = sdk::Factory::metadata(&TestFactory {
             role: ComponentRole::Source,
@@ -182,6 +188,12 @@ fn unsupported_selection_is_rejected_before_construction() -> anyhow::Result<()>
 struct InvalidPrimary;
 
 impl sdk::Factory for InvalidPrimary {
+    fn describe(
+        &self,
+        _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(drasi_computation_plugin_sdk::ComponentDescription::undeclared())
+    }
     fn metadata(&self) -> FactoryMetadata {
         let mut metadata = sdk::Factory::metadata(&FormatFactory);
         metadata.capabilities.primary_ports =

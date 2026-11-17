@@ -76,6 +76,12 @@ fn alert_descriptor(id: ComponentId) -> GraphResult<ComponentDescriptor> {
 
 #[async_trait]
 impl ComponentFactory for FileFactory {
+    fn describe(
+        &self,
+        _context: &drasi_lib::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.0
     }
@@ -107,6 +113,12 @@ impl ComponentFactory for FileFactory {
 
 #[async_trait]
 impl ComponentFactory for AlertFactory {
+    fn describe(
+        &self,
+        _context: &drasi_lib::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.0
     }
@@ -175,12 +187,9 @@ impl ManagementResourceResolver for MemoryResources {
                 && configuration == &serde_json::json!({"kind":"memory"}),
             "unsupported managed resource"
         );
-        Ok(ResourceHandle::new(
-            ResourceRole::IndexBackend,
-            Arc::new(QueryIndexProviderResource(Arc::new(
+        Ok(drasi_lib::computation::v1::QueryIndexProviderResource::handle(ResourceRole::IndexBackend, Arc::new(
                 InMemoryComputationProvider,
-            ))),
-        ))
+            )))
     }
 }
 

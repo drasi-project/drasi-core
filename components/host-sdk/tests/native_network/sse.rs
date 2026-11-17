@@ -403,11 +403,9 @@ async fn instance_snapshots_and_routes(statically_linked: bool) -> Result<()> {
                     (
                         indexes_id,
                         ResourceRole::IndexBackend,
-                        ResourceHandle::new(
+                        drasi_lib::computation::v1::QueryIndexProviderResource::handle(
                             ResourceRole::IndexBackend,
-                            Arc::new(QueryIndexProviderResource(Arc::new(
-                                InMemoryComputationProvider,
-                            ))),
+                            Arc::new(InMemoryComputationProvider),
                         ),
                     ),
                     (

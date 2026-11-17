@@ -1154,6 +1154,9 @@ async fn recreated_async_member_owns_construction_and_later_stop_supersedes_acti
 struct Service(ComponentDescriptor);
 #[async_trait]
 impl ComputationComponent for Service {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }
@@ -1195,6 +1198,12 @@ impl ServiceFactory {
 }
 #[async_trait]
 impl ComponentFactory for ServiceFactory {
+    fn describe(
+        &self,
+        _context: &drasi_lib::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.0
     }

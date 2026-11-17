@@ -145,6 +145,7 @@ fn decoder(anchor: Option<Position>) -> Binlog {
         )]),
         anchor,
         sequence: Arc::new(AtomicU64::new(0)),
+        skipped: Default::default(),
     })
     .unwrap();
     decoder.format = format();

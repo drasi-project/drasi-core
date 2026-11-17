@@ -529,12 +529,12 @@ impl ManagementResourceResolver for HostManagementResources {
             "this host recipe does not accept resource dependencies"
         );
         let resource = match recipe {
-            Recipe::MemoryIndexes => ResourceHandle::new(
-                ResourceRole::IndexBackend,
-                Arc::new(QueryIndexProviderResource(Arc::new(
-                    drasi_core::computation::InMemoryComputationProvider,
-                ))),
-            ),
+            Recipe::MemoryIndexes => {
+                drasi_lib::computation::v1::QueryIndexProviderResource::handle(
+                    ResourceRole::IndexBackend,
+                    Arc::new(drasi_core::computation::InMemoryComputationProvider),
+                )
+            }
             Recipe::QueryCatalog {} => ResourceHandle::new(
                 ResourceRole::QueryCatalog,
                 Arc::new(QueryResultsCatalog::new(graph)?),
@@ -566,9 +566,9 @@ impl ManagementResourceResolver for HostManagementResources {
                         "version-pinned indexes require implementation and a positive configurationVersion"
                     ),
                 }
-                ResourceHandle::new(
+                drasi_lib::computation::v1::QueryIndexProviderResource::handle(
                     ResourceRole::IndexBackend,
-                    Arc::new(QueryIndexProviderResource(entry.provider.clone())),
+                    entry.provider.clone(),
                 )
             }
             Recipe::SharedStorage {

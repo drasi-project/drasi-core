@@ -88,7 +88,7 @@ the procedure, and the cursor table in the same server.
 
 Completion: `handle` returns `Ok` only after `COMMIT` succeeded.
 
-## Destination cursor protocol (format version 2)
+## Destination cursor protocol (format version 3)
 
 Shared by the three stored-procedure sinks. Table `progressTable` (default
 `drasi_delivery_progress`) in the configured database, InnoDB:
@@ -97,11 +97,12 @@ Shared by the three stored-procedure sinks. Table `progressTable` (default
 |---|---|---|
 | `owner` | `CHAR(64)` ascii | lowercase hex SHA-256 of `"drasi.storedproc/owner/v1\0" + graph_id + "\0" + component_id` |
 | `stream_key` | `VARCHAR(128)` ascii | the host `DeliveryPosition` stream (producer, consumer scope and port) |
-| `version` | `SMALLINT` | `2` |
+| `version` | `SMALLINT` | `3` |
 | `sequence` | `VARCHAR(20)` | decimal producer sequence of the current batch |
 | `digest` | `BINARY(32)` | canonical batch digest |
 | `operations` | `BIGINT` | operations in the current batch |
 | `completed` | `BIGINT` | completed operation prefix |
+| `epoch` | `VARCHAR(64)` ascii | empty for exactly-once streams; otherwise the at-least-once producer epoch |
 
 `PRIMARY KEY (owner, stream_key)`. One row per stream replaces an ever-growing
 receipt table.
@@ -109,7 +110,10 @@ receipt table.
 Per operation, in one transaction:
 
 1. Validate the position; lock the stream row with `SELECT … FOR UPDATE`.
-2. No row: take the per-owner admission lock (`GET_LOCK`, released after
+2. Epoch: a different non-empty epoch on both sides treats the row as absent
+   (operation `0` required; the row is overwritten with the new batch and
+   epoch); an empty epoch on exactly one side is a permanent receipt conflict.
+   No row: take the per-owner admission lock (`GET_LOCK`, released after
    `COMMIT`/`ROLLBACK`), re-read, require operation `0`, count the owner's rows
    against `maxStreams`, insert the row with `completed = 0`.
 3. Older sequence than the row: *receipt expired* (permanent).
@@ -122,6 +126,37 @@ Per operation, in one transaction:
 7. Run the effect, then `UPDATE … SET completed = completed + 1 WHERE …
    AND completed = <expected>` and check one row changed.
 8. `COMMIT`.
+
+Format 2 tables (without `epoch`) are refused at Start, not migrated.
+
+### Delivery guarantee and producer epochs
+
+The factory's pure describer (`Factory::describe`) reads the sink's own
+`deliveryGuarantee` and declares it as the input's `InputDelivery` in the
+sink's `ComponentDescription`; the Host forwards the description unchanged.
+The graph compares it with the producer's declared output when it binds the
+edge (`check_edge`). `deliveryGuarantee: exactlyOnce` (the default) accepts
+only a `Durable`, replayable producer; a `Volatile` one fails the edge with
+`Incompatibility::ProducerIdentity`, and an `Untracked` or undeclared producer
+fails under either guarantee. The failure is recorded on the edge
+(`BindingState::Failed`) and on the sink node (terminal `Binding` failure);
+the graph change itself is accepted. The plugin's own check at delivery is an
+internal invariant guard, not the compatibility check.
+
+`deliveryGuarantee: atLeastOnce` additionally accepts a producer with a
+volatile identity: an in-memory query or a volatile graph producer.
+Its output has no persistent progress, so the host derives a weaker identity
+(`Candidate::new_volatile`): the stream key excludes the producer's per-run
+incarnation, and the item's `DeliveryPosition` (version 2) carries an
+`epoch`, a SHA-256 of the producer incarnation (and, for a query, its
+generation and configuration hash). The host delivers such a batch without its `DeliveryRunner` ledger
+(nothing can resume across a restart), calling the plugin per operation and
+stopping at the first failure. The cursor applies one extra rule: an item
+whose epoch differs from the row's treats the row as absent and overwrites
+it, so a new producer run starts a fresh cursor on the same row; the same
+epoch deduplicates exactly as before. Exactly-once items (empty epoch) never
+match an at-least-once row, nor the reverse (a permanent receipt conflict).
+
 
 Rows are validated on every read (version 2, canonical decimal sequence,
 32-byte digest, `0 <= completed <= operations`).
@@ -220,8 +255,11 @@ orphan this owner's rows. Remove the component (Erase) and add it again.
   (identity providers) to external consumers; the plugin supports them, but
   a Host must forward them before they take effect. Until then use literal
   credentials.
-- The `DeliveryRunner` only accepts inputs from producers with persistent
-  progress (persistent queries and sources); volatile producers are rejected.
+- In-memory (volatile) queries are accepted only with
+  `deliveryGuarantee: atLeastOnce`, and are then delivered at least once:
+  deduplicated within one producer run, never resumed across a restart.
+  Without opt-in the edge fails when it is bound (see Delivery guarantee and
+  producer epochs).
 - A failed delivery is retried without Stop/Start, through the host as well.
   A delivery the host cancels mid-flight still requires Stop before more
   input, because its batch may not have settled.

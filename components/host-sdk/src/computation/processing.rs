@@ -177,6 +177,12 @@ pub(super) struct ProcessingBinding {
 }
 
 impl ProcessingBinding {
+    /// The capabilities the bound processing provider declares: durable
+    /// exactly when it is persistent.
+    pub(super) fn capabilities(&self) -> drasi_lib::computation::v1::ResourceCapabilities {
+        drasi_lib::computation::v1::index_provider_capabilities(self.provider.as_ref())
+    }
+
     pub(super) fn new(
         provider: Arc<dyn ComputationIndexProvider>,
         graph: String,

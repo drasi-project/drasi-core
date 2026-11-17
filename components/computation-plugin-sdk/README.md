@@ -21,7 +21,18 @@ evaluator, query parsers or legacy plugin SDK.
 2. Implement this SDK's `Factory`. Its `metadata()` declares implementation and
    configuration versions, a `ConfigSchema`, fixed port/schema descriptors, sink
    completion and explicit `Capabilities`. Its synchronous `create()` receives a
-   `CreateRequest` and `ControlSender`, returning a `CreatedComponent`.
+   `CreateRequest` and `ControlSender`, returning a `CreatedComponent`. Its
+   required, pure `describe(&DescribeRequest)` returns the instance's
+   `ComponentDescription` from the creation request, the component descriptor
+   and the declared `ResourceCapabilities` of resources bound to each
+   dependency (for example `admission` or `processing`): output identity and
+   replay, each input's `InputDelivery`, and dependency requirements. No I/O
+   or construction. The Host forwards the answer unchanged (ABI
+   `FactoryVTable::describe`) and the graph compares descriptions when it binds
+   edges and resources. `DescribeRequest` helpers cover the common cases
+   (`source_description`, `volatile_transformer`, `unkeyed_sink`, `consumer`).
+   A consumer must declare its keyed inputs; one that offers `atLeastOnce`
+   reads its own `deliveryGuarantee` configuration.
 3. Register factories and executable schemas in `PluginDefinition::new`.
    A sink that can replace its state from a snapshot returns a
    `SnapshotConsumer` from `NativeSink::snapshot_consumer(port)` for each such
@@ -342,7 +353,8 @@ A plugin publishes provider components through the bootstrap extension
 `BootstrapProvider` role. A provider node has one `snapshot` output and no live
 ports; it serves one provider instance per session for the consumer named in
 the request. Provider nodes accept a `source_progress` dependency for durable
-bootstrap and, for source-paired factories, one `source_bootstrap` coordinator.
+bootstrap. Source-paired providers reach the coordinator their connected source
+creates; there is no coordinator dependency to declare.
 
 A consumer bootstraps either from its inputs' `snapshot` outputs or from one
 local provider connected directly to its `bootstrap` input. With a local

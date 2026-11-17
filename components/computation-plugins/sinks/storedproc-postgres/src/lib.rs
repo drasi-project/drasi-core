@@ -91,6 +91,20 @@ impl PostgresStoredProcFactory {
 }
 
 impl Factory for PostgresStoredProcFactory {
+    /// A consumer whose inputs deliver with its configured `deliveryGuarantee`.
+    fn describe(
+        &self,
+        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        let guarantee = match request.request.configuration.get("deliveryGuarantee") {
+            None | Some(serde_json::Value::Null) => {
+                drasi_computation_plugin_sdk::DeliveryGuarantee::ExactlyOnce
+            }
+            Some(value) => serde_json::from_value(value.clone())
+                .map_err(|error| anyhow::anyhow!("invalid deliveryGuarantee: {error}"))?,
+        };
+        Ok(request.consumer(guarantee))
+    }
     fn metadata(&self) -> FactoryMetadata {
         FactoryMetadata {
             // Constant identifiers; validated by the factory tests.

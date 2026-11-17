@@ -12,13 +12,15 @@ fn mysql_bootstrap_is_query_owned_and_not_a_source_or_private_graph() -> Result<
     let rows = MySqlSharedRowBootstrapFactory.metadata();
     for metadata in [&single, &transactions, &rows] {
         assert!(metadata.source_progress);
-        assert!(metadata.configuration.fields["settings"].secret);
+        assert!(metadata.configuration.fields["password"].secret);
+        assert!(metadata.configuration.fields.contains_key("retention"));
     }
     assert_ne!(single.implementation, transactions.implementation);
     assert_ne!(transactions.implementation, rows.implementation);
     let standalone = MySqlStandaloneBootstrapFactory.metadata();
     assert!(!standalone.source_progress);
-    assert!(standalone.configuration.fields["settings"].secret);
+    assert!(standalone.configuration.fields["password"].secret);
+    assert!(!standalone.configuration.fields.contains_key("settings"));
     assert!(standalone.configuration.fields.contains_key("labels"));
     assert_ne!(standalone.implementation, rows.implementation);
     Ok(())

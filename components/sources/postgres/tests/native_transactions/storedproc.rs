@@ -140,8 +140,8 @@ async fn insert_row(database: &Database, owner: &str, stream: &str) -> Result<()
         .client()
         .execute(
             &format!(
-                "INSERT INTO {PROGRESS} (owner, stream_key, version, sequence, digest, operations, completed)
-                 VALUES ($1, $2, 2, '1', decode(repeat('00', 32), 'hex'), 1, 1)"
+                "INSERT INTO {PROGRESS} (owner, stream_key, version, sequence, digest, operations, completed, epoch)
+                 VALUES ($1, $2, 3, '1', decode(repeat('00', 32), 'hex'), 1, 1, '')"
             ),
             &[&owner, &stream],
         )
@@ -513,4 +513,131 @@ async fn native_storedproc_rejects_template_injection_at_construction() -> Resul
         assert!(result.is_err(), "{template} was accepted");
     }
     Ok(())
+}
+
+/// One live output of an in-memory (volatile) query run, as the native
+/// query emits it: no persistent progress and a per-run incarnation in its
+/// recovery identity. (The transactional source requires persistent owner
+/// progress, so the output is encoded directly.)
+fn volatile_output(incarnation: &str, sequence: u64, id: i64, name: &str) -> Result<InputEnvelope> {
+    use drasi_core::evaluation::{
+        context::QueryPartEvaluationContext, variable_value::VariableValue,
+    };
+    let query = component_id(46);
+    let mut envelope = QueryChangeCodec::encode_evaluation(
+        None,
+        &query,
+        SystemMetadata::new(StreamId::try_new("results")?, sequence),
+        &ResultNodeProjector::try_new("test/native-storedproc-volatile/out", None)?,
+        &[QueryPartEvaluationContext::Adding {
+            after: [
+                ("id".into(), VariableValue::Integer(id.into())),
+                ("name".into(), VariableValue::from(name)),
+            ]
+            .into(),
+            row_signature: id as u64,
+        }],
+        QueryOutputMetadata {
+            query_id: query.clone(),
+            input_origin: None,
+            timestamp: chrono::DateTime::from_timestamp(1_700_000_000, 0).context("timestamp")?,
+            metadata: Default::default(),
+            profiling: None,
+        },
+    )?
+    .context("volatile query output")?;
+    let identity: QueryRecoveryIdentity = serde_json::from_value(json!({
+        "construction_scope": "volatile-graph", "graph_id": "volatile-graph",
+        "query_id": query.as_str(), "configuration_hash": 7, "incarnation": incarnation
+    }))?;
+    identity.annotate(&mut envelope, &query)?;
+    Ok(InputEnvelope {
+        port: PortId::try_new("in")?,
+        envelope,
+    })
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
+async fn native_storedproc_delivers_in_memory_queries_only_at_least_once_by_opt_in() -> Result<()> {
+    let plugins = plugins(true)?;
+    let database = Database::new().await?;
+    prepare_destination(&database).await?;
+    let directory = tempfile::tempdir()?;
+    let graph = "volatile-graph";
+    const FIRST: &str = "5e0c1d2a-3b4c-4d5e-8f60-718293a4b501";
+    const SECOND: &str = "5e0c1d2a-3b4c-4d5e-8f60-718293a4b502";
+    let first = volatile_output(FIRST, 1, 1, "volatile")?;
+
+    // Without opt-in the consumer refuses the volatile producer permanently,
+    // naming the fix, and applies nothing.
+    let mut strict = started(
+        &plugins,
+        &directory.path().join("strict"),
+        graph,
+        101,
+        sink_settings(&database),
+    )
+    .await?;
+    let error = strict.handle(first.clone()).await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("output identity is Volatile"),
+        "{error:#}"
+    );
+    assert_eq!(count(&database).await?, 0);
+    strict.stop(&lifecycle_ctx::stop()).await?;
+    drop(strict);
+
+    // With atLeastOnce the effect is applied once per producer run; a retry
+    // of the same input is deduplicated by the destination cursor.
+    let mut settings = sink_settings(&database);
+    settings["deliveryGuarantee"] = json!("atLeastOnce");
+    let mut opted = started(
+        &plugins,
+        &directory.path().join("opted"),
+        graph,
+        102,
+        settings.clone(),
+    )
+    .await?;
+    opted.handle(first.clone()).await?;
+    opted.handle(first).await?;
+    assert_eq!(count(&database).await?, 1);
+    let mine = owner(&database, graph, 102).await?;
+    assert_eq!(owned_rows(&database, PROGRESS, &mine).await?, 1);
+    let epoch: String = database
+        .client()
+        .query_one(
+            "SELECT epoch FROM public.drasi_delivery_progress WHERE owner = $1",
+            &[&mine],
+        )
+        .await?
+        .get(0);
+    assert_eq!(epoch.len(), 64, "at-least-once rows carry their epoch");
+
+    // A new producer incarnation restarts its sequence. Its first output is
+    // delivered against the same stream row, which it overwrites with the new
+    // epoch instead of rejecting it as an expired receipt.
+    opted
+        .handle(volatile_output(SECOND, 1, 2, "restarted")?)
+        .await?;
+    assert_eq!(count(&database).await?, 2);
+    assert_eq!(
+        owned_rows(&database, PROGRESS, &mine).await?,
+        1,
+        "the stream key excludes the incarnation"
+    );
+    let next: String = database
+        .client()
+        .query_one(
+            "SELECT epoch FROM public.drasi_delivery_progress WHERE owner = $1",
+            &[&mine],
+        )
+        .await?
+        .get(0);
+    assert_ne!(next, epoch);
+    opted.stop(&lifecycle_ctx::stop()).await?;
+    opted.dispose(&lifecycle_ctx::erase()).await?;
+    drop(opted);
+    database.shutdown().await
 }

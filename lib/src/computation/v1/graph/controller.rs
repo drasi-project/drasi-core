@@ -49,6 +49,9 @@ use crate::computation::v1::{
 pub(super) struct InstanceSlot {
     pub(super) id: ComponentId,
     pub(super) generation: ComponentGeneration,
+    /// The constructed instance's declared description, captured when the
+    /// instance is installed so edge checks never contend with its lease.
+    description: Mutex<Option<drasi_computation_contracts::ComponentDescription>>,
     value: Mutex<Option<Instance>>,
     configuration: Mutex<super::CapturedComponentConfiguration>,
     metadata_changes: super::registry::MetadataChanges,
@@ -141,6 +144,7 @@ impl InstanceSlot {
         let slot = Arc::new(Self {
             id,
             generation,
+            description: Mutex::new(component.description()),
             metadata_changes,
             construction_reservation: Mutex::new(None),
             configuration: Mutex::new(super::CapturedComponentConfiguration::Unavailable {
@@ -259,6 +263,25 @@ impl InstanceSlot {
             })
             .as_ref()
             .map(Arc::downgrade)
+    }
+
+    /// The constructed instance's declared description; `None` before
+    /// construction.
+    pub(super) fn description(
+        &self,
+    ) -> GraphResult<Option<drasi_computation_contracts::ComponentDescription>> {
+        Ok(self
+            .description
+            .lock()
+            .map_err(|_| topology(format!("instance {} description poisoned", self.id)))?
+            .clone())
+    }
+
+    fn set_description(&self, description: drasi_computation_contracts::ComponentDescription) {
+        *self
+            .description
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(description);
     }
 
     pub(super) fn is_constructed(self: &Arc<Self>) -> GraphResult<bool> {
@@ -1456,6 +1479,10 @@ pub(super) fn mark_cleanup_required(observed: &watch::Sender<Arc<ObservedGraph>>
 }
 
 pub(super) fn failure(error: GraphError, phase: FailurePhase) -> ComponentFailure {
+    let phase = match error.underlying() {
+        GraphError::Incompatible { phase, .. } => *phase,
+        _ => phase,
+    };
     ComponentFailure {
         phase,
         disposition: error.failure_disposition(),
@@ -1874,6 +1901,7 @@ async fn deploy(
     }
     let mut controls = PipeGuard(BTreeMap::new());
     let unconstructed = unavailable.clone();
+    let mut binding_failures = BTreeMap::new();
     for (&edge_index, edge) in &graph.edges {
         let from = graph.ids[&edge.definition.from.component];
         let to = graph.ids[&edge.definition.to.component];
@@ -1896,6 +1924,16 @@ async fn deploy(
                 unavailable.insert(to);
                 unavailable.insert(from);
             }
+            continue;
+        }
+        if let Err(error) = check_edge_compatibility(graph, edge) {
+            if !matches!(error, GraphError::Incompatible { .. }) {
+                return Err(error);
+            }
+            let failed = failure(error, FailurePhase::Binding);
+            record_incompatible_edge(graph, &edge.definition, &failed);
+            unavailable.insert(to);
+            binding_failures.entry(to).or_insert(failed);
             continue;
         }
         let binding_generation = graph.next_binding_generation;
@@ -1966,18 +2004,20 @@ async fn deploy(
         let waiting = binding_waits(graph, id);
         let blocked = unavailable.contains(&index) || !waiting.is_empty();
         let creation_failure = creation_failures.get(&index);
+        let binding_failure = binding_failures.get(&index);
         update(graph, |state| {
             let observed = state.components.get_mut(id).expect("component");
-            observed.realization = if creation_failure.is_some() {
-                RealizationState::CreationFailed
-            } else if blocked {
-                RealizationState::Blocked
-            } else {
-                RealizationState::Created
-            };
+            observed.realization =
+                if creation_failure.is_some_and(|failure| failure.phase != FailurePhase::Binding) {
+                    RealizationState::CreationFailed
+                } else if blocked {
+                    RealizationState::Blocked
+                } else {
+                    RealizationState::Created
+                };
             observed.lifecycle = ComponentLifecycle::Stopped;
             observed.health = ComponentHealth::Unknown;
-            observed.failure = creation_failure.cloned();
+            observed.failure = creation_failure.or(binding_failure).cloned();
             if !creation_blocks.contains_key(&index) {
                 observed.waiting_for = waiting;
             }
@@ -2716,6 +2756,119 @@ impl Drop for ProvidedBinding {
     }
 }
 
+/// The factory's declaration for this construction, validated against the
+/// node's ports and checked against the declared capabilities of every bound
+/// resource. A dependency mismatch is a terminal binding failure of the node.
+fn declared_description(
+    node: &super::NodeSnapshot,
+    factory: &dyn super::ComponentFactory,
+    context: &super::ConstructionContext,
+) -> GraphResult<drasi_computation_contracts::ComponentDescription> {
+    let id = node.descriptor.id();
+    let declared = factory
+        .describe(context)
+        .map_err(|source| GraphError::Creation {
+            component: id.clone(),
+            disposition: FailureDisposition::Terminal,
+            source: source.context("factory could not describe the instance"),
+        })?;
+    declared
+        .validate(&node.descriptor)
+        .map_err(|reason| GraphError::Incompatible {
+            component: id.clone(),
+            phase: FailurePhase::Creation,
+            context: "factory declaration".into(),
+            source: drasi_computation_contracts::Incompatibility::InvalidDescription(reason),
+        })?;
+    for (dependency, resources) in context.dependency_capabilities() {
+        for resource in resources {
+            drasi_computation_contracts::check_dependency(&declared, &dependency, resource)
+                .map_err(|source| GraphError::Incompatible {
+                    component: id.clone(),
+                    phase: FailurePhase::Binding,
+                    context: format!("resource bound to dependency '{dependency}'"),
+                    source,
+                })?;
+        }
+    }
+    Ok(declared)
+}
+
+/// Compare one edge's declarations: the producer's output, the pipe and the
+/// consumer's input. Endpoints that are not constructed yet are not checked
+/// (the edge is not bound either).
+pub(super) fn check_edge_compatibility(
+    graph: &ComputationGraph,
+    edge: &EdgeSnapshot,
+) -> GraphResult<()> {
+    let description = |id: &ComponentId| graph.components[graph.ids[id]].description();
+    let (Some(producer), Some(consumer)) = (
+        description(&edge.definition.from.component)?,
+        description(&edge.definition.to.component)?,
+    ) else {
+        return Ok(());
+    };
+    let output = producer.output(&edge.definition.from.port);
+    let input = consumer.input(&edge.definition.to.port);
+    drasi_computation_contracts::check_edge(output, &edge.capabilities, input).map_err(|source| {
+        GraphError::Incompatible {
+            component: edge.definition.to.component.clone(),
+            phase: FailurePhase::Binding,
+            context: format!(
+                "input '{}:{}' ({:?}) cannot be connected to output '{}:{}' ({:?}, replay {:?})",
+                edge.definition.to.component,
+                edge.definition.to.port,
+                input.delivery,
+                edge.definition.from.component,
+                edge.definition.from.port,
+                output.identity,
+                output.replay,
+            ),
+            source,
+        }
+    })
+}
+
+/// Record an edge whose declarations are incompatible: the edge is failed and
+/// unbound, and its consumer node carries the terminal binding failure. Both
+/// nodes stay in the graph.
+pub(super) fn record_incompatible_edge(
+    graph: &ComputationGraph,
+    edge: &crate::computation::v1::EdgeDefinition,
+    failed: &ComponentFailure,
+) {
+    update(graph, |state| {
+        let observed = state.relationships.get_mut(edge).expect("relationship");
+        observed.binding = BindingState::Failed;
+        observed.availability = DataAvailability::Unavailable;
+        observed.failure = Some(failed.clone());
+        observed.transition_time = Utc::now();
+        let consumer = state
+            .components
+            .get_mut(&edge.to.component)
+            .expect("component");
+        if consumer.failure.is_none() {
+            consumer.failure = Some(failed.clone());
+        }
+        consumer.realization = RealizationState::Blocked;
+        consumer.transition_time = Utc::now();
+    });
+}
+
+/// Whether a failure is a declaration mismatch of an edge (cleared when
+/// every edge of the component is compatible again).
+pub(super) fn is_edge_incompatibility(failure: &ComponentFailure) -> bool {
+    failure.phase == FailurePhase::Binding
+        && matches!(
+            failure.cause.underlying(),
+            GraphError::Incompatible {
+                source: drasi_computation_contracts::Incompatibility::ProducerIdentity { .. }
+                    | drasi_computation_contracts::Incompatibility::Replay { .. },
+                ..
+            }
+        )
+}
+
 fn construct_pipe(
     graph: &ComputationGraph,
     index: usize,
@@ -3316,13 +3469,25 @@ impl Operations {
         result
     }
 
+    /// Whether a lifecycle group or retirement reserves any of `selected`.
+    ///
+    /// A start group reserves only members it has yet to settle or whose
+    /// `Start` is still running. Settled members (blocked, not created, already
+    /// running) wait for their own later activation, so an unfinished sibling's
+    /// Start, possibly waiting on those members, must not keep them reserved.
     fn conflicts(&self, selected: &BTreeSet<usize>, starts: bool) -> bool {
         !selected.is_disjoint(&self.retiring)
             || (starts
-                && self
-                    .starting
-                    .iter()
-                    .any(|group| !group.selected.is_disjoint(selected)))
+                && self.starting.iter().any(|group| {
+                    selected.iter().any(|index| {
+                        group.pending.contains(index)
+                            || group.selected.contains(index)
+                                && self
+                                    .active
+                                    .get(index)
+                                    .is_some_and(|active| active.operation == Operation::Start)
+                    })
+                }))
             || self
                 .stopping
                 .iter()
@@ -4569,6 +4734,7 @@ impl Operations {
                             disposition: error.disposition,
                             source: error.source,
                         })?;
+                        let declared = declared_description(&node, factory.as_ref(), &context)?;
                         if operation == Operation::Reconfigure {
                             let update = lease.pending_update.clone()
                                 .ok_or_else(|| topology("component update has no accepted factory plan"))?;
@@ -4596,6 +4762,17 @@ impl Operations {
                                     })?;
                             lease.component = constructed.0;
                         }
+                        if lease.component.description().as_ref() != Some(&declared) {
+                            return Err(GraphError::Incompatible {
+                                component: node.descriptor.id().clone(),
+                                phase: FailurePhase::Creation,
+                                context: "the constructed instance's description differs from \
+                                          its factory's declaration"
+                                    .into(),
+                                source: drasi_computation_contracts::Incompatibility::InstanceDescription,
+                            });
+                        }
+                        lease.slot.set_description(declared);
                         lease.refresh_configuration()?;
                     } else if let Component::Unresolved(definition) = &lease.component {
                         if matches!(
@@ -6161,7 +6338,13 @@ impl Operations {
                     );
                     update(graph, |state| {
                         let node = state.components.get_mut(id).expect("added component");
-                        node.realization = RealizationState::CreationFailed;
+                        // A declaration mismatch with a bound resource blocks
+                        // the node until either side changes.
+                        node.realization = if failure.phase == FailurePhase::Binding {
+                            RealizationState::Blocked
+                        } else {
+                            RealizationState::CreationFailed
+                        };
                         if completion.operation == Operation::Reconfigure {
                             node.lifecycle = ComponentLifecycle::Failed;
                         }
@@ -8290,6 +8473,9 @@ mod command_tests {
 
     #[async_trait::async_trait]
     impl ComputationComponent for AdmittedSource {
+        fn description(&self) -> crate::computation::v1::ComponentDescription {
+            crate::computation::v1::ComponentDescription::undeclared()
+        }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.0
         }
@@ -8426,6 +8612,9 @@ mod command_tests {
 
     #[async_trait::async_trait]
     impl ComputationComponent for ProtectionService {
+        fn description(&self) -> crate::computation::v1::ComponentDescription {
+            crate::computation::v1::ComponentDescription::undeclared()
+        }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.descriptor
         }
@@ -8493,6 +8682,12 @@ mod command_tests {
 
     #[async_trait::async_trait]
     impl ComponentFactory for ProtectionFactory {
+        fn describe(
+            &self,
+            _context: &crate::computation::v1::ConstructionContext,
+        ) -> anyhow::Result<crate::computation::v1::ComponentDescription> {
+            Ok(crate::computation::v1::ComponentDescription::undeclared())
+        }
         fn descriptor(&self) -> &FactoryDescriptor {
             &self.descriptor
         }

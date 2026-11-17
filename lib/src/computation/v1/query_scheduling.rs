@@ -222,6 +222,9 @@ impl QueryScheduledSource {
 }
 #[async_trait]
 impl ComputationComponent for QueryScheduledSource {
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        crate::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -393,6 +396,12 @@ impl Default for QueryScheduledSourceFactory {
 }
 #[async_trait]
 impl ComponentFactory for QueryScheduledSourceFactory {
+    fn describe(
+        &self,
+        _context: &crate::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<crate::computation::v1::ComponentDescription> {
+        Ok(crate::computation::v1::ComponentDescription::undeclared())
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }

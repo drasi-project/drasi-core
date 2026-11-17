@@ -757,6 +757,9 @@ struct QuietSource {
 
 #[async_trait::async_trait]
 impl ComputationComponent for QuietSource {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -780,6 +783,9 @@ struct BlockedSink {
 
 #[async_trait::async_trait]
 impl ComputationComponent for BlockedSink {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }

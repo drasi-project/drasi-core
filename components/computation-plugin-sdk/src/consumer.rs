@@ -5,8 +5,8 @@ use crate::NativeComponent as ComputationComponent;
 use crate::{abi, transport::Failure, wire, Component, NativeTransactionContext};
 use async_trait::async_trait;
 use drasi_computation_contracts::{
-    BinaryEnvelopeCodec, DeliveryBatch, DeliveryBatchIdentity, DeliveryHandler, DeliveryItem,
-    DeliveryScope, EnvelopeCodec, InputEnvelope, PortId, Schema,
+    BinaryEnvelopeCodec, DeliveryBatch, DeliveryBatchIdentity, DeliveryGuarantee, DeliveryHandler,
+    DeliveryItem, DeliveryScope, EnvelopeCodec, InputEnvelope, PortId, Schema,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -182,6 +182,7 @@ impl ConsumerState {
         input: &[u8],
         codec: &BinaryEnvelopeCodec,
         descriptor: &drasi_computation_contracts::ComponentDescriptor,
+        guarantee: DeliveryGuarantee,
     ) -> anyhow::Result<Vec<u8>> {
         let input: BeginBatch = wire::decode(input)?;
         let envelope = codec.decode(&input.envelope)?;
@@ -191,13 +192,16 @@ impl ConsumerState {
             &envelope,
             drasi_computation_contracts::PortDirection::Input,
         )?;
-        let batch = DeliveryBatch::new(
+        // The consumer re-derives identity itself and accepts a volatile
+        // (in-memory query) producer only when it is configured at-least-once.
+        let batch = DeliveryBatch::new_with_guarantee(
             self.scope.clone(),
             InputEnvelope {
                 port: input.port,
                 envelope,
             },
             &self.codec,
+            guarantee,
         )?;
         anyhow::ensure!(
             batch.identity() == &input.identity,

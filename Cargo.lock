@@ -3417,6 +3417,7 @@ dependencies = [
  "drasi-computation-plugin-sdk",
  "drasi-core-types",
  "drasi-mssql-common",
+ "log",
  "serde",
  "serde_json",
  "tokio",
@@ -3463,12 +3464,17 @@ dependencies = [
  "async-trait",
  "bytes",
  "drasi-computation-contracts",
+ "drasi-computation-network-common",
  "drasi-computation-plugin-sdk",
  "drasi-core-types",
  "drasi-sqlite-common",
  "futures",
+ "rcgen",
+ "reqwest 0.12.28",
+ "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "uuid 1.26.1",
 ]
@@ -3999,6 +4005,7 @@ name = "drasi-mssql-common"
 version = "0.2.11"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bytes",
  "chrono",
  "drasi-computation-contracts",

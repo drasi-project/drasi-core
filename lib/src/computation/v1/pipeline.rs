@@ -1244,9 +1244,9 @@ impl ComputationPipelineBuilder {
             let (handle, publication, ownership) =
                 if let Some((provider, publication)) = self.overrides.get(&config.id) {
                     (
-                        ResourceHandle::new(
+                        crate::computation::v1::QueryIndexProviderResource::handle(
                             ResourceRole::IndexBackend,
-                            Arc::new(QueryIndexProviderResource(provider.clone())),
+                            provider.clone(),
                         ),
                         *publication,
                         ResourceOwnership::Borrowed,
@@ -1263,9 +1263,9 @@ impl ComputationPipelineBuilder {
                         })
                     ) {
                         (
-                            ResourceHandle::new(
+                            crate::computation::v1::QueryIndexProviderResource::handle(
                                 ResourceRole::IndexBackend,
-                                Arc::new(QueryIndexProviderResource(Arc::new(MemoryQueryProvider))),
+                                Arc::new(MemoryQueryProvider),
                             ),
                             QueryPublicationMode::NonAtomic,
                             ResourceOwnership::Borrowed,

@@ -1,23 +1,60 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+//! The native MySQL source component: lifecycle and management around the
+//! shared replication engine in `drasi-mysql-common`.
+
+use crate::config::SourceConfig;
+use crate::management;
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_computation_contracts::{
     ComponentDescriptor, ComponentId, ConsumerProgressView, InputPositionPolicy, OutputEnvelope,
-    SourceProgressView,
+    SourceProgressKey, SourceProgressView,
 };
 use drasi_computation_plugin_sdk::lifecycle::{
-    nothing_to_do, DisposeContext, InitializeContext, LifecycleResult, PauseContext, ResumeContext,
-    StartContext, StopContext,
+    ApplyContext, ApplyError, Assessment, DisposeContext, InitializeContext, LifecycleResult,
+    PauseContext, ResumeContext, StartContext, StopContext, UpdateBoundary,
 };
-use drasi_computation_plugin_sdk::{NativeComponent, NativeSource};
+use drasi_computation_plugin_sdk::{
+    ApplyUpdateRequest, NativeComponent, NativeManagement, NativeSource, UpdateRequest,
+};
 use drasi_core_types::interface::StorageDurability;
+use drasi_mysql_common::native::source::Activation;
 use drasi_mysql_common::native::MySqlSource;
 use std::sync::Arc;
 
 pub struct MySqlComponent {
+    pub(crate) config: SourceConfig,
     pub(crate) source: MySqlSource,
+}
+
+fn refused(reason: impl std::fmt::Display) -> ApplyError {
+    ApplyError::Refused {
+        now_requires: None,
+        reason: reason.to_string(),
+    }
+}
+
+impl MySqlComponent {
+    /// Whether the host's progress shows no committed cursor for this source.
+    /// Only query-owned progress is observable; shared consumer sets are
+    /// treated as committed.
+    fn uncommitted(&self) -> bool {
+        let Some(progress) = self.source.recovery_reader() else {
+            return !self.config.mode.tracked();
+        };
+        progress.snapshot().is_ok_and(|snapshot| {
+            !snapshot
+                .checkpoints
+                .contains_key(&SourceProgressKey::Source(self.descriptor().id().clone()))
+        })
+    }
+
+    fn live_assessment(&self, request: &UpdateRequest) -> Result<Assessment> {
+        let (current, proposed) = management::configurations(self.config.mode, request)?;
+        Ok(management::plan(&current, &proposed, self.uncommitted()))
+    }
 }
 
 #[async_trait]
@@ -25,8 +62,11 @@ impl NativeComponent for MySqlComponent {
     fn descriptor(&self) -> &ComponentDescriptor {
         self.source.descriptor()
     }
+    fn management(&mut self) -> Option<&mut dyn NativeManagement> {
+        Some(self)
+    }
     fn configuration(&self) -> Result<serde_json::Value> {
-        self.source.configuration()
+        self.config.to_value()
     }
     fn consumer_progress_reader(&self) -> Option<ConsumerProgressView> {
         self.source.consumer_progress().map(|binding| binding.view)
@@ -39,32 +79,110 @@ impl NativeComponent for MySqlComponent {
     fn input_position_policy(&self) -> Option<Arc<InputPositionPolicy>> {
         self.source.position_policy()
     }
+    /// Validates the configuration. No connection is opened.
     async fn initialize(&mut self, _ctx: &InitializeContext) -> LifecycleResult {
-        nothing_to_do()
+        self.config.validate()?;
+        Ok(())
     }
-    async fn start(&mut self, _ctx: &mut StartContext) -> LifecycleResult {
-        Ok(self.start_activation().await?)
+    /// Waits for progress readiness within the host deadline and
+    /// cancellation, then opens replication within `ioTimeoutMs`.
+    /// Host-supplied activation credentials replace the configured user and
+    /// password for this activation.
+    async fn start(&mut self, ctx: &mut StartContext) -> LifecycleResult {
+        let credentials = ctx
+            .take_credentials()
+            .map(|credentials| credentials.into_auth_pair());
+        let cancellation = ctx.cancellation().clone();
+        self.source
+            .start_with(Activation {
+                cancellation: Some(&cancellation),
+                deadline: ctx.deadline(),
+                credentials,
+            })
+            .await?;
+        Ok(())
     }
-    async fn pause(&mut self, _ctx: &PauseContext) -> LifecycleResult {
-        nothing_to_do()
+    /// Stops decoding and emitting at the next transaction boundary while
+    /// the replication connection stays open (see `DESIGN.md`).
+    async fn pause(&mut self, ctx: &PauseContext) -> LifecycleResult {
+        self.source
+            .pause(ctx.deadline(), Some(ctx.cancellation()))
+            .await?;
+        Ok(())
     }
     async fn resume(&mut self, _ctx: &ResumeContext) -> LifecycleResult {
-        nothing_to_do()
+        self.source.resume();
+        Ok(())
     }
-    async fn stop(&mut self, _ctx: &StopContext) -> LifecycleResult {
-        Ok(self.stop_activation().await?)
+    /// `Drain` closes replication gracefully; `Abort` cancels the worker.
+    /// Both honour the deadline and keep ownership on timeout.
+    async fn stop(&mut self, ctx: &StopContext) -> LifecycleResult {
+        self.source.stop_with(ctx.mode(), ctx.deadline()).await?;
+        Ok(())
     }
+    /// The source owns no server-side state (no slot, no table, no
+    /// registration that outlives its connection), so erasing disposal has
+    /// nothing to remove. Dispose retires the schema reader, is idempotent
+    /// and refuses while a worker is owned.
     async fn dispose(&mut self, _ctx: &DisposeContext) -> LifecycleResult {
-        nothing_to_do()
+        self.source.dispose()?;
+        Ok(())
     }
 }
 
-impl MySqlComponent {
-    async fn start_activation(&mut self) -> Result<()> {
-        self.source.start().await
+#[async_trait]
+impl NativeManagement for MySqlComponent {
+    fn assess(&self, request: &UpdateRequest) -> Result<Assessment> {
+        self.live_assessment(request)
     }
-    async fn stop_activation(&mut self) -> Result<()> {
-        self.source.stop().await
+
+    async fn apply(
+        &mut self,
+        ctx: &ApplyContext,
+        update: &ApplyUpdateRequest,
+    ) -> Result<(), ApplyError> {
+        let (current, proposed) =
+            management::configurations(self.config.mode, &update.request).map_err(refused)?;
+        if current.to_value().map_err(refused)? != self.config.to_value().map_err(refused)? {
+            return Err(refused(
+                "the source configuration changed after the update was assessed",
+            ));
+        }
+        let assessment = self.live_assessment(&update.request).map_err(refused)?;
+        let Some(plan) = assessment.plan() else {
+            return Err(refused("the update is not supported"));
+        };
+        if plan != update.plan {
+            return Err(ApplyError::Refused {
+                now_requires: Some(plan.mode.into()),
+                reason: "the update now requires a different boundary".into(),
+            });
+        }
+        proposed.validate().map_err(refused)?;
+        let engine = proposed
+            .engine_config(self.descriptor().id())
+            .map_err(refused)?;
+        match ctx.boundary() {
+            UpdateBoundary::Pause => {
+                if self.source.is_running() && !self.source.is_paused() {
+                    return Err(refused("in-place updates require a completed pause"));
+                }
+                if !management::same_plan(&assessment, UpdateBoundary::Pause) {
+                    return Err(refused("only reconnectBudgetMs can change in place"));
+                }
+                self.source
+                    .set_reconnect_budget(proposed.settings.reconnect_budget_ms);
+            }
+            UpdateBoundary::Stop => {
+                if self.source.is_running() {
+                    return Err(refused("restart updates require a stopped source"));
+                }
+                self.source.reconfigure(engine).map_err(refused)?;
+            }
+            UpdateBoundary::Replace => return Err(refused("Replace is not an instance update")),
+        }
+        self.config = proposed;
+        Ok(())
     }
 }
 

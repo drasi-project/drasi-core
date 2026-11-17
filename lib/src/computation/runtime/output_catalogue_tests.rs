@@ -436,6 +436,9 @@ fn fixture_source_with_schema(
 
 #[async_trait]
 impl ComputationComponent for FixtureSource {
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        crate::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -459,6 +462,9 @@ struct FixtureTransformer {
 
 #[async_trait]
 impl ComputationComponent for FixtureTransformer {
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        crate::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -479,6 +485,9 @@ struct FixtureSink(ComponentDescriptor);
 
 #[async_trait]
 impl ComputationComponent for FixtureSink {
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        crate::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }
@@ -976,6 +985,9 @@ struct ChangingRegistration {
 
 #[async_trait]
 impl ComputationComponent for ChangingRegistration {
+    fn description(&self) -> crate::computation::v1::ComponentDescription {
+        crate::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.inner.descriptor
     }

@@ -31,6 +31,16 @@ pub fn plugin() -> anyhow::Result<PluginDefinition> {
 drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
 
 impl Factory for CounterFactory {
+    /// Outputs carry only source replay progress unless published through a Host admission channel.
+    fn describe(
+        &self,
+        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        Ok(request.source_description(
+            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
+            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
+        ))
+    }
     fn supports_update_planning(&self) -> bool {
         true
     }
@@ -60,6 +70,8 @@ impl Factory for CounterFactory {
                 control: true,
                 management: true,
                 update_modes: vec![ComponentUpdateMode::InPlace],
+                // Outputs carry source replay progress, not a producer identity of their
+                // own (Host admission, when bound, publishes under its durable identity).
                 ..Capabilities::default()
             },
         }

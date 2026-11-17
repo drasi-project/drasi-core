@@ -4,9 +4,9 @@
 use anyhow::{Context, Result};
 use drasi_computation_contracts::{ComponentId, ImplementationIdentity, StreamId};
 use drasi_computation_plugin_sdk::{
-    BootstrapFactory, BootstrapFactoryMetadata, ConfigSchema, ConfigType, CreateRequest,
-    LinkedBootstrapProvider, NativeBootstrapProvider, NativeSourceBootstrap, NativeSourceProgress,
-    SourceBootstrapMetadata,
+    BootstrapFactory, BootstrapFactoryMetadata, ConfigDefinition, ConfigOption, ConfigType,
+    CreateRequest, LinkedBootstrapProvider, NativeBootstrapProvider, NativeSourceBootstrap,
+    NativeSourceProgress, SourceBootstrapMetadata,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -35,10 +35,22 @@ fn metadata(shared: bool) -> BootstrapFactoryMetadata {
         )
         .expect("constant implementation"),
         configuration_version: 1,
-        configuration: ConfigSchema::from_fields([
-            ("source", ConfigType::ComponentId, true),
-            ("stream", ConfigType::String, true),
-        ]),
+        configuration: ConfigDefinition::try_new([
+            ConfigOption::new(
+                "source",
+                ConfigType::ComponentId,
+                true,
+                "The paired journal source, configured with coordinatedSnapshot: true.",
+            ),
+            ConfigOption::new(
+                "stream",
+                ConfigType::String,
+                true,
+                "The paired source's output stream.",
+            ),
+        ])
+        .expect("constant SQLite coordinated bootstrap configuration")
+        .schema(),
         source_progress: true,
     }
 }
@@ -85,11 +97,10 @@ fn validate(
                 .plugin
                 .as_ref()
                 .is_some_and(|plugin| plugin.id.as_ref() == "drasi-computation-source-sqlite")
-            && pairing.source.configuration.get("coordinated_snapshot")
+            && pairing.source.configuration.get("coordinatedSnapshot")
                 == Some(&serde_json::Value::Bool(true))
             && pairing.source.configuration["stream"].as_str() == Some(stream.as_str())
-            && pairing.source.configuration["settings"]["output"] == "transactions"
-            && pairing.source.configuration["settings"]["replay"].is_object(),
+            && pairing.source.configuration["path"].is_string(),
         "SQLite bootstrap source mode or immutable configuration does not match"
     );
     Ok(())

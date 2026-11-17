@@ -52,6 +52,10 @@ pub struct ComponentUpdateDirective {
 pub trait ComputationComponent: Send + Sync {
     /// Immutable identity, semantic role and declared ports for this instance.
     fn descriptor(&self) -> &ComponentDescriptor;
+    /// This instance's declared capabilities and requirements, compared by
+    /// the graph when it binds the instance's edges and resources. Undeclared
+    /// facts satisfy no requirement; they are never assumed.
+    fn description(&self) -> drasi_computation_contracts::ComponentDescription;
     /// Captured at construction, activation and reconfiguration, never per envelope.
     /// Unknown is not a recovery guarantee. Implementations must identify their
     /// actual admission, processing and publication boundary.

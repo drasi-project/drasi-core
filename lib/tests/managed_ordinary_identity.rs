@@ -1110,6 +1110,9 @@ struct NativeService(ComponentDescriptor);
 
 #[async_trait]
 impl ComputationComponent for NativeService {
+    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }
@@ -1127,6 +1130,12 @@ struct NativeFactory(FactoryDescriptor);
 
 #[async_trait]
 impl ComponentFactory for NativeFactory {
+    fn describe(
+        &self,
+        _context: &drasi_lib::computation::v1::ConstructionContext,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.0
     }
