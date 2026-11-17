@@ -33,15 +33,14 @@ use drasi_lib::channels::events::{
     BootstrapEvent, BootstrapEventSender, SourceEvent, SourceEventWrapper,
 };
 use drasi_lib::channels::ChangeReceiver;
-use drasi_lib::component_graph::ComponentUpdateReceiver;
+use drasi_lib::component_graph::{ComponentUpdate, ComponentUpdateReceiver};
 use drasi_lib::config::SourceSubscriptionSettings;
 use drasi_lib::reactions::Reaction;
 use drasi_lib::sources::Source;
 use drasi_lib::{ComponentStatus, DispatchMode, SourceRuntimeContext, StateStoreProvider};
 
 use super::bootstrap_proxy::FfiBootstrapProviderProxy;
-use super::callbacks::FfiLifecycleEvent;
-use super::callbacks::FfiLifecycleEventType;
+use super::callbacks::{FfiLifecycleEvent, FfiLifecycleEventType, LifecycleCallbackFn};
 use super::payload::{BootstrapEventPayload, SourceEventPayload};
 use super::state_store_proxy::FfiStateStoreProxy;
 use super::types::*;
@@ -52,6 +51,65 @@ use crate::descriptor::{
 };
 
 type LifecycleEmitterFn = fn(&str, FfiLifecycleEventType, &str);
+
+pub(crate) struct StatusUpdateForwarder(tokio::task::JoinHandle<()>);
+
+impl Drop for StatusUpdateForwarder {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn forward_status_updates(
+    mut status_rx: ComponentUpdateReceiver,
+    lifecycle_callback: Option<LifecycleCallbackFn>,
+    lifecycle_ctx: *mut c_void,
+    component_type: &'static str,
+    lifecycle_emitter: LifecycleEmitterFn,
+    runtime_handle: tokio::runtime::Handle,
+) -> StatusUpdateForwarder {
+    let lifecycle_ctx = lifecycle_ctx as usize;
+    StatusUpdateForwarder(runtime_handle.spawn(async move {
+        while let Some(ComponentUpdate::Status {
+            component_id,
+            status,
+            message,
+        }) = status_rx.recv().await
+        {
+            let event_type = match status {
+                ComponentStatus::Starting => FfiLifecycleEventType::Starting,
+                ComponentStatus::Running => FfiLifecycleEventType::Started,
+                ComponentStatus::Stopping => FfiLifecycleEventType::Stopping,
+                ComponentStatus::Stopped => FfiLifecycleEventType::Stopped,
+                ComponentStatus::Error => FfiLifecycleEventType::Error,
+                unsupported => {
+                    log::debug!(
+                        "Plugin status {unsupported:?} for '{component_id}' has no FFI lifecycle representation"
+                    );
+                    continue;
+                }
+            };
+            let message = if event_type == FfiLifecycleEventType::Error {
+                message.unwrap_or_default()
+            } else {
+                String::new()
+            };
+
+            if let Some(callback) = lifecycle_callback {
+                let event = FfiLifecycleEvent {
+                    component_id: FfiStr::from_str(&component_id),
+                    component_type: FfiStr::from_str(component_type),
+                    event_type,
+                    message: FfiStr::from_str(&message),
+                    timestamp_us: super::now_us(),
+                };
+                ffi_guard((), || callback(lifecycle_ctx as *mut c_void, &event));
+            } else {
+                ffi_guard((), || lifecycle_emitter(&component_id, event_type, &message));
+            }
+        }
+    }))
+}
 
 /// Wraps a closure in `catch_unwind`, returning `default` on panic.
 ///
@@ -581,8 +639,8 @@ pub(crate) struct SourceWrapper<T: Source + 'static> {
     pub instance_lifecycle_ctx: std::sync::atomic::AtomicPtr<c_void>,
     /// Cached instance_id from FfiRuntimeContext (set during initialize).
     pub instance_id: std::sync::RwLock<String>,
-    /// Keeps the dummy status_rx alive so inner source's status_tx.send() doesn't error.
-    pub _status_rx: std::sync::Mutex<Option<ComponentUpdateReceiver>>,
+    /// Forwards plugin-side status updates through the lifecycle callback.
+    pub _status_forwarder: std::sync::Mutex<Option<StatusUpdateForwarder>>,
 }
 
 /// Build a SourceVtable from a concrete type implementing the DrasiLib Source trait.
@@ -862,9 +920,17 @@ pub fn build_source_vtable<T: Source + 'static>(
         }
 
         let (runtime_ctx, status_rx) = build_source_runtime_context(ffi_ctx);
-        // Keep the receiver alive so inner source's status_tx.send() doesn't error
-        if let Ok(mut guard) = w._status_rx.lock() {
-            *guard = Some(status_rx);
+        let forwarder = forward_status_updates(
+            status_rx,
+            ffi_ctx.lifecycle_callback,
+            ffi_ctx.lifecycle_ctx,
+            "source",
+            w.lifecycle_emitter,
+            (w.runtime_handle)().handle().clone(),
+        );
+        match w._status_forwarder.lock() {
+            Ok(mut guard) => *guard = Some(forwarder),
+            Err(e) => log::error!("Failed to store source lifecycle forwarder: {e}"),
         }
         let handle = (w.runtime_handle)().handle().clone();
         let ptr = SendPtr(state as *const SourceWrapper<T>);
@@ -939,7 +1005,7 @@ pub fn build_source_vtable<T: Source + 'static>(
         instance_lifecycle_cb: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_id: std::sync::RwLock::new(String::new()),
-        _status_rx: std::sync::Mutex::new(None),
+        _status_forwarder: std::sync::Mutex::new(None),
     });
 
     SourceVtable {
@@ -987,7 +1053,7 @@ pub fn build_source_vtable_from_boxed(
         instance_lifecycle_cb: std::sync::atomic::AtomicPtr<()>,
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr<c_void>,
         instance_id: std::sync::RwLock<String>,
-        _status_rx: std::sync::Mutex<Option<ComponentUpdateReceiver>>,
+        _status_forwarder: std::sync::Mutex<Option<StatusUpdateForwarder>>,
     }
 
     extern "C" fn id_fn(state: *const c_void) -> FfiStr {
@@ -1254,8 +1320,17 @@ pub fn build_source_vtable_from_boxed(
         }
 
         let (runtime_ctx, status_rx) = build_source_runtime_context(ffi_ctx);
-        if let Ok(mut guard) = w._status_rx.lock() {
-            *guard = Some(status_rx);
+        let forwarder = forward_status_updates(
+            status_rx,
+            ffi_ctx.lifecycle_callback,
+            ffi_ctx.lifecycle_ctx,
+            "source",
+            w.lifecycle_emitter,
+            (w.runtime_handle)().handle().clone(),
+        );
+        match w._status_forwarder.lock() {
+            Ok(mut guard) => *guard = Some(forwarder),
+            Err(e) => log::error!("Failed to store source lifecycle forwarder: {e}"),
         }
         let handle = (w.runtime_handle)().handle().clone();
         let inner_ptr = SendPtr(state as *const DynSourceWrapper);
@@ -1327,7 +1402,7 @@ pub fn build_source_vtable_from_boxed(
         instance_lifecycle_cb: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_id: std::sync::RwLock::new(String::new()),
-        _status_rx: std::sync::Mutex::new(None),
+        _status_forwarder: std::sync::Mutex::new(None),
     });
 
     SourceVtable {
@@ -1368,7 +1443,7 @@ pub(crate) struct ReactionWrapper<T: Reaction + 'static> {
     pub instance_lifecycle_cb: std::sync::atomic::AtomicPtr<()>,
     pub instance_lifecycle_ctx: std::sync::atomic::AtomicPtr<c_void>,
     pub instance_id: std::sync::RwLock<String>,
-    pub _status_rx: std::sync::Mutex<Option<ComponentUpdateReceiver>>,
+    pub _status_forwarder: std::sync::Mutex<Option<StatusUpdateForwarder>>,
 }
 
 /// Build a ReactionVtable from a concrete type implementing the DrasiLib Reaction trait.
@@ -1562,8 +1637,17 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         }
 
         let (runtime_ctx, status_rx) = build_reaction_runtime_context(ffi_ctx);
-        if let Ok(mut guard) = w._status_rx.lock() {
-            *guard = Some(status_rx);
+        let forwarder = forward_status_updates(
+            status_rx,
+            ffi_ctx.lifecycle_callback,
+            ffi_ctx.lifecycle_ctx,
+            "reaction",
+            w.lifecycle_emitter,
+            (w.runtime_handle)().handle().clone(),
+        );
+        match w._status_forwarder.lock() {
+            Ok(mut guard) => *guard = Some(forwarder),
+            Err(e) => log::error!("Failed to store reaction lifecycle forwarder: {e}"),
         }
         let handle = (w.runtime_handle)().handle().clone();
         let ptr = SendPtr(state as *const ReactionWrapper<T>);
@@ -1705,7 +1789,7 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
         instance_lifecycle_cb: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_id: std::sync::RwLock::new(String::new()),
-        _status_rx: std::sync::Mutex::new(None),
+        _status_forwarder: std::sync::Mutex::new(None),
     });
 
     ReactionVtable {
@@ -1748,7 +1832,7 @@ pub fn build_reaction_vtable_from_boxed(
         instance_lifecycle_cb: std::sync::atomic::AtomicPtr<()>,
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr<c_void>,
         instance_id: std::sync::RwLock<String>,
-        _status_rx: std::sync::Mutex<Option<ComponentUpdateReceiver>>,
+        _status_forwarder: std::sync::Mutex<Option<StatusUpdateForwarder>>,
     }
 
     // The state pointer points to a heap-allocated `Arc<DynReactionWrapper>`.
@@ -1943,8 +2027,17 @@ pub fn build_reaction_vtable_from_boxed(
         }
 
         let (runtime_ctx, status_rx) = build_reaction_runtime_context(ffi_ctx);
-        if let Ok(mut guard) = w._status_rx.lock() {
-            *guard = Some(status_rx);
+        let forwarder = forward_status_updates(
+            status_rx,
+            ffi_ctx.lifecycle_callback,
+            ffi_ctx.lifecycle_ctx,
+            "reaction",
+            w.lifecycle_emitter,
+            (w.runtime_handle)().handle().clone(),
+        );
+        match w._status_forwarder.lock() {
+            Ok(mut guard) => *guard = Some(forwarder),
+            Err(e) => log::error!("Failed to store reaction lifecycle forwarder: {e}"),
         }
         let handle = (w.runtime_handle)().handle().clone();
         let arc = wrapper_arc(state);
@@ -2099,7 +2192,7 @@ pub fn build_reaction_vtable_from_boxed(
         instance_lifecycle_cb: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_lifecycle_ctx: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         instance_id: std::sync::RwLock::new(String::new()),
-        _status_rx: std::sync::Mutex::new(None),
+        _status_forwarder: std::sync::Mutex::new(None),
     });
     // Heap-allocate the Arc handle and pass its raw pointer as the FFI
     // state. drop_fn reclaims the Box (and decrements the Arc); any
@@ -2925,10 +3018,7 @@ fn build_source_runtime_context(
                 super::identity_proxy::FfiIdentityProviderProxy::new(ffi_ctx.identity_provider)
             }))
         };
-    // Create a dummy mpsc channel pair.
-    // The update_tx is provided to satisfy the SourceRuntimeContext signature.
-    // In the plugin-side context, status updates flow through the FFI lifecycle callback,
-    // not through this channel. The receiver is returned so it stays alive.
+    // The receiver is consumed by the wrapper's lifecycle status forwarder.
     let (update_tx, status_rx) = tokio::sync::mpsc::channel(16);
 
     let wal_provider: Option<Arc<dyn drasi_lib::wal::WalProvider>> =
@@ -2981,6 +3071,7 @@ fn build_reaction_runtime_context(
                 },
             ))
         };
+    // The receiver is consumed by the wrapper's lifecycle status forwarder.
     let (update_tx, status_rx) = tokio::sync::mpsc::channel(16);
 
     let ctx = drasi_lib::ReactionRuntimeContext {
@@ -2992,6 +3083,304 @@ fn build_reaction_runtime_context(
         snapshot_fetcher,
     };
     (ctx, status_rx)
+}
+
+#[cfg(test)]
+mod status_forwarder_tests {
+    use super::*;
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use drasi_lib::context::ReactionRuntimeContext;
+    use drasi_lib::reactions::Reaction;
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct CapturedLifecycleEvent {
+        component_id: String,
+        component_type: String,
+        event_type: FfiLifecycleEventType,
+        message: String,
+    }
+
+    struct CallbackContext(tokio::sync::mpsc::UnboundedSender<CapturedLifecycleEvent>);
+
+    struct DynamicReaction {
+        update_tx: std::sync::Arc<
+            std::sync::Mutex<Option<tokio::sync::mpsc::Sender<ComponentUpdate>>>,
+        >,
+        fail_delivery: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+
+    #[async_trait]
+    impl Reaction for DynamicReaction {
+        fn id(&self) -> &str {
+            "dynamic-http"
+        }
+
+        fn type_name(&self) -> &str {
+            "http"
+        }
+
+        fn properties(&self) -> std::collections::HashMap<String, serde_json::Value> {
+            std::collections::HashMap::new()
+        }
+
+        fn query_ids(&self) -> Vec<String> {
+            vec!["query".to_string()]
+        }
+
+        async fn initialize(&self, context: ReactionRuntimeContext) {
+            *self.update_tx.lock().expect("update sender lock") = Some(context.update_tx);
+        }
+
+        async fn start(&self) -> Result<()> {
+            let Some(fail_delivery) = self
+                .fail_delivery
+                .lock()
+                .expect("failure receiver lock")
+                .take()
+            else {
+                return Ok(());
+            };
+            let update_tx = self
+                .update_tx
+                .lock()
+                .expect("update sender lock")
+                .clone()
+                .expect("initialized update sender");
+            tokio::spawn(async move {
+                if fail_delivery.await.is_ok() {
+                    let _ = update_tx
+                        .send(ComponentUpdate::Status {
+                            component_id: "dynamic-http".to_string(),
+                            status: ComponentStatus::Error,
+                            message: Some("HTTP delivery failed after retries".to_string()),
+                        })
+                        .await;
+                }
+            });
+            Ok(())
+        }
+
+        async fn stop(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn status(&self) -> ComponentStatus {
+            ComponentStatus::Stopped
+        }
+    }
+
+    extern "C" fn capture_lifecycle_event(ctx: *mut c_void, event: *const FfiLifecycleEvent) {
+        let captured = CapturedLifecycleEvent {
+            component_id: unsafe { (*event).component_id.to_string() },
+            component_type: unsafe { (*event).component_type.to_string() },
+            event_type: unsafe { (*event).event_type },
+            message: unsafe { (*event).message.to_string() },
+        };
+        let context = unsafe { &*(ctx as *const CallbackContext) };
+        let _ = context.0.send(captured);
+    }
+
+    fn unused_lifecycle_emitter(_: &str, _: FfiLifecycleEventType, _: &str) {}
+
+    extern "C" fn unused_executor(_: *mut c_void) -> *mut c_void {
+        std::ptr::null_mut()
+    }
+
+    fn plugin_runtime() -> &'static tokio::runtime::Runtime {
+        static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+        RUNTIME.get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("plugin test runtime")
+        })
+    }
+
+    async fn receive_event(
+        events: &mut tokio::sync::mpsc::UnboundedReceiver<CapturedLifecycleEvent>,
+        expected_type: FfiLifecycleEventType,
+        expected_message: &str,
+    ) {
+        let event = events.recv().await.expect("lifecycle event");
+        assert_eq!(event.component_id, "dynamic-http");
+        assert_eq!(event.component_type, "reaction");
+        assert_eq!(event.event_type, expected_type);
+        assert_eq!(event.message, expected_message);
+    }
+
+    #[tokio::test]
+    async fn forwards_statuses_and_error_reason_for_sources_and_reactions() {
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let callback_ctx = CallbackContext(event_tx);
+        let callback_ctx = &callback_ctx as *const CallbackContext as *mut c_void;
+        let transitions = [
+            (
+                ComponentStatus::Starting,
+                FfiLifecycleEventType::Starting,
+                None,
+            ),
+            (
+                ComponentStatus::Running,
+                FfiLifecycleEventType::Started,
+                None,
+            ),
+            (
+                ComponentStatus::Error,
+                FfiLifecycleEventType::Error,
+                Some("HTTP delivery failed"),
+            ),
+            (
+                ComponentStatus::Starting,
+                FfiLifecycleEventType::Starting,
+                None,
+            ),
+            (
+                ComponentStatus::Running,
+                FfiLifecycleEventType::Started,
+                None,
+            ),
+            (
+                ComponentStatus::Stopping,
+                FfiLifecycleEventType::Stopping,
+                None,
+            ),
+            (
+                ComponentStatus::Stopped,
+                FfiLifecycleEventType::Stopped,
+                None,
+            ),
+        ];
+
+        for component_type in ["source", "reaction"] {
+            let (update_tx, update_rx) = tokio::sync::mpsc::channel(8);
+            let forwarder = forward_status_updates(
+                update_rx,
+                Some(capture_lifecycle_event),
+                callback_ctx,
+                component_type,
+                unused_lifecycle_emitter,
+                tokio::runtime::Handle::current(),
+            );
+
+            for (status, event_type, message) in transitions {
+                update_tx
+                    .send(ComponentUpdate::Status {
+                        component_id: "plugin-instance".to_string(),
+                        status,
+                        message: message.map(str::to_string),
+                    })
+                    .await
+                    .expect("status receiver is active");
+                assert_eq!(
+                    event_rx.recv().await.expect("lifecycle callback receives update"),
+                    CapturedLifecycleEvent {
+                        component_id: "plugin-instance".to_string(),
+                        component_type: component_type.to_string(),
+                        event_type,
+                        message: message.unwrap_or_default().to_string(),
+                    }
+                );
+            }
+
+            drop(forwarder);
+        }
+    }
+
+    #[tokio::test]
+    async fn dynamic_reaction_reports_post_start_error_and_restart_transitions() {
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let callback_ctx = CallbackContext(event_tx);
+        let callback_ctx = &callback_ctx as *const CallbackContext as *mut c_void;
+        let update_tx = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let (fail_delivery_tx, fail_delivery_rx) = tokio::sync::oneshot::channel();
+        let vtable = build_reaction_vtable_from_boxed(
+            Box::new(DynamicReaction {
+                update_tx: update_tx.clone(),
+                fail_delivery: std::sync::Mutex::new(Some(fail_delivery_rx)),
+            }),
+            unused_executor,
+            unused_lifecycle_emitter,
+            plugin_runtime,
+        );
+        let instance_id = FfiStr::from_str("test-instance");
+        let component_id = FfiStr::from_str("dynamic-http");
+        let context = FfiRuntimeContext {
+            instance_id,
+            component_id,
+            state_store: std::ptr::null(),
+            log_callback: None,
+            log_ctx: std::ptr::null_mut(),
+            lifecycle_callback: Some(capture_lifecycle_event),
+            lifecycle_ctx: callback_ctx,
+            identity_provider: std::ptr::null(),
+            snapshot_fetcher: std::ptr::null(),
+            wal_provider: std::ptr::null(),
+        };
+        (vtable.initialize_fn)(vtable.state, &context);
+
+        let start = (vtable.start_fn)(vtable.state);
+        assert!(unsafe { start.into_result() }.is_ok(), "start should succeed");
+        receive_event(
+            &mut event_rx,
+            FfiLifecycleEventType::Starting,
+            "",
+        )
+        .await;
+        receive_event(
+            &mut event_rx,
+            FfiLifecycleEventType::Started,
+            "",
+        )
+        .await;
+
+        fail_delivery_tx
+            .send(())
+            .expect("failure task is still waiting");
+        receive_event(
+            &mut event_rx,
+            FfiLifecycleEventType::Error,
+            "HTTP delivery failed after retries",
+        )
+        .await;
+
+        let stop = (vtable.stop_fn)(vtable.state);
+        assert!(unsafe { stop.into_result() }.is_ok(), "stop should succeed");
+        receive_event(
+            &mut event_rx,
+            FfiLifecycleEventType::Stopping,
+            "",
+        )
+        .await;
+        receive_event(
+            &mut event_rx,
+            FfiLifecycleEventType::Stopped,
+            "",
+        )
+        .await;
+
+        let restart = (vtable.start_fn)(vtable.state);
+        assert!(
+            unsafe { restart.into_result() }.is_ok(),
+            "restart should succeed"
+        );
+        receive_event(
+            &mut event_rx,
+            FfiLifecycleEventType::Starting,
+            "",
+        )
+        .await;
+        receive_event(
+            &mut event_rx,
+            FfiLifecycleEventType::Started,
+            "",
+        )
+        .await;
+
+        drop(update_tx);
+        (vtable.drop_fn)(vtable.state);
+    }
 }
 
 /// Wrap a DrasiLib SubscriptionResponse into an FfiSubscriptionResponse.
