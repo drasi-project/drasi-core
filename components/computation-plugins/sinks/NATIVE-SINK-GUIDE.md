@@ -14,7 +14,7 @@ what is different for sinks.
 |---|---|
 | `initialize` | Compile every template and validator, check that credentials are present, and resolve routes against the bound outputs. Open no connections, bind no listeners, start no workers. |
 | `start` | Observe `ctx.cancellation()` and `ctx.deadline()` across every connect, retry and readiness wait. A connection loop must not outlive the start budget. Prefer lazy connection: a destination that is down is a delivery failure, not a start failure, unless the configuration explicitly requires a connection at start. A cancelled start leaves nothing running and the object startable. |
-| `pause` | **Host-driven sinks** (no worker of their own: HTTP, gRPC, log) may succeed. The host calls no `handle` while paused and cancels or awaits the in-flight one. **Sinks with workers** (the SSE server, a profiler reporter, driver keepalives) must gate them, or return `lifecycle::unsupported(...)`. Never return success while a worker keeps serving or reporting. |
+| `pause` | **Host-driven sinks** (no worker of their own: HTTP, gRPC, log) may succeed and need no gate. The host calls no `handle` while paused and lets the in-flight one settle before Pause returns. **Sinks with workers** (the SSE server, a profiler reporter, driver keepalives) must gate them with the SDK's `ActivationScope` and `PauseGate` (see the source guide), or return `lifecycle::unsupported(...)`. Never return success while a worker keeps serving or reporting. |
 | `resume` | Reopen exactly what Pause closed. |
 | `stop` | `Drain`: let the in-flight delivery or connection finish within `ctx.deadline()`, then close. `Abort`: cancel promptly. On expiry, return a retryable error and keep ownership (`join_owned_worker_gracefully` for servers). Never report an earlier delivery failure as a Stop failure. |
 | `dispose` | Implement both intents. Under `Erase`, remove exactly the destination-side state the sink owns (cursor rows, sender ledgers), idempotently. A sink that owns nothing declares `erases_owned_state` with a documented no-op. |
@@ -173,14 +173,18 @@ let suite = SinkConformance::new(&MyFactory, "<component uuid>", inputs)?;
 suite.lifecycle(config.clone(), &Probe).await?;           // start, pause, Drain/Abort, restart, dispose
 suite.retry_after_failure(config.clone(), &Probe).await?; // a failed input retries without a restart
 suite.erase(config.clone()).await?;                       // erase twice succeeds
+suite.dispose_matrix(config.clone()).await?;              // every DisposeReason, with Erase when declared
+suite.dispose_after_failed_initialize(bad).await?;        // dispose ends a failed initialization
 suite.configuration_round_trip(&[config.clone()])?;       // configuration() == constructed
 suite.assess_matrix(&config, &cases)?;                    // every field's boundary
 suite.apply(current, proposed, &Probe).await?;            // live in-place and restart updates
 ```
 
-Run the suite on both Tokio flavours. Also test the destination protocol, the
-security boundaries and the delivery profile's duplicate behaviour, and run the
-loaded dynamic library through the Host SDK.
+Run the suite on both Tokio flavours, linked and against the built dynamic
+library through the Host SDK's `LoadedTarget` with
+`SinkConformance::with_target` (see the source guide; a loaded repeated Start is
+acknowledged rather than refused). Also test the destination protocol, the
+security boundaries and the delivery profile's duplicate behaviour.
 
 ## Documentation
 

@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use drasi_lib::{
     computation::v1::{
         AdmissionOptions, ComponentDescriptor, ComponentRecovery, ComponentRole,
-        ComputationComponent, EnvelopeSource, OutputEnvelope, SourceAdmission,
+        ComputationComponent, EnvelopeSource, LifecycleError, OutputEnvelope, SourceAdmission,
     },
     context::workers::{join_owned_worker_gracefully, spawn_owned_worker, WorkerCompletion},
 };
@@ -265,8 +265,54 @@ impl ComputationComponent for BridgeSource {
     }
 
     drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
-    drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
-    drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+    /// Refuses new data with a retryable `Busy` and waits for any admission
+    /// in flight. Receipt and control requests stay live, and frames already
+    /// admitted stay in the queue or journal for delivery after Resume.
+    async fn pause(
+        &mut self,
+        context: &drasi_lib::computation::v1::PauseContext,
+    ) -> anyhow::Result<()> {
+        let Some(runtime) = &self.runtime else {
+            return Ok(());
+        };
+        let receiver = runtime.receiver.clone();
+        let settled = async {
+            match context.deadline() {
+                Some(deadline) => tokio::time::timeout_at(deadline, receiver.pause())
+                    .await
+                    .is_ok(),
+                None => {
+                    receiver.pause().await;
+                    true
+                }
+            }
+        };
+        let outcome = tokio::select! {
+            biased;
+            _ = context.cancellation().cancelled() => Err(LifecycleError::cancelled()),
+            settled = settled => if settled {
+                Ok(())
+            } else {
+                Err(LifecycleError::retryable(anyhow::anyhow!(
+                    "bridge admission in flight did not finish before the pause deadline"
+                )))
+            },
+        };
+        if outcome.is_err() {
+            runtime.receiver.resume();
+        }
+        Ok(outcome?)
+    }
+
+    async fn resume(
+        &mut self,
+        _context: &drasi_lib::computation::v1::ResumeContext,
+    ) -> anyhow::Result<()> {
+        if let Some(runtime) = &self.runtime {
+            runtime.receiver.resume();
+        }
+        Ok(())
+    }
 
     async fn dispose(
         &mut self,

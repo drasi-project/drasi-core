@@ -12,6 +12,7 @@ use crate::{row_element as element, value_to_json as json, TableSchema as Table}
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use drasi_computation_contracts::pause::{PauseGate, PauseState};
 use drasi_computation_contracts::{
     ChangeEnvelope, ComponentId, ConsumerProgressView, GraphChangeCodec, OutputEnvelope, PortId,
     PreparedSourceTransaction, SourceProgressSnapshot, SourceProgressView,
@@ -1287,10 +1288,8 @@ pub struct WorkerControl {
     pub stop: watch::Receiver<bool>,
     /// `true` when Stop is an Abort: open work is rolled back at once.
     pub abort: watch::Receiver<bool>,
-    /// `true` while the host asks the source to pause.
-    pub pause: watch::Receiver<bool>,
-    /// Set by the worker when it has parked at a transaction boundary.
-    pub paused: Arc<watch::Sender<bool>>,
+    /// Acknowledges Pause at the loop top, a transaction boundary.
+    pub pause: PauseGate,
     /// Whether Stop lets an open transaction scope finish instead of rolling
     /// it back.
     pub drain_transactions: bool,
@@ -1369,10 +1368,7 @@ pub fn run(
         }
         // The loop top is always a transaction boundary: acknowledge Pause
         // and Resume here, so a paused worker never holds an open write.
-        let pausing = *control.pause.borrow_and_update();
-        if *control.paused.borrow() != pausing {
-            control.paused.send_replace(pausing);
-        }
+        let pausing = control.pause.sync() == PauseState::Paused;
         let draining = *control.draining.borrow_and_update();
         if draining {
             // Never wait for output while stopping: deliver what fits now.
@@ -1390,10 +1386,7 @@ pub fn run(
             tokio::select! {
                 biased;
                 _ = control.stop.wait_for(|stopped| *stopped) => Wake::Stop,
-                changed = control.pause.changed() => match changed {
-                    Ok(()) => Wake::Pause,
-                    Err(_) => Wake::Stop,
-                },
+                _ = control.pause.changed() => Wake::Pause,
                 changed = control.draining.changed(), if !draining => match changed {
                     Ok(()) => Wake::Pause,
                     Err(_) => Wake::Stop,

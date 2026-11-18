@@ -9,9 +9,10 @@ use crate::management;
 use crate::rows::RowEmission;
 use crate::shared::{self, SharedBinding, SharedMode, SharedUpdates, TransactionEmission};
 use crate::whole::{Cursors, WholeEmission};
-use crate::worker::{decoder_resume, Emission, PauseGate, Worker, WorkerProgress};
+use crate::worker::{decoder_resume, Emission, Worker, WorkerProgress};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use drasi_computation_contracts::pause::{PauseControl, PauseGate};
 use drasi_computation_contracts::{
     workers::{
         cancel_owned_worker, join_owned_worker, spawn_owned_worker, WorkerCleanupError,
@@ -23,8 +24,9 @@ use drasi_computation_contracts::{
     SourceTransactionCodec, StreamId,
 };
 use drasi_computation_plugin_sdk::lifecycle::{
-    ApplyContext, ApplyError, Assessment, DisposeContext, InitializeContext, LifecycleResult,
-    PauseContext, ResumeContext, StartContext, StopContext, StopMode, UpdateBoundary,
+    ApplyContext, ApplyError, Assessment, DisposeContext, InitializeContext, LifecycleError,
+    LifecycleResult, PauseContext, ResumeContext, StartContext, StopContext, StopMode,
+    UpdateBoundary,
 };
 use drasi_computation_plugin_sdk::{
     ActivationCredentials, ApplyUpdateRequest, NativeComponent, NativeConsumerProgress,
@@ -81,8 +83,7 @@ pub struct PostgresTransactionSource {
     persistent: bool,
     receiver: Option<mpsc::Receiver<OutputEnvelope>>,
     shutdown: watch::Sender<Shutdown>,
-    pause: watch::Sender<bool>,
-    paused: Arc<watch::Sender<bool>>,
+    pause: PauseControl,
     worker: RwLock<Option<JoinHandle<Result<()>>>>,
     cleanup_required: bool,
     transport_sequence: Arc<AtomicU64>,
@@ -132,8 +133,7 @@ impl PostgresTransactionSource {
             persistent,
             receiver: None,
             shutdown: watch::channel(Shutdown::Running).0,
-            pause: watch::channel(false).0,
-            paused: Arc::new(watch::channel(false).0),
+            pause: PauseControl::new(),
             worker: RwLock::new(None),
             cleanup_required: false,
             transport_sequence: Arc::new(AtomicU64::new(0)),
@@ -303,10 +303,7 @@ impl PostgresTransactionSource {
     }
 
     fn pause_gate(&self) -> PauseGate {
-        PauseGate {
-            requested: self.pause.subscribe(),
-            acknowledged: (*self.paused).clone(),
-        }
+        self.pause.gate()
     }
 
     fn transactions(
@@ -686,10 +683,8 @@ impl PostgresTransactionSource {
         let (sender, receiver) = mpsc::channel(1);
         self.receiver = Some(receiver);
         self.shutdown.send_replace(Shutdown::Running);
-        self.pause.send_replace(false);
-        self.paused.send_replace(false);
+        self.pause.resume();
         let mut shutdown = self.shutdown.subscribe();
-        let paused = self.paused.clone();
         let shared = self.shared.is_some();
         spawn_owned_worker(&self.worker, async move {
             let stopped = tokio::select! {
@@ -708,8 +703,9 @@ impl PostgresTransactionSource {
                 }
                 Err(result) => result,
             };
-            // Nothing is read or emitted after exit; a pending pause holds.
-            paused.send_replace(true);
+            // The worker's pause gate drops with it, so a pending pause
+            // settles: nothing is read or emitted after exit.
+            drop(worker);
             if let Err(error) = &result {
                 if shared && consumer_progress_closed(error) {
                     log::debug!(
@@ -759,31 +755,25 @@ impl PostgresTransactionSource {
         Ok(())
     }
 
-    async fn pause_activation(&mut self, ctx: &PauseContext) -> Result<()> {
+    async fn pause_activation(&mut self, ctx: &PauseContext) -> LifecycleResult {
         if self.worker.get_mut().is_none() {
             return Ok(());
         }
-        self.pause.send_replace(true);
-        let mut acknowledged = self.paused.subscribe();
-        let timeout = ctx.deadline().map_or(self.config.timeout(), |deadline| {
-            deadline.saturating_duration_since(Instant::now())
-        });
-        let cancellation = ctx.cancellation().clone();
-        let result = tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => Err(anyhow::anyhow!("PostgreSQL pause was cancelled")),
-            waited = tokio::time::timeout(timeout, acknowledged.wait_for(|paused| *paused)) => match waited {
-                Ok(Ok(_)) => Ok(()),
-                Ok(Err(_)) => Err(anyhow::anyhow!("PostgreSQL worker closed during pause")),
-                Err(_) => Err(anyhow::anyhow!(
-                    "PostgreSQL could not reach a transaction boundary before the pause deadline"
-                )),
-            },
-        };
-        if result.is_err() {
-            self.pause.send_replace(false);
-        }
-        result
+        let deadline = ctx
+            .deadline()
+            .unwrap_or_else(|| Instant::now() + self.config.timeout());
+        self.pause
+            .pause(Some(deadline), ctx.cancellation())
+            .await
+            .map_err(|error| {
+                if error.is_retryable() {
+                    LifecycleError::retryable(anyhow::anyhow!(
+                        "PostgreSQL could not reach a transaction boundary before the pause deadline"
+                    ))
+                } else {
+                    error
+                }
+            })
     }
 
     /// Whether the host's progress shows no committed cursor for this source.
@@ -863,10 +853,10 @@ impl NativeComponent for PostgresTransactionSource {
     /// standby feedback continues, so the server keeps the connection. An
     /// open transaction is assembled first; it is held, not emitted.
     async fn pause(&mut self, ctx: &PauseContext) -> LifecycleResult {
-        Ok(self.pause_activation(ctx).await?)
+        self.pause_activation(ctx).await
     }
     async fn resume(&mut self, _ctx: &ResumeContext) -> LifecycleResult {
-        self.pause.send_replace(false);
+        self.pause.resume();
         Ok(())
     }
     /// `Drain` sends final feedback at the committed cursor and closes the
@@ -955,7 +945,7 @@ impl NativeManagement for PostgresTransactionSource {
         settings.validate().map_err(refused)?;
         match ctx.boundary() {
             UpdateBoundary::Pause => {
-                if self.worker.get_mut().is_some() && !*self.paused.borrow() {
+                if self.worker.get_mut().is_some() && !self.pause.is_paused() {
                     return Err(refused("in-place updates require a completed pause"));
                 }
                 if !management::same_plan(&assessment, UpdateBoundary::Pause) {

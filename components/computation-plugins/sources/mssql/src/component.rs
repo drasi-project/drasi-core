@@ -8,10 +8,11 @@ use crate::{
     config::SourceConfig,
     management,
     progress::Membership,
-    worker::{Output, PauseGate, Shared, Shutdown, Worker},
+    worker::{Output, Shared, Shutdown, Worker},
 };
 use anyhow::{bail, ensure, Context, Result};
 use async_trait::async_trait;
+use drasi_computation_contracts::pause::PauseControl;
 use drasi_computation_contracts::{
     workers::{
         cancel_owned_worker, join_owned_worker, join_owned_worker_gracefully, spawn_owned_worker,
@@ -106,8 +107,7 @@ pub struct MsSqlSource {
     idle_progress: Duration,
     receiver: Option<mpsc::Receiver<OutputEnvelope>>,
     shutdown: watch::Sender<Shutdown>,
-    pause: watch::Sender<bool>,
-    paused: Arc<watch::Sender<bool>>,
+    pause: PauseControl,
     worker: AsyncRwLock<Option<JoinHandle<Result<()>>>>,
     cleanup_required: bool,
 }
@@ -169,8 +169,7 @@ impl MsSqlSource {
             idle_progress: crate::worker::IDLE_PROGRESS,
             receiver: None,
             shutdown: watch::channel(Shutdown::Running).0,
-            pause: watch::channel(false).0,
-            paused: Arc::new(watch::channel(false).0),
+            pause: PauseControl::new(),
             worker: AsyncRwLock::new(None),
             cleanup_required: false,
         })
@@ -288,10 +287,7 @@ impl MsSqlSource {
             queue,
             last_emission: Instant::now(),
             idle_progress: self.idle_progress,
-            pause: PauseGate {
-                requested: self.pause.subscribe(),
-                acknowledged: self.paused.clone(),
-            },
+            pause: self.pause.gate(),
             shutdown: self.shutdown.subscribe(),
             port: PortId::try_new("out")?,
         })
@@ -333,14 +329,10 @@ impl MsSqlSource {
         let (sender, receiver) = mpsc::channel(1);
         self.receiver = Some(receiver);
         self.shutdown.send_replace(Shutdown::Running);
-        self.pause.send_replace(false);
-        self.paused.send_replace(false);
-        let paused = self.paused.clone();
+        self.pause.resume();
         let close_timeout = settings.command_timeout().min(CLOSE_TIMEOUT);
         spawn_owned_worker(&self.worker, async move {
             let result = worker.run(sender).await;
-            // Nothing is read or emitted after exit; a pending pause holds.
-            paused.send_replace(true);
             match &result {
                 Ok(()) => worker.close(close_timeout).await,
                 Err(error) => log::error!("Native SQL Server source stopped: {error:#}"),
@@ -356,27 +348,18 @@ impl MsSqlSource {
         if self.worker.get_mut().is_none() {
             return Ok(());
         }
-        self.pause.send_replace(true);
-        let mut acknowledged = self.paused.subscribe();
-        let wait = async {
-            acknowledged
-                .wait_for(|paused| *paused)
-                .await
-                .map(|_| ())
-                .map_err(|_| anyhow::anyhow!("SQL Server worker closed during pause"))
-        };
-        let result = bounded(ctx.cancellation(), ctx.deadline(), wait).await;
-        if let Err(error) = result {
-            // A cancelled or expired pause leaves the source running.
-            self.pause.send_replace(false);
-            return Err(match error.downcast_ref::<Cancelled>() {
-                Some(_) => LifecycleError::cancelled(),
-                None => LifecycleError::retryable(error.context(
-                    "SQL Server could not finish its in-flight page before the pause deadline",
-                )),
-            });
-        }
-        Ok(())
+        self.pause
+            .pause(ctx.deadline(), ctx.cancellation())
+            .await
+            .map_err(|error| {
+                if error.is_retryable() {
+                    LifecycleError::retryable(anyhow::anyhow!(
+                        "SQL Server could not finish its in-flight page before the pause deadline"
+                    ))
+                } else {
+                    error
+                }
+            })
     }
 
     async fn stop_activation(&mut self, ctx: &StopContext) -> LifecycleResult {
@@ -557,7 +540,7 @@ impl NativeComponent for MsSqlSource {
         self.pause_activation(ctx).await
     }
     async fn resume(&mut self, _ctx: &ResumeContext) -> LifecycleResult {
-        self.pause.send_replace(false);
+        self.pause.resume();
         Ok(())
     }
     /// `Drain` finishes the in-flight query and closes the session; `Abort`
@@ -614,7 +597,7 @@ impl NativeManagement for MsSqlSource {
             .map_err(refused)?;
         match ctx.boundary() {
             UpdateBoundary::Pause => {
-                if self.worker.get_mut().is_some() && !*self.paused.borrow() {
+                if self.worker.get_mut().is_some() && !self.pause.is_paused() {
                     return Err(refused("in-place updates require a completed pause"));
                 }
                 if !management::same_plan(&assessment, UpdateBoundary::Pause) {

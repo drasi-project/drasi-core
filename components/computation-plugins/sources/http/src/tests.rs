@@ -129,6 +129,11 @@ async fn erase_is_idempotent() -> Result<()> {
     conformance().erase(base(free_port())).await
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn every_dispose_reason_ends_an_initialized_source() -> Result<()> {
+    conformance().dispose_matrix(base(free_port())).await
+}
+
 fn webhook_config(port: u16, auth: Value) -> Value {
     let mut route = json!({
         "path":"/hook","methods":["POST"],

@@ -687,6 +687,96 @@ both_flavors!(
     independent_graceful_drain
 );
 
+async fn paused_sink_settles_in_flight_handling_and_receives_nothing_until_resumed() {
+    let source_id = drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+        .expect("fixture UUID");
+    let sink_id = drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
+        .expect("fixture UUID");
+    let (input, events) = mpsc::channel(4);
+    let (output_tx, mut output_rx) = mpsc::channel(4);
+    let gate = Arc::new(Gate::default());
+    let mut graph = ComputationGraph::builder("paused-sink")
+        .fixture_source(Box::new(Source {
+            descriptor: descriptor(&source_id, &[], &["out"]),
+            input: events,
+            control: Arc::default(),
+            starts: Arc::default(),
+        }))
+        .fixture_sink(Box::new(Sink {
+            descriptor: descriptor(&sink_id, &["in"], &[]),
+            output: output_tx,
+            gate: Some(gate.clone()),
+            panic_control: false,
+        }))
+        .bind_stream(endpoint(&source_id, "out"), stream("source"))
+        .connect(
+            edge(&source_id, &sink_id),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .build()
+        .unwrap();
+    let run = graph.run().unwrap();
+    let control = run.control();
+    let send = |value: u16| {
+        Event::Output(output(root(
+            &drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000004d")
+                .expect("fixture UUID"),
+            "source",
+            u64::from(value),
+            &[value],
+        )))
+    };
+    let (result, ()) = tokio::join!(run, async {
+        control.deployment_report().await.unwrap();
+        let revision = control.desired_snapshot().revision;
+        control
+            .start_components(revision, GraphSelection::All)
+            .await
+            .unwrap();
+        input.send(send(1)).await.unwrap();
+        gate.entered.notified().await;
+
+        let pause =
+            control.quiesce_components(revision, GraphSelection::Exact(vec![sink_id.clone()]));
+        tokio::pin!(pause);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut pause)
+                .await
+                .is_err(),
+            "pause returned while a handle call was still in flight"
+        );
+        gate.release.notify_one();
+        pause.await.unwrap();
+        assert_eq!(values(&output_rx.recv().await.unwrap()), [1]);
+        assert_eq!(gate.completed.load(Ordering::SeqCst), 1);
+        assert_eq!(gate.dropped.load(Ordering::SeqCst), 0);
+
+        input.send(send(2)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            gate.active.load(Ordering::SeqCst),
+            0,
+            "a paused sink received a handle call"
+        );
+        assert!(output_rx.try_recv().is_err());
+
+        control
+            .start_components(revision, GraphSelection::Exact(vec![sink_id.clone()]))
+            .await
+            .unwrap();
+        gate.entered.notified().await;
+        gate.release.notify_one();
+        assert_eq!(values(&output_rx.recv().await.unwrap()), [2]);
+        control.cancel();
+    });
+    assert!(matches!(result, Err(GraphError::Cancelled)), "{result:?}");
+}
+
+both_flavors!(
+    paused_sink_receives_nothing_until_resumed,
+    paused_sink_settles_in_flight_handling_and_receives_nothing_until_resumed
+);
+
 async fn scoped_force_escalates_without_reusing_an_uncertain_generation() {
     scoped_force_with_companion(false).await;
 }

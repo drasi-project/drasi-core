@@ -8,13 +8,14 @@
 //! the operation identity, deadline and cancellation token. The exporter
 //! rejects invalid sequences before plugin code runs.
 
-use std::{future::Future, sync::Arc};
+use std::future::Future;
 
 pub use drasi_computation_contracts::lifecycle::{
     nothing_to_do, unsupported, ApplyError, Assessment, CancellationToken, DisposeReason,
     LifecycleError, LifecycleErrorKind, LifecycleResult, OperationScope, StateIntent, StopMode,
     UpdateBoundary,
 };
+pub use drasi_computation_contracts::pause::{PauseControl, PauseGate, PauseState};
 use tokio::{sync::watch, task::JoinSet};
 
 use crate::ActivationCredentials;
@@ -275,12 +276,16 @@ impl ApplyContext {
 
 /// Owns one activation's workers.
 ///
-/// Pause gates workers through [`PauseGate`]. `stop(Drain)` signals the drain
-/// token and joins; `stop(Abort)` also aborts the tasks before joining.
+/// Each worker that reads, writes or emits on its own takes a [`PauseGate`]
+/// and calls [`PauseGate::wait_running`] at boundaries where it holds no open
+/// work. [`ActivationScope::pause`] returns once every gate has acknowledged,
+/// so nothing is emitted while paused. [`ActivationScope::stop`] cancels the
+/// token, closes the gates and joins the workers within the hook's deadline.
 pub struct ActivationScope {
     token: CancellationToken,
-    paused: Arc<watch::Sender<bool>>,
+    pause: PauseControl,
     workers: JoinSet<anyhow::Result<()>>,
+    first_error: Option<anyhow::Error>,
 }
 
 impl Default for ActivationScope {
@@ -289,12 +294,22 @@ impl Default for ActivationScope {
     }
 }
 
+impl std::fmt::Debug for ActivationScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActivationScope")
+            .field("pause", &self.pause.state())
+            .field("workers", &self.workers.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl ActivationScope {
     pub fn new() -> Self {
         Self {
             token: CancellationToken::new(),
-            paused: Arc::new(watch::channel(false).0),
+            pause: PauseControl::new(),
             workers: JoinSet::new(),
+            first_error: None,
         }
     }
 
@@ -303,9 +318,16 @@ impl ActivationScope {
         self.token.clone()
     }
 
-    /// Lets a worker wait while the activation is paused.
+    /// A gate for one worker. Every worker that produces output on its own
+    /// must take one; a Pause waits for all of them.
     pub fn gate(&self) -> PauseGate {
-        PauseGate(self.paused.subscribe())
+        self.pause.gate()
+    }
+
+    /// Observes Pause requests without acknowledging them, for admission
+    /// paths that refuse new work while paused.
+    pub fn pause_requests(&self) -> watch::Receiver<bool> {
+        self.pause.requests()
     }
 
     pub fn spawn<F>(&mut self, worker: F)
@@ -315,48 +337,76 @@ impl ActivationScope {
         self.workers.spawn(worker);
     }
 
-    pub fn pause(&self) {
-        self.paused.send_replace(true);
+    /// Requests Pause and waits until every gate acknowledges. On expiry
+    /// (`Retryable`) or cancellation the request is withdrawn and the
+    /// workers keep running.
+    pub async fn pause(&self, context: &PauseContext) -> LifecycleResult {
+        self.pause
+            .pause(context.deadline(), context.cancellation())
+            .await
     }
 
     pub fn resume(&self) {
-        self.paused.send_replace(false);
+        self.pause.resume();
     }
 
+    /// Whether every gate has acknowledged the current Pause.
     pub fn is_paused(&self) -> bool {
-        *self.paused.borrow()
+        self.pause.is_paused()
     }
 
-    /// Signals the token, then joins every worker. `Abort` also aborts them.
-    /// Returns the first worker error; a worker aborted by `Abort` is not an error.
-    pub async fn stop(&mut self, mode: StopMode) -> anyhow::Result<()> {
+    /// The number of workers not yet joined.
+    pub fn workers(&self) -> usize {
+        self.workers.len()
+    }
+
+    /// Cancels the token, closes the gates and joins every worker; `Abort`
+    /// also aborts them. If the deadline passes or the host cancels first,
+    /// the remaining workers are kept and the error is retryable, so a
+    /// retried Stop joins them. A worker that failed or panicked makes Stop
+    /// fail terminally once all have been joined; an aborted worker is not
+    /// an error.
+    pub async fn stop(&mut self, context: &StopContext) -> LifecycleResult {
         self.token.cancel();
-        self.paused.send_replace(false);
-        if mode == StopMode::Abort {
+        self.pause.close();
+        if context.mode() == StopMode::Abort {
             self.workers.abort_all();
         }
-        let mut first = None;
-        while let Some(result) = self.workers.join_next().await {
+        let deadline = context.deadline();
+        loop {
+            let joined = tokio::select! {
+                biased;
+                _ = context.cancellation().cancelled() => {
+                    return Err(LifecycleError::cancelled());
+                }
+                joined = self.workers.join_next() => joined,
+                _ = sleep_until(deadline) => {
+                    return Err(LifecycleError::retryable(anyhow::anyhow!(
+                        "{} activation worker(s) still running at the stop deadline",
+                        self.workers.len()
+                    )));
+                }
+            };
+            let Some(result) = joined else { break };
             let error = match result {
                 Ok(Ok(())) => continue,
                 Ok(Err(error)) => error,
                 Err(join) if join.is_cancelled() => continue,
                 Err(join) => anyhow::anyhow!("activation worker panicked: {join}"),
             };
-            first.get_or_insert(error);
+            self.first_error.get_or_insert(error);
         }
-        first.map_or(Ok(()), Err)
+        match self.first_error.take() {
+            Some(error) => Err(LifecycleError::terminal(error)),
+            None => Ok(()),
+        }
     }
 }
 
-/// Observes an [`ActivationScope`]'s pause state.
-#[derive(Clone)]
-pub struct PauseGate(watch::Receiver<bool>);
-
-impl PauseGate {
-    /// Returns immediately while running; otherwise waits for Resume or Stop.
-    pub async fn wait_running(&mut self) {
-        let _ = self.0.wait_for(|paused| !*paused).await;
+async fn sleep_until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -498,28 +548,89 @@ mod tests {
         Box::new(component)
     }
 
+    fn scope(deadline: Option<Duration>) -> OperationScope {
+        OperationScope::new(
+            "op",
+            "c",
+            1,
+            deadline.map(|d| tokio::time::Instant::now() + d),
+            CancellationToken::new(),
+        )
+    }
+
     #[tokio::test]
-    async fn activation_scope_gates_drains_and_aborts() -> anyhow::Result<()> {
-        let mut scope = ActivationScope::new();
-        let token = scope.token();
-        let mut gate = scope.gate();
+    async fn activation_scope_pauses_at_worker_boundaries_and_drains() -> anyhow::Result<()> {
+        let mut activation = ActivationScope::new();
+        let token = activation.token();
+        let mut gate = activation.gate();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        scope.pause();
-        scope.spawn(async move {
-            gate.wait_running().await;
-            let _ = tx.send(());
-            token.cancelled().await;
+        let (step_tx, mut step) = tokio::sync::mpsc::unbounded_channel::<()>();
+        activation.spawn(async move {
+            while gate.wait_running().await {
+                tokio::select! {
+                    _ = token.cancelled() => break,
+                    _ = gate.pause_requested() => continue,
+                    Some(()) = step.recv() => { let _ = tx.send(()); }
+                }
+            }
             Ok(())
         });
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert!(rx.try_recv().is_err());
-        scope.resume();
+        step_tx.send(())?;
         rx.recv().await;
-        scope.stop(StopMode::Drain).await?;
+        activation.pause(&PauseContext::new(scope(None))).await?;
+        assert!(activation.is_paused());
+        step_tx.send(())?;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(rx.try_recv().is_err(), "emitted while paused");
+        activation.resume();
+        rx.recv().await;
+        activation
+            .stop(&StopContext::new(scope(None), StopMode::Drain))
+            .await?;
 
         let mut aborted = ActivationScope::new();
         aborted.spawn(std::future::pending());
-        aborted.stop(StopMode::Abort).await?;
+        aborted
+            .stop(&StopContext::new(scope(None), StopMode::Abort))
+            .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pause_times_out_when_a_worker_never_reaches_a_boundary() {
+        let activation = ActivationScope::new();
+        let _gate = activation.gate();
+        let error = activation
+            .pause(&PauseContext::new(scope(Some(Duration::from_millis(10)))))
+            .await
+            .unwrap_err();
+        assert!(error.is_retryable());
+        assert!(!activation.is_paused());
+    }
+
+    #[tokio::test]
+    async fn stop_times_out_then_a_retry_joins_the_leftover_workers() -> anyhow::Result<()> {
+        let mut activation = ActivationScope::new();
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        activation.spawn(async move {
+            let _ = released.await;
+            anyhow::bail!("worker failed while draining")
+        });
+        let timeout = StopContext::new(scope(Some(Duration::from_millis(10))), StopMode::Drain);
+        let error = activation.stop(&timeout).await.unwrap_err();
+        assert!(error.is_retryable());
+        assert_eq!(activation.workers(), 1);
+
+        let _ = release.send(());
+        let error = activation
+            .stop(&StopContext::new(scope(None), StopMode::Drain))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), LifecycleErrorKind::Terminal);
+        assert_eq!(activation.workers(), 0);
+        activation
+            .stop(&StopContext::new(scope(None), StopMode::Drain))
+            .await?;
         Ok(())
     }
 

@@ -11,7 +11,7 @@ default = []
 registry = ["oci-client", "tokio/fs", "x509-parser", "p256", "p384", "pem", "base64"]
 fetcher = ["reqwest", "url", "tokio/fs"]
 watcher = ["notify", "notify-debouncer-mini"]
-test-support = ["drasi-lib/test-support"]
+test-support = ["drasi-lib/test-support", "drasi-computation-plugin-sdk/test-support"]
 
 [dependencies]
 im = { workspace = true }

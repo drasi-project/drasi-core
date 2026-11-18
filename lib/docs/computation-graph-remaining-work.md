@@ -1461,46 +1461,38 @@ plugin's own entry; these entries hold only the shared part.
 
 ### Make pause and stop behave the same in every plugin (CW-96, Source X-01, Sink X-01)
 
-**Kind:** Issue. **Priority:** High (P0). **Effort:** Medium.
+**Kind:** Issue. **Priority:** Medium. **Effort:** Small.
 
-The lifecycle rules are written down in the native source and sink guides, but
-the SDK helpers that would enforce them are unused and incomplete. Each plugin
-builds its own pause gate and worker shutdown, and several plugins keep working
-while paused.
+The shared lifecycle helpers are in place. `PauseControl` and `PauseGate`
+(`drasi-computation-contracts::pause`, re-exported by the SDK) give an
+acknowledged pause: Pause returns once every worker has reached a quiet point,
+and an expired or cancelled Pause withdraws the request. `ActivationScope`
+owns an activation's workers; its `stop` honours the deadline and keeps
+unjoined workers so a retried Stop joins them. The PostgreSQL, MSSQL, MySQL
+and SQLite sources and the profiler sink use them, the bridge source refuses
+new data with `Busy` while paused ([BR-01](#br-01)), and a Host test proves a
+paused host-driven sink receives no `handle` and its in-flight input settles
+before Pause returns. Native lifecycle calls refuse an already cancelled scope
+before reaching the plugin.
 
 **What remains:**
 
-- `ActivationScope::stop` joins workers with no deadline and does not keep
-  workers it failed to join, so a `stop` that times out cannot be retried
-  safely. Make it deadline-aware and keep unjoined workers for the next attempt
-  (the contracts crate already has `join_owned_worker_gracefully`).
-- Move plugins onto the SDK's `ActivationScope` and `PauseGate`. No plugin uses
-  them today: PostgreSQL has its own `PauseGate`, and the SSE and log sinks
-  have local gates (the sink side is NI-03 in [CW-101](#cw-101)).
-- Add a Host test proving the Host calls no `handle` on a host-driven sink while
-  it is paused and that work already in flight settles before Pause returns.
-  The sink guide relies on this for the HTTP, gRPC and log sinks.
-- Add pause-gate checks to the conformance kit (see
-  [the conformance kit entry](#source-x-02)).
+- Move the SSE sink's local pause flag onto the shared gate (NI-03 in
+  [CW-101](#cw-101)). Host-driven sinks (HTTP, gRPC, log) and sources whose
+  only work is network admission need no worker gate.
+- The conformance kit checks that a paused source refuses new input; it does
+  not yet observe that a paused worker-driven source emits nothing.
 
-The plugins that still work while paused (bridge source, profiler) are
-tracked under their own entries.
+**Example:** the SSE sink pauses through its own flag; a fix to the shared gate
+does not reach it.
 
-**Example:** a source worker blocked on a slow database read misses the stop
-deadline. `ActivationScope::stop` keeps waiting instead of returning a timeout
-with the worker still owned, so a retried `stop` has nothing to join.
+**Evidence:** `drasi-core/components/computation-contracts/src/pause.rs`;
+`drasi-core/components/computation-plugin-sdk/src/lifecycle.rs` (`ActivationScope`);
+`drasi-core/lib/tests/computation_task_execution.rs` (paused sink test);
+`drasi-core/components/computation-plugins/sinks/sse/src/component.rs`.
 
-**Evidence:** `drasi-core/components/computation-plugin-sdk/src/lifecycle.rs:217-295`
-(`ActivationScope`, `stop` at 273-292, `PauseGate` at 295);
-`drasi-core/components/computation-contracts/src/workers.rs:118`;
-`drasi-core/components/computation-plugins/sources/postgres/src/worker.rs:73`;
-`drasi-core/components/computation-plugins/sinks/NATIVE-SINK-GUIDE.md:17`;
-`drasi-core/components/computation-plugins/sources/NATIVE-SOURCE-GUIDE.md`.
-
-**Done when:** `ActivationScope::stop` honours its deadline and a retried stop
-joins the leftover workers; all plugins use the SDK gate or document why not;
-the Host test for host-driven sinks passes; and the conformance kit fails a
-plugin that emits or writes while paused.
+**Done when:** the SSE sink uses the shared gate and the kit fails a
+worker-driven source that emits while paused.
 
 <a id="cw-98"></a>
 <a id="source-d-1"></a>
@@ -1548,35 +1540,38 @@ conformance kit checks erase twice for every plugin that runs it.
 
 ### Run the conformance kit through loaded libraries and publish it (Source X-02, Sink X-02)
 
-**Kind:** Qualification. **Priority:** High (P0). **Effort:** Large.
+**Kind:** Qualification. **Priority:** High (P0). **Effort:** Medium.
 
-`SourceConformance` and `SinkConformance` take a linked `&dyn Factory`, so they
-never exercise a plugin through the C ABI. Only the HTTP and gRPC sources and
-the HTTP, gRPC, SSE and log sinks use them, and vendors cannot use them as an
-external qualification kit.
+The kit's suites are generic over a `ConformanceTarget`. `LinkedTarget` wraps a
+linked factory; the Host SDK's `LoadedTarget` (feature `test-support`) loads a
+built `cdylib` and drives it through the C ABI. `tests/native_conformance.rs`
+runs the HTTP source and capture sink through it on both Tokio flavours. The
+kit also covers the full `DisposeReason` matrix and dispose after a failed
+initialization. Loaded runs accept the ABI's acknowledgment of a repeated,
+already completed transition, and verify the component still works.
 
 **What remains:**
 
-- A dynamic-library driver in the Host SDK that runs the same checks against a
-  built `cdylib`, on both Tokio flavours.
-- Missing scenarios: stop timeout followed by a successful retry; the full
-  `DisposeReason` matrix (the kit uses only `Shutdown` and `Removal`); dispose
-  after a failed initialization; refusal of a stale or forged update plan;
-  pause checks ([CW-96](#cw-96)); erase twice ([CW-98](#cw-98)); a crashed
-  consumer for durable sinks.
+- Missing scenarios: stop timeout followed by a successful retry; refusal of a
+  stale or forged update plan (the recheck exists only in the ABI export, and
+  loaded `apply` is not driven by the kit); a paused worker-driven source
+  emitting nothing ([CW-96](#cw-96)); erase twice for plugins that own nothing
+  ([CW-98](#cw-98)); a crashed consumer for durable sinks.
 - Every native plugin runs the kit, linked and loaded.
-- Publish the kit and driver as a supported vendor surface with
-  documentation. The Host pipeline suite hard-codes Core package names in
-  `plugin_package`, so it cannot run a vendor plugin.
+- Publish the kit and driver as a supported vendor surface. The Host pipeline
+  suite hard-codes Core package names in `plugin_package`, so it cannot run a
+  vendor plugin.
 
 The loaded-library run overlaps [CW-41](#cw-41) item 2; that entry owns the
 wider ABI contract matrix.
 
-**Example:** a vendor builds `libacme_db.dylib`. They cannot point the kit at
-it; they would have to copy Host test code that only knows Core plugins.
+**Example:** the PostgreSQL source passes the kit linked but has never run it
+through its built library.
 
-**Evidence:** `drasi-core/components/computation-plugin-sdk/src/testing.rs:19-20,162,244,298,464`;
-`drasi-core/components/computation-plugin-sdk/Cargo.toml:13` (`test-support`);
+**Evidence:** `drasi-core/components/computation-plugin-sdk/src/testing.rs`
+(`ConformanceTarget`, `LinkedTarget`);
+`drasi-core/components/host-sdk/src/computation/conformance.rs`;
+`drasi-core/components/host-sdk/tests/native_conformance.rs`;
 `drasi-core/components/host-sdk/tests/native_computation_pipeline.rs:67-76`.
 
 **Done when:** every native plugin passes the kit both linked and loaded on both
@@ -2620,19 +2615,19 @@ The bridge source and `common/bridge` depend on `drasi-lib`, which breaks the na
 
 #### Gate or refuse Pause in the bridge source (BR-01)
 
-**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+**Kind:** Issue. **Priority:** Medium. **Effort:** Small.
 
-Pause uses the passive lifecycle macro and reports success while the receiver workers keep accepting frames and admitting them into the queue or journal. An update applied at the Pause boundary then assumes a quiet source that is still admitting input. This is the bridge part of [CW-96](#cw-96).
+Pause now refuses new data with a retryable `Busy` and returns once no
+admission is in flight; receipts and control requests stay live, and Resume
+reopens admission.
 
 **What remains:**
 
-- Either gate admission in `Receiver::admit` (return a retryable `Busy`/`Paused`, stop dequeuing, keep receipt and control lanes live) and reopen it on Resume, or return `lifecycle::unsupported(...)`.
 - Define how long a sender may retry against a paused receiver; the sink's fixed retry count and delay fail the sender during a long pause (shared with BS-01).
-- Bound and document what is admitted while paused.
 
-**Example:** pausing a durable bridge source for a managed update returns `Ok`, but the remote sender keeps committing frames into the journal during the update.
+**Example:** a managed update pauses a bridge source for longer than the sender's retry budget, and the sender fails.
 
-**Evidence:** `drasi-core/components/computation-plugins/sources/bridge/src/component.rs:261-263`; `drasi-core/components/computation-plugins/common/bridge/src/receiver.rs:533-556`.
+**Evidence:** `drasi-core/components/computation-plugins/common/bridge/src/receiver.rs` (`Receiver::pause`, `admit`); `drasi-core/components/computation-plugins/common/bridge/tests/bridge/integration.rs` (`paused_receiver_refuses_new_data_as_busy_and_keeps_control_live`).
 
 **Done when:** a test shows no admission after Pause and resumed flow after Resume (or an `unsupported` refusal), and a sender rides out a pause within its documented budget.
 
@@ -3398,23 +3393,21 @@ and documentation all need work.
 
 #### Stop reports while paused (PF-01, CW-96)
 
-**Kind:** Issue. **Priority:** Medium. **Effort:** Small.
+**Kind:** Issue. **Priority:** Low. **Effort:** Small.
 
-Pause returns success while the report task keeps logging, which breaks the
-rule that a paused component does no work ([CW-96](#cw-96)).
+The report worker runs on `ActivationScope` behind a `PauseGate`, so Pause
+returns once reporting has stopped, and Stop honours the deadline.
 
-**What remains:** run the reporter on `ActivationScope` with a `PauseGate` (or
-return `lifecycle::unsupported`), honour `StopMode` and the deadline, and emit
-a final report on Drain.
+**What remains:** emit a final report on Drain, and add a test showing no
+report while paused, reports after Resume and the final report on Drain.
 
-**Example:** with `reportIntervalSecs: 10`, pause the sink for a minute: six
-reports are still logged.
+**Example:** stopping with `Drain` discards the counts gathered since the last
+report.
 
-**Evidence:** `drasi-core/components/computation-plugins/sinks/profiler/src/component.rs:195-200,210-238`,
-`drasi-core/components/computation-plugin-sdk/src/lifecycle.rs:221-300`.
+**Evidence:** `drasi-core/components/computation-plugins/sinks/profiler/src/component.rs`
+(`start_activation`, `stop`).
 
-**Done when:** a test shows no report while paused, reports after Resume and a
-final report on Drain.
+**Done when:** the test passes.
 
 <a id="pf-02"></a>
 

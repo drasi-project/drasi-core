@@ -277,7 +277,10 @@ async fn pause_waits_for_the_in_flight_page_then_reads_nothing_until_resume() {
         .await
         .unwrap_err();
     assert_eq!(error.kind(), LifecycleErrorKind::Retryable, "{error:#}");
-    assert!(!*f.source.pause.borrow(), "an expired pause is withdrawn");
+    assert!(
+        !f.source.pause.is_pause_requested(),
+        "an expired pause is withdrawn"
+    );
     f.db.release();
     step(f.source.pause(&pause_ctx(STEP))).await.unwrap();
     let queries = f.db.with(|s| s.key_queries);

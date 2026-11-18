@@ -17,6 +17,23 @@ implementations. For the SDK contracts themselves, see the
 | `stop` | `Drain`: finish the in-flight unit (request, frame, transaction) within `ctx.deadline()`, then close gracefully. `Abort`: cancel promptly. On expiry, return a retryable error and keep ownership of unfinished work, so a later Stop completes it. Report an earlier processing failure once, through `next()` or status, not as a Stop failure. |
 | `dispose` | Implement both intents. Under `Erase`, remove exactly the state the component owns (replication slots, journal tables, producer registrations), never borrowed or shared state. Make it idempotent: "already gone" is success, and a retry repeats safely. Declare `erases_owned_state` whenever removal with erase should succeed. A component that owns nothing declares it with a documented no-op. |
 
+Own independent workers with the SDK's `ActivationScope` (re-exported from
+`drasi_computation_plugin_sdk::lifecycle`), created in `start`:
+
+- Every worker that reads, admits or emits on its own takes a `PauseGate` from
+  `scope.gate()` and calls `gate.wait_running().await` at points where it holds
+  no open unit of work. `scope.pause(ctx)` returns only once every gate has
+  acknowledged; on expiry or cancellation the request is withdrawn and the
+  workers keep running.
+- An admission path that is not a worker (a request handler) observes
+  `scope.pause_requests()` and refuses new work while paused.
+- `scope.stop(ctx)` cancels the token, closes the gates and joins the workers
+  within the deadline. Unjoined workers stay owned, and the retryable error lets
+  a later Stop finish the job.
+
+A source whose only work is network admission refuses new input while paused
+(for example, HTTP `503`, bridge `Busy`); it needs no worker gate.
+
 ## Management
 
 - Implement `Factory::supports_update_planning` and `Factory::assess`. The
@@ -86,14 +103,31 @@ let suite = SourceConformance::new(&MyFactory, "<component uuid>")?;
 suite.lifecycle(config.clone(), &Probe).await?;      // start, restart, pause gating, Drain/Abort, dispose
 suite.cancelled_start(config.clone(), &Probe).await?; // a pre-cancelled start leaves nothing running
 suite.erase(config.clone()).await?;                   // erase twice succeeds
+suite.dispose_matrix(config.clone()).await?;          // every DisposeReason, with Erase when declared
+suite.dispose_after_failed_initialize(bad).await?;    // dispose ends a failed initialization
 suite.configuration_round_trip(&[config.clone()])?;   // configuration() == constructed; defaults agree
 suite.assess_matrix(&config, &cases)?;                // every field's boundary
 suite.apply(current, proposed, &Probe).await?;        // in-place and restart updates on a live source
 ```
 
-Run the suite on both Tokio flavours. Also cover the plugin's real external
-system (containers, or the loaded dynamic library through the Host SDK), its
-security boundaries, and a crash or restart matrix wherever recovery is claimed.
+Run the suite on both Tokio flavours. Run the same scenarios against the built
+dynamic library through the Host SDK (feature `test-support`):
+
+```rust
+use drasi_host_sdk::computation::conformance::LoadedTarget;
+
+let target = LoadedTarget::load("target/debug/plugins/libmy_source.dylib", "acme.example/my-source")?;
+let suite = SourceConformance::with_target(target, "<component uuid>")?;
+suite.lifecycle(config.clone(), &Probe).await?;
+```
+
+Loaded runs differ from linked runs in one respect: the native ABI
+acknowledges a repeated, already completed transition (a second Start) instead
+of refusing it, so a Host retry after a lost reply is safe. The kit checks that
+the component still works afterwards. `apply` needs a linked factory.
+
+Also cover the plugin's real external system (containers), its security
+boundaries, and a crash or restart matrix wherever recovery is claimed.
 
 ## Documentation
 

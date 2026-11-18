@@ -16,6 +16,8 @@ mod bootstrap;
 mod bootstrap_consumer;
 mod bootstrap_coordination;
 mod bootstrap_node;
+#[cfg(feature = "test-support")]
+pub mod conformance;
 mod consumer;
 mod consumer_progress;
 mod control;

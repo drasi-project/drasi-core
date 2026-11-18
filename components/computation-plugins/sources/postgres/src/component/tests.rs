@@ -30,10 +30,7 @@ use std::{
 };
 
 fn unpaused() -> PauseGate {
-    PauseGate {
-        requested: watch::channel(false).1,
-        acknowledged: watch::channel(false).0,
-    }
+    drasi_computation_contracts::pause::PauseControl::new().gate()
 }
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

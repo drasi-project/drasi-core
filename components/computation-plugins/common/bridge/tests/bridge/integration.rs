@@ -684,6 +684,59 @@ async fn full_volatile_queue_keeps_receipts_and_control_live_and_retries_fifo() 
     Ok(())
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn paused_receiver_refuses_new_data_as_busy_and_keeps_control_live() -> Result<()> {
+    let directory = Directory::new()?;
+    let source_config = configuration(
+        &directory,
+        true,
+        Profile::Volatile,
+        PortableDelivery::Events,
+    );
+    let sink_config = configuration(
+        &directory,
+        false,
+        Profile::Volatile,
+        PortableDelivery::Events,
+    );
+    let mut source = BridgeSource::new(source_config, GRAPH.into(), None, None)?;
+    let mut sink = BridgeSink::new(sink_config, GRAPH.into(), None, None)?;
+    let control = sink.control();
+    source.start(&lifecycle_ctx::start()).await?;
+    sink.start(&lifecycle_ctx::start()).await?;
+    let first = graph_input(5, 5)?;
+    sink.handle(input(first.clone())).await?;
+    let first_receipt = sink.last_receipt().unwrap().clone();
+
+    source.pause(&lifecycle_ctx::pause()).await?;
+    assert_eq!(
+        control.receipt(&first_receipt.admission.session, 1).await?,
+        Some(first_receipt),
+        "receipts stay resolvable while paused"
+    );
+    assert_eq!(control.status().await?.accepted, 1);
+    let second = graph_input(7, 7)?;
+    let error = sink.handle(input(second.clone())).await.unwrap_err();
+    assert_eq!(error.bridge_cause().unwrap().code, ErrorCode::Busy);
+
+    source.resume(&lifecycle_ctx::resume()).await?;
+    assert_eq!(
+        source.next().await?.unwrap().envelope.system().sequence(),
+        1
+    );
+    sink.handle(input(second.clone())).await?;
+    assert_eq!(sink.last_receipt().unwrap().admission.sequence, 2);
+    let resumed = source.next().await?.unwrap().envelope;
+    assert_eq!(resumed.system().sequence(), 2);
+    assert_eq!(
+        resumed.changes().operations(),
+        second.changes().operations()
+    );
+    sink.stop(&lifecycle_ctx::stop()).await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
+    Ok(())
+}
+
 async fn upstream_input(path: &Path, envelope: &ChangeEnvelope) -> Result<ChangeEnvelope> {
     let journal = channel(path, "sender/out", "left", "input", "caller", 4).await?;
     let session = journal

@@ -201,6 +201,13 @@ async fn conformance() -> anyhow::Result<()> {
         suite.lifecycle(config.clone(), &probe).await?;
         suite.cancelled_start(config.clone(), &probe).await?;
         suite.erase(config.clone()).await?;
+        suite.dispose_matrix(config.clone()).await?;
+        suite
+            .dispose_after_failed_initialize(json!({
+                "stream": "sqlite/out",
+                "path": directory.path().join("missing").join("app.db"),
+            }))
+            .await?;
         suite.configuration_round_trip(&[
             config.clone(),
             json!({"stream": "sqlite/out", "path": path}),

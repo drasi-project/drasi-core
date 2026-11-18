@@ -102,6 +102,7 @@ pub struct Receiver {
     generation: watch::Sender<u64>,
     receiver_epoch: uuid::Uuid,
     sealed: AtomicBool,
+    paused: AtomicBool,
     admission_gate: Mutex<()>,
     cut: Mutex<Option<IngressCut>>,
     pub source_dequeued: AtomicU64,
@@ -144,10 +145,27 @@ impl Receiver {
             generation: watch::channel(0).0,
             receiver_epoch: uuid::Uuid::new_v4(),
             sealed: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
             admission_gate: Mutex::new(()),
             cut: Mutex::new(None),
             source_dequeued: AtomicU64::new(0),
         }))
+    }
+
+    /// Refuses new data with a retryable `Busy` and returns once no admission
+    /// is in flight. Receipt and control requests stay live.
+    pub async fn pause(&self) {
+        self.paused.store(true, Ordering::Release);
+        drop(self.admission_gate.lock().await);
+    }
+
+    /// Reopens data admission closed by [`Self::pause`].
+    pub fn resume(&self) {
+        self.paused.store(false, Ordering::Release);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Acquire)
     }
 
     pub(crate) async fn seal(&self) -> Result<IngressCut> {
@@ -537,6 +555,12 @@ impl Receiver {
             return Err(BridgeError::new(
                 ErrorCode::Sealed,
                 "ingress is sealed; resolve existing receipts over control",
+            ));
+        }
+        if self.paused.load(Ordering::Acquire) {
+            return Err(BridgeError::new(
+                ErrorCode::Busy,
+                "ingress is paused; retry after the receiving graph resumes",
             ));
         }
         self.check_generation(request.generation)?;

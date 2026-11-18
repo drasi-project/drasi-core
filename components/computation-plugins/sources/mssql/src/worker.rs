@@ -30,6 +30,7 @@
 
 use crate::progress::Membership;
 use anyhow::{Context, Result};
+use drasi_computation_contracts::pause::{PauseGate, PauseState};
 use drasi_computation_contracts::{
     exchange::{SourceEvent, SourceEventWrapper},
     reconnect::BackoffPolicy,
@@ -90,12 +91,6 @@ impl Shared {
     }
 }
 
-/// Pause request and acknowledgement shared with the component.
-pub(crate) struct PauseGate {
-    pub requested: watch::Receiver<bool>,
-    pub acknowledged: Arc<watch::Sender<bool>>,
-}
-
 pub(crate) struct Worker {
     pub source: ComponentId,
     pub stream: StreamId,
@@ -126,10 +121,6 @@ impl Worker {
         *self.shutdown.borrow() != Shutdown::Running
     }
 
-    fn pause_requested(&self) -> bool {
-        *self.pause.requested.borrow()
-    }
-
     /// Runs until Stop (`Ok`) or a permanent failure.
     pub async fn run(&mut self, sender: mpsc::Sender<OutputEnvelope>) -> Result<()> {
         let mut waiting_for_members = false;
@@ -137,20 +128,19 @@ impl Worker {
             if self.stopping() {
                 return Ok(());
             }
-            if self.pause_requested() {
-                self.pause.acknowledged.send_replace(true);
+            // The loop top is a page boundary: acknowledge any pause here.
+            if self.pause.sync() == PauseState::Paused {
                 tokio::select! {
-                    changed = self.pause.requested.changed() => if changed.is_err() { return Ok(()) },
+                    _ = self.pause.changed() => {}
                     _ = self.shutdown.changed() => {}
                 }
                 continue;
             }
-            self.pause.acknowledged.send_replace(false);
             if !self.queue.is_empty() {
                 tokio::select! {
                     biased;
                     _ = self.shutdown.changed() => {}
-                    _ = self.pause.requested.changed() => {}
+                    _ = self.pause.pause_requested() => {}
                     permit = sender.reserve() => {
                         let permit = permit.context("SQL Server output closed")?;
                         let output = self.queue.pop_front().context("queued SQL Server change")?;
@@ -222,7 +212,7 @@ impl Worker {
     async fn idle(&mut self, delay: Duration) {
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
-            _ = self.pause.requested.changed() => {}
+            _ = self.pause.pause_requested() => {}
             _ = self.shutdown.changed() => {}
         }
     }
@@ -232,16 +222,11 @@ impl Worker {
     async fn idle_disconnected(&mut self, delay: Duration) {
         let until = tokio::time::Instant::now() + delay;
         loop {
-            let paused = self.pause_requested();
-            self.pause.acknowledged.send_replace(paused);
+            self.pause.sync();
             tokio::select! {
                 _ = tokio::time::sleep_until(until) => return,
                 _ = self.shutdown.changed() => return,
-                changed = self.pause.requested.changed() => {
-                    if changed.is_err() {
-                        return;
-                    }
-                }
+                _ = self.pause.changed() => {}
             }
         }
     }

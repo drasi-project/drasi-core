@@ -30,6 +30,7 @@ use crate::rows::RowEmission;
 use crate::shared::SharedUpdates;
 use crate::whole::WholeEmission;
 use anyhow::{Context, Result};
+use drasi_computation_contracts::pause::{PauseGate, PauseState};
 use drasi_computation_contracts::reconnect::BackoffPolicy;
 use drasi_computation_contracts::{
     OutputEnvelope, SourceProgressUpdates, SourceTransactionError, StreamId,
@@ -93,14 +94,6 @@ impl WorkerProgress {
     }
 }
 
-/// Pause request and acknowledgement shared with the component.
-pub(crate) struct PauseGate {
-    /// `true` while the host has paused the source.
-    pub requested: watch::Receiver<bool>,
-    /// Set `true` once the worker has stopped reading and emitting.
-    pub acknowledged: watch::Sender<bool>,
-}
-
 /// The output a worker produces.
 pub(crate) enum Emission {
     Rows(RowEmission),
@@ -133,7 +126,7 @@ pub(crate) struct Worker {
 
 impl Worker {
     fn paused(&self) -> bool {
-        *self.pause.requested.borrow()
+        self.pause.is_pause_requested()
     }
 
     /// Whether reading may stop here: between transactions, or while a row
@@ -318,16 +311,10 @@ impl Worker {
     async fn idle(&mut self, delay: Duration) {
         let until = Instant::now() + delay;
         loop {
-            let paused = self.paused();
-            self.pause.acknowledged.send_replace(paused);
+            self.pause.sync();
             tokio::select! {
                 _ = tokio::time::sleep_until(until) => return,
-                changed = self.pause.requested.changed() => {
-                    if changed.is_err() {
-                        tokio::time::sleep_until(until).await;
-                        return;
-                    }
-                }
+                _ = self.pause.changed() => {}
             }
         }
     }
@@ -632,29 +619,27 @@ impl Worker {
             {
                 return Err(SourceTransactionError::Deadline.into());
             }
-            let paused = self.paused();
             let boundary = self.at_boundary();
+            // Only a boundary acknowledges a pause; elsewhere the worker
+            // finishes the open transaction first.
+            let paused = if boundary {
+                self.pause.sync() == PauseState::Paused
+            } else {
+                self.paused()
+            };
             // Park at a boundary while paused, or while a group holds for
             // its join point. Feedback continues so the server's
             // wal_sender_timeout does not disconnect us.
             if boundary && (paused || (self.holding && self.queue.is_empty())) {
-                self.pause.acknowledged.send_replace(paused);
                 tokio::select! {
                     _ = tokio::time::sleep_until(self.next_feedback) => self.feedback().await?,
                     changed = self.progress.changed() => {
                         changed?;
                         self.feedback().await?;
                     }
-                    changed = self.pause.requested.changed() => {
-                        if changed.is_err() {
-                            return Ok(());
-                        }
-                    }
+                    _ = self.pause.changed() => {}
                 }
                 continue;
-            }
-            if !paused {
-                self.pause.acknowledged.send_replace(false);
             }
             if !self.queue.is_empty() && !paused {
                 tokio::select! {
@@ -668,7 +653,7 @@ impl Worker {
                         changed?;
                         self.feedback().await?;
                     }
-                    _ = self.pause.requested.changed(), if self.pause.requested.has_changed().is_ok() => {}
+                    _ = self.pause.changed() => {}
                 }
                 continue;
             }
@@ -683,7 +668,7 @@ impl Worker {
                         None => std::future::pending().await,
                     }
                 } => return Err(SourceTransactionError::Deadline.into()),
-                _ = self.pause.requested.changed(), if boundary && self.pause.requested.has_changed().is_ok() => {}
+                _ = self.pause.pause_requested(), if boundary => {}
                 _ = tokio::time::sleep_until(self.next_feedback) => self.feedback().await?,
                 changed = self.progress.changed() => {
                     changed?;

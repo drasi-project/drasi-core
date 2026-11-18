@@ -8,15 +8,14 @@ use drasi_computation_contracts::{
     SinkCompletion,
 };
 use drasi_computation_plugin_sdk::lifecycle::{
-    nothing_to_do, DisposeContext, InitializeContext, LifecycleResult, PauseContext, ResumeContext,
-    StartContext, StopContext,
+    nothing_to_do, ActivationScope, DisposeContext, InitializeContext, LifecycleResult,
+    PauseContext, ResumeContext, StartContext, StopContext,
 };
 use drasi_computation_plugin_sdk::{NativeComponent, NativeSink};
 use drasi_core_types::profiling::{timestamp_ns, ProfilingMetadata};
 use serde::{Deserialize, Serialize};
 use std::{collections::VecDeque, sync::Arc, time::Duration};
-use tokio::{sync::Mutex, task::JoinHandle};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::Mutex;
 
 fn window_size() -> usize {
     1000
@@ -171,8 +170,7 @@ pub(super) struct ProfilerSink {
     descriptor: ComponentDescriptor,
     config: ProfilerSinkConfig,
     samples: Arc<Mutex<Samples>>,
-    cancel: Option<CancellationToken>,
-    task: Option<JoinHandle<()>>,
+    activation: Option<ActivationScope>,
 }
 
 impl ProfilerSink {
@@ -181,8 +179,7 @@ impl ProfilerSink {
             descriptor,
             samples: Arc::new(Mutex::new(Samples::new(config.window_size))),
             config,
-            cancel: None,
-            task: None,
+            activation: None,
         }
     }
 }
@@ -199,17 +196,29 @@ impl NativeComponent for ProfilerSink {
     async fn initialize(&mut self, _ctx: &InitializeContext) -> LifecycleResult {
         nothing_to_do()
     }
-    async fn start(&mut self, _ctx: &mut StartContext) -> LifecycleResult {
-        Ok(self.start_activation().await?)
+    async fn start(&mut self, ctx: &mut StartContext) -> LifecycleResult {
+        Ok(self.start_activation(ctx)?)
     }
-    async fn pause(&mut self, _ctx: &PauseContext) -> LifecycleResult {
-        nothing_to_do()
+    /// The host stops calling `handle` while paused; the report worker also
+    /// stops reporting.
+    async fn pause(&mut self, ctx: &PauseContext) -> LifecycleResult {
+        match &self.activation {
+            Some(activation) => activation.pause(ctx).await,
+            None => nothing_to_do(),
+        }
     }
     async fn resume(&mut self, _ctx: &ResumeContext) -> LifecycleResult {
+        if let Some(activation) = &self.activation {
+            activation.resume();
+        }
         nothing_to_do()
     }
-    async fn stop(&mut self, _ctx: &StopContext) -> LifecycleResult {
-        Ok(self.stop_activation().await?)
+    async fn stop(&mut self, ctx: &StopContext) -> LifecycleResult {
+        if let Some(activation) = &mut self.activation {
+            activation.stop(ctx).await?;
+        }
+        self.activation = None;
+        nothing_to_do()
     }
     async fn dispose(&mut self, _ctx: &DisposeContext) -> LifecycleResult {
         nothing_to_do()
@@ -217,33 +226,26 @@ impl NativeComponent for ProfilerSink {
 }
 
 impl ProfilerSink {
-    async fn start_activation(&mut self) -> Result<()> {
-        ensure!(self.task.is_none(), "profiler sink already started");
-        let cancel = CancellationToken::new();
-        let shutdown = cancel.clone();
+    fn start_activation(&mut self, ctx: &StartContext) -> Result<()> {
+        ensure!(self.activation.is_none(), "profiler sink already started");
+        let mut activation = ctx.activation_scope();
+        let mut gate = activation.gate();
         let samples = self.samples.clone();
         let component = self.descriptor.id().to_string();
         let interval = Duration::from_secs(self.config.report_interval_secs);
-        self.task = Some(tokio::spawn(async move {
+        activation.spawn(async move {
             let mut reports = tokio::time::interval(interval);
+            reports.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             reports.tick().await;
-            loop {
+            while gate.wait_running().await {
                 tokio::select! {
-                    _ = shutdown.cancelled() => break,
+                    _ = gate.pause_requested() => {}
                     _ = reports.tick() => samples.lock().await.report(&component),
                 }
             }
-        }));
-        self.cancel = Some(cancel);
-        Ok(())
-    }
-    async fn stop_activation(&mut self) -> Result<()> {
-        if let Some(cancel) = self.cancel.take() {
-            cancel.cancel();
-        }
-        if let Some(task) = self.task.take() {
-            task.await?;
-        }
+            Ok(())
+        });
+        self.activation = Some(activation);
         Ok(())
     }
 }

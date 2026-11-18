@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use drasi_computation_contracts::workers::spawn_owned_worker;
 use drasi_computation_contracts::{
     lifecycle::{CancellationToken, StopMode},
+    pause::PauseControl,
     workers::{
         cancel_owned_worker, join_owned_worker_gracefully, spawn_owned_blocking_worker,
         WorkerCleanupError, WorkerCompletion,
@@ -119,8 +120,7 @@ pub struct SqliteRuntime {
     draining: watch::Sender<bool>,
     stop: watch::Sender<bool>,
     abort: watch::Sender<bool>,
-    pause: watch::Sender<bool>,
-    paused: Arc<watch::Sender<bool>>,
+    pause: PauseControl,
     worker: RwLock<Option<JoinHandle<Result<WorkerOutcome>>>>,
     rest_address: Option<SocketAddr>,
     rest_worker: RwLock<Option<JoinHandle<Result<()>>>>,
@@ -153,8 +153,7 @@ impl SqliteRuntime {
             draining: watch::channel(false).0,
             stop: watch::channel(false).0,
             abort: watch::channel(false).0,
-            pause: watch::channel(false).0,
-            paused: Arc::new(watch::channel(false).0),
+            pause: PauseControl::new(),
             worker: RwLock::new(None),
             rest_address: None,
             rest_worker: RwLock::new(None),
@@ -211,7 +210,7 @@ impl SqliteRuntime {
 
     /// Whether the worker has acknowledged a Pause at a transaction boundary.
     pub fn paused(&self) -> bool {
-        *self.paused.borrow()
+        self.pause.is_paused()
     }
 
     /// Signals every activation worker to stop now, without waiting. Used when
@@ -247,8 +246,7 @@ impl SqliteRuntime {
         self.draining.send_replace(false);
         self.stop.send_replace(false);
         self.abort.send_replace(false);
-        self.pause.send_replace(false);
-        self.paused.send_replace(false);
+        self.pause.resume();
         self.rest_shutdown.send_replace(false);
         #[cfg(feature = "rest")]
         let listener = match &context.rest {
@@ -268,8 +266,7 @@ impl SqliteRuntime {
             drain_transactions: self.drain_transactions,
             stop: self.stop.subscribe(),
             abort: self.abort.subscribe(),
-            pause: self.pause.subscribe(),
-            paused: self.paused.clone(),
+            pause: self.pause.gate(),
         };
         let database_ownership = ownership.clone();
         self.receiver = Some(output_rx);
@@ -310,7 +307,7 @@ impl SqliteRuntime {
                 authorize: rest.authorize,
                 max_body_bytes: rest.max_body_bytes,
                 request_timeout: rest.request_timeout,
-                paused: Some(self.pause.subscribe()),
+                paused: Some(self.pause.requests()),
                 stopping: self.rest_shutdown.subscribe(),
                 page_limit: rest.page_limit,
                 sql_api: rest.sql_api,
@@ -360,29 +357,19 @@ impl SqliteRuntime {
             !worker.is_finished(),
             "native SQLite worker has ended; stop and restart the source"
         );
-        self.pause.send_replace(true);
-        let mut acknowledged = self.paused.subscribe();
-        let timeout = remaining(deadline, self.timeout);
-        let result = tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => Err(anyhow::anyhow!("native SQLite pause was cancelled")),
-            waited = tokio::time::timeout(timeout, acknowledged.wait_for(|paused| *paused)) => match waited {
-                Ok(Ok(_)) => Ok(()),
-                Ok(Err(_)) => Err(anyhow::anyhow!("native SQLite worker closed during pause")),
-                Err(_) => Err(anyhow::anyhow!(
-                    "native SQLite could not reach a transaction boundary before the pause deadline"
-                )),
-            },
-        };
-        if result.is_err() {
-            self.pause.send_replace(false);
-        }
-        result
+        let deadline = Instant::now() + remaining(deadline, self.timeout);
+        self.pause
+            .pause(Some(deadline), cancellation)
+            .await
+            .map_err(anyhow::Error::new)
+            .context(
+                "native SQLite could not reach a transaction boundary before the pause deadline",
+            )
     }
 
     /// Reopens what Pause closed: REST writes, handle writes and output.
     pub fn resume(&mut self) {
-        self.pause.send_replace(false);
+        self.pause.resume();
     }
 
     async fn join(&mut self, timeout: Duration) -> Result<()> {
@@ -458,8 +445,7 @@ impl SqliteRuntime {
         }
         self.receiver = None;
         self.cleanup_required = false;
-        self.pause.send_replace(false);
-        self.paused.send_replace(false);
+        self.pause.resume();
         let outcome = std::mem::take(&mut self.outcome);
         if outcome.lost_volatile_transactions > 0 {
             log::warn!(

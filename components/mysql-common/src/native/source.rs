@@ -33,6 +33,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use drasi_computation_contracts::{
     lifecycle::{CancellationToken, StopMode},
+    pause::{PauseControl, PauseGate, PauseState},
     reconnect::BackoffPolicy,
     workers::{
         cancel_owned_worker, join_owned_worker, spawn_owned_worker, WorkerCleanupError,
@@ -190,12 +191,6 @@ enum StartPoint {
     },
 }
 
-/// Pause request and acknowledgement shared with the worker.
-struct PauseGate {
-    requested: watch::Receiver<bool>,
-    acknowledged: Arc<watch::Sender<bool>>,
-}
-
 /// Raised inside the worker when a paused connection was closed
 /// deliberately and must be reopened on resume.
 #[derive(Debug)]
@@ -219,8 +214,7 @@ pub struct MySqlSource {
     position_policy: Option<Arc<InputPositionPolicy>>,
     receiver: Option<mpsc::Receiver<OutputEnvelope>>,
     shutdown: watch::Sender<Shutdown>,
-    pause: watch::Sender<bool>,
-    paused: Arc<watch::Sender<bool>>,
+    pause: PauseControl,
     worker: RwLock<Option<JoinHandle<Result<()>>>>,
     cleanup_required: bool,
     sequence: Arc<AtomicU64>,
@@ -447,8 +441,7 @@ impl MySqlSource {
             position_policy,
             receiver: None,
             shutdown: watch::channel(Shutdown::Running).0,
-            pause: watch::channel(false).0,
-            paused: Arc::new(watch::channel(false).0),
+            pause: PauseControl::new(),
             worker: RwLock::new(None),
             cleanup_required: false,
             sequence: Arc::new(AtomicU64::new(0)),
@@ -597,10 +590,7 @@ impl MySqlSource {
                     emission: None,
                     last_emission: Instant::now(),
                     idle_progress: self.idle_progress,
-                    pause: PauseGate {
-                        requested: self.pause.subscribe(),
-                        acknowledged: self.paused.clone(),
-                    },
+                    pause: self.pause.gate(),
                     reconnect_budget_ms: self.reconnect_budget_ms.clone(),
                     status: self.status.clone(),
                     buffered: VecDeque::new(),
@@ -1303,7 +1293,7 @@ impl MySqlSource {
     }
     /// Whether the worker has acknowledged a pause.
     pub fn is_paused(&self) -> bool {
-        *self.paused.borrow()
+        self.pause.is_paused()
     }
     /// Overrides the least quiet time before a row source commits a
     /// transaction without selected rows as progress (tests).
@@ -1413,10 +1403,8 @@ impl MySqlSource {
         let (sender, receiver) = mpsc::channel(1);
         self.receiver = Some(receiver);
         self.shutdown.send_replace(Shutdown::Running);
-        self.pause.send_replace(false);
-        self.paused.send_replace(false);
+        self.pause.resume();
         let mut shutdown = self.shutdown.subscribe();
-        let paused = self.paused.clone();
         let status = self.status.clone();
         spawn_owned_worker(&self.worker, async move {
             let stopped = tokio::select! {
@@ -1438,8 +1426,9 @@ impl MySqlSource {
                     result
                 }
             };
-            // Nothing is read or emitted after exit; a pending pause holds.
-            paused.send_replace(true);
+            // The worker's pause gate drops with it, so a pending pause
+            // settles: nothing is read or emitted after exit.
+            drop(worker);
             if let Err(error) = &result {
                 log::error!("Native MySQL replication stopped: {error:#}");
                 if let Some(status) = status {
@@ -1464,26 +1453,18 @@ impl MySqlSource {
         if self.worker.get_mut().is_none() {
             return Ok(());
         }
-        self.pause.send_replace(true);
-        let mut acknowledged = self.paused.subscribe();
         let deadline = deadline.unwrap_or_else(|| Instant::now() + self.config.timeout());
-        let result = bounded("pause", cancellation, Some(deadline), async {
-            acknowledged
-                .wait_for(|paused| *paused)
-                .await
-                .map(|_| ())
-                .map_err(|_| anyhow::anyhow!("MySQL worker closed during pause"))
-        })
-        .await;
-        if result.is_err() {
-            self.pause.send_replace(false);
-        }
-        result.context("MySQL could not reach a transaction boundary before the pause deadline")
+        let cancellation = cancellation.cloned().unwrap_or_default();
+        self.pause
+            .pause(Some(deadline), &cancellation)
+            .await
+            .map_err(anyhow::Error::new)
+            .context("MySQL could not reach a transaction boundary before the pause deadline")
     }
 
     /// Reopens exactly what Pause closed.
     pub fn resume(&mut self) {
-        self.pause.send_replace(false);
+        self.pause.resume();
     }
 
     /// Stops with `Drain` and the configured I/O timeout.
@@ -1768,7 +1749,7 @@ async fn read_live(connection: &mut Option<Connection>, window: Duration) -> Res
 
 impl Worker {
     fn paused(&self) -> bool {
-        *self.pause.requested.borrow()
+        self.pause.is_pause_requested()
     }
 
     fn report(&self, status: SourceStatus) {
@@ -1912,19 +1893,13 @@ impl Worker {
     async fn idle(&mut self, delay: Duration) {
         let until = Instant::now() + delay;
         loop {
-            let paused = self.paused();
-            self.pause.acknowledged.send_replace(paused);
+            let paused = self.pause.sync() == PauseState::Paused;
             if !paused && Instant::now() >= until {
                 return;
             }
             tokio::select! {
                 _ = tokio::time::sleep_until(until), if !paused => return,
-                changed = self.pause.requested.changed() => {
-                    if changed.is_err() {
-                        tokio::time::sleep_until(until).await;
-                        return;
-                    }
-                }
+                _ = self.pause.changed() => {}
             }
         }
     }
@@ -2071,12 +2046,10 @@ impl Worker {
             // the socket is drained into a bounded buffer so the server keeps
             // the connection.
             if paused && self.decoder.at_boundary() {
-                self.pause.acknowledged.send_replace(true);
-                self.paused_wait().await?;
+                if self.pause.sync() == PauseState::Paused {
+                    self.paused_wait().await?;
+                }
                 continue;
-            }
-            if !paused {
-                self.pause.acknowledged.send_replace(false);
             }
             if self.holding && !self.has_output() {
                 if self
@@ -2108,7 +2081,7 @@ impl Worker {
                         None => std::future::pending().await,
                     }
                 } => return Err(SourceTransactionError::Deadline.into()),
-                _ = self.pause.requested.changed(), if !paused && between && self.pause.requested.has_changed().is_ok() => {}
+                _ = self.pause.pause_requested(), if !paused && between => {}
                 permit = sender.reserve(), if has_output => {
                     let permit = permit.context("MySQL output receiver closed")?;
                     if let Some(envelope) = self.take_output()? {
@@ -2137,11 +2110,7 @@ impl Worker {
         let open = self.connection.is_some();
         tokio::select! {
             biased;
-            changed = self.pause.requested.changed() => {
-                if changed.is_err() {
-                    std::future::pending::<()>().await;
-                }
-            }
+            _ = self.pause.changed() => {}
             changed = progress_changed(&mut self.progress, &mut self.consumer_progress, &mut self.row_progress) => changed?,
             frame = read_live(&mut self.connection, window), if open => match frame {
                 Ok(frame) => self.hold(frame).await,

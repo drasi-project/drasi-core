@@ -43,6 +43,7 @@ mod internal;
 pub mod lifecycle;
 mod output_follow;
 mod output_read;
+pub mod pause;
 mod port_formats;
 #[doc(hidden)]
 pub mod ports;

@@ -291,6 +291,11 @@ async fn erase_is_idempotent() -> Result<()> {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn every_dispose_reason_ends_an_initialized_sink() -> Result<()> {
+    conformance(inputs()).dispose_matrix(json!({})).await
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn cancelled_start_reports_cancelled_and_stays_startable() -> Result<()> {
     let probe = Probe::new("test.cancelled");
     let mut sink = create_sink(

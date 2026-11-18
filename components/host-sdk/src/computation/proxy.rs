@@ -41,15 +41,21 @@ fn operation_failure(error: Failure) -> anyhow::Error {
     .into()
 }
 
-/// Lifecycle hooks additionally classify a retryable native failure for the
-/// graph's lifecycle retry policy; the native cause stays in the chain.
+/// Lifecycle hooks restore the plugin's lifecycle error kind for the graph's
+/// retry policy and callers; the native cause stays in the chain.
 fn lifecycle_failure(error: Failure) -> anyhow::Error {
-    let retryable = native_failure_disposition(&error) == FailureDisposition::Retryable;
+    let kind = match error.code {
+        abi::status::UNSUPPORTED => Some(LifecycleErrorKind::Unsupported),
+        abi::status::CANCELLED => Some(LifecycleErrorKind::Cancelled),
+        _ if native_failure_disposition(&error) == FailureDisposition::Retryable => {
+            Some(LifecycleErrorKind::Retryable)
+        }
+        _ => None,
+    };
     let error = operation_failure(error);
-    if retryable {
-        LifecycleError::retryable(error).into()
-    } else {
-        error
+    match kind {
+        Some(kind) => LifecycleError::new(kind, error).into(),
+        None => error,
     }
 }
 
@@ -270,11 +276,24 @@ impl RemoteComponent {
     }
     /// A unit lifecycle operation whose retryable failure is classified for
     /// the graph's lifecycle policy.
-    async fn lifecycle(&self, code: u32, request: &LifecycleRequest) -> anyhow::Result<()> {
-        let reply = self
-            .begin(code, &wire::encode(request)?, None)?
-            .await
-            .map_err(lifecycle_failure)?;
+    /// Runs a forward transition (Initialize, Start, Pause, Resume). An
+    /// already cancelled scope never reaches native code; cancellation while
+    /// in flight drops the operation, which cancels it natively.
+    async fn lifecycle(
+        &self,
+        code: u32,
+        request: &LifecycleRequest,
+        cancellation: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        if cancellation.is_cancelled() {
+            return Err(LifecycleError::cancelled().into());
+        }
+        let operation = self.begin(code, &wire::encode(request)?, None)?;
+        let reply = tokio::select! {
+            biased;
+            reply = operation => reply.map_err(lifecycle_failure)?,
+            () = cancellation.cancelled() => return Err(LifecycleError::cancelled().into()),
+        };
         anyhow::ensure!(
             reply.is_empty(),
             "native unit operation returned unexpected data"
@@ -1461,16 +1480,32 @@ impl ComputationComponent for NativeComponentProxy {
     async fn initialize(&mut self, context: &InitializeContext) -> anyhow::Result<()> {
         let request = self.lifecycle_request(context.scope());
         self.inner
-            .lifecycle(abi::operation::INITIALIZE, &request)
+            .lifecycle(
+                abi::operation::INITIALIZE,
+                &request,
+                context.scope().cancellation(),
+            )
             .await
     }
     async fn pause(&mut self, context: &PauseContext) -> anyhow::Result<()> {
         let request = self.lifecycle_request(context.scope());
-        self.inner.lifecycle(abi::operation::PAUSE, &request).await
+        self.inner
+            .lifecycle(
+                abi::operation::PAUSE,
+                &request,
+                context.scope().cancellation(),
+            )
+            .await
     }
     async fn resume(&mut self, context: &ResumeContext) -> anyhow::Result<()> {
         let request = self.lifecycle_request(context.scope());
-        self.inner.lifecycle(abi::operation::RESUME, &request).await
+        self.inner
+            .lifecycle(
+                abi::operation::RESUME,
+                &request,
+                context.scope().cancellation(),
+            )
+            .await
     }
     fn management(&self) -> Option<&dyn ComponentManagement> {
         self.management
@@ -1485,6 +1520,9 @@ impl ComputationComponent for NativeComponentProxy {
         }
     }
     async fn start(&mut self, context: &StartContext) -> anyhow::Result<()> {
+        if context.scope().cancellation().is_cancelled() {
+            return Err(LifecycleError::cancelled().into());
+        }
         anyhow::ensure!(
             self.update
                 .get_mut()
@@ -1586,7 +1624,11 @@ impl ComputationComponent for NativeComponentProxy {
                 processing.open().await?;
             }
             self.inner
-                .lifecycle(abi::operation::START, &request)
+                .lifecycle(
+                    abi::operation::START,
+                    &request,
+                    context.scope().cancellation(),
+                )
                 .await?;
             if let Some(bootstrap) = &mut self.bootstrap {
                 let bindings = self
