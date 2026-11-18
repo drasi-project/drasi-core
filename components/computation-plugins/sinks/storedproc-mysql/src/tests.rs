@@ -57,7 +57,11 @@ fn consumer(
     request: &CreateRequest,
 ) -> Result<Box<dyn drasi_computation_plugin_sdk::NativeConsumer>> {
     match MySqlStoredProcFactory
-        .create(request, ControlSender::default())?
+        .create(
+            request,
+            ControlSender::default(),
+            drasi_computation_plugin_sdk::ServiceBindings::none(),
+        )?
         .component
     {
         Component::Consumer(consumer) => Ok(consumer),
@@ -72,7 +76,10 @@ fn factory_is_an_external_consumer_with_flat_published_configuration() -> Result
     assert!(!drasi_computation_plugin_metadata().is_null());
     let factory = MySqlStoredProcFactory;
     let metadata = factory.metadata();
-    assert_eq!(factory.consumer_mode(), Some(ConsumerMode::External));
+    assert_eq!(
+        factory.metadata().capabilities.services.consumer,
+        Some(ConsumerMode::External)
+    );
     ConsumerMode::External.validate_factory(&metadata)?;
     assert_eq!(metadata.role, ComponentRole::Sink);
     assert_eq!(metadata.completion, Some(SinkCompletion::Handled));
@@ -94,7 +101,7 @@ fn factory_is_an_external_consumer_with_flat_published_configuration() -> Result
         assert!(!fields[field].secret, "{field}");
     }
     assert!(!fields.contains_key("settings"));
-    let details = factory.configuration_details().context("details")?;
+    let details = factory.configuration_details();
     details.validate_schema(&metadata.configuration)?;
     let id = ComponentId::generate();
     assert_eq!(MySqlStoredProcSink::describe(id.clone())?.id(), &id);
@@ -105,7 +112,7 @@ fn factory_is_an_external_consumer_with_flat_published_configuration() -> Result
 fn configuration_round_trips_with_published_defaults() -> Result<()> {
     let factory = MySqlStoredProcFactory;
     let metadata = factory.metadata();
-    let details = factory.configuration_details().context("details")?;
+    let details = factory.configuration_details();
     let mut full = settings();
     full["sslMode"] = json!("require");
     full["onPermanentFailure"] = json!("skip");
@@ -302,28 +309,46 @@ impl Factory for MyFactory {
     fn metadata(&self) -> FactoryMetadata {
         MySqlStoredProcFactory.metadata()
     }
-    fn supports_update_planning(&self) -> bool {
-        true
+    fn configuration_details(&self) -> drasi_computation_plugin_sdk::ConfigDetails {
+        MySqlStoredProcFactory.configuration_details()
     }
+    fn update_planner(&self) -> Option<&dyn drasi_computation_plugin_sdk::UpdatePlanner> {
+        Some(self)
+    }
+    fn activation_credentials(
+        &self,
+    ) -> Option<&dyn drasi_computation_plugin_sdk::ActivationCredentialEndpoint> {
+        Some(&MySqlStoredProcFactory)
+    }
+    fn create(
+        &self,
+        request: &CreateRequest,
+        control: ControlSender,
+        services: drasi_computation_plugin_sdk::ServiceBindings,
+    ) -> Result<CreatedComponent> {
+        MySqlStoredProcFactory.create(request, control, services)
+    }
+}
+
+impl drasi_computation_plugin_sdk::UpdatePlanner for MyFactory {
     fn assess(&self, request: &UpdateRequest) -> Result<Assessment> {
-        MySqlStoredProcFactory.assess(request)
-    }
-    fn create(&self, request: &CreateRequest, control: ControlSender) -> Result<CreatedComponent> {
-        MySqlStoredProcFactory.create(request, control)
+        drasi_computation_plugin_sdk::UpdatePlanner::assess(&MySqlStoredProcFactory, request)
     }
 }
 
 #[tokio::test]
 async fn activation_credentials_are_explicit_transient_and_not_constructor_io() -> Result<()> {
     let factory = MySqlStoredProcFactory;
-    assert!(factory.supports_activation_credentials());
+    let endpoint = factory
+        .activation_credentials()
+        .expect("declared activation credentials");
     let mut configuration = settings();
     configuration.as_object_mut().unwrap().remove("user");
     configuration.as_object_mut().unwrap().remove("password");
     let mut request = request(configuration);
     assert!(consumer(&request).is_err());
     request.activation_credentials_bound = true;
-    let context = factory.activation_credential_context(&request)?;
+    let context = endpoint.activation_credential_context(&request)?;
     assert_eq!(context.hostname, "no-connection-at-construction");
     assert_eq!(context.port, 3306);
     let mut sink = consumer(&request)?;

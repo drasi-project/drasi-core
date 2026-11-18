@@ -1,7 +1,7 @@
 # Native MySQL sources
 
 `drasi-computation-source-mysql` streams MySQL row-based binary logs into a
-ComputationGraph (native ABI 4.0). Seven factories, each at implementation and
+ComputationGraph (native ABI 5.0). Seven factories, each at implementation and
 configuration version `1`:
 
 | Factory | Output |
@@ -13,6 +13,11 @@ configuration version `1`:
 | `drasi.mysql/shared-changes` | Row changes for a fixed set of queries |
 | `drasi.mysql/positional-changes` | Untracked `@N` rows (MySQL 5.7 / limited metadata) |
 | `drasi.mysql/shared-positional-changes` | Positional rows for a fixed set of queries |
+
+Each factory declares its progress contract: the replaying factories (and
+shared rows with `persistent: true`) require durable progress, which the
+graph checks when it binds the progress resource; the untracked factories
+declare volatile progress and resume at `startFrom` after a restart.
 
 ```sh
 cargo build -p drasi-computation-source-mysql --features dynamic-plugin
@@ -41,10 +46,12 @@ same flat settings. MariaDB is not supported.
 
 `make test-native-mysql` builds the three MySQL libraries and runs the Host
 suite (`native_mysql_components`) with Podman, static and dynamic, on both Tokio
-flavours. Engine-level live tests (erase, pause across server timeouts,
-reconnect after a killed session, DDL policy, large transactions, extended
-types) run with:
+flavours. The crate's own live suite (`tests/native_live.rs`, Podman, ignored by
+default) drives the shared engine directly through test-only adapters (erase,
+pause across server timeouts, reconnect after a killed session, DDL policy,
+large transactions, extended types, process exits, coordinated snapshots and
+shared consumer replay) and builds its graph cases from this plugin's factories:
 
 ```sh
-cargo test -p drasi-source-mysql --lib -- --ignored native::tests::production --test-threads=1
+cargo test --locked -p drasi-computation-source-mysql --test native_live -- --ignored --test-threads=1
 ```

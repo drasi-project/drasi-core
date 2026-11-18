@@ -181,11 +181,11 @@ impl MsSqlStoredProcSink {
         let Some(source) = config.template_for(&input.alias, input.operation) else {
             return Ok(None);
         };
-        let Some(template) = templates.get_mut(source) else {
+        let Some(template) = templates.get(source) else {
             // An empty template is not compiled: the operation is ignored.
             return Ok(None);
         };
-        template.render(input.object())
+        template.render(&input.context)
     }
 
     /// Renders one delivery item with this sink's templates.

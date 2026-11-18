@@ -201,7 +201,7 @@ async fn managed_redb_instance_reconstructs_real_plugin_factories_and_preserves_
             source.specification(
                 id("counter"),
                 json!({
-                    "stream":"counter/out","count":3,"start":10,"step":2,"interval_ms":2
+                    "stream":"counter/out","count":3,"start":10,"step":2,"intervalMs":2
                 }),
             )?,
             source,
@@ -562,7 +562,7 @@ async fn managed_graph_constructs_the_existing_query_engine_from_persisted_recip
             name("counter"),
             source.specification(
                 id("counter"),
-                json!({"stream":"counter/out","count":3,"start":2,"step":2,"interval_ms":2}),
+                json!({"stream":"counter/out","count":3,"start":2,"step":2,"intervalMs":2}),
             )?,
             source,
         )
@@ -926,8 +926,7 @@ async fn separately_loaded_pipeline_exact_outputs_configuration_and_topology_rou
     let sink = factory(&plugin, CAPTURE)?;
     let directory = directory()?;
     let path = directory.path().join("captured.jsonl");
-    let source_config =
-        json!({"stream":"counter/out","count":4,"start":2,"step":3,"interval_ms":1});
+    let source_config = json!({"stream":"counter/out","count":4,"start":2,"step":3,"intervalMs":1});
     let middleware_config = json!({"stream":"middleware/out","middleware":[{
         "name":"rename","kind":"relabel","config":{"labelMappings":{"Counter":"Projected"}}
     }],"pipeline":["rename"]});
@@ -1007,7 +1006,7 @@ async fn separately_loaded_pipeline_exact_outputs_configuration_and_topology_rou
     assert_eq!(
         configuration(&snapshot, "counter")?,
         json!({
-            "stream":"counter/out","count":4,"start":2,"step":3,"interval_ms":1,"paused":false
+            "stream":"counter/out","count":4,"start":2,"step":3,"intervalMs":1,"paused":false
         })
     );
     assert_eq!(configuration(&snapshot, "middleware")?, middleware_config);
@@ -1296,8 +1295,8 @@ fn transaction_definition(
     Ok(TransactionTransformerDefinition {
         graph_id: "native-transactions".into(), id: id("transaction"), output_stream: stream("transaction/out"),
         steps: [
-            ("first", json!({"stream":"first/out","add":2,"multiply":1,"counter_property":"first_count"})),
-            ("second", json!({"stream":"second/out","add":0,"multiply":4,"counter_property":"second_count"})),
+            ("first", json!({"stream":"first/out","add":2,"multiply":1,"counterProperty":"first_count"})),
+            ("second", json!({"stream":"second/out","add":0,"multiply":4,"counterProperty":"second_count"})),
         ].into_iter().map(|(name, configuration)| TransactionStepDefinition {
             id: id(name), implementation: implementation.clone(), configuration_version: 1, configuration,
         }).collect(),
@@ -1955,7 +1954,7 @@ async fn managed_qos_recipes_replay_real_native_records_and_isolate_instances() 
     let recipe = json!({"kind":"qos", "definition":definition, "provider":"persistent"});
     let mut source = factory(&plugin, COUNTER)?.create_component(
         id("counter"),
-        json!({"stream":"counter/out","count":1,"start":7,"step":1,"interval_ms":1}),
+        json!({"stream":"counter/out","count":1,"start":7,"step":1,"intervalMs":1}),
     )?;
     source.initialize(&crate::hooks::initialize_ctx()).await?;
     source.start(&crate::hooks::start_ctx()).await?;

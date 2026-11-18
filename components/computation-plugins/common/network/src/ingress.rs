@@ -13,6 +13,7 @@
 //! QoS admission service; standard routes use the source's own server-sequenced
 //! producer (see [`crate::durable`]) and the session protocol remains available.
 
+use crate::batching::{AdaptiveBatchSettings, BatchLimit};
 use crate::config::IngressConfig;
 use crate::security::{Authenticator, RateLimiter};
 use anyhow::{Context, Result};
@@ -626,20 +627,19 @@ impl SourceRuntime {
         })
     }
 
-    pub fn with_adaptive(mut self, config: Option<AdaptiveBatchConfig>) -> Result<Self> {
+    /// Enables bounded volatile prefetch with the shared adaptive settings,
+    /// validated against this source's `ingressCapacity`.
+    pub fn with_adaptive(mut self, config: Option<&AdaptiveBatchSettings>) -> Result<Self> {
         self.set_adaptive(config)?;
         Ok(self)
     }
 
-    fn set_adaptive(&mut self, config: Option<AdaptiveBatchConfig>) -> Result<()> {
+    fn set_adaptive(&mut self, config: Option<&AdaptiveBatchSettings>) -> Result<()> {
         anyhow::ensure!(
             config.is_none() || matches!(self.mode, AdmissionMode::Volatile { .. }),
             "adaptive prefetch is a volatile ingress option; durable admission is scheduled by the host"
         );
-        if let Some(config) = &config {
-            validate_adaptive(config, self.config.ingress_capacity)?;
-        }
-        self.adaptive = config;
+        self.adaptive = adaptive_config(config, self.config.ingress_capacity)?;
         Ok(())
     }
 
@@ -685,7 +685,7 @@ impl SourceRuntime {
     pub fn reconfigure(
         &mut self,
         config: IngressConfig,
-        adaptive: Option<AdaptiveBatchConfig>,
+        adaptive: Option<&AdaptiveBatchSettings>,
     ) -> Result<()> {
         anyhow::ensure!(
             self.running.is_none(),
@@ -696,9 +696,7 @@ impl SourceRuntime {
             "the source stream is fixed for the component's lifetime"
         );
         config.validate()?;
-        if let Some(adaptive) = &adaptive {
-            validate_adaptive(adaptive, config.ingress_capacity)?;
-        }
+        let adaptive = adaptive_config(adaptive, config.ingress_capacity)?;
         anyhow::ensure!(
             adaptive.is_none() || matches!(self.mode, AdmissionMode::Volatile { .. }),
             "adaptive prefetch is a volatile ingress option"
@@ -982,19 +980,14 @@ impl SourceRuntime {
     }
 }
 
-fn validate_adaptive(config: &AdaptiveBatchConfig, ingress_capacity: usize) -> Result<()> {
-    anyhow::ensure!(
-        config.min_batch_size > 0
-            && config.min_batch_size <= config.max_batch_size
-            && config.max_batch_size <= ingress_capacity
-            && !config.min_wait_time.is_zero()
-            && config.min_wait_time <= config.max_wait_time
-            && config.max_wait_time <= Duration::from_secs(60)
-            && !config.throughput_window.is_zero()
-            && config.throughput_window <= Duration::from_secs(3600),
-        "invalid bounded adaptive ingress settings"
-    );
-    Ok(())
+/// The shared adaptive validator with this source's ingress bound.
+fn adaptive_config(
+    settings: Option<&AdaptiveBatchSettings>,
+    ingress_capacity: usize,
+) -> Result<Option<AdaptiveBatchConfig>> {
+    Ok(settings
+        .map(|settings| settings.batch_config(BatchLimit::ingress(ingress_capacity)))
+        .transpose()?)
 }
 
 fn truncate(reason: &mut String, limit: usize) {

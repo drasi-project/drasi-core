@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use drasi_computation_contracts::{
     ComponentId, GraphProducerProgress, InputEnvelope, OutputReadError, SnapshotProvider, StreamId,
 };
+use drasi_computation_plugin_sdk::UpdatePlanner;
 use drasi_computation_plugin_sdk::{
     lifecycle::{DisposeReason, StateIntent, StopMode, UpdateBoundary},
     testing::{contexts, update_request},
@@ -895,9 +896,7 @@ fn metadata_is_valid() -> Result<()> {
 #[test]
 fn configuration_round_trips_through_create() -> Result<()> {
     let metadata = GeometryFactory.metadata();
-    let details = GeometryFactory
-        .configuration_details()
-        .context("configuration details")?;
+    let details = GeometryFactory.configuration_details();
     details.validate_schema(&metadata.configuration)?;
     for configuration in [
         move_a_wall(),

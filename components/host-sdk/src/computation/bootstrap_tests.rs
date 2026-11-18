@@ -26,12 +26,13 @@ fn progress() -> Arc<QuerySourceProgress> {
 
 fn bootstrap_plugin() -> Arc<NativePlugin> {
     unsafe {
-        NativePlugin::from_entry_points_with_bootstrap(
+        NativePlugin::from_entry_points_with(
             drasi_computation_plugin_metadata,
             drasi_computation_plugin_entry,
-            None,
-            None,
-            Some(drasi_computation_plugin_bootstrap_v1),
+            crate::computation::EntryPoints {
+                bootstrap: Some(drasi_computation_plugin_bootstrap_v1),
+                ..super::entry_points()
+            },
         )
     }
     .unwrap()
@@ -43,6 +44,7 @@ fn provider(config: Value) -> Arc<NativeBootstrapProxy> {
             config,
             None,
             None,
+            drasi_computation_plugin_sdk::BootstrapSession::default(),
         )
         .unwrap()
 }
@@ -328,6 +330,7 @@ async fn native_bootstrap_non_ready_reprepares_without_stop_static_and_dynamic(
                     json!({"mode":mode,"count":2}),
                     None,
                     None,
+                    drasi_computation_plugin_sdk::BootstrapSession::default(),
                 )?;
                 let before_reset = State::default();
                 let after_reset = State::default();
@@ -388,6 +391,7 @@ async fn native_bootstrap_non_ready_retry_preserves_snapshot_and_cancellation_gu
                 json!({"mode":mode}),
                 None,
                 None,
+                drasi_computation_plugin_sdk::BootstrapSession::default(),
             )?;
             assert_eq!(provider.prepare().await?, initial);
             assert_eq!(provider.prepare().await?, initial);
@@ -408,6 +412,7 @@ async fn native_bootstrap_non_ready_retry_preserves_snapshot_and_cancellation_gu
             json!({"mode":"refresh-once"}),
             None,
             None,
+            drasi_computation_plugin_sdk::BootstrapSession::default(),
         )?;
         assert_eq!(
             provider.prepare().await?,
@@ -447,6 +452,7 @@ async fn native_bootstrap_non_ready_query_reset_reprepares_static_and_dynamic() 
                 json!({"mode":mode, "count":2, "durability":StorageDurability::VOLATILE}),
                 None,
                 None,
+                drasi_computation_plugin_sdk::BootstrapSession::default(),
             )?;
             let mut query = ContinuousQueryTransformer::new_with_options(
                 definition(),
@@ -504,7 +510,8 @@ async fn native_bootstrap_progress_requires_actual_owner_and_stable_reader() -> 
             ComponentId::try_new("1d4f4a3d-6cce-5052-b017-09f1341b67af")?,
             json!({}),
             Some(scope()),
-            None
+            None,
+            drasi_computation_plugin_sdk::BootstrapSession::default()
         )
         .is_err());
     let owner = progress();
@@ -514,6 +521,7 @@ async fn native_bootstrap_progress_requires_actual_owner_and_stable_reader() -> 
             json!({"mode":"forge-reader"}),
             Some(scope()),
             Some(owner.clone()),
+            drasi_computation_plugin_sdk::BootstrapSession::default(),
         )
         .is_err());
     let changed = factory.create_provider(
@@ -521,6 +529,7 @@ async fn native_bootstrap_progress_requires_actual_owner_and_stable_reader() -> 
         json!({"mode":"change-reader"}),
         Some(scope()),
         Some(owner.clone()),
+        drasi_computation_plugin_sdk::BootstrapSession::default(),
     )?;
     assert!(changed
         .prepare()
@@ -535,6 +544,7 @@ async fn native_bootstrap_progress_requires_actual_owner_and_stable_reader() -> 
         json!({}),
         Some(scope()),
         Some(owner.clone()),
+        drasi_computation_plugin_sdk::BootstrapSession::default(),
     )?;
     assert!(Arc::ptr_eq(bootstrap.source_progress().unwrap(), &owner));
     let mut query = ContinuousQueryTransformer::new(
@@ -609,6 +619,7 @@ async fn native_bootstrap_real_library_commits_snapshot_and_recovers_without_res
             json!({"count":count, "durability":StorageDurability::LOCAL_PROCESS_RESTART}),
             Some(scope()),
             Some(owner.clone()),
+            drasi_computation_plugin_sdk::BootstrapSession::default(),
         )?;
         let mut query = persisted_query(directory.path(), owner.clone(), bootstrap).await?;
         query
@@ -654,6 +665,7 @@ async fn native_bootstrap_real_library_preserves_initialization_intent_after_can
             json!({"mode":mode, "durability":StorageDurability::LOCAL_PROCESS_RESTART}),
             Some(scope()),
             Some(owner.clone()),
+            drasi_computation_plugin_sdk::BootstrapSession::default(),
         )?;
         let mut query = persisted_query(directory.path(), owner.clone(), bootstrap.clone()).await?;
         if mode == "pending" {
@@ -695,17 +707,19 @@ fn native_bootstrap_malformed_negotiation_rejects_before_entry() {
             version: abi::bootstrap::VERSION + 1,
             reserved: 0,
             factories: None,
+            describe: None,
             create: None,
         };
         &TABLE
     }
     assert!(unsafe {
-        NativePlugin::from_entry_points_with_bootstrap(
+        NativePlugin::from_entry_points_with(
             drasi_computation_plugin_metadata,
             entry,
-            None,
-            None,
-            Some(extension),
+            crate::computation::EntryPoints {
+                bootstrap: Some(extension),
+                ..super::entry_points()
+            },
         )
     }
     .is_err());

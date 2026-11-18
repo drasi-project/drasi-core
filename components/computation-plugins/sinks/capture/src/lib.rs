@@ -39,8 +39,8 @@ impl Factory for CaptureFactory {
         let configuration = component::Configuration::parse(request.request.configuration.clone())?;
         Ok(request.unkeyed_sink(configuration.on_permanent_failure))
     }
-    fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
-        Some(component::configuration_definition().details())
+    fn configuration_details(&self) -> drasi_computation_plugin_sdk::ConfigDetails {
+        component::configuration_definition().details()
     }
 
     fn metadata(&self) -> FactoryMetadata {
@@ -64,6 +64,7 @@ impl Factory for CaptureFactory {
         &self,
         request: &CreateRequest,
         _control: ControlSender,
+        _services: drasi_computation_plugin_sdk::ServiceBindings,
     ) -> anyhow::Result<CreatedComponent> {
         Ok(Component::Sink(Box::new(component::Capture::new(
             self.metadata().descriptor(request.id.clone())?,

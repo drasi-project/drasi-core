@@ -262,7 +262,7 @@ async fn ordinary_graph(
             factory.metadata().implementation.name.as_ref() == "drasi.sqlite/file-bootstrap"
         }).context("SQLite file bootstrap")?.create_provider(
             id(name),
-            json!({"source":id("source"),"stream":"sqlite/out",
+            json!({
                 "path":path,"tables":["items"],
                 "tableKeys":keys.iter().map(|key| json!({"table":key.table,"keyColumns":key.key_columns})).collect::<Vec<_>>(),
                 "maxTables":8,"maxBytes":1048576,
@@ -272,6 +272,13 @@ async fn ordinary_graph(
                 instance_id: INSTANCE.into(), graph_id: ComponentBatch::GRAPH_ID.into(), generation: 1,
             }),
             None,
+            drasi_computation_plugin_sdk::BootstrapSession::new(
+                Some(drasi_computation_plugin_sdk::ServedSource {
+                    source: id("source"),
+                    stream: StreamId::try_new("sqlite/out")?,
+                }),
+                None,
+            ),
         )?;
         let query = ContinuousQueryTransformer::new(
             ContinuousQueryDefinition {

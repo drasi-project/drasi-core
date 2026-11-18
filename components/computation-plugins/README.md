@@ -49,9 +49,11 @@ checks every native library independently, including its build dependencies.
 | Sink | [drasi-computation-sink-storedproc-postgres](sinks/storedproc-postgres) | `drasi.postgres/storedproc` | Dynamic or Rust SDK |
 | Sink | [drasi-computation-sink-bridge](sinks/bridge) | `drasi.bridge/sink` | Static Rust factory |
 
-Production native sources and sinks follow the
-[native source standard](sources/NATIVE-SOURCE-GUIDE.md) and the
-[native sink standard](sinks/NATIVE-SINK-GUIDE.md).
+Production native components follow the
+[native source standard](sources/NATIVE-SOURCE-GUIDE.md), the
+[native sink standard](sinks/NATIVE-SINK-GUIDE.md), the
+[native bootstrap provider standard](bootstrappers/NATIVE-BOOTSTRAP-PROVIDER-GUIDE.md)
+and the [native transformer standard](transformers/NATIVE-TRANSFORMER-GUIDE.md).
 
 Registration is not qualification. The selected MySQL and SQLite scopes have
 real-library and Server qualification; SQL Server remains explicitly incomplete
@@ -62,7 +64,7 @@ SQLite has no legacy reaction to migrate; no new SQLite sink is implied by this
 inventory.
 
 The query plugin is the normal explicitly selected Host/Server query
-implementation; its factories use the `drasi.query` family. The separate view component maintains map/relabel projections and
+implementation; its factories use the `drasi.query` family. The separate view component maintains middleware projections and
 exact retractions, but does not advertise durability, replay/follow or
 transaction participation. Native `scheduled_processing` is an optional
 borrowed service, not another plugin or graph: its standalone profile requires
@@ -115,7 +117,7 @@ field/type-only metadata.
 For example, gRPC sink `batchSize` is bounded to `1..=65536`, and the network
 sources mark `authToken` and `tlsPrivateKeyPem` as secret fields. These
 descriptions do not enable missing features. Rebuild the component library to
-publish the new details; host and plugins must use native ABI 4.0.0 and the
+publish the new details; host and plugins must use native ABI 5.0.0 and the
 UUID wire-version-2 contract. Libraries built against older native ABIs are
 rejected.
 
@@ -127,6 +129,9 @@ rejected.
 - [common/bridge](common/bridge) shares protocol framing, transport, TLS, controls
   and durable mapping state. Actual source/sink components and registration live
   in their own endpoint crates.
+- [common/middleware](common/middleware) is the one middleware pipeline, declared
+  kind list and `stream`/`middleware`/`pipeline` configuration shared by the
+  middleware and view transformers; it exports no factories.
 - [STANDARD.md](STANDARD.md) documents the counter/middleware/capture pipeline and
   arithmetic transaction contract.
 - [NETWORK.md](NETWORK.md) documents the HTTP/gRPC wire, admission and completion
@@ -135,7 +140,7 @@ rejected.
 Existing implementation names, implementation version `"1"` and configuration
 version `1` remain stable. New factory modes have distinct identities; consult
 each family guide for its schemas, resource requirements and recovery boundaries.
-The native plugin ABI is **4.0.0**, including the six lifecycle operations and
+The native plugin ABI is **5.0.0**, including the six lifecycle operations and
 separate management (assess/apply). Batching, query-snapshot, consumer-progress/cursor-policy,
 source-schema, source/bootstrap coordination and activation credentials remain
 separately negotiated extensions.

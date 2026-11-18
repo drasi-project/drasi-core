@@ -17,8 +17,6 @@ pub struct PluginBatchingV1 {
     pub header: Header,
     pub version: u32,
     pub reserved: u32,
-    /// Bounded MessagePack bool for a borrowed plugin handle's factory index.
-    pub factory: Option<unsafe extern "C" fn(*mut c_void, u32) -> Reply>,
     /// Bounded MessagePack Option<SinkBatching> for a borrowed component handle.
     pub policy: Option<unsafe extern "C" fn(*mut c_void) -> Reply>,
 }
@@ -31,7 +29,7 @@ mod tests {
     #[test]
     fn extension_preserves_frozen_base_tables() {
         let pointer = size_of::<usize>();
-        assert_eq!(size_of::<PluginBatchingV1>(), 24 + 2 * pointer);
+        assert_eq!(size_of::<PluginBatchingV1>(), 24 + pointer);
         assert_eq!(size_of::<crate::ComponentVTable>(), 16 + 5 * pointer);
         assert_eq!(crate::ABI_VERSION, "5.0.0");
         assert_eq!(crate::WIRE_VERSION, 5);

@@ -15,12 +15,12 @@ use axum::{
 };
 use drasi_computation_contracts::ProducerSession;
 use drasi_computation_network_common::diag;
+use drasi_http_common::content::{parse_content, ContentType};
+use drasi_http_common::template::{TemplateEngine, WebhookContext};
 use drasi_http_common::webhook::{
     auth::{AuthResult, ResolvedAuth},
     config::{ErrorBehavior, WebhookConfig, WebhookRoute},
-    content_parser::{parse_content, ContentType},
     route_matcher::{convert_method, find_matching_mappings, headers_to_map, RouteMatcher},
-    template_engine::{TemplateContext, TemplateEngine},
 };
 use std::sync::Arc;
 
@@ -203,7 +203,7 @@ pub(crate) async fn handle(
             "explicit-session webhook admission requires effectiveFrom on every mapping",
         );
     }
-    let context = TemplateContext {
+    let context = WebhookContext {
         payload: payload.clone(),
         route: route_match.path_params,
         query: url::form_urlencoded::parse(uri.query().unwrap_or("").as_bytes())

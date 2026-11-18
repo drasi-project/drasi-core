@@ -127,3 +127,84 @@ fn shared_transaction_binding_uses_the_component_uuid_stably() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn bootstrap_tables_are_selected_by_the_querys_labels() {
+    let labels = drasi_computation_contracts::BootstrapLabels::new(["items"], Vec::<String>::new())
+        .expect("labels");
+    assert!(table_selected(Some(&labels), "items"));
+    assert!(!table_selected(Some(&labels), "orders"));
+    assert!(table_selected(None, "orders"));
+}
+
+#[test]
+fn paired_snapshots_connect_with_the_sources_activation_credentials() {
+    let base = config(3306, MySqlOutput::Changes);
+    let activation: ActivationCredentials = Default::default();
+    assert_eq!(
+        with_activation(&base, Some(&activation)).connection.user,
+        base.connection.user,
+        "before activation the configured login is used"
+    );
+    *activation.write().expect("activation") = Some(("granted".into(), "secret".into()));
+    let active = with_activation(&base, Some(&activation));
+    assert_eq!(active.connection.user, "granted");
+    assert_eq!(active.connection.password, "secret");
+}
+
+/// Each progress binding declares exactly the durability its replay needs:
+/// a whole-transaction or durable group source requires durable progress
+/// (so binding it to volatile progress is refused before anything starts),
+/// a non-durable group accepts any progress and keeps volatile progress
+/// itself, and a source without replay keeps no progress or dependency.
+#[test]
+fn descriptions_declare_the_progress_durability_each_binding_requires() -> Result<()> {
+    use drasi_computation_contracts::{
+        check_dependency, DurabilityRequirement, OutputDescription, PortId, ProgressPersistence,
+        ResourceCapabilities,
+    };
+    let id =
+        drasi_computation_contracts::ComponentId::try_new("8c950040-bfe1-5104-b7f0-744bb1e73e84")?;
+    let descriptor = MySqlSource::describe(id, MySqlOutput::Transactions)?;
+    let out = PortId::try_new("out")?;
+    for (progress, persistence, dependency) in [
+        (MySqlProgress::None, ProgressPersistence::Volatile, None),
+        (
+            MySqlProgress::Single,
+            ProgressPersistence::Durable,
+            Some(("source_progress", DurabilityRequirement::Durable)),
+        ),
+        (
+            MySqlProgress::Group { durable: true },
+            ProgressPersistence::Durable,
+            Some(("consumer_progress", DurabilityRequirement::Durable)),
+        ),
+        (
+            MySqlProgress::Group { durable: false },
+            ProgressPersistence::Volatile,
+            Some(("consumer_progress", DurabilityRequirement::Any)),
+        ),
+    ] {
+        let declared = description(progress, &descriptor);
+        assert_eq!(declared.component.progress, persistence, "{progress:?}");
+        // Outputs carry source replay progress, not a producer identity.
+        assert_eq!(declared.output(&out), OutputDescription::UNTRACKED);
+        declared
+            .validate(&descriptor)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        match dependency {
+            None => assert!(declared.dependencies.is_empty(), "{progress:?}"),
+            Some((name, durability)) => {
+                assert_eq!(declared.dependencies.len(), 1, "{progress:?}");
+                assert_eq!(declared.dependencies[name].durability, durability);
+                assert!(check_dependency(&declared, name, ResourceCapabilities::DURABLE).is_ok());
+                assert_eq!(
+                    check_dependency(&declared, name, ResourceCapabilities::VOLATILE).is_ok(),
+                    durability == DurabilityRequirement::Any,
+                    "{progress:?} against volatile progress"
+                );
+            }
+        }
+    }
+    Ok(())
+}

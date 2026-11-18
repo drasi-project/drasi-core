@@ -1,7 +1,7 @@
 # Native HTTP source
 
 `drasi-computation-source-http` provides `drasi.network/http-source`
-(implementation `1`, configuration version `1`, native ABI 4.0). It accepts
+(implementation `1`, configuration version `1`, native ABI 5.0). It accepts
 graph changes over HTTP, through standard event routes or configured webhook
 routes, and emits them on its `out` port as `GraphChangeCodec` envelopes.
 

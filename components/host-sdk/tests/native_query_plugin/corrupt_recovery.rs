@@ -28,7 +28,7 @@ fn query(
     let mut query = factory()?.create_component_with_processing_publication(
         component_id()?,
         json!({
-            "query": super::bootstrap::TEXT, "bootstrap": true, "outbox_capacity": 4,
+            "query": super::bootstrap::TEXT, "bootstrap": true, "outboxCapacity": 4,
             "recovery": recovery, "publication": if non_atomic { "non_atomic" } else { "atomic" },
         }),
         scope(generation),

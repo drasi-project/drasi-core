@@ -34,8 +34,6 @@ pub struct PluginActivationCredentialsV1 {
     pub header: Header,
     pub version: u32,
     pub reserved: u32,
-    /// Given FactoryHandle.state, returns MessagePack bool indicating support.
-    pub factory: Option<unsafe extern "C" fn(*mut c_void) -> Reply>,
     /// Given FactoryHandle.state and the base CreateRequest, purely inspects the
     /// configured endpoint, returning `{hostname: string, port: u16}`. Inspection
     /// must permit omitted literal auth because the Host binds an actual provider.
@@ -50,7 +48,7 @@ mod tests {
         use std::mem::size_of;
         assert_eq!(
             size_of::<super::PluginActivationCredentialsV1>(),
-            24 + 2 * size_of::<usize>()
+            24 + size_of::<usize>()
         );
         assert_eq!(
             size_of::<crate::ComponentVTable>(),

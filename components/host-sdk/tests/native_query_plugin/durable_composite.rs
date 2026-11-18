@@ -27,14 +27,13 @@ fn query(
     .zip(sources)
     {
         let mut configuration = sqlite::provider_configuration(path);
-        configuration["source"] = json!(source);
-        configuration["stream"] = json!(format!("{name}/out"));
         configuration["tables"] = json!([table]);
         let provider: Arc<dyn ComputationBootstrapProvider> = bootstrap.create_query_provider(
             component_id()?,
             configuration,
             scope(generation),
             None,
+            sqlite::provider_session(&source.to_string(), &format!("{name}/out"))?,
         )?;
         members.push((ResourceId::try_new(name)?, provider));
     }

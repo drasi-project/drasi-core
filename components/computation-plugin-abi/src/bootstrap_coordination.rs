@@ -17,7 +17,6 @@ pub struct PluginBootstrapCoordinationV1 {
     pub header: Header,
     pub version: u32,
     pub reserved: u32,
-    pub source_factory: Option<unsafe extern "C" fn(*mut c_void, u32) -> Reply>,
     pub bootstrap_factory: Option<unsafe extern "C" fn(*mut c_void, u32) -> Reply>,
     pub create: Option<
         unsafe extern "C" fn(
@@ -25,16 +24,6 @@ pub struct PluginBootstrapCoordinationV1 {
             BorrowedBytes,
             *const BootstrapProgressV1,
             *mut BootstrapCoordinatorHandle,
-        ) -> Status,
-    >,
-    pub create_source: Option<
-        unsafe extern "C" fn(
-            *mut c_void,
-            BorrowedBytes,
-            *const BootstrapCoordinatorHandle,
-            *const recovery::SourceProgressV1,
-            *const consumer_progress::ConsumerProgressV1,
-            *mut ComponentHandle,
         ) -> Status,
     >,
     pub create_bootstrap: Option<
@@ -91,6 +80,8 @@ pub struct BootstrapCoordinatorVTable {
     pub retain: Option<unsafe extern "C" fn(*mut c_void)>,
     pub release: Option<unsafe extern "C" fn(*mut c_void)>,
     pub describe: Option<unsafe extern "C" fn(*mut c_void) -> Reply>,
+    /// Open one query's provider. The bytes are a MessagePack
+    /// `SourceBootstrapOpen`: the query and its declared labels.
     pub open: Option<
         unsafe extern "C" fn(*mut c_void, BorrowedBytes, *mut bootstrap::BootstrapHandle) -> Status,
     >,
@@ -116,7 +107,7 @@ mod tests {
     #[test]
     fn coordinator_extension_preserves_existing_layouts() {
         let pointer = size_of::<usize>();
-        assert_eq!(size_of::<PluginBootstrapCoordinationV1>(), 24 + 5 * pointer);
+        assert_eq!(size_of::<PluginBootstrapCoordinationV1>(), 24 + 3 * pointer);
         assert_eq!(size_of::<BootstrapCoordinatorHandle>(), 2 * pointer);
         assert_eq!(size_of::<BootstrapCoordinatorVTable>(), 16 + 5 * pointer);
         assert_eq!(size_of::<SourceBootstrapV1>(), 16 + 5 * pointer);

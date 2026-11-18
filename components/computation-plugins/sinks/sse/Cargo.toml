@@ -20,6 +20,7 @@ abi-version = "5.0.0"
 kind = "sink-sse"
 
 [dependencies]
+drasi-computation-template-common = { workspace = true }
 drasi-computation-plugin-sdk = { workspace = true }
 drasi-computation-network-common = { workspace = true, features = ["listener"] }
 drasi-computation-contracts = { workspace = true }

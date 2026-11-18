@@ -24,16 +24,16 @@ impl BridgeFactoryDefinition {
     pub fn new(source: bool) -> Self {
         use ConfigurationType::{ComponentId, Object, String};
         let fields = [
-            ("link_id", String, true),
-            ("sender_instance", String, true),
-            ("receiver_instance", String, true),
-            ("sender_endpoint", ComponentId, true),
-            ("receiver_endpoint", ComponentId, true),
+            ("linkId", String, true),
+            ("senderInstance", String, true),
+            ("receiverInstance", String, true),
+            ("senderEndpoint", ComponentId, true),
+            ("receiverEndpoint", ComponentId, true),
             ("stream", String, true),
-            ("peer_stream", String, true),
+            ("peerStream", String, true),
             ("delivery", String, true),
             ("profile", String, true),
-            ("failure_scope", String, false),
+            ("failureScope", String, false),
             ("namespace", Object, true),
             ("transport", Object, true),
             ("limits", Object, false),

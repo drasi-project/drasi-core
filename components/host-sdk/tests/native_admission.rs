@@ -21,8 +21,26 @@ fn captured() -> &'static Mutex<Option<sdk::NativeAdmission>> {
     HANDLE.get_or_init(|| Mutex::new(None))
 }
 
-struct Factory;
+/// A source that declares source admission when its flag is set.
+struct Factory(bool);
 impl sdk::Factory for Factory {
+    /// Every field described (fixture).
+    fn configuration_details(&self) -> sdk::ConfigDetails {
+        sdk::ConfigDetails {
+            fields: sdk::Factory::metadata(self)
+                .configuration
+                .fields
+                .into_keys()
+                .map(|name| {
+                    let details = sdk::configuration::ConfigFieldDetails {
+                        description: format!("Fixture field {name}."),
+                        ..Default::default()
+                    };
+                    (name, details)
+                })
+                .collect(),
+        }
+    }
     fn describe(
         &self,
         _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
@@ -44,26 +62,21 @@ impl sdk::Factory for Factory {
             )],
             completion: None,
             capabilities: sdk::Capabilities {
+                services: sdk::HostServices {
+                    source_admission: self.0,
+                    ..Default::default()
+                },
                 ..sdk::Capabilities::default()
             },
         }
     }
-    fn supports_source_admission(&self) -> bool {
-        true
-    }
     fn create(
         &self,
         request: &sdk::CreateRequest,
-        control: sdk::ControlSender,
-    ) -> Result<sdk::CreatedComponent> {
-        self.create_with_admission(request, control, None)
-    }
-    fn create_with_admission(
-        &self,
-        request: &sdk::CreateRequest,
         _: sdk::ControlSender,
-        admission: Option<sdk::NativeAdmission>,
+        services: sdk::ServiceBindings,
     ) -> Result<sdk::CreatedComponent> {
+        let admission = services.admission;
         *captured().lock().expect("capture lock") = admission.clone();
         Ok(sdk::Component::Source(Box::new(Source {
             descriptor: self.metadata().descriptor(request.id.clone())?,
@@ -98,24 +111,13 @@ impl sdk::NativeSource for Source {
     }
 }
 
-mod fixture {
-    use super::*;
-    sdk::export_computation_plugin!(sdk::PluginDefinition::new(
+fn plugin(admission: bool) -> Result<Arc<NativePlugin>> {
+    NativePlugin::from_definition(sdk::PluginDefinition::new(
         "probe/admission",
         "1",
-        vec![Arc::new(Factory)],
+        vec![Arc::new(Factory(admission))],
         vec![GraphChangeCodec::schema()],
-    ));
-}
-
-fn plugin(services: bool) -> Result<Arc<NativePlugin>> {
-    unsafe {
-        NativePlugin::from_entry_points_with_services(
-            fixture::drasi_computation_plugin_metadata,
-            fixture::drasi_computation_plugin_entry,
-            services.then_some(fixture::drasi_computation_plugin_services_v1),
-        )
-    }
+    )?)
 }
 
 struct Sink {
@@ -147,10 +149,15 @@ impl EnvelopeSink for Sink {
 }
 
 #[test]
-fn service_negotiation_does_not_change_old_metadata_or_grant_undeclared_resources() -> Result<()> {
+fn only_declared_admission_grants_its_resource() -> Result<()> {
     let old = plugin(false)?;
     let new = plugin(true)?;
-    assert_eq!(old.metadata(), new.metadata());
+    assert!(
+        new.metadata().factories[0]
+            .capabilities
+            .services
+            .source_admission
+    );
     assert!(old.factories()[0].descriptor().dependencies.is_empty());
     let dependencies = &new.factories()[0].descriptor().dependencies;
     assert_eq!(dependencies["admission"].minimum, 0);
@@ -392,29 +399,4 @@ async fn native_admission_uses_graph_commit_and_revokes_retained_callbacks() -> 
     );
     channel.shutdown().await?;
     Ok(())
-}
-
-#[test]
-fn malformed_service_extension_is_rejected_before_plugin_entry() {
-    unsafe extern "C" fn invalid() -> *const abi::services::PluginServicesV1 {
-        static TABLE: abi::services::PluginServicesV1 = abi::services::PluginServicesV1 {
-            header: abi::Header::new::<abi::services::PluginServicesV1>(),
-            version: 99,
-            reserved: 0,
-            factory: None,
-            create: None,
-        };
-        &TABLE
-    }
-    unsafe extern "C" fn never_enter(_: *mut abi::PluginHandle) -> abi::Status {
-        panic!("invalid extension must reject before entry")
-    }
-    assert!(unsafe {
-        NativePlugin::from_entry_points_with_services(
-            fixture::drasi_computation_plugin_metadata,
-            never_enter,
-            Some(invalid),
-        )
-    }
-    .is_err());
 }

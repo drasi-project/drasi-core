@@ -773,6 +773,17 @@ impl Component {
         }
     }
 
+    fn worker_failures(&self) -> Option<Arc<dyn super::WorkerFailures>> {
+        match self {
+            Self::Source(component) => component.worker_failures(),
+            Self::Transformer(component) => component.worker_failures(),
+            Self::Sink(component) => component.worker_failures(),
+            Self::Service(component) => component.worker_failures(),
+            Self::BootstrapProvider(component) => component.worker_failures(),
+            Self::Deferred { .. } | Self::Unresolved(_) => None,
+        }
+    }
+
     fn requires_readiness_confirmation(&self) -> bool {
         match self {
             Self::Source(component) => component.requires_readiness_confirmation(),

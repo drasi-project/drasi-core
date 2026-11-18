@@ -31,14 +31,16 @@ workspace = true
 default = ["native-tls", "tiberius/winauth"]
 native-tls = ["tiberius/native-tls"]
 rustls = ["tiberius/rustls"]
-sql = ["dep:drasi-computation-contracts", "dep:drasi-reaction-common", "dep:handlebars", "dep:serde_json", "tokio/time"]
+sql = ["dep:drasi-computation-contracts", "dep:drasi-reaction-common", "dep:drasi-computation-template-common", "dep:handlebars", "dep:serde_json", "tokio/time"]
 test-support = ["native"]
-native = ["dep:drasi-computation-contracts", "dep:serde_json", "dep:sha2", "dep:async-trait", "dep:futures-util", "dep:bytes", "tokio/rt", "tokio/sync", "tokio/time", "tokio/macros"]
+native = ["dep:drasi-computation-contracts", "dep:drasi-computation-plugin-sdk", "dep:serde_json", "dep:sha2", "dep:async-trait", "dep:futures-util", "dep:bytes", "tokio/rt", "tokio/sync", "tokio/time", "tokio/macros"]
 
 [dependencies]
 drasi-core-types.workspace = true
 drasi-computation-contracts = { workspace = true, optional = true }
+drasi-computation-plugin-sdk = { workspace = true, optional = true }
 drasi-reaction-common = { workspace = true, optional = true }
+drasi-computation-template-common = { workspace = true, optional = true }
 tiberius = { version = "0.13", default-features = false, features = ["tds73", "chrono", "rust_decimal"] }
 tokio = { version = "1.0", features = ["net"] }
 tokio-util = { version = "0.7", features = ["compat"] }

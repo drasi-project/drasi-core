@@ -1,7 +1,7 @@
 # SQL Server stored-procedure sink: design
 
 `drasi.mssql/storedproc` (crate `drasi-computation-sink-storedproc-mssql`,
-computation ABI 4.0.0) calls a SQL Server stored procedure, or any
+computation ABI 5.0.0) calls a SQL Server stored procedure, or any
 parameterized T-SQL batch, for each graph change it receives.
 
 > **Live qualification is deferred (CW-78).** Everything below is verified by
@@ -48,8 +48,10 @@ properties it sets, and an unknown `before` is absent rather than null.
 ## Templates and the injection rule
 
 Templates are **parameter-only** (SMS-01). At construction every template is
-checked with `drasi_reaction_common::sql_template::validate_parameter_only`
-and compiled once into a `CommandTemplate`. The following are rejected:
+compiled once into a `CommandTemplate` by the shared native template engine
+(`drasi-computation-template-common`, `ParameterTemplate` with `@P1…@Pn`
+placeholders), which applies the parameter-only rule shared by the three
+stored-procedure sinks. The following are rejected:
 
 * plain interpolation `{{x}}`, anywhere in the SQL text;
 * raw output `{{{x}}}` and `{{& x}}`;
@@ -225,7 +227,7 @@ counts as success, and a second Erase deletes nothing. The factory declares `era
 ## Authentication
 
 * **SQL authentication** with literal `user` and `password` (secret).
-* **Activation credentials** (`supports_activation_credentials`): a host
+* **Activation credentials** (`HostServices::activation_credentials`): a host
   identity binding supplies credentials at each start, overriding literals
   for that activation only. `UsernamePassword` is SQL authentication.
   `Token` is a **Microsoft Entra ID access token** sent with Tiberius

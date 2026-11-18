@@ -1465,7 +1465,8 @@ configured processing failures still error. `relabel`, `decoder`, `parse_json` a
 `promote` forward removals and replacements, and `unwind` is the stage that uses
 retained previous elements. Do not add retained input/output state to `map` or
 `jq`. The separate `drasi.standard/view` factory reconstructs complete input
-images and applies map/relabel rules once to each affected final input. It
+images and applies its declared stateless middleware (the pipeline it shares with
+the `drasi.standard/middleware` transformer) once to each affected final input. It
 retains the actual output associations, so filtering, removed children and key
 changes retract the previously emitted images without rerunning historical
 mapping. Whole-envelope staging protects its state on failure.
@@ -2606,8 +2607,8 @@ rollback exclusion, restart, and actual retirement hold/resume. Follow its
 database/plugin prerequisites; a Rust-only mock is not equivalent evidence.
 
 Use the connector-specific suites for shared source behavior: PostgreSQL
-[row, snapshot and transaction cases](../../components/sources/postgres/tests/native_transactions),
-MySQL [shared recovery](../../components/sources/mysql/src/native/tests/shared.rs),
+[row, snapshot and transaction cases](../../components/computation-plugins/sources/postgres/tests/native_transactions),
+MySQL [shared recovery](../../components/computation-plugins/sources/mysql/tests/native_live/shared.rs),
 and SQLite [consumer enrollment](../../components/sources/sqlite/tests/native/consumers.rs).
 Check unequal snapshot positions and unrelated counters, the slow member's
 retention floor, exact transaction effects, failure/cancellation, and explicit

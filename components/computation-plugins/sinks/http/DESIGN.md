@@ -10,7 +10,7 @@ lists every setting and how to operate them.
 | `drasi.network/http-delivery` | `Component::Consumer` (`ConsumerMode::External`) | `Consumer/External` through the host `DeliveryRunner` |
 
 Both have implementation version `1`, configuration version `1` and native
-ABI 4.0, and both consume the standard `GraphChangeCodec` schema on their `in`
+ABI 5.0, and both consume the standard `GraphChangeCodec` schema on their `in`
 port from any producer: a source, a transformer or a query
 ([sink input contract](../../SINKS.md)). The HTTP sink is the plugin's first
 factory.
@@ -134,9 +134,14 @@ may cover a different run than before; deduplicate per change using the
 ## Batching
 
 With `adaptive` and `batchEndpoint`, the factory advertises native host
-batching (`supports_sink_batching`). The host collects inputs and timers within
-`SinkBatching` (`maxBatchBytes`, at most `min(adaptiveMaxBatchSize, 1024)`
+batching (`HostServices::sink_batching`). The host collects inputs and timers within
+`SinkBatching` (`maxBatchBytes`, at most `min(adaptive.maxBatchSize, 1024)`
 inputs, the adaptive operation count and delay) and calls `handle_batch`. The
+policy is the shared `AdaptivePolicy::from_settings` in `common/network`, so the
+same `adaptive` object batches identically in the HTTP and gRPC sinks. A batch
+is accepted whenever it is nonempty and within the host's 1024-input bound,
+even if it was collected under an earlier tier or before a Pause update; the
+sink splits it at the current operation target. The
 sink renders each change to one item (the route's body template, which must
 render JSON, or the default notification) and starts a new request when:
 
@@ -185,7 +190,8 @@ deadlines. A Drain stop waits for the in-flight delivery, which is bounded by
 `outputTemplates.routes` (keyed by output alias, or its last dotted segment)
 and `outputTemplates.defaultTemplate` select, per operation (`added`,
 `updated`, `deleted`), a body `template`, `url`, `method` and `headers`. Every
-template string is compiled once at construction; a helper call must name one
+template string is compiled once at construction by the shared native template
+engine (`drasi-computation-template-common`); a helper call must name one
 of `if`, `unless`, `each`, `with`, `lookup`, `raw`, `log`, `eq`, `ne`, `gt`,
 `gte`, `lt`, `lte`, `and`, `or`, `not`, `len` or `json`; partials and decorators
 are rejected. Template headers may not name the reserved headers (HS-07).
@@ -193,9 +199,10 @@ are rejected. Template headers may not name the reserved headers (HS-07).
 Rendering a change never falls back (D-5): a failing body, URL or header
 template, a rendered URL off the base origin, an invalid rendered header value,
 a batch item that does not render JSON, or an oversized body is a per-change
-error for the failure policy. Handlebars is not strict: a missing field renders
-as empty text, as in the legacy reaction. `{{x}}` is HTML-escaped; use
-`{{{x}}}` or `{{json x}}` for raw values.
+error for the failure policy. Rendering is strict, as in every native sink: a
+missing field is a render failure, not empty text as in the legacy reaction.
+Values are not HTML-escaped (the legacy reaction escaped `{{x}}`); use
+`{{json x}}` for a JSON value.
 
 ## Delivery consumer (`drasi.network/http-delivery`)
 
@@ -240,7 +247,7 @@ disposal has nothing to remove and is idempotent.
 
 ## Management
 
-Both factories plan updates (`supports_update_planning`, `Factory::assess`) and
+Both factories plan updates (`Factory::update_planner`, `UpdatePlanner::assess`) and
 both live objects export `NativeManagement` with the same pure classification.
 The strongest boundary among the changed fields wins.
 
@@ -248,11 +255,13 @@ HTTP sink:
 
 - **Pause (InPlace):** `outputTemplates`, `headers`, `secretHeaders`, `token`,
   `timeoutMs`, `maxRequestBytes`, `maxRetries`, `retryBudgetMs`,
-  `successStatusCodes` — everything read per delivery. `onPermanentFailure` is
-  a Replace: it is part of the description the graph captured.
-- **Stop (Restart):** `url`, `baseUrl`, `batchEndpoint`, `adaptive`,
-  `maxBatchBytes` (the host batching declaration), TLS fields,
-  `connectTimeoutMs`, `poolIdleTimeoutMs`, `poolMaxIdlePerHost`.
+  `successStatusCodes` — everything read per delivery — and the `adaptive`
+  bounds and `maxBatchBytes`, because the host reads `batching()` before every
+  collection. `onPermanentFailure` is a Replace: it is part of the description
+  the graph captured.
+- **Stop (Restart):** `url`, `baseUrl`, `batchEndpoint` (so enabling or
+  disabling `adaptive` restarts), TLS fields, `connectTimeoutMs`,
+  `poolIdleTimeoutMs`, `poolMaxIdlePerHost`.
 - **Replace (Recreate):** `outputs`, or changed input bindings.
 
 Delivery consumer: Pause for `token`, `timeoutMs`, `maxMessageBytes`; Stop for

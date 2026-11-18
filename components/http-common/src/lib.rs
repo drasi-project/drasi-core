@@ -8,9 +8,13 @@
 pub mod adaptive_batcher;
 #[cfg(feature = "bootstrap")]
 pub mod bootstrap;
+#[cfg(any(feature = "bootstrap", feature = "webhook"))]
+pub mod content;
 mod models;
 #[cfg(feature = "reaction")]
 pub mod reaction;
+#[cfg(any(feature = "bootstrap", feature = "webhook"))]
+pub mod template;
 pub mod time;
 #[cfg(feature = "webhook")]
 pub mod webhook;

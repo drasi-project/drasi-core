@@ -1,7 +1,7 @@
 # Native SQL Server source: design
 
 `drasi-computation-source-mssql` streams SQL Server change data capture
-(CDC) into a ComputationGraph. It is a native plugin (ABI 4.0) with one
+(CDC) into a ComputationGraph. It is a native plugin (ABI 5.0) with one
 factory, `drasi.mssql/changes`, at implementation and configuration version
 `1`. The CDC engine (settings, catalog and binding, value mapping, paging,
 snapshots and owned markers) lives in `drasi-mssql-common::native`, shared
@@ -164,6 +164,21 @@ parameters.
 
 ## Consumers and recovery
 
+### Declared description
+
+Outputs carry only source replay progress (`untracked` identity). The
+source's progress is its consumers' committed cursors, bound as the
+`consumer_progress` dependency, so it declares exactly the durability that
+resource declares: durable consumer progress (queries with persistent
+indexes) gives durable progress that resumes after a process restart;
+volatile consumer progress gives volatile progress, and a restarted process
+begins again at `startPosition`. Either binding is accepted (requirement
+`any`); an undeclared binding leaves the source's progress undeclared,
+which satisfies no downstream requirement. The source does not check
+durability at start.
+
+### Replay
+
 Replay starts at the members' minimum committed cursor; a member without a
 cursor joins there. A group in which no member has a cursor starts at
 `startPosition`:
@@ -223,7 +238,11 @@ this source's prefix (`DELETE … WHERE UPPER(LEFT(CONVERT(char(36), token),
 rows is success, so a retry is safe. The bootstrapper does **not** sweep:
 bootstrap providers have no erase hook, and a startup sweep could delete
 the marker of a snapshot still in progress. Without `barrierTable` the
-source owns no external state and erase is a documented no-op.
+source owns no external state and erase is a documented no-op. Erase
+connects with the activation credentials the host resolves for the
+erasing dispose (`DisposeContext::credentials`, MS-22), falling back to the
+last activation's credentials or the literal login, so a source rebuilt
+after a process restart erases its markers without starting first.
 
 ## Lifecycle
 

@@ -104,6 +104,18 @@ impl StandaloneSnapshot {
         })
     }
 
+    /// Narrow the selection to the tables whose label (the table name) the
+    /// requesting query declares; `None` keeps the whole selection. The
+    /// configured tables and `labels` remain the upper bound.
+    pub fn for_request(
+        mut self,
+        labels: Option<&drasi_computation_contracts::BootstrapLabels>,
+    ) -> Self {
+        self.selected
+            .retain(|table| super::table_selected(labels, table));
+        self
+    }
+
     pub fn for_labels(mut self, labels: &[String]) -> Self {
         if !labels.is_empty() {
             self.selected.retain(|table| labels.contains(table));

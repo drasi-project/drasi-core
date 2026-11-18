@@ -32,12 +32,7 @@ descriptions and defaults.
 | `tlsCertificatePem` | string | none | PEM certificate chain. Requires `tlsPrivateKeyPem`. | Stop |
 | `tlsPrivateKeyPem` | string, **secret** | none | PEM private key matching the certificate. | Stop |
 | `tlsClientCaPem` | string | none | PEM CA bundle. When set, clients must present a certificate it issued (mutual TLS). | Stop |
-| `adaptiveEnabled` | boolean | `false` | Volatile mode only. Enables bounded prefetch. | Stop |
-| `adaptiveMaxBatchSize` | integer | smaller of 1000 and `ingressCapacity` | ≤ `ingressCapacity`. Requires `adaptiveEnabled`. | Stop |
-| `adaptiveMinBatchSize` | integer | smaller of 10 and `adaptiveMaxBatchSize` | ≤ `adaptiveMaxBatchSize`. Requires `adaptiveEnabled`. | Stop |
-| `adaptiveMaxWaitMs` | integer | `100` | `1..=60000`. Requires `adaptiveEnabled`. | Stop |
-| `adaptiveMinWaitMs` | integer | `1` | ≤ `adaptiveMaxWaitMs`. Requires `adaptiveEnabled`. | Stop |
-| `adaptiveWindowSecs` | integer | `5` | `1..=3600`. Requires `adaptiveEnabled`. | Stop |
+| `adaptive` | object | absent (disabled) | Volatile mode only. Enables bounded prefetch; see [Adaptive prefetch](#adaptive-prefetch). `maxBatchSize` ≤ `ingressCapacity`. | Stop |
 | `webhooks` | object | none | Webhook routes (see [Webhooks](#webhooks)). When present, they replace the standard event routes. | Pause (routes, mappings, auth, error policy); Stop (`cors`, or adding or removing `webhooks`) |
 
 Secret fields accept only host secret references, never literal values.
@@ -150,7 +145,11 @@ source. Error-policy values are snake_case.
 Templates use Handlebars syntax and can reference `payload`, `route`, `query`,
 `headers`, `method`, `path` and `source_id`.
 
-- Payloads may be JSON, XML, YAML or text, selected by `Content-Type`.
+- Payloads may be JSON, XML, YAML or text, selected by `Content-Type`. The
+  parser and template engine are shared with the HTTP bootstrap provider
+  (`drasi_http_common::content` and `::template`), so the same document
+  yields the same template values on both paths; see that provider's README
+  for the XML conversion rules.
 - When signature and bearer checks are both configured, both must pass.
 - Webhook secrets are read from the named environment variables once, when a
   configuration is accepted: construction, and assessment and apply of an
@@ -275,3 +274,22 @@ is rejected during assessment and changes nothing.
   | 413 | Raise `maxMessageBytes` |
   | Connections closed immediately | `maxConnections` reached |
   | Construction fails with an exposure error | Configure authentication for a non-loopback `host` |
+
+## Adaptive prefetch
+
+`adaptive` is the shared native adaptive batching object, identical in the
+HTTP source and the HTTP and gRPC sinks
+(`drasi_computation_network_common::batching::AdaptiveBatchSettings`). Unknown
+keys are rejected; every key has a default and the configuration getter
+returns all of them.
+
+| Key | Default | Rule |
+|---|---|---|
+| `minBatchSize` | `10` | `1..=maxBatchSize`; collection target at idle throughput |
+| `maxBatchSize` | `1000` | ≤ `ingressCapacity` (and ≤ 65536); target at burst throughput |
+| `minWaitMs` | `1` | `1..=maxWaitMs`; wait at idle throughput |
+| `maxWaitMs` | `100` | ≤ 60000; busier tiers wait 1, 10, 25 or 50 ms, clamped to `minWaitMs..=maxWaitMs` |
+| `windowMs` | `5000` | `1..=3600000`; throughput observation window |
+
+With the default `ingressCapacity` (1024) `"adaptive": {}` is valid; a smaller
+capacity requires an explicit smaller `maxBatchSize`.

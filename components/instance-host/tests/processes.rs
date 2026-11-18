@@ -1010,7 +1010,7 @@ fn real_bidirectional_native_data_drains_through_native_cuts_before_process_exit
         ComponentName::try_new("parent/input")?,
         "drasi.standard/volatile-counter",
         ComponentRole::Source,
-        json!({"stream":"p/input","count":64,"interval_ms":20}),
+        json!({"stream":"p/input","count":64,"intervalMs":20}),
     )?;
     parent_config
         .desired

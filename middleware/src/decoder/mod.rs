@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::common::{derive_removes_output, derived_property_is_set, ErrorHandling};
+use crate::stateless::{StatelessMiddleware, StatelessMiddlewareFactory};
 use async_trait::async_trait;
 use base64::Engine;
 use drasi_core_types::{
@@ -87,6 +88,16 @@ impl SourceMiddleware for Decoder {
         &self,
         source_change: SourceChange,
         _element_index: &dyn ElementIndex,
+    ) -> Result<Vec<SourceChange>, MiddlewareError> {
+        StatelessMiddleware::apply(self, source_change).await
+    }
+}
+
+#[async_trait]
+impl StatelessMiddleware for Decoder {
+    async fn apply(
+        &self,
+        source_change: SourceChange,
     ) -> Result<Vec<SourceChange>, MiddlewareError> {
         match source_change {
             SourceChange::Insert { mut element } => match self.decode_property(&mut element) {
@@ -335,6 +346,28 @@ impl SourceMiddlewareFactory for DecoderFactory {
         &self,
         config: &SourceMiddlewareConfig,
     ) -> Result<Arc<dyn SourceMiddleware>, MiddlewareSetupError> {
+        self.build(config)
+            .map(|middleware| Arc::new(middleware) as Arc<dyn SourceMiddleware>)
+    }
+}
+
+impl StatelessMiddlewareFactory for DecoderFactory {
+    fn kind(&self) -> &'static str {
+        "decoder"
+    }
+
+    fn build_stateless(
+        &self,
+        config: &SourceMiddlewareConfig,
+    ) -> Result<Box<dyn StatelessMiddleware>, MiddlewareSetupError> {
+        self.build(config)
+            .map(|middleware| Box::new(middleware) as Box<dyn StatelessMiddleware>)
+    }
+}
+
+impl DecoderFactory {
+    /// Builds the middleware from its declaration.
+    pub fn build(&self, config: &SourceMiddlewareConfig) -> Result<Decoder, MiddlewareSetupError> {
         let decoder_config: DecoderConfig =
             match serde_json::from_value(Value::Object(config.config.clone())) {
                 Ok(cfg) => cfg,
@@ -377,9 +410,9 @@ impl SourceMiddlewareFactory for DecoderFactory {
             decoder_config
         );
 
-        Ok(Arc::new(Decoder {
+        Ok(Decoder {
             name: config.name.to_string(),
             config: decoder_config,
-        }))
+        })
     }
 }

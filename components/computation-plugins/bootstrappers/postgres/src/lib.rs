@@ -1,28 +1,34 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-mod shared;
-mod snapshot;
+//! Native PostgreSQL bootstrap providers.
+//!
+//! - `drasi.postgres/snapshot` is a standalone, read-only snapshot. It serves
+//!   the source whose bootstrap input it is connected to (that source's
+//!   namespace and stream, from the graph relation) and declares a quiescent
+//!   completion.
+//! - The coordinated and shared providers pair with the native PostgreSQL
+//!   source through its declared coordination protocol. The source's
+//!   coordinator creates their providers from the source's own identity,
+//!   stream and settings (see `drasi_computation_source_postgres::bootstrap`),
+//!   so they take no configuration and can only create slots under that
+//!   source's managed prefix.
+//!
+//! Every provider reads only the tables whose label the query declares.
+
 mod standalone;
 
 use anyhow::{Context, Result};
-use drasi_computation_contracts::{
-    ComponentId, GraphChangeCodec, ImplementationIdentity, StreamId,
-};
+use drasi_computation_contracts::{GraphChangeCodec, ImplementationIdentity};
 use drasi_computation_plugin_sdk::{
-    BootstrapFactory, BootstrapFactoryMetadata, ConfigSchema, ConfigType, CreateRequest,
-    NativeSourceProgress, PluginDefinition,
+    BootstrapCompletionKind, BootstrapFactory, BootstrapFactoryMetadata,
+    BootstrapOutputDescription, BootstrapSession, CreateRequest, ElementNamespace,
+    NativeBootstrapProvider, NativeSourceProgress, PairedBootstrapFactory, PluginDefinition,
 };
-use serde::Deserialize;
-
-pub use drasi_postgres_common::replication::SlotOwnership;
+use drasi_postgres_common::replication::coordination;
 use std::sync::Arc;
 
-pub use drasi_computation_plugin_sdk::NativeBootstrapProvider;
-pub use drasi_postgres_common::replication::PostgresTransactionConfig;
-pub use shared::PostgresSharedSnapshot;
-pub use snapshot::PostgresSnapshot;
-pub use standalone::{PostgresBootstrapConfig, PostgresBootstrapProvider};
+pub use standalone::{definition, PostgresBootstrapConfig, PostgresBootstrapProvider};
 
 pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
 pub const POSTGRES_BOOTSTRAP: &str = "drasi.postgres/coordinated-bootstrap";
@@ -32,73 +38,38 @@ pub const POSTGRES_SHARED_ROW_BOOTSTRAP: &str = "drasi.postgres/shared-row-boots
 pub const POSTGRES_SHARED_TRANSACTION_BOOTSTRAP: &str =
     "drasi.postgres/shared-transaction-bootstrap";
 
-pub struct PostgresBootstrapFactory;
 pub struct StandalonePostgresBootstrapFactory;
-pub struct PostgresRowBootstrapFactory;
-pub struct PostgresSharedRowBootstrapFactory;
-pub struct PostgresSharedTransactionBootstrapFactory;
 
-/// A coordinated provider's configuration: `source` and `stream` beside the
-/// same flat settings the paired source accepts, so both compute one binding
-/// and one managed slot identity.
-struct Configuration {
-    source: String,
-    stream: String,
-    settings: PostgresTransactionConfig,
+fn paired(name: &str, protocol: &str) -> PairedBootstrapFactory {
+    PairedBootstrapFactory::new(
+        ImplementationIdentity::try_new(name, "1").expect("constant implementation"),
+        coordination::protocol(protocol),
+    )
 }
 
-impl Configuration {
-    fn from_value(value: &serde_json::Value) -> Result<Self> {
-        let mut object = value
-            .as_object()
-            .context("PostgreSQL bootstrap configuration must be an object")?
-            .clone();
-        let mut take = |name: &str| match object.remove(name) {
-            Some(serde_json::Value::String(value)) => Ok(value),
-            _ => anyhow::bail!("{name} must be a string"),
-        };
-        let source = take("source")?;
-        let stream = take("stream")?;
-        let settings = serde_json::from_value(serde_json::Value::Object(object))
-            .context("invalid PostgreSQL settings")?;
-        Ok(Self {
-            source,
-            stream,
-            settings,
-        })
-    }
+/// Paired with `drasi/postgres-transactions` configured with
+/// `coordinatedSnapshot: true`.
+pub fn coordinated_factory() -> PairedBootstrapFactory {
+    paired(POSTGRES_BOOTSTRAP, coordination::COORDINATED_TRANSACTIONS)
 }
 
-/// The flat settings fields shared with the native source.
-const SETTINGS_FIELDS: &[(&str, ConfigType, bool)] = &[
-    ("host", ConfigType::String, false),
-    ("port", ConfigType::Integer, false),
-    ("database", ConfigType::String, true),
-    ("user", ConfigType::String, true),
-    ("password", ConfigType::String, false),
-    ("sslMode", ConfigType::String, false),
-    ("tlsCaPem", ConfigType::String, false),
-    ("publication", ConfigType::String, true),
-    ("tables", ConfigType::Array, false),
-    ("tableKeys", ConfigType::Array, false),
-    ("slotOwnership", ConfigType::String, false),
-    ("slotName", ConfigType::String, false),
-    ("startLsn", ConfigType::String, false),
-    ("maxTransactionChanges", ConfigType::Integer, false),
-    ("maxTransactionBytes", ConfigType::Integer, false),
-    ("maxTransactionDurationMs", ConfigType::Integer, false),
-    ("maxProtocolBytes", ConfigType::Integer, false),
-    ("ioTimeoutMs", ConfigType::Integer, false),
-    ("feedbackIntervalMs", ConfigType::Integer, false),
-    ("reconnectBudgetMs", ConfigType::Integer, false),
-];
+/// Paired with `drasi.postgres/changes` configured with
+/// `coordinatedSnapshot: true`.
+pub fn coordinated_row_factory() -> PairedBootstrapFactory {
+    paired(POSTGRES_ROW_BOOTSTRAP, coordination::COORDINATED_ROWS)
+}
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StandaloneConfiguration {
-    source: String,
-    stream: String,
-    settings: PostgresBootstrapConfig,
+/// Paired with `drasi.postgres/shared-changes`.
+pub fn shared_row_factory() -> PairedBootstrapFactory {
+    paired(POSTGRES_SHARED_ROW_BOOTSTRAP, coordination::SHARED_ROWS)
+}
+
+/// Paired with `drasi.postgres/shared-transactions`.
+pub fn shared_transaction_factory() -> PairedBootstrapFactory {
+    paired(
+        POSTGRES_SHARED_TRANSACTION_BOOTSTRAP,
+        coordination::SHARED_TRANSACTIONS,
+    )
 }
 
 pub fn plugin() -> Result<PluginDefinition> {
@@ -107,93 +78,46 @@ pub fn plugin() -> Result<PluginDefinition> {
         env!("CARGO_PKG_VERSION"),
         Vec::new(),
         vec![
-            Arc::new(PostgresBootstrapFactory),
+            Arc::new(coordinated_factory()),
             Arc::new(StandalonePostgresBootstrapFactory),
-            Arc::new(PostgresRowBootstrapFactory),
-            Arc::new(PostgresSharedRowBootstrapFactory),
-            Arc::new(PostgresSharedTransactionBootstrapFactory),
+            Arc::new(coordinated_row_factory()),
+            Arc::new(shared_row_factory()),
+            Arc::new(shared_transaction_factory()),
         ],
         vec![GraphChangeCodec::schema()],
     )
 }
 
-impl BootstrapFactory for PostgresSharedTransactionBootstrapFactory {
-    fn metadata(&self) -> BootstrapFactoryMetadata {
-        let mut metadata = PostgresBootstrapFactory.metadata();
-        metadata.implementation =
-            ImplementationIdentity::try_new(POSTGRES_SHARED_TRANSACTION_BOOTSTRAP, "1")
-                .expect("constant implementation");
-        metadata
-    }
-    fn create(
-        &self,
-        request: &CreateRequest,
-        progress: Option<NativeSourceProgress>,
-    ) -> Result<Arc<dyn NativeBootstrapProvider>> {
-        let (config, scope, reader) = scoped_configuration(request, progress)?;
-        let mut provider = PostgresSharedSnapshot::transactions(
-            ComponentId::try_new(config.source)?,
-            StreamId::try_new(config.stream)?,
-            config.settings,
-            reader,
-        )?;
-        provider.query_scope = Some((scope, request.id.clone()));
-        Ok(Arc::new(provider))
-    }
-}
-
-impl BootstrapFactory for PostgresSharedRowBootstrapFactory {
-    fn metadata(&self) -> BootstrapFactoryMetadata {
-        let mut metadata = PostgresBootstrapFactory.metadata();
-        metadata.implementation =
-            ImplementationIdentity::try_new(POSTGRES_SHARED_ROW_BOOTSTRAP, "1")
-                .expect("constant implementation");
-        metadata
-    }
-
-    fn create(
-        &self,
-        request: &CreateRequest,
-        progress: Option<NativeSourceProgress>,
-    ) -> Result<Arc<dyn NativeBootstrapProvider>> {
-        let (config, scope, reader) = scoped_configuration(request, progress)?;
-        let mut provider = PostgresSharedSnapshot::new(
-            ComponentId::try_new(config.source)?,
-            StreamId::try_new(config.stream)?,
-            config.settings,
-            reader,
-        )?;
-        provider.query_scope = Some((scope, request.id.clone()));
-        Ok(Arc::new(provider))
-    }
-}
-
 impl BootstrapFactory for StandalonePostgresBootstrapFactory {
     fn metadata(&self) -> BootstrapFactoryMetadata {
-        let mut configuration = ConfigSchema::from_fields([
-            ("source", ConfigType::ComponentId, true),
-            ("stream", ConfigType::String, true),
-            ("settings", ConfigType::Object, true),
-        ]);
-        configuration
-            .fields
-            .get_mut("settings")
-            .expect("settings")
-            .secret = true;
         BootstrapFactoryMetadata {
             implementation: ImplementationIdentity::try_new(POSTGRES_SNAPSHOT, "1")
                 .expect("constant implementation"),
             configuration_version: 1,
-            configuration,
+            configuration: standalone::definition().schema(),
             source_progress: false,
+            pairing: None,
         }
+    }
+
+    /// Quiescent, unpaired, in the served source's namespace.
+    fn describe(&self, configuration: &serde_json::Value) -> Result<BootstrapOutputDescription> {
+        self.metadata().configuration.validate(configuration)?;
+        PostgresBootstrapConfig::from_value(configuration)?;
+        Ok(BootstrapOutputDescription {
+            completion: BootstrapCompletionKind::Quiescent,
+            pairing: None,
+            namespace: ElementNamespace::ServedSource,
+            identity: None,
+        })
     }
 
     fn create(
         &self,
         request: &CreateRequest,
+        session: &BootstrapSession,
         progress: Option<NativeSourceProgress>,
-    ) -> Result<Arc<dyn NativeBootstrapProvider>> {
+    ) -> Result<NativeBootstrapProvider> {
         anyhow::ensure!(
             progress.is_none(),
             "standalone PostgreSQL snapshots do not own source progress"
@@ -201,155 +125,73 @@ impl BootstrapFactory for StandalonePostgresBootstrapFactory {
         self.metadata()
             .configuration
             .validate(&request.configuration)?;
-        let config: StandaloneConfiguration =
-            serde_json::from_value(request.configuration.clone())?;
+        let config = PostgresBootstrapConfig::from_value(&request.configuration)?;
         let scope = request
             .scope
             .clone()
             .context("PostgreSQL snapshot requires query scope")?;
         drasi_computation_contracts::validate_identifier("instance", &scope.instance_id)?;
         drasi_computation_contracts::validate_identifier("graph", &scope.graph_id)?;
-        let mut provider = PostgresBootstrapProvider::new(
-            ComponentId::try_new(config.source)?,
-            StreamId::try_new(config.stream)?,
-            config.settings,
-        )?;
+        let served = session.served()?;
+        let mut provider =
+            PostgresBootstrapProvider::new(served.source.clone(), served.stream.clone(), config)?
+                .with_labels(session.labels.clone());
         provider.query_scope = Some((scope, request.id.clone()));
-        Ok(Arc::new(provider))
+        Ok(NativeBootstrapProvider::Quiescent(Arc::new(provider)))
     }
 }
 
 #[cfg(feature = "dynamic-plugin")]
 drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
 
-impl BootstrapFactory for PostgresRowBootstrapFactory {
-    fn metadata(&self) -> BootstrapFactoryMetadata {
-        let mut metadata = PostgresBootstrapFactory.metadata();
-        metadata.implementation = ImplementationIdentity::try_new(POSTGRES_ROW_BOOTSTRAP, "1")
-            .expect("constant implementation");
-        metadata
-    }
-    fn create(
-        &self,
-        request: &CreateRequest,
-        progress: Option<NativeSourceProgress>,
-    ) -> Result<Arc<dyn NativeBootstrapProvider>> {
-        create_coordinated(request, progress, true)
-    }
-}
-
-impl BootstrapFactory for PostgresBootstrapFactory {
-    fn metadata(&self) -> BootstrapFactoryMetadata {
-        let mut configuration = ConfigSchema::from_fields(
-            [
-                ("source", ConfigType::ComponentId, true),
-                ("stream", ConfigType::String, true),
-            ]
-            .into_iter()
-            .chain(SETTINGS_FIELDS.iter().copied()),
-        );
-        configuration
-            .fields
-            .get_mut("password")
-            .expect("password")
-            .secret = true;
-        BootstrapFactoryMetadata {
-            implementation: ImplementationIdentity::try_new(POSTGRES_BOOTSTRAP, "1")
-                .expect("constant implementation"),
-            configuration_version: 1,
-            configuration,
-            source_progress: true,
-        }
-    }
-
-    fn create(
-        &self,
-        request: &CreateRequest,
-        progress: Option<NativeSourceProgress>,
-    ) -> Result<Arc<dyn NativeBootstrapProvider>> {
-        create_coordinated(request, progress, false)
-    }
-}
-
-fn create_coordinated(
-    request: &CreateRequest,
-    progress: Option<NativeSourceProgress>,
-    rows: bool,
-) -> Result<Arc<dyn NativeBootstrapProvider>> {
-    let (config, scope, reader) = scoped_configuration(request, progress)?;
-    let constructor = if rows {
-        PostgresSnapshot::rows
-    } else {
-        PostgresSnapshot::new
-    };
-    let mut provider = constructor(
-        ComponentId::try_new(config.source)?,
-        StreamId::try_new(config.stream)?,
-        config.settings,
-        reader,
-    )?;
-    provider.query_scope = Some((scope, request.id.clone()));
-    Ok(Arc::new(provider))
-}
-
-fn scoped_configuration(
-    request: &CreateRequest,
-    progress: Option<NativeSourceProgress>,
-) -> Result<(
-    Configuration,
-    drasi_computation_plugin_sdk::Scope,
-    drasi_computation_contracts::SourceProgressView,
-)> {
-    PostgresBootstrapFactory
-        .metadata()
-        .configuration
-        .validate(&request.configuration)?;
-    let config = Configuration::from_value(&request.configuration)?;
-    let scope = request
-        .scope
-        .clone()
-        .context("PostgreSQL bootstrap requires query scope")?;
-    drasi_computation_contracts::validate_identifier("instance", &scope.instance_id)?;
-    drasi_computation_contracts::validate_identifier("graph", &scope.graph_id)?;
-    let reader = progress
-        .context("PostgreSQL bootstrap requires its actual query progress owner")?
-        .reader();
-    anyhow::ensure!(
-        reader.graph_id() == scope.graph_id && reader.component_id() == &request.id,
-        "PostgreSQL bootstrap progress belongs to another query"
-    );
-    Ok((config, scope, reader))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use drasi_computation_plugin_sdk::ExportedPlugin;
+    use drasi_computation_contracts::{ComponentId, StreamId};
+    use drasi_computation_plugin_sdk::{ExportedPlugin, Scope, ServedSource};
 
     const SOURCE_ID: &str = "ca61606a-85bf-514b-83b4-bdf81b539289";
 
     #[test]
-    fn bootstrap_library_has_only_a_query_scoped_recoverable_factory() -> Result<()> {
+    fn coordinated_factories_are_paired_and_take_no_settings() -> Result<()> {
         ExportedPlugin::new(plugin()?)?;
-        let metadata = PostgresBootstrapFactory.metadata();
-        assert!(metadata.source_progress);
-        assert!(metadata.configuration.fields["password"].secret);
-        assert!(!metadata.configuration.fields.contains_key("settings"));
-        assert!(
-            StandalonePostgresBootstrapFactory
-                .metadata()
-                .configuration
-                .fields["settings"]
-                .secret
-        );
+        for (factory, protocol) in [
+            (
+                coordinated_factory(),
+                coordination::COORDINATED_TRANSACTIONS,
+            ),
+            (coordinated_row_factory(), coordination::COORDINATED_ROWS),
+            (shared_row_factory(), coordination::SHARED_ROWS),
+            (
+                shared_transaction_factory(),
+                coordination::SHARED_TRANSACTIONS,
+            ),
+        ] {
+            let metadata = factory.metadata();
+            assert!(metadata.source_progress);
+            assert_eq!(metadata.pairing, Some(coordination::protocol(protocol)));
+            assert!(
+                metadata.configuration.fields.is_empty(),
+                "the source owns the settings, slot prefix and table selection"
+            );
+            metadata.validate_description(&factory.describe(&serde_json::json!({}))?)?;
+            assert!(factory
+                .describe(&serde_json::json!({"source": SOURCE_ID, "stream": "items/out"}))
+                .is_err());
+        }
+        let standalone = StandalonePostgresBootstrapFactory.metadata().configuration;
+        let secrets: Vec<_> = standalone
+            .fields
+            .iter()
+            .filter(|(_, field)| field.secret)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert_eq!(secrets, ["password"], "only the password is secret");
         Ok(())
     }
 
-    #[test]
-    fn standalone_factory_needs_no_replication_or_progress_and_is_configuration_only() -> Result<()>
-    {
-        use drasi_computation_plugin_sdk::Scope;
-        let request = CreateRequest {
+    fn request() -> Result<CreateRequest> {
+        Ok(CreateRequest {
             inputs: Vec::new(),
             activation_credentials_bound: false,
             update_directive: None,
@@ -362,24 +204,92 @@ mod tests {
                 generation: 1,
             }),
             configuration: serde_json::json!({
-                "source": SOURCE_ID, "stream": "seed/out", "settings": {
-                    "host": "must-not-connect-at-construction", "database": "db", "user": "reader",
-                    "tables": ["items"], "max_tables": 8, "max_protocol_bytes": 65536,
-                    "io_timeout_ms": 1000, "max_duration_ms": 10000
-                }
+                "host": "must-not-connect-at-construction", "database": "db", "user": "reader",
+                "tables": ["items"], "maxTables": 8, "maxProtocolBytes": 65536,
+                "ioTimeoutMs": 1000, "maxDurationMs": 10000
             }),
-        };
-        let provider = StandalonePostgresBootstrapFactory.create(&request, None)?;
+        })
+    }
+
+    #[test]
+    fn standalone_factory_needs_no_replication_or_progress_and_is_configuration_only() -> Result<()>
+    {
+        let request = request()?;
+        let session = BootstrapSession::new(
+            Some(ServedSource {
+                source: ComponentId::try_new(SOURCE_ID)?,
+                stream: StreamId::try_new("seed/out")?,
+            }),
+            None,
+        );
+        let provider = StandalonePostgresBootstrapFactory.create(&request, &session, None)?;
+        assert_eq!(provider.completion(), BootstrapCompletionKind::Quiescent);
         provider.validate_query_scope("instance", "graph", &request.id)?;
         assert!(provider.recovery_reader().is_none());
-        assert!(
-            !StandalonePostgresBootstrapFactory
-                .metadata()
-                .source_progress
-        );
         assert!(provider
             .validate_query_scope("other", "graph", &request.id)
             .is_err());
+        assert!(
+            StandalonePostgresBootstrapFactory
+                .create(&request, &BootstrapSession::default(), None)
+                .is_err(),
+            "the served source comes from the graph relation"
+        );
+        let mut legacy = request.configuration.clone();
+        legacy["source"] = serde_json::json!(SOURCE_ID);
+        assert!(StandalonePostgresBootstrapFactory
+            .describe(&legacy)
+            .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn standalone_configuration_is_flat_camel_case_with_published_defaults() -> Result<()> {
+        let definition = definition();
+        let schema = definition.schema();
+        drasi_computation_plugin_sdk::testing::ensure_camel_case_configuration(&schema)?;
+        let minimal = serde_json::json!({"database": "db", "user": "reader", "tables": ["items"]});
+        let parsed = serde_json::to_value(PostgresBootstrapConfig::from_value(&minimal)?)?;
+        for (name, field) in definition.details().fields {
+            if let Some(default) = field.default {
+                assert_eq!(parsed.get(&name), Some(&default), "{name}");
+            }
+        }
+        let shared = drasi_computation_plugin_sdk::ConfigDefinition::try_new(
+            drasi_postgres_common::replication::definition::options(),
+        )?
+        .schema();
+        for name in [
+            "host",
+            "port",
+            "sslMode",
+            "tlsCaPem",
+            "tableKeys",
+            "password",
+        ] {
+            assert_eq!(
+                schema.fields[name].secret, shared.fields[name].secret,
+                "{name} is published as the source publishes it"
+            );
+        }
+        for (key, value) in [
+            ("settings", serde_json::json!({})),
+            ("max_tables", serde_json::json!(4)),
+            ("ssl_mode", serde_json::json!("disable")),
+            (
+                "tableKeys",
+                serde_json::json!([{"table": "items", "key_columns": ["id"]}]),
+            ),
+        ] {
+            let mut config = minimal.clone();
+            config[key] = value;
+            assert!(
+                StandalonePostgresBootstrapFactory
+                    .describe(&config)
+                    .is_err(),
+                "{key} is refused"
+            );
+        }
         Ok(())
     }
 }

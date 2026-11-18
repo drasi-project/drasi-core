@@ -280,9 +280,18 @@ pub struct PluginVTable {
 pub struct FactoryVTable {
     pub header: Header,
     pub release: Option<unsafe extern "C" fn(*mut c_void)>,
-    /// Configuration-only constructor. No I/O, activation, workers or blocking.
-    pub create:
-        Option<unsafe extern "C" fn(*mut c_void, BorrowedBytes, *mut ComponentHandle) -> Status>,
+    /// The single configuration-only constructor. No I/O, activation, workers
+    /// or blocking. The non-null `ServiceBindingsV1` carries every Host service
+    /// bound to this construction together; the Host binds only services the
+    /// factory's manifest declares.
+    pub create: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            BorrowedBytes,
+            *const services::ServiceBindingsV1,
+            *mut ComponentHandle,
+        ) -> Status,
+    >,
     /// Pure factory planner. Input is a JSON UpdateRequest and success returns a
     /// JSON Assessment, each bounded by MAX_METADATA_BYTES. No construction, I/O,
     /// activation or inspection of mutable external state. An unsupported change
@@ -371,6 +380,12 @@ pub mod operation {
     /// Management apply of an accepted update at a Pause or Stop boundary.
     /// Begun only through `management::PluginManagementV1::apply`.
     pub const APPLY: u32 = 28;
+    /// Independent of data and lifecycle calls, like WAKE_WAIT: completes with
+    /// a retryable failure once work the current activation registered outside
+    /// its operations (an owned worker) has failed, for example by panicking.
+    /// It stays pending while that work is healthy and never succeeds. Begun
+    /// only while the component runs; STOP and PAUSE end it with CLOSED.
+    pub const WORKER_FAILURE: u32 = 29;
 }
 
 pub const POLL_PENDING: u32 = 0;

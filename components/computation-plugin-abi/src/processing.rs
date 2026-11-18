@@ -6,26 +6,8 @@
 use crate::*;
 
 pub const VERSION: u32 = 1;
-pub const SYMBOL: &[u8] = b"drasi_computation_plugin_processing_v1\0";
-pub type ProcessingFn = unsafe extern "C" fn() -> *const PluginProcessingV1;
 pub const MAX_OUTBOX_PAGE_RECORDS: usize = 1024;
 pub const MAX_LIVE_RESULT_PAGE_RECORDS: usize = 1024;
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct PluginProcessingV1 {
-    pub header: Header,
-    pub version: u32,
-    pub reserved: u32,
-    pub create: Option<
-        unsafe extern "C" fn(
-            *mut c_void,
-            BorrowedBytes,
-            *const ProcessingV1,
-            *mut ComponentHandle,
-        ) -> Status,
-    >,
-}
 
 /// A retained host capability. Each accepted operation is driven within the
 /// actual host-owned transaction; the plugin cannot commit it independently.
@@ -177,7 +159,6 @@ mod tests {
     #[test]
     fn processing_extension_does_not_change_base_layouts() {
         let pointer = size_of::<usize>();
-        assert_eq!(size_of::<PluginProcessingV1>(), 24 + pointer);
         assert_eq!(size_of::<ProcessingV1>(), 16 + 4 * pointer);
         assert_eq!(size_of::<ScheduledProcessingV1>(), 24 + 5 * pointer);
         assert_eq!(size_of::<ProcessingWorkV1>(), 16 + 4 * pointer);

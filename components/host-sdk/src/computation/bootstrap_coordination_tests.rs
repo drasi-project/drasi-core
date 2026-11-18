@@ -36,6 +36,7 @@ struct State {
     foreign_open_reader: AtomicBool,
     invalid_open_scope: AtomicBool,
     source_lifecycle: Arc<SourceLifecycle>,
+    opened_labels: Mutex<Option<sdk::BootstrapLabels>>,
 }
 
 fn named_component_id(value: &str) -> ComponentId {
@@ -104,31 +105,61 @@ fn metadata() -> sdk::FactoryMetadata {
 }
 
 impl sdk::Factory for SourceFactory {
+    /// Every field described (fixture).
+    fn configuration_details(&self) -> sdk::ConfigDetails {
+        sdk::ConfigDetails {
+            fields: sdk::Factory::metadata(self)
+                .configuration
+                .fields
+                .into_keys()
+                .map(|name| {
+                    let details = sdk::configuration::ConfigFieldDetails {
+                        description: format!("Fixture field {name}."),
+                        ..Default::default()
+                    };
+                    (name, details)
+                })
+                .collect(),
+        }
+    }
     fn describe(
         &self,
         _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
     ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(drasi_computation_plugin_sdk::ComponentDescription::undeclared())
+        Ok(
+            drasi_computation_plugin_sdk::ComponentDescription::undeclared().with_coordination(
+                sdk::BootstrapCoordination {
+                    protocol: protocol(),
+                    required: true,
+                },
+            ),
+        )
     }
     fn metadata(&self) -> sdk::FactoryMetadata {
-        metadata()
+        let mut metadata = metadata();
+        metadata.capabilities.services = sdk::HostServices {
+            source_progress: !self.shared,
+            consumer_progress: self.shared,
+            bootstrap_coordination: true,
+            ..Default::default()
+        };
+        metadata
     }
-    fn supports_source_progress(&self) -> bool {
-        !self.shared
-    }
-    fn supports_consumer_progress(&self) -> bool {
-        self.shared
-    }
-    fn supports_bootstrap_coordination(&self) -> bool {
-        true
-    }
+
     fn create(
         &self,
         _: &CreateRequest,
         _: sdk::ControlSender,
+        _services: sdk::ServiceBindings,
     ) -> anyhow::Result<sdk::CreatedComponent> {
         anyhow::bail!("fixture requires a coordinator")
     }
+    fn bootstrap_coordination(&self) -> Option<&dyn sdk::SourceBootstrapCoordination> {
+        Some(self)
+    }
+}
+
+impl sdk::SourceBootstrapCoordination for SourceFactory {
     fn create_bootstrap_coordinator(
         &self,
         _: &CreateRequest,
@@ -232,8 +263,15 @@ impl sdk::NativeSource for LiveSource {
     }
 }
 
+fn protocol() -> sdk::BootstrapProtocol {
+    sdk::BootstrapProtocol::new("test/coordinated", 1)
+}
+
 #[async_trait]
 impl sdk::NativeSourceBootstrapCoordinator for State {
+    fn protocol(&self) -> sdk::BootstrapProtocol {
+        protocol()
+    }
     fn create_source(
         &self,
         request: &CreateRequest,
@@ -259,8 +297,10 @@ impl sdk::NativeSourceBootstrapCoordinator for State {
         &self,
         query: &ComponentId,
         mut progress: SourceProgressView,
-    ) -> anyhow::Result<Arc<dyn sdk::NativeBootstrapProvider>> {
+        labels: Option<&sdk::BootstrapLabels>,
+    ) -> anyhow::Result<Arc<dyn sdk::DurableBootstrapProvider>> {
         self.open_calls.fetch_add(1, Ordering::SeqCst);
+        *self.opened_labels.lock().unwrap() = labels.cloned();
         anyhow::ensure!(!self.fail_open.swap(false, Ordering::SeqCst), "open failed");
         if self.foreign_open_reader.swap(false, Ordering::SeqCst) {
             progress = SourceProgressView::new(Arc::new(QuerySourceProgress::new(
@@ -290,13 +330,30 @@ impl sdk::NativeSourceBootstrapCoordinator for State {
 struct Provider(SourceProgressView, Arc<ProviderStop>, bool);
 
 #[async_trait]
-impl sdk::NativeBootstrapProvider for Provider {
+impl sdk::DurableBootstrapProvider for Provider {
     fn validate_query_scope(&self, _: &str, _: &str, _: &ComponentId) -> anyhow::Result<()> {
         anyhow::ensure!(!self.2, "provider scope mismatch");
         Ok(())
     }
     fn recovery_reader(&self) -> Option<SourceProgressView> {
         Some(self.0.clone())
+    }
+    async fn prepare(
+        &self,
+        _: Option<&dyn drasi_computation_contracts::BootstrapState>,
+    ) -> anyhow::Result<drasi_computation_contracts::BootstrapPreparation> {
+        Ok(drasi_computation_contracts::BootstrapPreparation::Ready)
+    }
+    fn has_pending_snapshot(&self) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+    async fn complete_snapshot(
+        &self,
+    ) -> anyhow::Result<Vec<drasi_computation_contracts::BootstrapWatermark>> {
+        Ok(Vec::new())
+    }
+    fn completion_state(&self) -> anyhow::Result<Option<bytes::Bytes>> {
+        Ok(None)
     }
     async fn stop(&self) -> anyhow::Result<()> {
         self.1.started.fetch_add(1, Ordering::SeqCst);
@@ -309,7 +366,10 @@ impl sdk::NativeBootstrapProvider for Provider {
         );
         Ok(())
     }
-    async fn snapshot(&self) -> anyhow::Result<ComputationBootstrapSnapshot> {
+    async fn snapshot(
+        &self,
+        _: Option<&dyn drasi_computation_contracts::BootstrapState>,
+    ) -> anyhow::Result<ComputationBootstrapSnapshot> {
         self.0.snapshot()?;
         Ok(ComputationBootstrapSnapshot {
             changes: Box::pin(tokio_stream::empty()),
@@ -326,16 +386,23 @@ impl sdk::BootstrapFactory for PairedFactory {
             configuration_version: 1,
             configuration: sdk::ConfigSchema::default(),
             source_progress: true,
+            pairing: Some(protocol()),
         }
     }
-    fn requires_source_bootstrap(&self) -> bool {
-        true
+    fn describe(&self, _: &serde_json::Value) -> anyhow::Result<sdk::BootstrapOutputDescription> {
+        Ok(sdk::BootstrapOutputDescription {
+            completion: sdk::BootstrapCompletionKind::Durable,
+            pairing: Some(protocol()),
+            namespace: sdk::ElementNamespace::ServedSource,
+            identity: None,
+        })
     }
     fn create(
         &self,
         _: &CreateRequest,
+        _: &sdk::BootstrapSession,
         _: Option<sdk::NativeSourceProgress>,
-    ) -> anyhow::Result<Arc<dyn sdk::NativeBootstrapProvider>> {
+    ) -> anyhow::Result<sdk::NativeBootstrapProvider> {
         anyhow::bail!("unpaired fixture")
     }
     fn create_with_source_bootstrap(
@@ -344,8 +411,9 @@ impl sdk::BootstrapFactory for PairedFactory {
         source: sdk::NativeSourceBootstrap,
     ) -> anyhow::Result<sdk::LinkedBootstrapProvider> {
         anyhow::ensure!(
-            source.metadata().source.id
-                == ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?,
+            source.metadata().source
+                == ComponentId::try_new("f0d98da5-9a87-5a60-adc0-9dc6bf36a2d2")?
+                && source.metadata().protocol == protocol(),
             "wrong source"
         );
         source.open()
@@ -441,7 +509,7 @@ async fn coordination_matrix() -> anyhow::Result<()> {
             progress(shared, &query, &group),
         )?;
         readers_active(&state, true);
-        let binding = coordinator.bind_query(query.component_id(), &scope(0), &query)?;
+        let binding = coordinator.bind_query(query.component_id(), &scope(0), &query, None)?;
         let table = binding.table();
         unsafe {
             table.retain.unwrap()(table.context);
@@ -527,6 +595,7 @@ async fn coordination_matrix() -> anyhow::Result<()> {
                 json!({}),
                 Some(scope(0)),
                 Some(query.clone()),
+                drasi_computation_plugin_sdk::BootstrapSession::default(),
             )
             .is_err());
         assert!(paired_factory
@@ -536,6 +605,7 @@ async fn coordination_matrix() -> anyhow::Result<()> {
                 scope(0),
                 foreign,
                 coordinator.clone(),
+                None,
             )
             .is_err());
         assert!(paired_factory
@@ -545,6 +615,7 @@ async fn coordination_matrix() -> anyhow::Result<()> {
                 scope(0),
                 query.clone(),
                 coordinator.clone(),
+                None,
             )
             .is_err());
         let provider = paired_factory.create_paired_query_provider(
@@ -553,6 +624,7 @@ async fn coordination_matrix() -> anyhow::Result<()> {
             scope(0),
             query.clone(),
             coordinator.clone(),
+            None,
         )?;
         assert!(
             paired_factory
@@ -562,6 +634,7 @@ async fn coordination_matrix() -> anyhow::Result<()> {
                     scope(0),
                     query.clone(),
                     coordinator.clone(),
+                    None,
                 )
                 .is_err(),
             "query provider leases cannot overlap"
@@ -698,6 +771,7 @@ async fn coordination_matrix() -> anyhow::Result<()> {
                 scope(0),
                 query.clone(),
                 coordinator.clone(),
+                None,
             )
             .is_err());
         state.stop_release.notify_one();
@@ -754,6 +828,7 @@ async fn replacement_matrix() -> anyhow::Result<()> {
                 scope(0),
                 query.clone(),
                 coordinator.clone(),
+                None,
             )
         };
         let old = open()?;
@@ -856,6 +931,7 @@ async fn bootstrap_coordination_dropped_unstopped_or_failed_providers_remain_fen
                     scope(0),
                     query.clone(),
                     coordinator.clone(),
+                    None,
                 )
             };
             let provider = open()?;
@@ -1030,6 +1106,7 @@ async fn rejected_replacement_matrix() -> anyhow::Result<()> {
                 scope(0),
                 query.clone(),
                 coordinator.clone(),
+                None,
             )
         };
         let old = open()?;
@@ -1105,6 +1182,7 @@ async fn bootstrap_coordination_shared_queries_keep_independent_provider_leases(
             scope(0),
             owner.clone(),
             coordinator.clone(),
+            None,
         )
     };
     let first = open(&left)?;
@@ -1247,7 +1325,7 @@ async fn bootstrap_coordination_stop_keeps_every_subscription_until_cleanup() ->
         coordinator.shutdown().await?;
         assert_eq!(state.stop_started.load(Ordering::SeqCst), 2);
         assert!(coordinator
-            .bind_query(query.component_id(), &scope(0), &query)
+            .bind_query(query.component_id(), &scope(0), &query, None)
             .is_err());
     }
     Ok(())

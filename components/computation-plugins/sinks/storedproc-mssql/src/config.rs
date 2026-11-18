@@ -16,7 +16,7 @@ use drasi_computation_contracts::{
 pub use drasi_computation_storedproc_common::cursor::ProgressTable;
 use drasi_computation_storedproc_common::settings;
 use drasi_mssql_common::sql::CommandTemplate;
-use drasi_reaction_common::{sql_template::validate_parameter_only, OperationType, QueryConfig};
+use drasi_reaction_common::{OperationType, QueryConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::HashMap, time::Duration};
@@ -209,7 +209,6 @@ impl MsSqlStoredProcConfig {
                 continue;
             }
             configured += 1;
-            validate_parameter_only(template).with_context(|| format!("{location} template"))?;
             CommandTemplate::compile(template).with_context(|| format!("{location} template"))?;
         }
         ensure!(

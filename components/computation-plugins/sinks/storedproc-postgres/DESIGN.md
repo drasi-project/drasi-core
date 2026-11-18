@@ -2,7 +2,7 @@
 
 `drasi-computation-sink-storedproc-postgres` provides one native
 ComputationGraph factory, `drasi.postgres/storedproc` (implementation `1`,
-configuration version `1`, native ABI 4.0). This document describes how it
+configuration version `1`, native ABI 5.0). This document describes how it
 works. [CONFIGURATION.md](CONFIGURATION.md) lists every setting and how to
 operate the sink.
 
@@ -50,8 +50,8 @@ the task that drives it. It runs no other worker and opens no listener.
 | Planning | `src/management.rs` | Field-by-field update classification |
 | `PgSession`, `ProgressTable`, SQLSTATE classification | `postgres-common/src/delivery/progress.rs` | The PostgreSQL `Session` of the shared protocol: format-4 cursor and dead-letter SQL, table preparation, Erase, commit-outcome and transaction-control detection |
 | `Delivery`, `decide`, `OperationContext` | `computation-plugins/common/storedproc` | The cursor protocol, failure rules and atomic skip shared by the three stored-procedure sinks ([README](../../common/storedproc/README.md)) |
-| `CompiledTemplate`, `SqlParam` | `postgres-common/src/sql.rs` | Parameter-only rendering and typed binding |
-| Parameter-only rule | `reaction-common/src/sql_template.rs` | The single validator shared by the stored-procedure sinks |
+| `ParameterTemplate` | `computation-plugins/common/template` | The shared native template engine: parameter-only rule, strict rendering, `$N` placeholders ([README](../../common/template/README.md)) |
+| `SqlParam` | `postgres-common/src/sql.rs` | Typed binding |
 
 ## Input decoding and change projection
 

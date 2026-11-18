@@ -40,6 +40,23 @@ sdk::export_computation_plugin!(plugin());
 pub struct Factory;
 
 impl sdk::Factory for Factory {
+    /// Every field described (fixture).
+    fn configuration_details(&self) -> sdk::ConfigDetails {
+        sdk::ConfigDetails {
+            fields: sdk::Factory::metadata(self)
+                .configuration
+                .fields
+                .into_keys()
+                .map(|name| {
+                    let details = sdk::configuration::ConfigFieldDetails {
+                        description: format!("Fixture field {name}."),
+                        ..Default::default()
+                    };
+                    (name, details)
+                })
+                .collect(),
+        }
+    }
     fn describe(
         &self,
         _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
@@ -85,18 +102,13 @@ impl sdk::Factory for Factory {
 
     fn create(
         &self,
-        _: &sdk::CreateRequest,
-        _: sdk::ControlSender,
-    ) -> anyhow::Result<sdk::CreatedComponent> {
-        anyhow::bail!("scheduled delay requires the negotiated processing service")
-    }
-
-    fn create_with_processing(
-        &self,
         request: &sdk::CreateRequest,
         _: sdk::ControlSender,
-        processing: sdk::NativeProcessing,
+        services: sdk::ServiceBindings,
     ) -> anyhow::Result<sdk::CreatedComponent> {
+        let processing = services
+            .processing
+            .ok_or_else(|| anyhow::anyhow!("fixture requires its declared processing binding"))?;
         let scheduling = processing
             .scheduling()
             .context("missing scheduling service")?;
@@ -286,11 +298,6 @@ impl sdk::NativeTransformer for Delay {
         self.replay
     }
 
-    fn resume_delivery(&mut self) -> anyhow::Result<()> {
-        self.replay = self.pending.is_some();
-        Ok(())
-    }
-
     async fn transform(&mut self, input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
         let codec = self.codec.clone();
         let delay = self.delay_ms;
@@ -440,7 +447,13 @@ impl sdk::NativeTransformer for Delay {
             envelope: output,
         }])
     }
+    fn durable_output(&mut self) -> Option<&mut dyn sdk::NativeDurableOutput> {
+        Some(self)
+    }
+}
 
+#[async_trait]
+impl sdk::NativeDurableOutput for Delay {
     async fn delivery_completed(&mut self, outputs: &[OutputEnvelope]) -> anyhow::Result<()> {
         if outputs.is_empty() {
             return Ok(());
@@ -463,6 +476,11 @@ impl sdk::NativeTransformer for Delay {
             })
             .await?;
         self.pending = None;
+        Ok(())
+    }
+
+    fn resume_delivery(&mut self) -> anyhow::Result<()> {
+        self.replay = self.pending.is_some();
         Ok(())
     }
 }

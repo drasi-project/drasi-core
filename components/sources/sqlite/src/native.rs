@@ -243,14 +243,24 @@ impl ComputationComponent for SqliteSource {
     /// The loaded plugin's declaration for the same recovery model.
     fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
         use drasi_sqlite_common::native::SqliteProgress;
-        drasi_sqlite_common::native::description(
+        let description = drasi_sqlite_common::native::description(
             match (&self.progress, &self.consumer_progress) {
                 (Some(_), _) => SqliteProgress::Single,
                 (None, Some(_)) => SqliteProgress::Group,
                 (None, None) => SqliteProgress::None,
             },
             &self.descriptor,
-        )
+        );
+        // The element identities a connected file snapshot must equal, as
+        // the loaded plugin declares them. The selection was validated when
+        // the source was built.
+        match drasi_sqlite_common::native::element_identity(
+            &self.config.tables,
+            &self.config.table_keys,
+        ) {
+            Ok(identity) => description.with_element_identity(identity),
+            Err(_) => description,
+        }
     }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor

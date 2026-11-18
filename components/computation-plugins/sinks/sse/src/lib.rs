@@ -7,6 +7,7 @@
 
 mod component;
 mod config;
+mod render;
 
 use drasi_computation_contracts::GraphChangeCodec;
 use drasi_computation_plugin_sdk::PluginDefinition;

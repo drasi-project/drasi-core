@@ -2364,7 +2364,7 @@ maintained views in [section 6.1](#61-each-side-has-its-own-data-contract):
 The [maintained view transformer](../../components/computation-plugins/transformers/view/README.md)
 retains full input images and actual output associations to retract filtered
 rows, delete one-to-many children and remove old mapped identities. It applies
-map/relabel to reconstructed complete images, not historical events. It is not
+its declared stateless middleware to reconstructed complete images, not historical events. It is not
 a `map`/`jq` mode. Its current memory-backed profile exposes coherent snapshots
 and volatile producer progress, but no replay, durable storage, transactional
 processing, bootstrap input or input deduplication. Whole-envelope staging

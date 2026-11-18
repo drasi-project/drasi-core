@@ -27,6 +27,51 @@ pub use error::{SqlitePaused, SqliteStopping};
 pub use handle::{SqliteHandle, SqliteTransactionHandle};
 pub type SqliteRow = serde_json::Map<String, serde_json::Value>;
 
+/// The coordination protocol of a single-owner replay source and its paired
+/// `drasi.sqlite/coordinated-bootstrap` providers.
+pub const COORDINATED_PROTOCOL: &str = "drasi.sqlite/coordinated-snapshot";
+
+/// The coordination protocol of a shared (consumer group) source and its
+/// paired `drasi.sqlite/shared-bootstrap` providers.
+pub const SHARED_PROTOCOL: &str = "drasi.sqlite/shared-snapshot";
+
+/// Version of both coordination protocols.
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// The coordination protocol of a journal source (`shared` selects the
+/// consumer-group protocol).
+pub fn coordination_protocol(shared: bool) -> drasi_computation_contracts::BootstrapProtocol {
+    drasi_computation_contracts::BootstrapProtocol::new(
+        if shared {
+            SHARED_PROTOCOL
+        } else {
+            COORDINATED_PROTOCOL
+        },
+        PROTOCOL_VERSION,
+    )
+}
+
+/// The element identities a source or file snapshot produces for `tables`
+/// and `table_keys`, as the graph compares them.
+pub fn element_identity(
+    tables: &[String],
+    table_keys: &[crate::TableKeyConfig],
+) -> Result<drasi_computation_contracts::ElementIdentity> {
+    Ok(drasi_computation_contracts::ElementIdentity {
+        scheme: crate::ELEMENT_IDENTITY_SCHEME.into(),
+        binding: crate::element_identity_binding(tables, table_keys)?,
+    })
+}
+
+/// Whether a table is read for a query declaring `labels`: a row's label is
+/// its table's name, and `None` reads every captured table.
+pub fn table_selected(
+    labels: Option<&drasi_computation_contracts::BootstrapLabels>,
+    table: &str,
+) -> bool {
+    labels.is_none_or(|labels| labels.requests_node(table))
+}
+
 /// Where a source's replay progress is bound, which decides its declared
 /// description.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -13,8 +13,6 @@ readme = "README.md"
 [features]
 default = []
 sse = ["dep:anyhow", "dep:handlebars", "dep:serde_json"]
-# The parameter-only rule for stored-procedure command templates.
-sql = ["dep:anyhow", "dep:handlebars"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

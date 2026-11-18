@@ -2,7 +2,7 @@
 
 `drasi-computation-sink-sse` contains the configuration, factory, implementation
 and plugin export for **one** component: `drasi.network/sse-sink`
-(implementation `"1"`, configuration `1`, computation ABI 4.0).
+(implementation `"1"`, configuration `1`, computation ABI 5.0).
 
 It serves graph changes from any output (source, transformer or query) to
 browsers over Server-Sent Events, and can serve a point-in-time snapshot of a

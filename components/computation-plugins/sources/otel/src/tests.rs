@@ -215,7 +215,13 @@ fn metadata_is_valid() -> Result<()> {
     let metadata = OtelSourceFactory.metadata();
     assert_eq!(&*metadata.implementation.name, OTEL_SOURCE);
     assert!(metadata.capabilities.management);
-    assert!(!OtelSourceFactory.supports_source_admission());
+    assert!(
+        !OtelSourceFactory
+            .metadata()
+            .capabilities
+            .services
+            .source_admission
+    );
     metadata.descriptor(ComponentId::try_new(ID)?)?;
     plugin()?;
     Ok(())

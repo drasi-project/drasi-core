@@ -23,7 +23,7 @@ use drasi_computation_contracts::{
 };
 use drasi_computation_plugin_sdk::{
     lifecycle::Assessment, Capabilities, Component, ControlSender, CreateRequest, CreatedComponent,
-    Factory, FactoryMetadata, PluginDefinition, UpdateRequest,
+    Factory, FactoryMetadata, PluginDefinition, ServiceBindings, UpdatePlanner, UpdateRequest,
 };
 use std::sync::Arc;
 
@@ -60,16 +60,12 @@ impl Factory for GeometryFactory {
         Ok(request.volatile_transformer())
     }
 
-    fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
-        Some(config::definition().details())
+    fn configuration_details(&self) -> drasi_computation_plugin_sdk::ConfigDetails {
+        config::definition().details()
     }
 
-    fn supports_update_planning(&self) -> bool {
-        true
-    }
-
-    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
-        component::assess(request)
+    fn update_planner(&self) -> Option<&dyn UpdatePlanner> {
+        Some(self)
     }
 
     fn metadata(&self) -> FactoryMetadata {
@@ -106,6 +102,7 @@ impl Factory for GeometryFactory {
         &self,
         request: &CreateRequest,
         _control: ControlSender,
+        _services: ServiceBindings,
     ) -> anyhow::Result<CreatedComponent> {
         Ok(
             Component::Transformer(Box::new(component::GeometryTransformer::new(
@@ -115,5 +112,11 @@ impl Factory for GeometryFactory {
             )?))
             .into(),
         )
+    }
+}
+
+impl UpdatePlanner for GeometryFactory {
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
+        component::assess(request)
     }
 }

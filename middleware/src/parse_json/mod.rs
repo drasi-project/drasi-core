@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::common::{derive_removes_output, derived_property_is_set, ErrorHandling};
+use crate::stateless::{StatelessMiddleware, StatelessMiddlewareFactory};
 use async_trait::async_trait;
 use drasi_core_types::{
     interface::{
@@ -87,6 +88,16 @@ impl SourceMiddleware for ParseJson {
         &self,
         source_change: SourceChange,
         _element_index: &dyn ElementIndex,
+    ) -> Result<Vec<SourceChange>, MiddlewareError> {
+        StatelessMiddleware::apply(self, source_change).await
+    }
+}
+
+#[async_trait]
+impl StatelessMiddleware for ParseJson {
+    async fn apply(
+        &self,
+        source_change: SourceChange,
     ) -> Result<Vec<SourceChange>, MiddlewareError> {
         match source_change {
             SourceChange::Insert { mut element } => match self.parse_property(&mut element) {
@@ -311,6 +322,31 @@ impl SourceMiddlewareFactory for ParseJsonFactory {
         &self,
         config: &SourceMiddlewareConfig,
     ) -> Result<Arc<dyn SourceMiddleware>, MiddlewareSetupError> {
+        self.build(config)
+            .map(|middleware| Arc::new(middleware) as Arc<dyn SourceMiddleware>)
+    }
+}
+
+impl StatelessMiddlewareFactory for ParseJsonFactory {
+    fn kind(&self) -> &'static str {
+        "parse_json"
+    }
+
+    fn build_stateless(
+        &self,
+        config: &SourceMiddlewareConfig,
+    ) -> Result<Box<dyn StatelessMiddleware>, MiddlewareSetupError> {
+        self.build(config)
+            .map(|middleware| Box::new(middleware) as Box<dyn StatelessMiddleware>)
+    }
+}
+
+impl ParseJsonFactory {
+    /// Builds the middleware from its declaration.
+    pub fn build(
+        &self,
+        config: &SourceMiddlewareConfig,
+    ) -> Result<ParseJson, MiddlewareSetupError> {
         let parse_json_config: ParseJsonConfig =
             match serde_json::from_value(Value::Object(config.config.clone())) {
                 Ok(cfg) => cfg,
@@ -362,9 +398,9 @@ impl SourceMiddlewareFactory for ParseJsonFactory {
             parse_json_config
         );
 
-        Ok(Arc::new(ParseJson {
+        Ok(ParseJson {
             name: config.name.to_string(),
             config: parse_json_config,
-        }))
+        })
     }
 }

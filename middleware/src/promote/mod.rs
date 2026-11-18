@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::common::ErrorHandling;
+use crate::stateless::{StatelessMiddleware, StatelessMiddlewareFactory};
 use async_trait::async_trait;
 use drasi_core_types::{
     interface::{
@@ -243,6 +244,16 @@ impl SourceMiddleware for PromoteMiddleware {
         source_change: SourceChange,
         _element_index: &dyn ElementIndex,
     ) -> Result<Vec<SourceChange>, MiddlewareError> {
+        StatelessMiddleware::apply(self, source_change).await
+    }
+}
+
+#[async_trait]
+impl StatelessMiddleware for PromoteMiddleware {
+    async fn apply(
+        &self,
+        source_change: SourceChange,
+    ) -> Result<Vec<SourceChange>, MiddlewareError> {
         match source_change {
             SourceChange::Insert { mut element } => {
                 self.process_element(&mut element, &mut BTreeSet::new())?;
@@ -291,6 +302,31 @@ impl SourceMiddlewareFactory for PromoteMiddlewareFactory {
         &self,
         config: &SourceMiddlewareConfig,
     ) -> Result<Arc<dyn SourceMiddleware>, MiddlewareSetupError> {
+        self.build(config)
+            .map(|middleware| Arc::new(middleware) as Arc<dyn SourceMiddleware>)
+    }
+}
+
+impl StatelessMiddlewareFactory for PromoteMiddlewareFactory {
+    fn kind(&self) -> &'static str {
+        "promote"
+    }
+
+    fn build_stateless(
+        &self,
+        config: &SourceMiddlewareConfig,
+    ) -> Result<Box<dyn StatelessMiddleware>, MiddlewareSetupError> {
+        self.build(config)
+            .map(|middleware| Box::new(middleware) as Box<dyn StatelessMiddleware>)
+    }
+}
+
+impl PromoteMiddlewareFactory {
+    /// Builds the middleware from its declaration.
+    pub fn build(
+        &self,
+        config: &SourceMiddlewareConfig,
+    ) -> Result<PromoteMiddleware, MiddlewareSetupError> {
         // Parse configuration
         let promote_config: PromoteMiddlewareConfig =
             match serde_json::from_value(serde_json::Value::Object(config.config.clone())) {
@@ -335,9 +371,9 @@ impl SourceMiddlewareFactory for PromoteMiddlewareFactory {
         );
 
         // Create middleware instance
-        Ok(Arc::new(PromoteMiddleware::new(
+        Ok(PromoteMiddleware::new(
             config.name.to_string(),
             promote_config,
-        )))
+        ))
     }
 }

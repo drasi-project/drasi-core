@@ -29,6 +29,8 @@ The journal factories need the Host's progress binding
 |---|---|---|---|---|
 | `stream` | string, required | — | stream identifier | unsupported |
 | `coordinatedSnapshot` | boolean | `false` | — | unsupported |
+
+With `coordinatedSnapshot: true` a journal factory declares, and requires, the coordination protocol of its paired provider (`drasi.sqlite/coordinated-snapshot` or `drasi.sqlite/shared-snapshot`). Every factory also declares its element identities (selected tables and keys), which a connected file snapshot must equal.
 | `maxJournalTransactions` | integer | `10000` | ≥ 1 | restart, increase only |
 | `maxJournalBytes` | integer | `268435456` (256 MiB) | ≥ 1 | restart, increase only |
 
@@ -153,7 +155,7 @@ In-memory source that creates its table and accepts SQL:
 ```
 
 Coordinated replay for one persistent query (pair with
-`drasi.sqlite/coordinated-bootstrap` configured with `{"source", "stream"}`):
+`drasi.sqlite/coordinated-bootstrap`, which takes no configuration, connected to this source's `bootstrap` input):
 
 ```json
 {
@@ -179,7 +181,7 @@ providers when `coordinatedSnapshot` is true.
 - Journal factories take an exclusive lock: no other process may open the
   file while the source runs. With `walMode`, other processes may read.
 - Transaction factories need a transaction-enabled query
-  (`source_transactions`). Journal factories declare that their progress
+  (`sourceTransactions`). Journal factories declare that their progress
   binding must be durable: bind the progress of queries with persistent
   storage. The graph refuses a volatile or undeclared progress resource
   before the source starts.

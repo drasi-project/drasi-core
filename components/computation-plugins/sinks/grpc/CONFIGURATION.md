@@ -33,9 +33,9 @@ Update boundaries: **Pause** = applied in place, **Stop** = restart,
 | `keepaliveIntervalMs` | integer | `30000` | `0..=3600000`. HTTP/2 PING interval while a call is open; `0` disables keepalive. | no | Stop |
 | `keepaliveTimeoutMs` | integer | `20000` | `1..=3600000`. PING acknowledgement timeout before the connection is closed. | no | Stop |
 | `compression` | string | `none` | `none` or `gzip`. With `gzip`, the receiver must accept gzip requests. | no | Stop |
-| `batchSize` | integer | `1` | `1..=65536`. Fixed batching target in changes; `1` disables host batching. Not with `batching`. | no | Pause |
-| `batchFlushTimeoutMs` | integer | `100` | `1..=60000`. Host collection deadline in fixed mode. Not with `batching`. | no | Pause |
-| `batching` | object | none | `{"mode":"fixed","batchSize":100,"batchFlushTimeoutMs":1000}` or `{"mode":"adaptive","adaptiveMinBatchSize":1,"adaptiveMaxBatchSize":100,"adaptiveWindowSize":10,"adaptiveBatchTimeoutMs":1000}` (nested defaults shown; sizes ≤ 65536, window ≤ 255 × 100 ms, timeout ≤ 60000). Mutually exclusive with the flat fields. | no | Pause |
+| `batchSize` | integer | `1` | `1..=65536`. Fixed batching target in changes; `1` disables host batching. Not with `adaptive`. | no | Pause |
+| `batchFlushTimeoutMs` | integer | `100` | `1..=60000`. Host collection deadline in fixed mode. Not with `adaptive`. | no | Pause |
+| `adaptive` | object | none | The shared native adaptive object, identical in the HTTP sink and HTTP source: `minBatchSize` (10), `maxBatchSize` (1000, ≤ 65536), `minWaitMs` (1), `maxWaitMs` (100, ≤ 60000), `windowMs` (5000, ≤ 3600000); unknown keys reject. Mutually exclusive with `batchSize`/`batchFlushTimeoutMs`. | no | Pause |
 | `outputTemplates` | object | none | See [Templates](#templates). | no | Pause |
 | `maxBatchBytes` | integer | `16777216` | `1..=67108864`. Host collection byte bound. | no | Pause |
 | `maxRequestBytes` | integer | `4194304` | `1..=33554432`. Maximum encoded request (and decoded response). Requests split before it; a larger single change fails permanently. | no | Stop |
@@ -48,8 +48,8 @@ Reserved metadata names, set by the sink on every request:
 Secret fields accept only host secret references; a whole `secretMetadata`
 object is one reference that resolves to an object of strings.
 `configuration()` returns resolved values because it is the persistence hook;
-`Debug` output redacts them. With a `batching` object, `configuration()` omits
-the flat batch fields and fills the object's nested defaults.
+`Debug` output redacts them. With an `adaptive` object, `configuration()` omits
+the fixed batch fields and fills the object's nested defaults.
 
 The host batching contract allows at most 1024 inputs per batch, so a fixed
 `batchSize` above 1024 publishes `maxInputs` 1024 while still allowing up to
@@ -96,8 +96,7 @@ Adaptive batching with gzip:
 {
   "endpoint": "grpc://receiver:50052",
   "compression": "gzip",
-  "batching": { "mode": "adaptive", "adaptiveMinBatchSize": 1, "adaptiveMaxBatchSize": 500,
-                "adaptiveWindowSize": 10, "adaptiveBatchTimeoutMs": 100 }
+  "adaptive": { "minBatchSize": 1, "maxBatchSize": 500, "maxWaitMs": 100 }
 }
 ```
 
@@ -161,8 +160,12 @@ Each template set has optional `added` (`ADD`), `updated` (`REPLACE` and
   (`{alias, component, port}`), `sequence`, `timestamp` (when known),
   `identity`, `element`, `before`, `after`, `removedProperties` (patches),
   `effectiveFrom`. Absent fields are absent, not null.
-- **Helpers:** `json` (renders its argument as JSON) and the Handlebars
-  built-ins. Strict mode: reading a missing field is an error.
+- **Engine:** the [shared native template engine](../../common/template/README.md), the same in every native sink.
+  Helpers: `json` (renders its argument as JSON) and the Handlebars built-ins
+  `if`, `unless`, `each`, `with`, `lookup`, `raw`, `log`, `eq`, `ne`, `gt`,
+  `gte`, `lt`, `lte`, `and`, `or`, `not`, `len`; any other helper, a partial or
+  a decorator rejects at construction, in any branch. Strict mode: reading a
+  missing field is an error. Values are not HTML-escaped.
 - **Body:** must render valid JSON; it replaces `payload` only. Typed images,
   identity, operation and sequence are never rewritten. An empty template uses
   the `outputFormat` default.
@@ -178,7 +181,7 @@ Each template set has optional `added` (`ADD`), `updated` (`REPLACE` and
 
 | Change | Boundary |
 |---|---|
-| `metadata`, `secretMetadata`, `timeoutMs`, `maxRetries`, `retryBudgetMs`, `requireConnectedAtStart`, `batchSize`, `batchFlushTimeoutMs`, `batching`, `maxBatchBytes`, `outputTemplates`, `outputFormat` | Pause (in place) |
+| `metadata`, `secretMetadata`, `timeoutMs`, `maxRetries`, `retryBudgetMs`, `requireConnectedAtStart`, `batchSize`, `batchFlushTimeoutMs`, `adaptive`, `maxBatchBytes`, `outputTemplates`, `outputFormat` | Pause (in place) |
 | `endpoint`, `tlsCaPem`, `tlsClientCertificatePem`, `tlsClientPrivateKeyPem`, `tlsDomainName`, `connectTimeoutMs`, `keepaliveIntervalMs`, `keepaliveTimeoutMs`, `compression`, `maxRequestBytes` | Stop (restart) |
 | `outputs`, `onPermanentFailure`, or the bound inputs | Replace |
 | No change | Pause (nothing to do) |
@@ -231,10 +234,11 @@ This is a breaking change (D-9); there is no compatibility mode.
 | `maxRetries` default 3 | `maxRetries` default **5**, plus `retryBudgetMs` 120000 | Permanent codes are no longer retried. |
 | `connectionRetryAttempts` (5), `initialConnectionTimeoutMs` (10000) | `connectTimeoutMs` (10000) and the retry policy; `requireConnectedAtStart` | Removed fields are rejected. |
 | fixed batching default `batchSize` 100, `batchFlushTimeoutMs` 1000 | default `batchSize` **1**, `batchFlushTimeoutMs` **100** | Set `batchSize: 100, batchFlushTimeoutMs: 1000` for the legacy behaviour. |
-| adaptive `batching` object | same object | Same nested defaults. |
+| `batching` object (`{"mode":"fixed",…}` or `{"mode":"adaptive","adaptiveMinBatchSize",…,"adaptiveWindowSize" in 100 ms units,"adaptiveBatchTimeoutMs"}`) | fixed: `batchSize`/`batchFlushTimeoutMs`; adaptive: the shared `adaptive` object (`minBatchSize`, `maxBatchSize`, `minWaitMs`, `maxWaitMs`, `windowMs`) | The `batching` key is rejected. Idle adaptive batches now wait `minWaitMs` (default 1 ms) instead of 100 ms, the same as the HTTP sink. |
 | `outputFormat` | `outputFormat` | Unchanged values. |
 | `outputTemplates` keyed by query id; context `query_id`, `query_name`, `data`, `row_signature`, `before`/`after` | keyed by output alias; truthful change context (`operation`, `output`, `identity`, `before`, `after`, …) | `query_id` → `output.component`, `query_name` → `output.alias`, `data`/`row` → `after` (or `before` for deletes); a `PATCH`'s `after` holds only the changed properties. |
 | render failure falls back to the canonical payload | render failure is permanent, under `onPermanentFailure` | |
+| `{{x}}` HTML-escaped; helpers not checked until render | no escaping; every helper call checked at construction | The shared native template engine. |
 | `GOAWAY`/connection errors matched by text; 5 s `RESOURCE_EXHAUSTED` sleep | classification by status code; channel rebuilt; jittered backoff with receiver hints | |
 | no TLS | TLS and mutual TLS | |
 | no idempotency key | `x-drasi-delivery-id` | |

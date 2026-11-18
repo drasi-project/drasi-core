@@ -1,0 +1,24 @@
+[package]
+rust-version.workspace = true
+name = "drasi-computation-middleware-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The declared middleware kinds, configuration and pipeline shared by the native middleware and view transformers; no component factories"
+readme = "README.md"
+
+[dependencies]
+drasi-computation-contracts = { workspace = true }
+drasi-computation-plugin-sdk = { workspace = true }
+drasi-core-types = { workspace = true }
+# The fixed stateless kinds this crate declares; see STATELESS_KINDS.
+drasi-middleware = { workspace = true, features = ["map", "relabel", "decoder", "parse_json", "promote"] }
+anyhow = "1"
+serde_json = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[lints]
+workspace = true

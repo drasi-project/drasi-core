@@ -44,6 +44,23 @@ impl SourceSchemaReader for Reader {
 struct SchemaFactory(Arc<Reader>);
 
 impl sdk::Factory for SchemaFactory {
+    /// Every field described (fixture).
+    fn configuration_details(&self) -> sdk::ConfigDetails {
+        sdk::ConfigDetails {
+            fields: sdk::Factory::metadata(self)
+                .configuration
+                .fields
+                .into_keys()
+                .map(|name| {
+                    let details = sdk::configuration::ConfigFieldDetails {
+                        description: format!("Fixture field {name}."),
+                        ..Default::default()
+                    };
+                    (name, details)
+                })
+                .collect(),
+        }
+    }
     fn describe(
         &self,
         _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
@@ -63,6 +80,7 @@ impl sdk::Factory for SchemaFactory {
         &self,
         request: &sdk::CreateRequest,
         _: sdk::ControlSender,
+        _services: sdk::ServiceBindings,
     ) -> anyhow::Result<sdk::CreatedComponent> {
         Ok(sdk::Component::Source(Box::new(SchemaSource {
             descriptor: ComponentDescriptor::try_new(request.id.clone(), self.metadata().ports)?,
@@ -258,7 +276,14 @@ fn source_schema_extension_is_optional_and_validated() -> anyhow::Result<()> {
     )?;
     assert!(source.source_schema_reader().is_none());
     assert!(unsafe {
-        NativePlugin::from_entry_points_with_source_schema(metadata, entry, Some(invalid_extension))
+        NativePlugin::from_entry_points_with(
+            metadata,
+            entry,
+            crate::computation::EntryPoints {
+                source_schema: Some(invalid_extension),
+                ..Default::default()
+            },
+        )
     }
     .is_err());
     Ok(())

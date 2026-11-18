@@ -380,6 +380,14 @@ impl DeliveryRunner {
         self.mode == DeliveryMode::Transactional
     }
 
+    /// Whether an uncertain commit or rollback fenced this runner's storage
+    /// owner. A fenced runner refuses every later delivery and progress read;
+    /// its owner reopens a runner from storage, which reloads the committed
+    /// ledger and so resolves the uncertainty, before delivering again.
+    pub fn recovery_required(&self) -> bool {
+        self.transaction.recovery_required()
+    }
+
     /// Read one committed business-state value in this transactional consumer's
     /// namespace. Uses the runner's actual storage owner and transaction gate;
     /// no independent writer or commit capability escapes to the caller.

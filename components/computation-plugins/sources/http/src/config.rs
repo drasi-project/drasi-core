@@ -5,6 +5,7 @@
 
 use anyhow::{ensure, Result};
 use drasi_computation_contracts::StreamId;
+use drasi_computation_network_common::batching::{AdaptiveBatchSettings, BatchLimit};
 use drasi_computation_network_common::config::{
     self as shared, IngressConfig, SecretString, SecuritySettings,
 };
@@ -76,18 +77,9 @@ pub struct HttpSourceConfig {
     pub tls_private_key_pem: Option<SecretString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_client_ca_pem: Option<String>,
-    #[serde(default)]
-    pub adaptive_enabled: bool,
+    /// Bounded volatile prefetch; absent disables it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub adaptive_max_batch_size: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub adaptive_min_batch_size: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub adaptive_max_wait_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub adaptive_min_wait_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub adaptive_window_secs: Option<u64>,
+    pub adaptive: Option<AdaptiveBatchSettings>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -109,12 +101,7 @@ impl HttpSourceConfig {
         fields.extend([
             Field::new("maxBatchEvents", Integer, false, "Maximum events in one batch request.").default(batch_events()).minimum(1).maximum(MAX_BATCH_EVENTS as u64),
             Field::new("headerReadTimeoutMs", Integer, false, "Deadline in milliseconds for a client to send complete request headers; bounds slow clients and graceful shutdown.").default(header_read_timeout_ms()).minimum(1).maximum(600_000),
-            Field::new("adaptiveEnabled", Boolean, false, "Enable bounded prefetch in volatile mode using throughput tiers. Each event remains a separate graph envelope.").default(false),
-            Field::new("adaptiveMaxBatchSize", Integer, false, "Maximum prefetched events, no greater than ingressCapacity.").default_description("The smaller of 1000 and ingressCapacity.").minimum(1).maximum(shared::MAX_INGRESS_CAPACITY as u64),
-            Field::new("adaptiveMinBatchSize", Integer, false, "Minimum adaptive collection target, no greater than adaptiveMaxBatchSize.").default_description("The smaller of 10 and adaptiveMaxBatchSize.").minimum(1).maximum(shared::MAX_INGRESS_CAPACITY as u64),
-            Field::new("adaptiveMaxWaitMs", Integer, false, "Maximum collection wait in milliseconds.").default_description("100").minimum(1).maximum(60_000),
-            Field::new("adaptiveMinWaitMs", Integer, false, "Minimum collection wait in milliseconds.").default_description("1").minimum(1).maximum(60_000),
-            Field::new("adaptiveWindowSecs", Integer, false, "Throughput observation window in seconds.").default_description("5").minimum(1).maximum(3600),
+            Field::new("adaptive", Object, false, &AdaptiveBatchSettings::field_description("Bounded prefetch in volatile mode using throughput tiers; each event remains a separate graph envelope. Not allowed with durable admission.", "ingressCapacity")),
             Field::new("webhooks", Object, false, "Custom webhook routes with authentication, JSON/XML/YAML/text parsing, conditions, mapping, timestamps and CORS. When present, replaces the standard event routes. See CONFIGURATION.md for the nested schema."),
         ]);
         ConfigDefinition::try_new(fields)
@@ -210,51 +197,12 @@ impl HttpSourceConfig {
         Ok(())
     }
 
-    pub(crate) fn adaptive_settings(
-        &self,
-    ) -> Result<Option<drasi_http_common::adaptive_batcher::AdaptiveBatchConfig>> {
-        if !self.adaptive_enabled {
-            ensure!(
-                self.adaptive_max_batch_size.is_none()
-                    && self.adaptive_min_batch_size.is_none()
-                    && self.adaptive_max_wait_ms.is_none()
-                    && self.adaptive_min_wait_ms.is_none()
-                    && self.adaptive_window_secs.is_none(),
-                "adaptive settings require adaptiveEnabled"
-            );
-            return Ok(None);
+    /// The shared adaptive settings, validated against `ingressCapacity`.
+    pub(crate) fn adaptive_settings(&self) -> Result<Option<&AdaptiveBatchSettings>> {
+        if let Some(adaptive) = &self.adaptive {
+            adaptive.validate(BatchLimit::ingress(self.ingress_capacity))?;
         }
-        let mut config = drasi_http_common::adaptive_batcher::AdaptiveBatchConfig::default();
-        config.max_batch_size = self
-            .adaptive_max_batch_size
-            .unwrap_or(1000.min(self.ingress_capacity));
-        config.min_batch_size = self
-            .adaptive_min_batch_size
-            .unwrap_or(10.min(config.max_batch_size));
-        config.max_wait_time = shared::duration(
-            self.adaptive_max_wait_ms.unwrap_or(100),
-            "adaptiveMaxWaitMs",
-        )?;
-        config.min_wait_time =
-            shared::duration(self.adaptive_min_wait_ms.unwrap_or(1), "adaptiveMinWaitMs")?;
-        let window = self.adaptive_window_secs.unwrap_or(5);
-        ensure!(
-            (1..=3600).contains(&window),
-            "adaptiveWindowSecs must be in 1..=3600"
-        );
-        config.throughput_window = std::time::Duration::from_secs(window);
-        ensure!(
-            config.min_batch_size > 0
-                && config.min_batch_size <= config.max_batch_size
-                && config.max_batch_size <= self.ingress_capacity,
-            "adaptive batch bounds exceed ingressCapacity or are inverted"
-        );
-        ensure!(
-            config.min_wait_time <= config.max_wait_time
-                && config.max_wait_time <= std::time::Duration::from_secs(60),
-            "invalid adaptive wait bounds"
-        );
-        Ok(Some(config))
+        Ok(self.adaptive.as_ref())
     }
 }
 
@@ -272,8 +220,7 @@ mod tests {
                 "stream":"events/out", "host":"127.0.0.1",
                 "port":9000, "timeoutMs":60000, "ingressCapacity":1024,
                 "maxMessageBytes":2097152, "maxBatchEvents":1024, "maxConnections":1024,
-                "headerReadTimeoutMs":10000, "allowUnauthenticated":false,
-                "adaptiveEnabled":false
+                "headerReadTimeoutMs":10000, "allowUnauthenticated":false
             })
         );
         Ok(())
@@ -282,7 +229,10 @@ mod tests {
     #[test]
     fn rejects_invalid_settings() {
         for field in [
-            json!({"adaptiveEnabled":true,"adaptiveMinBatchSize":0}),
+            json!({"adaptive":{"minBatchSize":0}}),
+            json!({"adaptive":{"maxBatchSize":2000}}),
+            json!({"adaptive":{"unknown":1}}),
+            json!({"adaptiveEnabled":true}),
             json!({"maxBatchEvents":0}),
             json!({"maxBatchEvents":null}),
             json!({"maxMessageBytes":0}),

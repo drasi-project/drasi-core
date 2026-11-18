@@ -130,11 +130,173 @@ pub struct InputDescription {
 }
 
 /// The declared facts of one port.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PortDescription {
     Input(InputDescription),
     Output(OutputDescription),
+    /// A bootstrap input: what initialization the component accepts there.
+    BootstrapInput(BootstrapInputDescription),
+    /// A bootstrap output: what the snapshots served there carry.
+    BootstrapOutput(BootstrapOutputDescription),
+}
+
+/// A versioned source/bootstrap coordination protocol: the typed contract
+/// between a coordination-capable source and its paired providers. Shared
+/// constants in the family's `*-common` crate name it; it is a declared
+/// capability, never a plugin or implementation name.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BootstrapProtocol {
+    pub name: String,
+    pub version: u32,
+}
+
+impl BootstrapProtocol {
+    pub fn new(name: impl Into<String>, version: u32) -> Self {
+        Self {
+            name: name.into(),
+            version,
+        }
+    }
+}
+
+impl std::fmt::Display for BootstrapProtocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}@{}", self.name, self.version)
+    }
+}
+
+/// What a bootstrap output's sessions complete with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BootstrapCompletionKind {
+    /// Not declared; satisfies no requirement.
+    Undeclared,
+    /// Records only: no watermarks, no completion state, no progress
+    /// binding, and preparation is always ready.
+    Quiescent,
+    /// May complete with source watermarks and completion state, and may
+    /// bind the consumer's source progress.
+    Durable,
+    /// A relay (a source serving its provider's sessions): completes as the
+    /// providers on the component's own bootstrap inputs do, or quiescently
+    /// (an empty snapshot) when none is connected.
+    Relayed,
+}
+
+/// Whose element namespace a provider's records use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ElementNamespace {
+    /// Not declared; imposes no requirement.
+    Undeclared,
+    /// Records carry their own identities (a query's output snapshot).
+    Own,
+    /// Records are namespaced by the source whose bootstrap input the
+    /// provider is connected to. The graph relation (the provider's edge to
+    /// that source) supplies the source; the provider never names it.
+    ServedSource,
+}
+
+/// How a component identifies the elements of one family, for comparing a
+/// provider with the source it serves. `scheme` is a family-defined identity
+/// scheme and `binding` its canonical description (selected tables and key
+/// columns). Equal values produce equal element identities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ElementIdentity {
+    pub scheme: String,
+    pub binding: String,
+}
+
+/// Declared facts of a bootstrap output port.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BootstrapOutputDescription {
+    pub completion: BootstrapCompletionKind,
+    /// The coordination protocol the provider requires of the source it
+    /// serves; `None` for an unpaired provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing: Option<BootstrapProtocol>,
+    pub namespace: ElementNamespace,
+    /// The element identities the provider produces, when they must equal
+    /// the served source's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<ElementIdentity>,
+}
+
+impl BootstrapOutputDescription {
+    pub const UNDECLARED: Self = Self {
+        completion: BootstrapCompletionKind::Undeclared,
+        pairing: None,
+        namespace: ElementNamespace::Undeclared,
+        identity: None,
+    };
+    /// A relay's output (a source serving its provider's sessions).
+    pub const RELAYED: Self = Self {
+        completion: BootstrapCompletionKind::Relayed,
+        pairing: None,
+        namespace: ElementNamespace::Own,
+        identity: None,
+    };
+    /// A committed-output snapshot (a query or transformer serving its own
+    /// results): output-cursor watermarks under its own identities.
+    pub const OUTPUT_SNAPSHOT: Self = Self {
+        completion: BootstrapCompletionKind::Durable,
+        pairing: None,
+        namespace: ElementNamespace::Own,
+        identity: None,
+    };
+}
+
+/// What initialization a bootstrap input accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BootstrapAcceptance {
+    /// Only quiescent providers (no watermarks, state or progress).
+    Quiescent,
+    /// Quiescent and durable providers.
+    Durable,
+}
+
+/// Declared facts of a bootstrap input port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BootstrapInputDescription {
+    pub accepts: BootstrapAcceptance,
+    /// The input belongs to a source that relays its consumers' sessions to
+    /// the provider connected here, so the provider serves that source's
+    /// element namespace.
+    pub source_relay: bool,
+}
+
+impl BootstrapInputDescription {
+    /// A source's bootstrap input.
+    pub const SOURCE_RELAY: Self = Self {
+        accepts: BootstrapAcceptance::Durable,
+        source_relay: true,
+    };
+    /// A query's or durable transformer's bootstrap input.
+    pub const DURABLE: Self = Self {
+        accepts: BootstrapAcceptance::Durable,
+        source_relay: false,
+    };
+    /// A quiescent transformer's bootstrap input.
+    pub const QUIESCENT: Self = Self {
+        accepts: BootstrapAcceptance::Quiescent,
+        source_relay: false,
+    };
+}
+
+/// A source's offer to coordinate bootstrap with paired providers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BootstrapCoordination {
+    pub protocol: BootstrapProtocol,
+    /// Only a provider paired through `protocol` may be connected (the
+    /// source admits no live data before its coordinated snapshot).
+    pub required: bool,
 }
 
 /// Durability a resource declares about itself.
@@ -197,6 +359,13 @@ pub struct ComponentDescription {
     pub component: ComponentCapabilities,
     pub ports: BTreeMap<PortId, PortDescription>,
     pub dependencies: BTreeMap<String, DependencyRequirement>,
+    /// A source's coordination offer to providers on its bootstrap input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordination: Option<BootstrapCoordination>,
+    /// How a source identifies its elements, compared with providers that
+    /// declare an identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element_identity: Option<ElementIdentity>,
 }
 
 impl ComponentDescription {
@@ -209,6 +378,8 @@ impl ComponentDescription {
             },
             ports: BTreeMap::new(),
             dependencies: BTreeMap::new(),
+            coordination: None,
+            element_identity: None,
         }
     }
 
@@ -228,14 +399,14 @@ impl ComponentDescription {
         self
     }
 
-    /// Declare `description` on every output port of `descriptor`.
+    /// Declare `description` on every data output port of `descriptor`.
     pub fn with_outputs(
         mut self,
         descriptor: &ComponentDescriptor,
         description: OutputDescription,
     ) -> Self {
         for port in descriptor.ports() {
-            if port.direction() == PortDirection::Output {
+            if port.direction() == PortDirection::Output && port.kind() == super::PortKind::Data {
                 self.ports
                     .insert(port.id().clone(), PortDescription::Output(description));
             }
@@ -243,19 +414,58 @@ impl ComponentDescription {
         self
     }
 
-    /// Declare `delivery` on every input port of `descriptor`.
+    /// Declare `delivery` on every data input port of `descriptor`.
     pub fn with_inputs(
         mut self,
         descriptor: &ComponentDescriptor,
         delivery: InputDelivery,
     ) -> Self {
         for port in descriptor.ports() {
-            if port.direction() == PortDirection::Input {
+            if port.direction() == PortDirection::Input && port.kind() == super::PortKind::Data {
                 self.ports.insert(
                     port.id().clone(),
                     PortDescription::Input(InputDescription { delivery }),
                 );
             }
+        }
+        self
+    }
+
+    /// Declare the source's coordination offer.
+    pub fn with_coordination(mut self, coordination: BootstrapCoordination) -> Self {
+        self.coordination = Some(coordination);
+        self
+    }
+
+    /// Declare how the source identifies its elements.
+    pub fn with_element_identity(mut self, identity: ElementIdentity) -> Self {
+        self.element_identity = Some(identity);
+        self
+    }
+
+    /// Declare the facts of one port.
+    pub fn with_port(mut self, port: PortId, description: PortDescription) -> Self {
+        self.ports.insert(port, description);
+        self
+    }
+
+    /// Declare `input` on every bootstrap input and `output` on every
+    /// bootstrap output of `descriptor`.
+    pub fn with_bootstrap_ports(
+        mut self,
+        descriptor: &ComponentDescriptor,
+        input: BootstrapInputDescription,
+        output: BootstrapOutputDescription,
+    ) -> Self {
+        for port in descriptor.ports() {
+            if port.kind() != super::PortKind::Bootstrap {
+                continue;
+            }
+            let description = match port.direction() {
+                PortDirection::Input => PortDescription::BootstrapInput(input),
+                PortDirection::Output => PortDescription::BootstrapOutput(output.clone()),
+            };
+            self.ports.insert(port.id().clone(), description);
         }
         self
     }
@@ -285,6 +495,22 @@ impl ComponentDescription {
         }
     }
 
+    /// The declared facts of a bootstrap output (undeclared when absent).
+    pub fn bootstrap_output(&self, port: &PortId) -> BootstrapOutputDescription {
+        match self.ports.get(port) {
+            Some(PortDescription::BootstrapOutput(output)) => output.clone(),
+            _ => BootstrapOutputDescription::UNDECLARED,
+        }
+    }
+
+    /// The declared facts of a bootstrap input, if declared.
+    pub fn bootstrap_input(&self, port: &PortId) -> Option<BootstrapInputDescription> {
+        match self.ports.get(port) {
+            Some(PortDescription::BootstrapInput(input)) => Some(*input),
+            _ => None,
+        }
+    }
+
     /// Whether any input keys delivery on producer identity.
     pub fn has_keyed_inputs(&self) -> bool {
         self.ports.values().any(|port| {
@@ -306,9 +532,22 @@ impl ComponentDescription {
                 .iter()
                 .find(|candidate| candidate.id() == id)
                 .ok_or_else(|| format!("description declares unknown port '{id}'"))?;
+            let bootstrap = declared.kind() == super::PortKind::Bootstrap;
             match (port, declared.direction()) {
-                (PortDescription::Input(_), PortDirection::Input) => {}
-                (PortDescription::Output(output), PortDirection::Output) => {
+                (PortDescription::Input(_), PortDirection::Input) if !bootstrap => {}
+                (PortDescription::BootstrapInput(_), PortDirection::Input) if bootstrap => {}
+                (PortDescription::BootstrapOutput(output), PortDirection::Output) if bootstrap => {
+                    if output.pairing.is_some()
+                        && (output.namespace != ElementNamespace::ServedSource
+                            || output.completion != BootstrapCompletionKind::Durable)
+                    {
+                        return Err(format!(
+                            "paired bootstrap output '{id}' must serve its source's namespace \
+                             and complete durably"
+                        ));
+                    }
+                }
+                (PortDescription::Output(output), PortDirection::Output) if !bootstrap => {
                     output
                         .validate()
                         .map_err(|error| format!("output '{id}': {error}"))?;
@@ -324,7 +563,7 @@ impl ComponentDescription {
                 }
                 _ => {
                     return Err(format!(
-                        "description of port '{id}' has the wrong direction"
+                        "description of port '{id}' has the wrong direction or kind"
                     ))
                 }
             }
@@ -424,6 +663,40 @@ pub enum Incompatibility {
         required: DurabilityRequirement,
         declared: ResourceDurability,
     },
+    #[error(
+        "bootstrap provider requires source coordination {required}, but the connected \
+         input offers {offered:?}"
+    )]
+    BootstrapPairing {
+        required: Box<BootstrapProtocol>,
+        offered: Option<Box<BootstrapProtocol>>,
+    },
+    #[error(
+        "source requires a provider paired through {required}, but the connected provider is \
+         unpaired"
+    )]
+    BootstrapCoordinationRequired { required: Box<BootstrapProtocol> },
+    #[error(
+        "bootstrap provider serves its source's element namespace and must be connected to a \
+         source's bootstrap input"
+    )]
+    BootstrapNamespace,
+    #[error(
+        "bootstrap input accepts {accepts:?} initialization, but the connected provider \
+         completes {completion:?}"
+    )]
+    BootstrapCompletion {
+        accepts: BootstrapAcceptance,
+        completion: BootstrapCompletionKind,
+    },
+    #[error(
+        "bootstrap provider produces element identities {provided:?}, but the served source \
+         declares {declared:?}"
+    )]
+    BootstrapIdentity {
+        provided: Box<ElementIdentity>,
+        declared: Option<Box<ElementIdentity>>,
+    },
     #[error("instance description differs from its factory's declaration")]
     InstanceDescription,
     #[error("invalid component description: {0}")]
@@ -455,6 +728,103 @@ pub fn check_edge(
         });
     }
     Ok(())
+}
+
+/// The source whose namespace a provider on one bootstrap edge serves: the
+/// consumer itself when it is a source relay, otherwise the single producer
+/// of the consumer's data inputs (a query-local provider serves the source
+/// the query reads). The graph supplies it from the edges it binds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServedNamespace<'a> {
+    /// No single source: the consumer reads none, or several.
+    Unavailable,
+    /// The single source is known but not constructed yet; its declarations
+    /// are compared when it is.
+    Pending,
+    /// The single source and its declarations.
+    Source(&'a ComponentDescription),
+}
+
+/// Check one bootstrap edge: the provider's bootstrap output against the
+/// consumer's bootstrap input and coordination offer.
+///
+/// A `Relayed` output must be resolved by the caller first (see
+/// [`relayed_completion`]); an unresolved relay is treated as undeclared. An
+/// undeclared input (`None`) accepts any completion but is no source relay.
+pub fn check_bootstrap_edge(
+    output: &BootstrapOutputDescription,
+    consumer: &ComponentDescription,
+    input: Option<BootstrapInputDescription>,
+    served: ServedNamespace<'_>,
+) -> std::result::Result<(), Incompatibility> {
+    // An undeclared input states no acceptance requirement and is no source
+    // relay, so it satisfies no provider requirement either.
+    let input = input.unwrap_or(BootstrapInputDescription::DURABLE);
+    let offered = consumer
+        .coordination
+        .as_ref()
+        .filter(|_| input.source_relay);
+    match (&output.pairing, offered) {
+        (Some(required), Some(offer)) if &offer.protocol == required => {}
+        (Some(required), offer) => {
+            return Err(Incompatibility::BootstrapPairing {
+                required: Box::new(required.clone()),
+                offered: offer.map(|offer| Box::new(offer.protocol.clone())),
+            })
+        }
+        (None, Some(offer)) if offer.required => {
+            return Err(Incompatibility::BootstrapCoordinationRequired {
+                required: Box::new(offer.protocol.clone()),
+            })
+        }
+        (None, _) => {}
+    }
+    if output.namespace == ElementNamespace::ServedSource && served == ServedNamespace::Unavailable
+    {
+        return Err(Incompatibility::BootstrapNamespace);
+    }
+    if let Some(identity) = &output.identity {
+        let declared = match served {
+            ServedNamespace::Source(source) => source.element_identity.as_ref(),
+            ServedNamespace::Pending => Some(identity),
+            ServedNamespace::Unavailable => None,
+        };
+        if declared != Some(identity) {
+            return Err(Incompatibility::BootstrapIdentity {
+                provided: Box::new(identity.clone()),
+                declared: declared.cloned().map(Box::new),
+            });
+        }
+    }
+    let completion = match output.completion {
+        BootstrapCompletionKind::Relayed => BootstrapCompletionKind::Undeclared,
+        completion => completion,
+    };
+    match (input.accepts, completion) {
+        (BootstrapAcceptance::Durable, _)
+        | (BootstrapAcceptance::Quiescent, BootstrapCompletionKind::Quiescent) => Ok(()),
+        (accepts, completion) => Err(Incompatibility::BootstrapCompletion {
+            accepts,
+            completion,
+        }),
+    }
+}
+
+/// The completion a relay's consumers observe, given the completions of the
+/// providers connected to the relay's bootstrap inputs: quiescent with none,
+/// otherwise the weakest guarantee among them (`Undeclared` dominates, then
+/// `Durable`). An unresolved nested relay counts as undeclared.
+pub fn relayed_completion(
+    upstream: impl IntoIterator<Item = BootstrapCompletionKind>,
+) -> BootstrapCompletionKind {
+    use BootstrapCompletionKind::*;
+    upstream
+        .into_iter()
+        .fold(Quiescent, |current, next| match (current, next) {
+            (Undeclared, _) | (_, Undeclared) | (_, Relayed) | (Relayed, _) => Undeclared,
+            (Durable, _) | (_, Durable) => Durable,
+            (Quiescent, Quiescent) => Quiescent,
+        })
 }
 
 /// Check one resource bound to a named dependency against the requirement
@@ -558,6 +928,245 @@ mod tests {
             check_edge(unreplayable, &pipe(true), input(ExactlyOnce)),
             Ok(())
         );
+    }
+
+    /// The edge check as the graph applies it: a relay serves its own
+    /// namespace; another consumer here reads no single source.
+    fn check(
+        output: &BootstrapOutputDescription,
+        consumer: &ComponentDescription,
+        input: Option<BootstrapInputDescription>,
+    ) -> std::result::Result<(), Incompatibility> {
+        let served = if input.is_some_and(|input| input.source_relay) {
+            ServedNamespace::Source(consumer)
+        } else {
+            ServedNamespace::Unavailable
+        };
+        check_bootstrap_edge(output, consumer, input, served)
+    }
+
+    #[test]
+    fn a_query_local_provider_serves_the_single_source_the_query_reads() {
+        let local = BootstrapOutputDescription {
+            completion: BootstrapCompletionKind::Quiescent,
+            pairing: None,
+            namespace: ElementNamespace::ServedSource,
+            identity: Some(ElementIdentity {
+                scheme: "drasi.test/elements".into(),
+                binding: "items".into(),
+            }),
+        };
+        let query = ComponentDescription::new(ProgressPersistence::Durable);
+        let input = Some(BootstrapInputDescription::DURABLE);
+        let read = ComponentDescription::new(ProgressPersistence::Durable).with_element_identity(
+            ElementIdentity {
+                scheme: "drasi.test/elements".into(),
+                binding: "items".into(),
+            },
+        );
+        assert_eq!(
+            check_bootstrap_edge(&local, &query, input, ServedNamespace::Source(&read)),
+            Ok(())
+        );
+        assert_eq!(
+            check_bootstrap_edge(&local, &query, input, ServedNamespace::Pending),
+            Ok(()),
+            "a source that is not constructed yet is compared when it is"
+        );
+        assert_eq!(
+            check_bootstrap_edge(&local, &query, input, ServedNamespace::Unavailable),
+            Err(Incompatibility::BootstrapNamespace),
+            "a query reading no single source gives the provider no namespace"
+        );
+        let other = ComponentDescription::new(ProgressPersistence::Durable);
+        assert!(matches!(
+            check_bootstrap_edge(&local, &query, input, ServedNamespace::Source(&other)),
+            Err(Incompatibility::BootstrapIdentity { declared: None, .. })
+        ));
+    }
+
+    fn protocol(name: &str) -> BootstrapProtocol {
+        BootstrapProtocol::new(name, 1)
+    }
+
+    fn provider(
+        pairing: Option<BootstrapProtocol>,
+        completion: BootstrapCompletionKind,
+    ) -> BootstrapOutputDescription {
+        BootstrapOutputDescription {
+            completion,
+            pairing,
+            namespace: ElementNamespace::ServedSource,
+            identity: None,
+        }
+    }
+
+    fn source(coordination: Option<BootstrapCoordination>) -> ComponentDescription {
+        ComponentDescription {
+            coordination,
+            ..ComponentDescription::new(ProgressPersistence::Durable)
+        }
+    }
+
+    #[test]
+    fn paired_provider_requires_the_same_coordination_protocol() {
+        use BootstrapCompletionKind::Durable;
+        let offer = |name: &str, required| BootstrapCoordination {
+            protocol: protocol(name),
+            required,
+        };
+        let relay = Some(BootstrapInputDescription::SOURCE_RELAY);
+        let paired = provider(Some(protocol("drasi.test/coordinated")), Durable);
+        assert_eq!(
+            check(
+                &paired,
+                &source(Some(offer("drasi.test/coordinated", true))),
+                relay
+            ),
+            Ok(())
+        );
+        // Another protocol, or none at all, is refused when the edge binds.
+        assert_eq!(
+            check(
+                &paired,
+                &source(Some(offer("drasi.test/other", false))),
+                relay
+            ),
+            Err(Incompatibility::BootstrapPairing {
+                required: Box::new(protocol("drasi.test/coordinated")),
+                offered: Some(Box::new(protocol("drasi.test/other"))),
+            })
+        );
+        assert!(matches!(
+            check(&paired, &source(None), relay),
+            Err(Incompatibility::BootstrapPairing { offered: None, .. })
+        ));
+        // A coordination offer on a query (not a source relay) does not count.
+        assert!(matches!(
+            check(
+                &paired,
+                &source(Some(offer("drasi.test/coordinated", true))),
+                Some(BootstrapInputDescription::DURABLE)
+            ),
+            Err(Incompatibility::BootstrapPairing { .. })
+        ));
+        // A source that requires coordination refuses an unpaired provider;
+        // an optional offer accepts it.
+        let unpaired = provider(None, BootstrapCompletionKind::Quiescent);
+        assert_eq!(
+            check(
+                &unpaired,
+                &source(Some(offer("drasi.test/coordinated", true))),
+                relay
+            ),
+            Err(Incompatibility::BootstrapCoordinationRequired {
+                required: Box::new(protocol("drasi.test/coordinated"))
+            })
+        );
+        assert_eq!(
+            check(
+                &unpaired,
+                &source(Some(offer("drasi.test/coordinated", false))),
+                relay
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn served_source_namespace_requires_a_source_relay() {
+        let unpaired = provider(None, BootstrapCompletionKind::Quiescent);
+        assert_eq!(
+            check(
+                &unpaired,
+                &source(None),
+                Some(BootstrapInputDescription::DURABLE)
+            ),
+            Err(Incompatibility::BootstrapNamespace)
+        );
+        let own = BootstrapOutputDescription {
+            namespace: ElementNamespace::Own,
+            ..unpaired.clone()
+        };
+        assert_eq!(
+            check(
+                &own,
+                &source(None),
+                Some(BootstrapInputDescription::DURABLE)
+            ),
+            Ok(())
+        );
+        assert_eq!(check(&own, &source(None), None), Ok(()));
+        assert_eq!(
+            check(&unpaired, &source(None), None),
+            Err(Incompatibility::BootstrapNamespace),
+            "an undeclared input is no source relay"
+        );
+    }
+
+    #[test]
+    fn quiescent_inputs_refuse_durable_relayed_and_undeclared_providers() {
+        use BootstrapCompletionKind::*;
+        let own = |completion| BootstrapOutputDescription {
+            completion,
+            pairing: None,
+            namespace: ElementNamespace::Own,
+            identity: None,
+        };
+        let quiescent = Some(BootstrapInputDescription::QUIESCENT);
+        assert_eq!(check(&own(Quiescent), &source(None), quiescent), Ok(()));
+        for completion in [Durable, Undeclared, Relayed] {
+            assert_eq!(
+                check(&own(completion), &source(None), quiescent),
+                Err(Incompatibility::BootstrapCompletion {
+                    accepts: BootstrapAcceptance::Quiescent,
+                    completion: if completion == Relayed {
+                        Undeclared
+                    } else {
+                        completion
+                    },
+                })
+            );
+        }
+        for completion in [Quiescent, Durable, Undeclared] {
+            assert_eq!(
+                check(
+                    &own(completion),
+                    &source(None),
+                    Some(BootstrapInputDescription::DURABLE)
+                ),
+                Ok(())
+            );
+        }
+        assert_eq!(relayed_completion([]), Quiescent);
+        assert_eq!(relayed_completion([Quiescent, Quiescent]), Quiescent);
+        assert_eq!(relayed_completion([Quiescent, Durable]), Durable);
+        assert_eq!(relayed_completion([Durable, Undeclared]), Undeclared);
+        assert_eq!(relayed_completion([Relayed]), Undeclared);
+    }
+
+    #[test]
+    fn provider_identity_must_equal_the_served_sources() {
+        let identity = |binding: &str| ElementIdentity {
+            scheme: "drasi.test/elements".into(),
+            binding: binding.into(),
+        };
+        let file = BootstrapOutputDescription {
+            identity: Some(identity("[sensors:serial]")),
+            ..provider(None, BootstrapCompletionKind::Quiescent)
+        };
+        let relay = Some(BootstrapInputDescription::SOURCE_RELAY);
+        let matching = source(None).with_element_identity(identity("[sensors:serial]"));
+        assert_eq!(check(&file, &matching, relay), Ok(()));
+        let rowid = source(None).with_element_identity(identity("[sensors:rowid]"));
+        assert!(matches!(
+            check(&file, &rowid, relay),
+            Err(Incompatibility::BootstrapIdentity { .. })
+        ));
+        assert!(matches!(
+            check(&file, &source(None), relay),
+            Err(Incompatibility::BootstrapIdentity { declared: None, .. })
+        ));
     }
 
     #[test]

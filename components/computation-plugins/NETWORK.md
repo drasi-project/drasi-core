@@ -5,7 +5,7 @@ ComputationGraph HTTP/gRPC transport, HTTP bootstrap and browser SSE delivery. E
 registers its own factories and uses its package name as its plugin identity. The
 HTTP sink library registers two: the ordinary sink and the opt-in
 `drasi.network/http-delivery` consumer.
-Native ABI is **4.0.0**, independently of the workspace package version.
+Native ABI is **5.0.0**, independently of the workspace package version.
 Native wire version is **2**, using binary computation envelopes
 and bulk MessagePack buffers. Rebuild libraries built against an older native ABI.
 Each implementation has version `"1"` and configuration version `1`. The legacy
@@ -83,8 +83,9 @@ connections immediately, and a timed-out Drain retains ownership so a later
 Stop finishes it. Restart requires that cleanup. Construction binds no socket
 or worker.
 
-The native sink also reuses the legacy SSE renderer for per-query/default
-templates and static/dynamic paths, with explicit path-count bounds.
+The native sink renders per-output/default templates and static/dynamic paths
+with the shared native template engine, with explicit path-count bounds; a
+render failure is permanent and never falls back.
 Output snapshot readers have bounded admission, cancellation and host
 runtime ownership. Incoming recovery snapshot/progress control envelopes remain
 unsupported; configuration does not pretend otherwise.
@@ -218,7 +219,7 @@ HTTP also supports the published webhook configuration: custom routes, HMAC and
 bearer checks, JSON/XML/YAML/text parsing, conditions, node/relation mappings,
 explicit timestamps and CORS. Its canonical camelCase DTO is converted through
 the existing mapping engine, not a legacy source adapter. Webhook authentication
-failures always return 401. In volatile mode, `adaptiveEnabled` enables bounded,
+failures always return 401. In volatile mode, the `adaptive` object enables bounded,
 cancellation-safe prefetch; each prefetched event remains a separate graph
 envelope. Durable admission stays host-scheduled and does not allocate an
 adaptive local queue.
@@ -251,7 +252,7 @@ The source's `stream` must match the channel. Missing service support, incompati
 storage, foreign scope or a memory/mixed output path rejects rather than silently
 downgrading. Construction still performs no network I/O.
 
-This uses the optional native service-v1 interface with ABI 4.0 libraries.
+This uses the optional native service-v1 interface with ABI 5.0 libraries.
 Fast-mode support alone does not provide durable admission. No volatile
 event queue, local producer sequence or second journal is allocated in durable
 mode. HTTP and gRPC acknowledge only after host graph validation and the outgoing
@@ -397,6 +398,14 @@ output. `maxBatchBytes` bounds collected inputs; `maxRequestBytes` splits
 rendered requests. See [DESIGN.md](sinks/http/DESIGN.md) and
 [CONFIGURATION.md](sinks/http/CONFIGURATION.md).
 
+**One adaptive batching object.** The HTTP source, HTTP sink and gRPC sink
+publish the same nested `adaptive` object
+(`common/network::batching::AdaptiveBatchSettings`: `minBatchSize`,
+`maxBatchSize`, `minWaitMs`, `maxWaitMs`, `windowMs`, all defaulted, unknown
+keys rejected), checked by one validator and mapped onto the same throughput
+tiers. Sinks are bounded by the host's 65536-operation limit and publish at
+most 1024 inputs per batch; the source is bounded by its `ingressCapacity`.
+
 ## gRPC sink configuration
 
 ```json
@@ -426,8 +435,8 @@ in the secret `secretMetadata` field.
 The new `drasi.v1.ChangeService/ProcessChanges` protocol carries an
 `OutputIdentity` (`alias`, `component`, `port`) and ordered `Change` items; the
 legacy `ReactionService/ProcessResults` query-result protocol is not used by the
-native sink. It supports fixed and adaptive batches. Use the flat
-`batchSize`/`batchFlushTimeoutMs` settings or the legacy `batching` object.
+native sink. It supports fixed and adaptive batches: the flat
+`batchSize`/`batchFlushTimeoutMs` settings or the `adaptive` object.
 Count, byte and timeout limits flush real batches; output or rendered-metadata
 changes split RPCs without reordering items.
 
@@ -440,8 +449,8 @@ There is no `row_signature`. The batch timestamp is the latest item timestamp, i
 Configured metadata is sent in both the request body and actual gRPC headers
 together with `x-drasi-component` and `x-drasi-port`.
 `canonicalJson` includes the canonical JSON `payload`; `proto` omits it unless a
-body template is configured. `outputTemplates` reuses the legacy renderer and
-metadata templates without changing typed images. Every request also carries
+body template is configured. `outputTemplates` uses the legacy template routing and
+the shared native template engine for body and metadata templates without changing typed images. Every request also carries
 `x-drasi-delivery-id`. See [DESIGN.md](sinks/grpc/DESIGN.md) and
 [CONFIGURATION.md](sinks/grpc/CONFIGURATION.md).
 
@@ -489,7 +498,7 @@ Client requests live in host-polled operation futures, not background sink
 processing queues. Cancellation drops pending calls/backoff, so `Abort` ends an
 in-flight delivery at once and `Drain` waits at most for the retry budget; stop drops owned
 client/channel handles after the host drains/cancels operations. The plugin's I/O
-runtime and library remain process-pinned according to ABI 4.0. Cancellation is
+runtime and library remain process-pinned according to ABI 5.0. Cancellation is
 not rollback or exactly-once delivery.
 
 The optional batching extension leaves frozen native metadata/base layouts

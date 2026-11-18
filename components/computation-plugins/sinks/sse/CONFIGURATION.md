@@ -143,10 +143,14 @@ from `drasi-reaction-common`:
 - The template context is the change notification: `operation`, `output`,
   `sequence`, `timestamp` (when the envelope has one), `identity`, and the
   `element`, `before`, `after`, `removedProperties` and `effectiveFrom` the
-  record carries. The `json` helper renders a value as JSON.
-- A body that fails to render falls back to the per-change frame; a path that
-  fails to render falls back to the configured path. Both log a warning. A
-  rendered path that is invalid fails the input.
+  record carries. Templates use the [shared native template engine](../../common/template/README.md), the same in every native sink:
+  the `json` helper renders a value as JSON, values are not HTML-escaped,
+  every helper call is checked at construction in every branch, and
+  rendering is strict.
+- A body or path template that fails to render (for example it reads `before`
+  on an insert) fails the input permanently, so `onPermanentFailure` applies;
+  no frame of that input is sent and nothing falls back to the per-change frame
+  or to the configured path. A rendered path that is invalid fails the input.
 - Relative paths are appended to `ssePath`; absolute paths are used as they are.
   Paths without `{{` are static and available at once. Templated paths are
   dynamic: available after their first frame, pruned when idle at the

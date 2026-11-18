@@ -340,19 +340,37 @@ async fn exercise(dynamic: bool) -> Result<()> {
         let pg_factory = native[1].bootstrap_factories().iter()
             .find(|factory| factory.metadata().implementation.name.as_ref() == "drasi.postgres/shared-row-bootstrap")
             .context("configured PG bootstrap")?;
-        let pg = pg_factory.create_provider(id("joined"),
-            database.flat(json!({"source":id("stocks").to_string(),"stream":stream("stocks")})),
-            Some(scope.clone()), Some(owner.clone()))?;
+        // The paired provider is opened by the shared source's coordinator,
+        // from the source's own configuration, as the graph pairs them.
+        let pg_source = native[0].factories().iter()
+            .find(|factory| factory.metadata().implementation.name.as_ref() == "drasi.postgres/shared-changes")
+            .context("configured PG source")?;
+        let coordinator = pg_source.create_source_bootstrap(
+            id("stocks"),
+            database.flat(json!({"stream":stream("stocks")})),
+            scope.clone(),
+            drasi_host_sdk::computation::NativeSourceBootstrapProgress::Shared(Arc::new(
+                ConsumerProgressSet::new(ComponentBatch::GRAPH_ID, id("stocks"), [owner.clone()])?,
+            )),
+        )?;
+        let pg = pg_factory.create_paired_query_provider(id("joined"), json!({}),
+            scope.clone(), owner.clone(), coordinator, None)?;
         let prices = native[3].bootstrap_factories().iter()
             .find(|factory| factory.metadata().implementation.name.as_ref() == "drasi.network/http-bootstrap")
             .context("HTTP bootstrap")?.create_provider(id("joined"), json!({
-                "source":id("price-feed").to_string(),"stream":stream("price-feed"),"outputCapacity":1,
+                "outputCapacity":1,
                 "settings":{"endpoints":[{"url":format!("http://{address}/prices"),
                     "response":{"itemsPath":"$.items","mappings":[{"elementType":"node","template":{
                         "id":"{{item.id}}","labels":["stock_prices"],
                         "properties":{"symbol":"{{item.symbol}}","price":"{{item.price}}"}}}]}}],
                     "maxRetries":0,"timeoutSeconds":20}
-            }), Some(scope), None)?;
+            }), Some(scope), None, drasi_computation_plugin_sdk::BootstrapSession::new(
+                Some(drasi_computation_plugin_sdk::ServedSource {
+                    source: id("price-feed"),
+                    stream: stream("price-feed"),
+                }),
+                None,
+            ))?;
         let composite = Arc::new(CompositeBootstrapProvider::new(INSTANCE, ComponentBatch::GRAPH_ID, id("joined"),
             vec![(resource("pg"),pg.clone()),(resource("http"),prices.clone())])?);
         let query = ContinuousQueryTransformer::new_configured(

@@ -154,7 +154,7 @@ async fn shared_query_output_history_reopens_and_capacity_is_operational() -> Re
     let create = |capacity, generation| {
         factory.create_component_with_processing(
             component_id()?,
-            json!({"query":QUERY, "outbox_capacity":capacity}),
+            json!({"query":QUERY, "outboxCapacity":capacity}),
             scope(generation),
             provider(directory.path())?,
         )

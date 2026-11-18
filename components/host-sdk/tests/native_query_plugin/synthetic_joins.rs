@@ -245,7 +245,7 @@ async fn join_graph(
         json!({
             "query": JOIN_QUERY, "bootstrap": true,
             "language": language, "joins": joins,
-            "source_transactions": limits(), "recovery":"strict",
+            "sourceTransactions": crate::transaction_settings(limits()), "recovery":"strict",
         }),
         vec!["orders".into(), "customers".into()],
     )
@@ -417,7 +417,7 @@ async fn synthetic_join_auto_reset_preserves_completed_coordinator_ownership() -
             None,
             json!({
                 "query":JOIN_QUERY, "bootstrap":true, "language":"cypher",
-                "joins":changed, "source_transactions":limits(), "recovery":"auto_reset",
+                "joins":changed, "sourceTransactions": crate::transaction_settings(limits()), "recovery":"auto_reset",
             }),
             vec!["orders".into(), "customers".into()],
         )
@@ -447,7 +447,13 @@ fn file_bootstrap(database: &Path, generation: u64) -> Result<Arc<NativeBootstra
         .context("missing file bootstrap factory")?;
     let mut configuration = sqlite::provider_configuration(database);
     configuration["tables"] = json!(["orders", "customers"]);
-    factory.create_query_provider(component_id()?, configuration, scope(generation), None)
+    factory.create_query_provider(
+        component_id()?,
+        configuration,
+        scope(generation),
+        None,
+        sqlite::provider_session(sqlite::PROVIDER_SOURCE, "sqlite/out")?,
+    )
 }
 
 #[tokio::test(flavor = "current_thread")]

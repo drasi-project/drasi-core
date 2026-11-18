@@ -126,16 +126,7 @@ pub(crate) fn plan(current: &HttpSourceConfig, proposed: &HttpSourceConfig) -> A
             || c.tls_client_ca_pem != p.tls_client_ca_pem,
         Stop,
     );
-    planner.field(
-        "adaptive",
-        c.adaptive_enabled != p.adaptive_enabled
-            || c.adaptive_max_batch_size != p.adaptive_max_batch_size
-            || c.adaptive_min_batch_size != p.adaptive_min_batch_size
-            || c.adaptive_max_wait_ms != p.adaptive_max_wait_ms
-            || c.adaptive_min_wait_ms != p.adaptive_min_wait_ms
-            || c.adaptive_window_secs != p.adaptive_window_secs,
-        Stop,
-    );
+    planner.field("adaptive", c.adaptive != p.adaptive, Stop);
     planner.field("webhookMode", c.webhook_mode() != p.webhook_mode(), Stop);
     planner.field(
         "webhooks.cors",

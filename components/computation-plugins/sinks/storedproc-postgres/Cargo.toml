@@ -23,11 +23,12 @@ abi-version = "5.0.0"
 kind = "sink-storedproc-postgres"
 
 [dependencies]
+drasi-computation-template-common.workspace = true
 drasi-computation-contracts.workspace = true
 drasi-computation-plugin-sdk.workspace = true
 drasi-computation-storedproc-common.workspace = true
 drasi-postgres-common = { workspace = true, features = ["storedproc"] }
-drasi-reaction-common = { workspace = true, features = ["sql"] }
+drasi-reaction-common.workspace = true
 anyhow = "1"
 async-trait = "0.1"
 log = "0.4"

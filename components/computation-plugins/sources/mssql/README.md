@@ -1,7 +1,7 @@
 # Native SQL Server CDC source
 
 `drasi-computation-source-mssql` streams SQL Server change data capture into a
-ComputationGraph (native ABI 4.0). It exports one factory,
+ComputationGraph (native ABI 5.0). It exports one factory,
 `drasi.mssql/changes`, at implementation and configuration version `1`: one
 envelope per row change for a fixed set of consumers, each with its own
 committed cursor and replay.

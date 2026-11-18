@@ -60,11 +60,6 @@ pub fn progress_record(
     })
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Options {
-    pub persistent: bool,
-}
-
 /// Row coverage is distinct from the existing transaction cursor. Counters are
 /// transport/logical allocation, never a substitute for physical binlog order.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,14 +277,10 @@ impl Iterator for Emission {
     }
 }
 
-pub fn validate(state: &SourceProgressSnapshot, options: Options) -> Result<()> {
+pub fn validate(state: &SourceProgressSnapshot) -> Result<()> {
     anyhow::ensure!(
-        state.ready
-            && state.recovered
-            && state.admitting
-            && state.failure.is_none()
-            && (!options.persistent || state.persistent),
-        "MySQL row consumer is unready, failed or missing required persistence"
+        state.ready && state.recovered && state.admitting && state.failure.is_none(),
+        "MySQL row consumer is unready or failed"
     );
     Ok(())
 }
@@ -298,13 +289,12 @@ pub fn minimum<'a>(
     initial: &'a Starting,
     source: &ComponentId,
     binding: [u8; 32],
-    options: Options,
 ) -> Result<Option<&'a SourceProgressSnapshot>> {
     let mut selected: Option<(&SourceProgressSnapshot, Option<RowPosition>)> = None;
     let mut history = None;
     let mut boundaries = BTreeMap::new();
     for state in initial.states() {
-        validate(state, options)?;
+        validate(state)?;
         let position = checkpoint(state, source, binding)?;
         if let Some(position) = &position {
             if let Some(history) = &history {
@@ -343,7 +333,6 @@ struct Member {
 pub struct Updates {
     updates: Box<dyn ConsumerProgressUpdates>,
     members: BTreeMap<ComponentId, Member>,
-    options: Options,
 }
 
 impl Updates {
@@ -352,7 +341,6 @@ impl Updates {
         initial: &ConsumerProgressSnapshot,
         source: &ComponentId,
         identity: [u8; 32],
-        options: Options,
     ) -> Result<Self> {
         anyhow::ensure!(
             binding.members.iter().eq(initial.consumers.keys()),
@@ -362,7 +350,7 @@ impl Updates {
             .consumers
             .iter()
             .map(|(id, state)| {
-                validate(state, options)?;
+                validate(state)?;
                 let position = checkpoint(state, source, identity)?;
                 Ok((
                     id.clone(),
@@ -377,7 +365,6 @@ impl Updates {
         Ok(Self {
             updates: binding.view.subscribe()?,
             members,
-            options,
         })
     }
 
@@ -393,7 +380,7 @@ impl Updates {
             "MySQL row membership changed"
         );
         for (id, state) in group.consumers {
-            validate(&state, self.options)?;
+            validate(&state)?;
             let member = self
                 .members
                 .get_mut(&id)

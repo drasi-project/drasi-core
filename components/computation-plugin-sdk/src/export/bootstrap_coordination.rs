@@ -23,10 +23,8 @@ pub(super) static EXTENSION: PluginBootstrapCoordinationV1 = PluginBootstrapCoor
     header: Header::new::<PluginBootstrapCoordinationV1>(),
     version: VERSION,
     reserved: 0,
-    source_factory: Some(source_factory),
     bootstrap_factory: Some(bootstrap_factory),
     create: Some(create),
-    create_source: Some(create_source),
     create_bootstrap: Some(create_bootstrap),
 };
 
@@ -222,7 +220,7 @@ impl ProviderLease {
 }
 
 struct Provider {
-    inner: Arc<dyn crate::NativeBootstrapProvider>,
+    inner: Arc<dyn crate::DurableBootstrapProvider>,
     lease: Arc<ProviderLease>,
 }
 
@@ -242,7 +240,7 @@ impl Provider {
 }
 
 #[async_trait]
-impl crate::NativeBootstrapProvider for Provider {
+impl crate::DurableBootstrapProvider for Provider {
     fn validate_query_scope(
         &self,
         instance: &str,
@@ -270,18 +268,12 @@ impl crate::NativeBootstrapProvider for Provider {
         self.lease.state.stopped.store(true, Ordering::Release);
         Ok(())
     }
-    async fn prepare(&self) -> anyhow::Result<BootstrapPreparation> {
-        self.lease.check(true)?;
-        let result = self.inner.prepare().await?;
-        self.active()?;
-        Ok(result)
-    }
-    async fn prepare_with_state(
+    async fn prepare(
         &self,
-        state: &dyn BootstrapState,
+        state: Option<&dyn BootstrapState>,
     ) -> anyhow::Result<BootstrapPreparation> {
         self.lease.check(true)?;
-        let result = self.inner.prepare_with_state(state).await?;
+        let result = self.inner.prepare(state).await?;
         self.active()?;
         Ok(result)
     }
@@ -289,18 +281,12 @@ impl crate::NativeBootstrapProvider for Provider {
         self.active()?;
         self.inner.has_pending_snapshot()
     }
-    async fn snapshot(&self) -> anyhow::Result<ComputationBootstrapSnapshot> {
-        self.lease.check(true)?;
-        let snapshot = self.inner.snapshot().await?;
-        self.active()?;
-        Ok(self.wrap(snapshot))
-    }
-    async fn snapshot_with_state(
+    async fn snapshot(
         &self,
-        state: &dyn BootstrapState,
+        state: Option<&dyn BootstrapState>,
     ) -> anyhow::Result<ComputationBootstrapSnapshot> {
         self.lease.check(true)?;
-        let snapshot = self.inner.snapshot_with_state(state).await?;
+        let snapshot = self.inner.snapshot(state).await?;
         self.active()?;
         Ok(self.wrap(snapshot))
     }
@@ -343,27 +329,16 @@ impl futures_core::Stream for PairedStream {
     }
 }
 
-unsafe extern "C" fn source_factory(raw: *mut c_void, index: u32) -> Reply {
-    transport::reply_boundary(|| {
-        let plugin = unsafe { state_ref::<Arc<PluginState>>(raw)? };
-        let factory = plugin
-            .definition
-            .factories
-            .get(index as usize)
-            .ok_or_else(|| Failure::protocol("unknown source/bootstrap factory"))?;
-        wire::encode(&factory.supports_bootstrap_coordination()).map_err(Failure::from)
-    })
-}
-
 unsafe extern "C" fn bootstrap_factory(raw: *mut c_void, index: u32) -> Reply {
     transport::reply_boundary(|| {
         let plugin = unsafe { state_ref::<Arc<PluginState>>(raw)? };
-        let factory = plugin
+        // The declared pairing selects creation through a source coordinator.
+        let metadata = plugin
             .definition
-            .bootstrap_factories
+            .bootstrap_metadata
             .get(index as usize)
             .ok_or_else(|| Failure::protocol("unknown paired bootstrap factory"))?;
-        wire::encode(&factory.requires_source_bootstrap()).map_err(Failure::from)
+        wire::encode(&metadata.pairing.is_some()).map_err(Failure::from)
     })
 }
 
@@ -450,23 +425,27 @@ unsafe extern "C" fn create(
         let metadata = &factory.plugin.definition.metadata.factories[factory.index];
         let implementation = &factory.plugin.definition.factories[factory.index];
         let construct = || -> anyhow::Result<Arc<Coordinator>> {
+            let services = &metadata.capabilities.services;
+            let coordination = implementation
+                .bootstrap_coordination()
+                .filter(|_| services.bootstrap_coordination)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("native factory does not declare bootstrap coordination")
+                })?;
             anyhow::ensure!(
-                implementation.supports_bootstrap_coordination()
-                    && metadata.role == drasi_computation_contracts::ComponentRole::Source
-                    && request.implementation == metadata.implementation
+                request.implementation == metadata.implementation
                     && request.configuration_version == metadata.configuration_version,
                 "source/bootstrap coordinator factory mismatch"
             );
             validate_create_request(factory, &request)?;
             let readers = unsafe { progress(readers, &request)? };
             anyhow::ensure!(
-                matches!(&readers, SourceBootstrapProgress::Single(_))
-                    == implementation.supports_source_progress()
+                matches!(&readers, SourceBootstrapProgress::Single(_)) == services.source_progress
                     && matches!(&readers, SourceBootstrapProgress::Shared { .. })
-                        == implementation.supports_consumer_progress(),
+                        == services.consumer_progress,
                 "source/bootstrap coordinator progress mode mismatch"
             );
-            let engine = implementation.create_bootstrap_coordinator(&request, readers.clone())?;
+            let engine = coordination.create_bootstrap_coordinator(&request, readers.clone())?;
             Ok(Arc::new(Coordinator {
                 plugin: factory.plugin.clone(),
                 index: factory.index,
@@ -550,30 +529,6 @@ pub(super) unsafe fn source_lease(
     })
 }
 
-unsafe extern "C" fn create_source(
-    factory: *mut c_void,
-    request: BorrowedBytes,
-    coordinator: *const BootstrapCoordinatorHandle,
-    progress: *const abi::recovery::SourceProgressV1,
-    consumers: *const abi::consumer_progress::ConsumerProgressV1,
-    out: *mut abi::ComponentHandle,
-) -> Status {
-    unsafe {
-        create_component_with_services(
-            factory,
-            request,
-            std::ptr::null(),
-            progress,
-            consumers,
-            std::ptr::null(),
-            false,
-            coordinator,
-            std::ptr::null(),
-            out,
-        )
-    }
-}
-
 static VTABLE: BootstrapCoordinatorVTable = BootstrapCoordinatorVTable {
     header: Header::new::<BootstrapCoordinatorVTable>(),
     retain: Some(retain),
@@ -600,7 +555,11 @@ unsafe extern "C" fn describe(raw: *mut c_void) -> Reply {
     transport::reply_boundary(|| {
         let owner = unsafe { clone_owner(raw)? };
         drop(owner.active()?);
-        crate::bootstrap::encode(&owner.request).map_err(Failure::from)
+        crate::bootstrap::encode(&crate::CoordinatorDescription {
+            source: owner.request.clone(),
+            protocol: owner.engine.protocol(),
+        })
+        .map_err(Failure::from)
     })
 }
 unsafe extern "C" fn open(
@@ -611,7 +570,8 @@ unsafe extern "C" fn open(
     transport::status_boundary(|| {
         require_output(out)?;
         let owner = unsafe { clone_owner(raw)? };
-        let query = unsafe { crate::bootstrap_coordination::decode_query(query)? };
+        let crate::SourceBootstrapOpen { query, labels } =
+            unsafe { crate::bootstrap_coordination::decode_open(query)? };
         let mut lifecycle = owner.active()?;
         let reader = owner.member(&query)?;
         if let Some(previous) = lifecycle.providers.get(&query) {
@@ -623,7 +583,7 @@ unsafe extern "C" fn open(
         }
         let scope = owner.request.scope.as_ref().expect("validated scope");
         let inner = owner.invoke(|| {
-            let inner = owner.engine.open(&query, reader.clone())?;
+            let inner = owner.engine.open(&query, reader.clone(), labels.as_ref())?;
             anyhow::ensure!(
                 inner
                     .recovery_reader()
@@ -649,7 +609,7 @@ unsafe extern "C" fn open(
             transport::write_out(
                 out,
                 crate::bootstrap::export_provider(
-                    provider,
+                    crate::NativeBootstrapProvider::Durable(provider),
                     owner.plugin.codec.clone(),
                     Some(reader),
                 ),
@@ -718,17 +678,20 @@ unsafe extern "C" fn create_bootstrap(
             .bootstrap_factories
             .get(index as usize)
             .ok_or_else(|| Failure::protocol("unknown paired bootstrap factory"))?;
-        if !factory.requires_source_bootstrap() {
+        let metadata = &plugin.definition.bootstrap_metadata[index as usize];
+        let Some(pairing) = metadata.pairing.as_ref() else {
             return Err(Failure::protocol(
                 "bootstrap factory did not declare source pairing",
             ));
-        }
-        let metadata = &plugin.definition.bootstrap_metadata[index as usize];
-        let request: CreateRequest = crate::bootstrap::decode(unsafe {
+        };
+        let crate::BootstrapCreateRequest { request, session } = crate::bootstrap::decode(unsafe {
             transport::borrowed_bytes(input, abi::bootstrap::MAX_CONTROL_BYTES)?
         })
         .map_err(Failure::from)?;
         metadata.validate_request(&request).map_err(Failure::from)?;
+        session.validate().map_err(Failure::from)?;
+        super::bootstrap_description(factory.as_ref(), metadata, &request.configuration)
+            .map_err(Failure::from)?;
         if !metadata.source_progress {
             return Err(Failure::protocol(
                 "paired bootstrap requires its actual query progress",
@@ -736,16 +699,13 @@ unsafe extern "C" fn create_bootstrap(
         }
         let source = unsafe { crate::NativeSourceBootstrap::from_borrowed(source)? };
         let binding = source.metadata();
-        if binding.query != request.id
-            || binding.source.id == request.id
-            || !binding
-                .source
-                .scope
-                .as_ref()
-                .zip(request.scope.as_ref())
-                .is_some_and(|(a, b)| a.instance_id == b.instance_id && a.graph_id == b.graph_id)
-        {
+        if binding.query != request.id || binding.source == request.id {
             return Err(Failure::protocol("paired bootstrap scope/query mismatch"));
+        }
+        if &binding.protocol != pairing {
+            return Err(Failure::protocol(
+                "paired source does not coordinate the provider's declared protocol",
+            ));
         }
         let provider = factory
             .create_with_source_bootstrap(&request, source)

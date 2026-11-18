@@ -19,15 +19,6 @@ pub struct PluginRecoveryV1 {
     pub header: Header,
     pub version: u32,
     pub reserved: u32,
-    pub factory: Option<unsafe extern "C" fn(*mut c_void, u32) -> Reply>,
-    pub create: Option<
-        unsafe extern "C" fn(
-            *mut c_void,
-            BorrowedBytes,
-            *const SourceProgressV1,
-            *mut ComponentHandle,
-        ) -> Status,
-    >,
     /// Immutable instance declaration, not proof of a host transaction owner.
     pub inspect: Option<unsafe extern "C" fn(*mut c_void) -> Reply>,
 }
@@ -79,10 +70,9 @@ mod tests {
     #[test]
     fn recovery_extension_does_not_change_existing_tables() {
         let pointer = size_of::<usize>();
-        assert_eq!(size_of::<PluginRecoveryV1>(), 24 + 3 * pointer);
+        assert_eq!(size_of::<PluginRecoveryV1>(), 24 + pointer);
         assert_eq!(size_of::<SourceProgressV1>(), 16 + 6 * pointer);
         assert_eq!(size_of::<ProgressSubscriptionV1>(), 16 + 4 * pointer);
-        assert_eq!(size_of::<services::PluginServicesV1>(), 24 + 2 * pointer);
         assert_eq!(size_of::<ComponentVTable>(), 16 + 5 * pointer);
         assert_eq!(ABI_VERSION, "5.0.0");
         assert_eq!(WIRE_VERSION, 5);

@@ -47,7 +47,7 @@ credentials then replace `user` and `password` for each activation.
 | `tables` | array of strings | `[]` | `table` (in `dbo`) or `schema.table`; bracket-quote other names (`[Sales Ops].[Order Lines]`). At most 256, no duplicates, not `barrierTable`. Empty selects every CDC-enabled table except `barrierTable`; a capture instance on a new table then stops the source with `SchemaChanged`. | | unsupported |
 | `tableKeys` | array | `[]` | `{"table": "schema.table", "keyColumns": ["a", "b"]}` for tables without a primary key, or to override one. Columns nonempty, unique and captured. | | unsupported |
 | `startPosition` | string | `current` | Where a group without any committed cursor starts: `current` (the CDC maximum LSN at its first start) or `beginning` (each capture instance's oldest retained change). No effect once cursors exist. | | Restart |
-| `barrierTable` | string | none | Administrator-provisioned CDC table with a `token uniqueidentifier` column, used by the coordinated bootstrap provider. Excluded from an all-tables selection; erasing removal deletes this source's leftover markers from it. | | unsupported |
+| `barrierTable` | string | none | Administrator-provisioned CDC table with a `token uniqueidentifier` column. When set, the source declares the `drasi.mssql/coordinated-changes` coordination protocol and its coordinator opens the paired `drasi.mssql/bootstrap` provider (which takes no configuration) with this table and the source's settings and credentials. Excluded from an all-tables selection; erasing removal deletes this source's leftover markers from it. | | unsupported |
 | `pollIntervalMs` | integer | `1000` | 1..=3600000. Delay before polling again after a page with no change. | | InPlace |
 | `maxRows` | integer | `10000` | 1..=1000000. Page size: change groups read and changes emitted per poll. | | InPlace |
 | `maxBytes` | integer | `67108864` | 1024..=268435456. Record payload bytes per page (both images of an update count); one change must fit. | | InPlace |
@@ -123,9 +123,11 @@ with this source's derived prefix, left behind by a crashed or failed
 coordinated snapshot — and nothing else. It is idempotent: a missing table
 or no rows is success. Without `barrierTable` the source owns no external
 state and erase succeeds without connecting. When the source authenticates
-through an activation identity, erase uses the last activation's credentials;
-if it never started in this process, erase fails and names the manual
-statement:
+through an activation identity, the host resolves the identity's
+credentials again for the erasing removal, so erase works on a source that
+never started in this process (for example after a host restart). Only if
+no credentials are available (an identity-bound source whose provider
+supplies none) does erase fail and name the manual statement:
 
 ```sql
 DELETE FROM drasi.Barrier WHERE UPPER(LEFT(CONVERT(char(36), token), 18)) = '<prefix>';
