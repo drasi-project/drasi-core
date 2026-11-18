@@ -62,35 +62,9 @@ impl Factory for MySqlStoredProcFactory {
         )?;
         Ok(request.consumer(config.delivery_guarantee, config.on_permanent_failure))
     }
-    fn supports_activation_credentials(&self) -> bool {
-        true
-    }
-    fn activation_credential_context(
-        &self,
-        request: &CreateRequest,
-    ) -> Result<ActivationCredentialContext> {
-        let config = MySqlStoredProcConfig::parse_with_activation_credentials(
-            request.configuration.clone(),
-            true,
-        )?;
-        let context = ActivationCredentialContext {
-            hostname: config.host,
-            port: config.port,
-        };
-        context.validate()?;
-        Ok(context)
-    }
-    fn configuration_details(&self) -> Option<ConfigDetails> {
-        Some(config::definition().details())
-    }
-    fn supports_update_planning(&self) -> bool {
-        true
-    }
-    fn assess(&self, request: &UpdateRequest) -> Result<Assessment> {
-        management::assess(request)
-    }
-    fn consumer_mode(&self) -> Option<ConsumerMode> {
-        Some(ConsumerMode::External)
+
+    fn configuration_details(&self) -> ConfigDetails {
+        config::definition().details()
     }
     fn metadata(&self) -> FactoryMetadata {
         FactoryMetadata {
@@ -110,11 +84,21 @@ impl Factory for MySqlStoredProcFactory {
                     ComponentUpdateMode::Recreate,
                 ],
                 erases_owned_state: true,
+                services: drasi_computation_plugin_sdk::HostServices {
+                    consumer: Some(ConsumerMode::External),
+                    activation_credentials: true,
+                    ..Default::default()
+                },
                 ..Capabilities::default()
             },
         }
     }
-    fn create(&self, request: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
+    fn create(
+        &self,
+        request: &CreateRequest,
+        _: ControlSender,
+        _services: drasi_computation_plugin_sdk::ServiceBindings,
+    ) -> Result<CreatedComponent> {
         let config = MySqlStoredProcConfig::parse_with_activation_credentials(
             request.configuration.clone(),
             request.activation_credentials_bound,
@@ -136,6 +120,38 @@ impl Factory for MySqlStoredProcFactory {
             scope,
         )?))
         .into())
+    }
+    fn update_planner(&self) -> Option<&dyn drasi_computation_plugin_sdk::UpdatePlanner> {
+        Some(self)
+    }
+    fn activation_credentials(
+        &self,
+    ) -> Option<&dyn drasi_computation_plugin_sdk::ActivationCredentialEndpoint> {
+        Some(self)
+    }
+}
+
+impl drasi_computation_plugin_sdk::UpdatePlanner for MySqlStoredProcFactory {
+    fn assess(&self, request: &UpdateRequest) -> Result<Assessment> {
+        management::assess(request)
+    }
+}
+
+impl drasi_computation_plugin_sdk::ActivationCredentialEndpoint for MySqlStoredProcFactory {
+    fn activation_credential_context(
+        &self,
+        request: &CreateRequest,
+    ) -> Result<ActivationCredentialContext> {
+        let config = MySqlStoredProcConfig::parse_with_activation_credentials(
+            request.configuration.clone(),
+            true,
+        )?;
+        let context = ActivationCredentialContext {
+            hostname: config.host,
+            port: config.port,
+        };
+        context.validate()?;
+        Ok(context)
     }
 }
 

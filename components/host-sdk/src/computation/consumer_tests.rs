@@ -94,13 +94,13 @@ impl EnvelopeSource for BatchSource {
 }
 pub(in crate::computation) fn plugin() -> anyhow::Result<Arc<NativePlugin>> {
     unsafe {
-        NativePlugin::from_entry_points_with_consumer(
+        NativePlugin::from_entry_points_with(
             drasi_computation_plugin_metadata,
             drasi_computation_plugin_entry,
-            None,
-            None,
-            None,
-            Some(drasi_computation_plugin_consumer_v1),
+            crate::computation::EntryPoints {
+                consumer: Some(drasi_computation_plugin_consumer_v1),
+                ..Default::default()
+            },
         )
     }
 }
@@ -140,7 +140,7 @@ pub(in crate::computation) fn factory(
     plugin
         .factories()
         .iter()
-        .find(|factory| factory.consumer_mode() == Some(mode))
+        .find(|factory| factory.metadata().capabilities.services.consumer == Some(mode))
         .unwrap()
         .clone()
 }
@@ -536,8 +536,6 @@ fn native_consumer_malformed_negotiation_rejects_before_entry() {
             header: abi::Header::new::<abi::consumer::PluginConsumerV1>(),
             version: abi::consumer::VERSION + 1,
             reserved: 0,
-            factory: None,
-            create: None,
             inspect: None,
             begin: None,
             end_batch: None,
@@ -545,13 +543,13 @@ fn native_consumer_malformed_negotiation_rejects_before_entry() {
         &TABLE
     }
     assert!(unsafe {
-        NativePlugin::from_entry_points_with_consumer(
+        NativePlugin::from_entry_points_with(
             drasi_computation_plugin_metadata,
             entry,
-            None,
-            None,
-            None,
-            Some(extension),
+            crate::computation::EntryPoints {
+                consumer: Some(extension),
+                ..Default::default()
+            },
         )
     }
     .is_err());
@@ -571,9 +569,16 @@ async fn native_consumer_graph_factory_requires_and_resolves_delivery_resource(
         .dependencies
         .insert("consumer".into(), vec![resource.clone()]);
     factory.validate(&specification)?;
-    assert!(super::plugin().factories()[6]
-        .validate(&specification)
-        .is_err());
+    // A sink that does not declare Host-owned delivery refuses the binding.
+    let ordinary = super::plugin().factories()[2].clone();
+    let mut ordinary_specification = ordinary.specification(id(424), json!({}))?;
+    ordinary_specification
+        .dependencies
+        .insert("consumer".into(), vec![resource.clone()]);
+    let error = ordinary
+        .validate(&ordinary_specification)
+        .expect_err("an undeclared consumer binding is refused");
+    assert!(error.to_string().contains("'consumer'"), "{error:#}");
     let mut graph = ComputationGraph::builder(GRAPH)
         .declare_resource(ResourceSpecification {
             id: resource.clone(),

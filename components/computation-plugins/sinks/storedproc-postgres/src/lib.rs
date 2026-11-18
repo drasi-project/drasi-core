@@ -119,27 +119,45 @@ impl Factory for PostgresStoredProcFactory {
                     ComponentUpdateMode::Recreate,
                 ],
                 erases_owned_state: true,
+                services: drasi_computation_plugin_sdk::HostServices {
+                    consumer: Some(ConsumerMode::External),
+                    activation_credentials: true,
+                    ..Default::default()
+                },
                 ..Capabilities::default()
             },
         }
     }
 
-    fn configuration_details(&self) -> Option<ConfigDetails> {
-        Some(PostgresStoredProcConfig::definition().details())
+    fn configuration_details(&self) -> ConfigDetails {
+        PostgresStoredProcConfig::definition().details()
     }
 
-    fn supports_update_planning(&self) -> bool {
-        true
+    fn create(
+        &self,
+        request: &CreateRequest,
+        _control: ControlSender,
+        _services: drasi_computation_plugin_sdk::ServiceBindings,
+    ) -> Result<CreatedComponent> {
+        Ok(Component::Consumer(Box::new(self.build(request)?)).into())
     }
+    fn update_planner(&self) -> Option<&dyn drasi_computation_plugin_sdk::UpdatePlanner> {
+        Some(self)
+    }
+    fn activation_credentials(
+        &self,
+    ) -> Option<&dyn drasi_computation_plugin_sdk::ActivationCredentialEndpoint> {
+        Some(self)
+    }
+}
 
+impl drasi_computation_plugin_sdk::UpdatePlanner for PostgresStoredProcFactory {
     fn assess(&self, request: &UpdateRequest) -> Result<Assessment> {
         management::assess(request)
     }
+}
 
-    fn supports_activation_credentials(&self) -> bool {
-        true
-    }
-
+impl drasi_computation_plugin_sdk::ActivationCredentialEndpoint for PostgresStoredProcFactory {
     /// The configured endpoint; pure configuration inspection.
     fn activation_credential_context(
         &self,
@@ -152,14 +170,6 @@ impl Factory for PostgresStoredProcFactory {
         };
         context.validate()?;
         Ok(context)
-    }
-
-    fn consumer_mode(&self) -> Option<ConsumerMode> {
-        Some(ConsumerMode::External)
-    }
-
-    fn create(&self, request: &CreateRequest, _control: ControlSender) -> Result<CreatedComponent> {
-        Ok(Component::Consumer(Box::new(self.build(request)?)).into())
     }
 }
 

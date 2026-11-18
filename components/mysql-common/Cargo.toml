@@ -36,7 +36,7 @@ api = ["dep:utoipa", "client"]
 # `native` use the owned connection layer and its native-tls stack instead.
 client = ["dep:mysql_async"]
 native = [
-    "dep:drasi-computation-contracts", "dep:async-trait", "dep:bytes", "dep:encoding_rs",
+    "dep:drasi-computation-contracts", "dep:drasi-computation-plugin-sdk", "dep:async-trait", "dep:bytes", "dep:encoding_rs",
     "dep:futures-util", "dep:mysql_common", "dep:native-tls",
     "dep:tokio", "dep:tokio-native-tls", "dep:rsa", "dep:sha1", "dep:sha2",
 ]
@@ -47,14 +47,16 @@ storedproc = [
     "dep:thiserror",
     "dep:drasi-computation-contracts",
     "dep:drasi-reaction-common",
-    "drasi-reaction-common/sql",
+    "dep:drasi-computation-template-common",
 ]
 
 [dependencies]
 drasi-core-types.workspace = true
 drasi-computation-contracts = { workspace = true, optional = true }
+drasi-computation-plugin-sdk = { workspace = true, optional = true }
 drasi-reaction-common = { workspace = true, optional = true }
 drasi-computation-storedproc-common = { workspace = true, optional = true }
+drasi-computation-template-common = { workspace = true, optional = true }
 thiserror = { version = "2", optional = true }
 anyhow = "1.0"
 log = "0.4"

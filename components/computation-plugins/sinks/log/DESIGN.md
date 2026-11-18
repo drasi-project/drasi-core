@@ -37,8 +37,8 @@ InputEnvelope ─► SinkOutputs::output_for(stream) ─► alias
 ## Rendering
 
 **Compile once.** Construction (and an in-place update) compiles every
-non-empty template once and registers it in a private Handlebars registry.
-Nothing is parsed per change.
+non-empty template once with the shared native template engine
+(`drasi-computation-template-common`). Nothing is parsed per change.
 
 **Static validation.** Each compiled template is walked, including blocks,
 `else` branches, sub-expressions and hash arguments:
@@ -50,12 +50,13 @@ Nothing is parsed per change.
   the sink registers none.
 
 A walk is used instead of a trial render because a trial render only visits the
-branches that one sample context selects. The helper list is fixed in this
-crate, so a Handlebars feature enabled elsewhere in the build (for example
-`string_helpers`) never changes which templates are accepted. Strict mode
-(missing values are errors) is **not** enabled: a missing value renders as an
-empty string, as it did in the legacy reaction, so a template can serve
-operations with and without a `before` image.
+branches that one sample context selects. The helper list is fixed in the
+shared engine, so a Handlebars feature enabled elsewhere in the build (for
+example `string_helpers`) never changes which templates are accepted. Strict
+mode is enabled, as in every native sink: a missing value is a render failure
+(the legacy reaction rendered an empty string), handled by
+`renderFailurePolicy`. A template that serves operations with and without a
+`before` image tests it with `{{#if before}}`.
 
 **No HTML escaping.** Log lines are not HTML, so `{{after.name}}` renders the
 value unchanged (the legacy reaction escaped `"`, `<`, `&` and so on).
@@ -124,7 +125,7 @@ can still abort it.
 
 ## Management
 
-The factory plans updates (`supports_update_planning`) and the live object
+The factory plans updates (`Factory::update_planner`) and the live object
 exports `NativeManagement`. Supported modes are `InPlace` and `Recreate`.
 
 | Change | Boundary |

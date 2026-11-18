@@ -595,9 +595,10 @@ fn unsupported_profile_axes_and_invalid_headers_are_explicit_errors() -> Result<
         GrpcSourceConfig::from_value(json!({"stream":"facilities-db/out"}))?.port,
         50051
     );
-    assert!(HttpSourceConfig::from_value(json!({"stream":"s","adaptiveEnabled":true})).is_ok());
+    assert!(HttpSourceConfig::from_value(json!({"stream":"s","adaptive":{}})).is_ok());
     for config in [
-        json!({"stream":"s","adaptiveEnabled":true,"adaptiveMinBatchSize":0}),
+        json!({"stream":"s","adaptive":{"minBatchSize":0}}),
+        json!({"stream":"s","adaptiveEnabled":true}),
         json!({"stream":"s","ingressCapacity":0}),
         json!({"stream":"s","durability":{}}),
         json!({"stream":"s","timeoutMs":0}),
@@ -637,12 +638,13 @@ fn unsupported_profile_axes_and_invalid_headers_are_explicit_errors() -> Result<
         2
     );
     assert!(GrpcSinkConfig::parse(
-        json!({"outputs":{"q":{"component":QUERY_ID,"port":"out"}},"batching":{"mode":"adaptive"}})
+        json!({"outputs":{"q":{"component":QUERY_ID,"port":"out"}},"adaptive":{}})
     )
     .is_ok());
     for config in [
         json!({"outputs":{"q":{"component":QUERY_ID,"port":"out"}},"batchSize":0}),
-        json!({"outputs":{"q":{"component":QUERY_ID,"port":"out"}},"batching":{"mode":"adaptive","adaptiveMinBatchSize":0}}),
+        json!({"outputs":{"q":{"component":QUERY_ID,"port":"out"}},"adaptive":{"minBatchSize":0}}),
+        json!({"outputs":{"q":{"component":QUERY_ID,"port":"out"}},"batching":{"mode":"adaptive"}}),
         json!({"outputs":{"q":{"component":QUERY_ID,"port":"out"}},"metadata":{"x-drasi-port":"wrong"}}),
         json!({"outputs":{"q":{"component":QUERY_ID,"port":"out"}},"connectionRetryAttempts":0}),
     ] {

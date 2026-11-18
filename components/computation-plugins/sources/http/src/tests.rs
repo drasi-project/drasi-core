@@ -157,7 +157,7 @@ fn configuration_round_trips() -> Result<()> {
         ),
         with(
             base(9102),
-            json!({"adaptiveEnabled": true, "adaptiveMaxBatchSize": 50}),
+            json!({"adaptive": {"minBatchSize": 10, "maxBatchSize": 50, "minWaitMs": 1, "maxWaitMs": 100, "windowMs": 5000}}),
         ),
         webhook_config(9103, Value::Null),
     ])
@@ -195,7 +195,7 @@ fn assessment_matrix() -> Result<()> {
                 Some(UpdateBoundary::Stop),
             ),
             (
-                with(current.clone(), json!({"adaptiveEnabled": true})),
+                with(current.clone(), json!({"adaptive": {}})),
                 Some(UpdateBoundary::Stop),
             ),
             (

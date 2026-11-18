@@ -8,6 +8,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct MySqlStandaloneBootstrapFactory;
 
+/// The standalone snapshot is not quiescent: a volatile query that completed
+/// its snapshot refreshes it on restart (the live source does not replay what
+/// it missed), so it declares a durable completion. It never returns a
+/// watermark or completion state.
 struct Provider {
     instance: String,
     graph: String,
@@ -17,7 +21,7 @@ struct Provider {
 }
 
 #[async_trait]
-impl NativeBootstrapProvider for Provider {
+impl DurableBootstrapProvider for Provider {
     fn validate_query_scope(&self, instance: &str, graph: &str, query: &ComponentId) -> Result<()> {
         anyhow::ensure!(
             instance == self.instance && graph == self.graph && query == &self.query,
@@ -25,12 +29,14 @@ impl NativeBootstrapProvider for Provider {
         );
         Ok(())
     }
-    async fn prepare(&self) -> Result<BootstrapPreparation> {
-        self.inner.prepare().await?;
-        Ok(BootstrapPreparation::Ready)
+    fn recovery_reader(&self) -> Option<SourceProgressView> {
+        None
     }
-    async fn prepare_with_state(&self, state: &dyn BootstrapState) -> Result<BootstrapPreparation> {
+    async fn prepare(&self, state: Option<&dyn BootstrapState>) -> Result<BootstrapPreparation> {
         self.inner.prepare().await?;
+        let Some(state) = state else {
+            return Ok(BootstrapPreparation::Ready);
+        };
         match state.durability().process_restart {
             FailureSurvival::Guaranteed => Ok(BootstrapPreparation::Ready),
             FailureSurvival::NotGuaranteed => {
@@ -45,12 +51,21 @@ impl NativeBootstrapProvider for Provider {
             }
         }
     }
-    async fn snapshot(&self) -> Result<ComputationBootstrapSnapshot> {
+    fn has_pending_snapshot(&self) -> Result<bool> {
+        Ok(false)
+    }
+    async fn snapshot(
+        &self,
+        _: Option<&dyn BootstrapState>,
+    ) -> Result<ComputationBootstrapSnapshot> {
         self.inner.snapshot().await
     }
     async fn complete_snapshot(&self) -> Result<Vec<BootstrapWatermark>> {
         self.inner.complete().await?;
         Ok(Vec::new())
+    }
+    fn completion_state(&self) -> Result<Option<bytes::Bytes>> {
+        Ok(None)
     }
     async fn stop(&self) -> Result<()> {
         self.inner.stop().await
@@ -59,13 +74,31 @@ impl NativeBootstrapProvider for Provider {
 
 impl BootstrapFactory for MySqlStandaloneBootstrapFactory {
     fn metadata(&self) -> BootstrapFactoryMetadata {
-        metadata(MYSQL_STANDALONE_BOOTSTRAP, Kind::Standalone)
+        BootstrapFactoryMetadata {
+            implementation: ImplementationIdentity::try_new(MYSQL_STANDALONE_BOOTSTRAP, "1")
+                .expect("implementation"),
+            configuration_version: 1,
+            configuration: config::definition().schema(),
+            source_progress: false,
+            pairing: None,
+        }
+    }
+    fn describe(&self, configuration: &serde_json::Value) -> Result<BootstrapOutputDescription> {
+        self.metadata().configuration.validate(configuration)?;
+        BootstrapConfig::from_value(configuration)?;
+        Ok(BootstrapOutputDescription {
+            completion: BootstrapCompletionKind::Durable,
+            pairing: None,
+            namespace: ElementNamespace::ServedSource,
+            identity: None,
+        })
     }
     fn create(
         &self,
         request: &CreateRequest,
+        session: &BootstrapSession,
         progress: Option<NativeSourceProgress>,
-    ) -> Result<Arc<dyn NativeBootstrapProvider>> {
+    ) -> Result<NativeBootstrapProvider> {
         self.metadata()
             .configuration
             .validate(&request.configuration)?;
@@ -73,21 +106,23 @@ impl BootstrapFactory for MySqlStandaloneBootstrapFactory {
             progress.is_none(),
             "standalone MySQL snapshot has no recovery owner"
         );
-        let config = BootstrapConfig::from_value(Kind::Standalone, &request.configuration)?;
-        let settings = config.engine_config(Kind::Standalone)?;
+        let config = BootstrapConfig::from_value(&request.configuration)?;
+        let served = session.served()?;
+        let settings = config.engine_config(&served.source)?;
         let scope = request
             .scope
             .as_ref()
             .context("MySQL standalone snapshot requires query scope")?;
         drasi_computation_contracts::validate_identifier("instance", &scope.instance_id)?;
         drasi_computation_contracts::validate_identifier("graph", &scope.graph_id)?;
-        Ok(Arc::new(Provider {
+        Ok(NativeBootstrapProvider::Durable(Arc::new(Provider {
             instance: scope.instance_id.clone(),
             graph: scope.graph_id.clone(),
             query: request.id.clone(),
             refresh_pending: AtomicBool::new(false),
-            inner: StandaloneSnapshot::new(config.source, config.stream, settings)?
-                .for_labels(&config.labels),
-        }))
+            inner: StandaloneSnapshot::new(served.source.clone(), served.stream.clone(), settings)?
+                .for_labels(&config.labels)
+                .for_request(session.labels.as_ref()),
+        })))
     }
 }

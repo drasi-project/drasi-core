@@ -93,13 +93,28 @@ impl sdk::BootstrapFactory for Factory {
                 allow_additional: false,
             },
             source_progress: self.progress,
+            pairing: None,
         }
+    }
+    /// A durable provider emitting its own fixture namespace.
+    fn describe(
+        &self,
+        configuration: &serde_json::Value,
+    ) -> anyhow::Result<sdk::BootstrapOutputDescription> {
+        serde_json::from_value::<Configuration>(configuration.clone())?;
+        Ok(sdk::BootstrapOutputDescription {
+            completion: sdk::BootstrapCompletionKind::Durable,
+            pairing: None,
+            namespace: sdk::ElementNamespace::Own,
+            identity: None,
+        })
     }
     fn create(
         &self,
         request: &sdk::CreateRequest,
+        _session: &sdk::BootstrapSession,
         progress: Option<sdk::NativeSourceProgress>,
-    ) -> anyhow::Result<Arc<dyn sdk::NativeBootstrapProvider>> {
+    ) -> anyhow::Result<sdk::NativeBootstrapProvider> {
         let config: Configuration = serde_json::from_value(request.configuration.clone())?;
         anyhow::ensure!(config.count <= 100, "fixture count exceeds limit");
         anyhow::ensure!(
@@ -110,14 +125,14 @@ impl sdk::BootstrapFactory for Factory {
             "fixture secret was not resolved"
         );
         let invalid_reader = AtomicBool::new(config.mode == "forge-reader");
-        Ok(Arc::new(Provider {
+        Ok(sdk::NativeBootstrapProvider::Durable(Arc::new(Provider {
             config,
             progress,
             worker: Mutex::new(None),
             invalid_reader,
             pending: AtomicBool::new(true),
             prepares: AtomicUsize::new(0),
-        }))
+        })))
     }
 }
 #[derive(Deserialize)]
@@ -152,19 +167,8 @@ struct Provider {
     pending: AtomicBool,
     prepares: AtomicUsize,
 }
-#[async_trait]
-impl sdk::NativeBootstrapProvider for Provider {
-    fn recovery_reader(&self) -> Option<drasi_computation_contracts::SourceProgressView> {
-        self.progress.as_ref().map(|progress| {
-            let reader = progress.reader();
-            if self.invalid_reader.load(Ordering::Acquire) {
-                drasi_computation_contracts::SourceProgressView::new(Arc::new(reader))
-            } else {
-                reader
-            }
-        })
-    }
-    async fn prepare(&self) -> anyhow::Result<BootstrapPreparation> {
+impl Provider {
+    async fn prepare_stateless(&self) -> anyhow::Result<BootstrapPreparation> {
         let initial = self.prepares.fetch_add(1, Ordering::SeqCst) == 0;
         if self.config.mode == "change-reader" {
             self.invalid_reader.store(true, Ordering::Release);
@@ -180,21 +184,40 @@ impl sdk::NativeBootstrapProvider for Provider {
             _ => BootstrapPreparation::Ready,
         })
     }
-    async fn prepare_with_state(
+}
+#[async_trait]
+impl sdk::DurableBootstrapProvider for Provider {
+    fn validate_query_scope(&self, _: &str, _: &str, _: &ComponentId) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn recovery_reader(&self) -> Option<drasi_computation_contracts::SourceProgressView> {
+        self.progress.as_ref().map(|progress| {
+            let reader = progress.reader();
+            if self.invalid_reader.load(Ordering::Acquire) {
+                drasi_computation_contracts::SourceProgressView::new(Arc::new(reader))
+            } else {
+                reader
+            }
+        })
+    }
+    async fn prepare(
         &self,
-        state: &dyn BootstrapState,
+        state: Option<&dyn BootstrapState>,
     ) -> anyhow::Result<BootstrapPreparation> {
+        let Some(state) = state else {
+            return self.prepare_stateless().await;
+        };
         anyhow::ensure!(
             state.durability() == self.config.durability,
             "durability was not preserved"
         );
         if self.config.durability == StorageDurability::VOLATILE {
-            return self.prepare().await;
+            return self.prepare_stateless().await;
         }
         let previous = state.read().await?;
         if previous.as_deref() == Some(b"complete".as_slice()) {
             self.pending.store(false, Ordering::Release);
-            return self.prepare().await;
+            return self.prepare_stateless().await;
         }
         let bytes = if self.config.mode == "oversize" {
             Bytes::from(vec![1; MAX_BOOTSTRAP_STATE_BYTES + 1])
@@ -218,12 +241,23 @@ impl sdk::NativeBootstrapProvider for Provider {
                 "initialization intent was lost"
             );
         }
-        self.prepare().await
+        self.prepare_stateless().await
     }
     fn has_pending_snapshot(&self) -> anyhow::Result<bool> {
         Ok(self.pending.load(Ordering::Acquire) && self.config.mode != "no-snapshot")
     }
-    async fn snapshot(&self) -> anyhow::Result<ComputationBootstrapSnapshot> {
+    async fn snapshot(
+        &self,
+        state: Option<&dyn BootstrapState>,
+    ) -> anyhow::Result<ComputationBootstrapSnapshot> {
+        if let Some(state) = state {
+            if self.config.durability != StorageDurability::VOLATILE {
+                anyhow::ensure!(
+                    state.read().await?.as_deref() == Some(b"initializing".as_slice()),
+                    "snapshot lost initialization state"
+                );
+            }
+        }
         let mut worker = self.worker.lock().await;
         anyhow::ensure!(worker.is_none(), "snapshot worker not joined");
         let (cancel, mut cancellation) = watch::channel(false);
@@ -275,18 +309,7 @@ impl sdk::NativeBootstrapProvider for Provider {
             }],
         })
     }
-    async fn snapshot_with_state(
-        &self,
-        state: &dyn BootstrapState,
-    ) -> anyhow::Result<ComputationBootstrapSnapshot> {
-        if self.config.durability != StorageDurability::VOLATILE {
-            anyhow::ensure!(
-                state.read().await?.as_deref() == Some(b"initializing".as_slice()),
-                "snapshot lost initialization state"
-            );
-        }
-        self.snapshot().await
-    }
+
     async fn complete_snapshot(&self) -> anyhow::Result<Vec<BootstrapWatermark>> {
         Ok(vec![BootstrapWatermark {
             producer: None,

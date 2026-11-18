@@ -31,6 +31,8 @@ mod lifecycle_tests;
 mod management;
 mod output_follow;
 mod output_reads;
+#[cfg(test)]
+mod service_tests;
 mod source_schema;
 mod update;
 #[cfg(test)]
@@ -51,8 +53,20 @@ use crate::{
 
 /// Configuration-only factory. `create` must not do I/O or start workers. Both
 /// standalone and transactional construction use this same immutable contract.
+///
+/// Every capability is declared once, in [`Factory::metadata`]: the Host
+/// services the factory's components are constructed with are
+/// `Capabilities::services`, and update planning is `Capabilities::update_modes`.
+/// The factory-level implementations those declarations require
+/// ([`Factory::update_planner`], [`Factory::activation_credentials`],
+/// [`Factory::bootstrap_coordination`]) must be present exactly when declared;
+/// [`PluginDefinition::new`] refuses a library where they differ.
 pub trait Factory: Send + Sync + 'static {
     fn metadata(&self) -> FactoryMetadata;
+    /// Pure metadata describing every configuration field: its meaning,
+    /// defaults and supported values. Every field of the metadata schema must
+    /// have a description.
+    fn configuration_details(&self) -> crate::ConfigDetails;
     /// The declared capabilities and requirements of the component this
     /// factory would construct from `request`: a plain function of its
     /// configuration, descriptor and the declared capabilities of its bound
@@ -63,127 +77,139 @@ pub trait Factory: Send + Sync + 'static {
         &self,
         request: &crate::wire::DescribeRequest,
     ) -> anyhow::Result<drasi_computation_contracts::ComponentDescription>;
-    /// Must agree with a nonempty Capabilities::update_modes declaration.
-    fn supports_update_planning(&self) -> bool {
-        false
-    }
-    /// Factory planner: pure assessment of current/proposed configuration for
-    /// one component. Used for Replace, for unconstructed components and when
-    /// no instance management exists. Never construct/activate an object,
-    /// perform I/O or consult mutable external state. Return
-    /// `Assessment::Unsupported` for changes the factory cannot safely describe.
-    /// Core separately validates actual data boundaries.
-    fn assess(
-        &self,
-        _request: &crate::UpdateRequest,
-    ) -> anyhow::Result<crate::lifecycle::Assessment> {
-        Err(Failure::new(
-            abi::status::UNSUPPORTED,
-            "factory does not implement update planning",
-        )
-        .into())
-    }
-    fn supports_activation_credentials(&self) -> bool {
-        false
-    }
-    /// Pure configuration inspection: no provider lookup or network I/O.
-    fn activation_credential_context(
-        &self,
-        _request: &CreateRequest,
-    ) -> anyhow::Result<crate::ActivationCredentialContext> {
-        anyhow::bail!("factory does not implement activation credentials")
-    }
-    fn supports_bootstrap_coordination(&self) -> bool {
-        false
-    }
-    fn create_bootstrap_coordinator(
-        &self,
-        _request: &CreateRequest,
-        _progress: crate::SourceBootstrapProgress,
-    ) -> anyhow::Result<Arc<dyn crate::NativeSourceBootstrapCoordinator>> {
-        anyhow::bail!("factory does not implement source/bootstrap coordination")
-    }
-    fn supports_output_snapshots(&self) -> bool {
-        false
-    }
-    fn create_with_output_snapshots(
-        &self,
-        request: &CreateRequest,
-        control: ControlSender,
-        snapshots: Option<crate::NativeOutputSnapshots>,
-    ) -> anyhow::Result<CreatedComponent> {
-        anyhow::ensure!(
-            snapshots.is_none(),
-            "factory does not implement output snapshot reads"
-        );
-        self.create(request, control)
-    }
-    fn supports_sink_batching(&self) -> bool {
-        false
-    }
-    fn create_with_processing(
-        &self,
-        _request: &CreateRequest,
-        _control: ControlSender,
-        _processing: crate::NativeProcessing,
-    ) -> anyhow::Result<CreatedComponent> {
-        anyhow::bail!("factory does not implement host-owned indexed processing")
-    }
-    /// Optional pure metadata describing defaults and supported field values.
-    fn configuration_details(&self) -> Option<crate::ConfigDetails> {
+    /// The factory planner, present exactly when `Capabilities::update_modes`
+    /// is nonempty.
+    fn update_planner(&self) -> Option<&dyn UpdatePlanner> {
         None
     }
-    fn consumer_mode(&self) -> Option<crate::ConsumerMode> {
+    /// Endpoint inspection for activation credentials, present exactly when
+    /// `HostServices::activation_credentials` is declared.
+    fn activation_credentials(&self) -> Option<&dyn ActivationCredentialEndpoint> {
         None
     }
-    fn supports_source_progress(&self) -> bool {
-        false
+    /// The source/bootstrap coordinator constructor, present exactly when
+    /// `HostServices::bootstrap_coordination` is declared.
+    fn bootstrap_coordination(&self) -> Option<&dyn SourceBootstrapCoordination> {
+        None
     }
-    fn supports_consumer_progress(&self) -> bool {
-        false
-    }
-    fn create_with_consumer_progress(
-        &self,
-        request: &CreateRequest,
-        control: ControlSender,
-        progress: crate::NativeConsumerProgress,
-    ) -> anyhow::Result<CreatedComponent> {
-        let _ = (request, control, progress);
-        anyhow::bail!("factory does not implement consumer progress")
-    }
-    fn create_with_progress(
-        &self,
-        request: &CreateRequest,
-        control: ControlSender,
-        progress: crate::NativeSourceProgress,
-    ) -> anyhow::Result<CreatedComponent> {
-        let _ = (request, control, progress);
-        anyhow::bail!("factory does not implement source progress")
-    }
-    fn supports_source_admission(&self) -> bool {
-        false
-    }
-    fn create_with_admission(
-        &self,
-        request: &CreateRequest,
-        control: ControlSender,
-        admission: Option<crate::NativeAdmission>,
-    ) -> anyhow::Result<CreatedComponent> {
-        anyhow::ensure!(
-            admission.is_none(),
-            "factory does not implement source admission"
-        );
-        self.create(request, control)
-    }
-    /// Configuration-only construction. When `request.update_directive` is set,
-    /// carry that accepted reconstruction intent into the new object, or reject
-    /// it. Do not silently substitute state deletion, a reset configuration flag
-    /// or ordinary initial creation. Actual I/O remains in lifecycle/processing.
+    /// The single configuration-only constructor. `services` carries every
+    /// Host service bound to this construction together; the SDK binds only
+    /// services `Capabilities::services` declares and always binds the
+    /// required ones. When `request.update_directive` is set, carry that
+    /// accepted reconstruction intent into the new object, or reject it. Do
+    /// not silently substitute state deletion, a reset configuration flag or
+    /// ordinary initial creation. Actual I/O remains in lifecycle/processing.
+    ///
+    /// A source whose bootstrap coordinator is bound is constructed by that
+    /// coordinator (`NativeSourceBootstrapCoordinator::create_source`) with
+    /// the same progress binding, not by this method.
     fn create(
         &self,
         request: &CreateRequest,
         control: ControlSender,
+        services: ServiceBindings,
     ) -> anyhow::Result<CreatedComponent>;
+}
+
+/// Pure factory planner: assessment of current/proposed configuration for one
+/// component. Used for Replace, for unconstructed components and when no
+/// instance management exists. Never construct/activate an object, perform I/O
+/// or consult mutable external state. Return `Assessment::Unsupported` for
+/// changes the factory cannot safely describe. Core separately validates
+/// actual data boundaries.
+pub trait UpdatePlanner: Send + Sync {
+    fn assess(
+        &self,
+        request: &crate::UpdateRequest,
+    ) -> anyhow::Result<crate::lifecycle::Assessment>;
+}
+
+/// Pure configuration inspection naming the endpoint activation credentials
+/// are acquired for: no provider lookup or network I/O. Must permit omitted
+/// literal auth because the Host binds an actual provider.
+pub trait ActivationCredentialEndpoint: Send + Sync {
+    fn activation_credential_context(
+        &self,
+        request: &CreateRequest,
+    ) -> anyhow::Result<crate::ActivationCredentialContext>;
+}
+
+/// Creates a source's bootstrap coordinator from its progress owners.
+pub trait SourceBootstrapCoordination: Send + Sync {
+    fn create_bootstrap_coordinator(
+        &self,
+        request: &CreateRequest,
+        progress: crate::SourceBootstrapProgress,
+    ) -> anyhow::Result<Arc<dyn crate::NativeSourceBootstrapCoordinator>>;
+}
+
+/// Every Host service bound to one construction, delivered together. Each is
+/// present only when the factory declares it in `Capabilities::services` and
+/// the graph bound it; required services (consumer progress, indexed
+/// processing) are always present when declared.
+#[derive(Default)]
+#[non_exhaustive]
+pub struct ServiceBindings {
+    pub source_progress: Option<crate::NativeSourceProgress>,
+    pub consumer_progress: Option<crate::NativeConsumerProgress>,
+    pub admission: Option<crate::NativeAdmission>,
+    pub output_snapshots: Option<crate::NativeOutputSnapshots>,
+    pub processing: Option<crate::NativeProcessing>,
+}
+
+impl ServiceBindings {
+    /// No bound services.
+    pub fn none() -> Self {
+        Self::default()
+    }
+    pub fn with_source_progress(mut self, progress: crate::NativeSourceProgress) -> Self {
+        self.source_progress = Some(progress);
+        self
+    }
+    pub fn with_consumer_progress(mut self, progress: crate::NativeConsumerProgress) -> Self {
+        self.consumer_progress = Some(progress);
+        self
+    }
+    pub fn with_admission(mut self, admission: crate::NativeAdmission) -> Self {
+        self.admission = Some(admission);
+        self
+    }
+    pub fn with_output_snapshots(mut self, snapshots: crate::NativeOutputSnapshots) -> Self {
+        self.output_snapshots = Some(snapshots);
+        self
+    }
+    pub fn with_processing(mut self, processing: crate::NativeProcessing) -> Self {
+        self.processing = Some(processing);
+        self
+    }
+    /// The declared services this binding set uses.
+    fn check(
+        &self,
+        services: &crate::HostServices,
+        indexed_processing: bool,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.source_progress.is_none() || services.source_progress,
+            "native factory does not declare source progress"
+        );
+        anyhow::ensure!(
+            self.admission.is_none() || services.source_admission,
+            "native factory does not declare source admission"
+        );
+        anyhow::ensure!(
+            self.output_snapshots.is_none() || services.output_snapshot_reads,
+            "native factory does not declare output snapshot reads"
+        );
+        anyhow::ensure!(
+            self.consumer_progress.is_some() == services.consumer_progress,
+            "native producer requires exactly its declared consumer progress binding"
+        );
+        anyhow::ensure!(
+            self.processing.is_some() == indexed_processing,
+            "native transformer requires exactly its declared indexed processing binding"
+        );
+        Ok(())
+    }
 }
 
 pub enum Component {
@@ -309,38 +335,37 @@ impl PluginDefinition {
         };
         metadata.validate()?;
         for (factory, metadata) in factories.iter().zip(&metadata.factories) {
-            anyhow::ensure!(
-                factory.supports_update_planning() != metadata.capabilities.update_modes.is_empty(),
-                "native update planner does not match declared update modes"
-            );
-            anyhow::ensure!(
-                !factory.supports_bootstrap_coordination()
-                    || (metadata.role == drasi_computation_contracts::ComponentRole::Source
-                        && (factory.supports_source_progress()
-                            ^ factory.supports_consumer_progress())),
-                "bootstrap coordination requires a source with one negotiated progress mode"
-            );
-            anyhow::ensure!(
-                !factory.supports_sink_batching()
-                    || (metadata.role == drasi_computation_contracts::ComponentRole::Sink
-                        && factory.consumer_mode().is_none()),
-                "host-owned batching requires an ordinary native sink, not a consumer service"
-            );
+            validate_declared_implementations(factory.as_ref(), metadata).with_context(|| {
+                format!(
+                    "native factory {} is inconsistent with its declaration",
+                    metadata.implementation.name
+                )
+            })?;
         }
         let configurations = crate::configuration::ConfigurationMetadata {
             version: abi::configuration::VERSION,
             factories: factories
                 .iter()
                 .zip(&metadata.factories)
-                .filter_map(|(factory, metadata)| {
-                    factory.configuration_details().map(|details| {
-                        crate::configuration::FactoryConfiguration {
-                            implementation: metadata.implementation.clone(),
-                            details,
-                        }
+                .map(|(factory, metadata)| -> anyhow::Result<_> {
+                    let details = factory.configuration_details();
+                    if let Some(field) = metadata
+                        .configuration
+                        .fields
+                        .keys()
+                        .find(|field| !details.fields.contains_key(*field))
+                    {
+                        anyhow::bail!(
+                            "native factory {} does not describe configuration field {field}",
+                            metadata.implementation.name
+                        );
+                    }
+                    Ok(crate::configuration::FactoryConfiguration {
+                        implementation: metadata.implementation.clone(),
+                        details,
                     })
                 })
-                .collect(),
+                .collect::<anyhow::Result<_>>()?,
         };
         configurations.validate(&metadata)?;
         Self {
@@ -377,10 +402,6 @@ impl PluginDefinition {
                 metadata.implementation.plugin = Some(self.metadata.plugin.clone());
                 metadata.validate(&self.metadata.plugin)?;
                 anyhow::ensure!(
-                    !factory.requires_source_bootstrap() || metadata.source_progress,
-                    "paired bootstrap requires actual query progress"
-                );
-                anyhow::ensure!(
                     identities.insert((
                         metadata.implementation.name.clone(),
                         metadata.implementation.version.clone()
@@ -395,6 +416,42 @@ impl PluginDefinition {
         self.bootstrap_metadata = metadata;
         Ok(self)
     }
+}
+
+/// The factory-level implementations a declaration requires must be present
+/// exactly when declared, so a library claiming a capability it does not
+/// implement is refused when it is defined, not at first construction.
+fn validate_declared_implementations(
+    factory: &dyn Factory,
+    metadata: &FactoryMetadata,
+) -> anyhow::Result<()> {
+    let capabilities = &metadata.capabilities;
+    let services = &capabilities.services;
+    for (name, declared, implemented) in [
+        (
+            "update planning (update_modes)",
+            !capabilities.update_modes.is_empty(),
+            factory.update_planner().is_some(),
+        ),
+        (
+            "activation credentials",
+            services.activation_credentials,
+            factory.activation_credentials().is_some(),
+        ),
+        (
+            "bootstrap coordination",
+            services.bootstrap_coordination,
+            factory.bootstrap_coordination().is_some(),
+        ),
+    ] {
+        anyhow::ensure!(
+            declared == implemented,
+            "{name} is {} but its implementation is {}",
+            if declared { "declared" } else { "not declared" },
+            if implemented { "present" } else { "missing" }
+        );
+    }
+    Ok(())
 }
 
 struct PluginState {
@@ -453,17 +510,8 @@ impl ExportedPlugin {
     pub fn configuration(&self) -> *const abi::configuration::ConfigurationMetadataV1 {
         &self.configuration
     }
-    pub fn services(&self) -> *const abi::services::PluginServicesV1 {
-        &PLUGIN_SERVICES
-    }
     pub fn batching(&self) -> *const abi::batching::PluginBatchingV1 {
         &PLUGIN_BATCHING
-    }
-    pub fn output_snapshots(&self) -> *const abi::output_snapshots::PluginOutputSnapshotsV1 {
-        &PLUGIN_OUTPUT_SNAPSHOTS
-    }
-    pub fn processing(&self) -> *const abi::processing::PluginProcessingV1 {
-        &PLUGIN_PROCESSING
     }
     pub fn recovery(&self) -> *const abi::recovery::PluginRecoveryV1 {
         &PLUGIN_RECOVERY
@@ -541,62 +589,12 @@ static PLUGIN_VTABLE: abi::PluginVTable = abi::PluginVTable {
     validate_record: Some(validate_record),
 };
 
-static PLUGIN_SERVICES: abi::services::PluginServicesV1 = abi::services::PluginServicesV1 {
-    header: Header::new::<abi::services::PluginServicesV1>(),
-    version: abi::services::VERSION,
-    reserved: 0,
-    factory: Some(factory_services),
-    create: Some(create_component_with_admission),
-};
-
 static PLUGIN_BATCHING: abi::batching::PluginBatchingV1 = abi::batching::PluginBatchingV1 {
     header: Header::new::<abi::batching::PluginBatchingV1>(),
     version: abi::batching::VERSION,
     reserved: 0,
-    factory: Some(factory_batching),
     policy: Some(batching_policy),
 };
-
-static PLUGIN_OUTPUT_SNAPSHOTS: abi::output_snapshots::PluginOutputSnapshotsV1 =
-    abi::output_snapshots::PluginOutputSnapshotsV1 {
-        header: Header::new::<abi::output_snapshots::PluginOutputSnapshotsV1>(),
-        version: abi::output_snapshots::VERSION,
-        reserved: 0,
-        factory: Some(factory_output_snapshots),
-        create: Some(create_component_with_output_snapshots),
-    };
-
-static PLUGIN_PROCESSING: abi::processing::PluginProcessingV1 =
-    abi::processing::PluginProcessingV1 {
-        header: Header::new::<abi::processing::PluginProcessingV1>(),
-        version: abi::processing::VERSION,
-        reserved: 0,
-        create: Some(create_component_with_processing),
-    };
-
-unsafe extern "C" fn factory_output_snapshots(state: *mut c_void, index: u32) -> Reply {
-    transport::reply_boundary(|| {
-        let plugin = unsafe { state_ref::<Arc<PluginState>>(state)? };
-        let factory = plugin
-            .definition
-            .factories
-            .get(index as usize)
-            .ok_or_else(|| Failure::protocol("unknown output-snapshot factory"))?;
-        wire::encode(&factory.supports_output_snapshots()).map_err(Failure::from)
-    })
-}
-
-unsafe extern "C" fn factory_batching(state: *mut c_void, index: u32) -> Reply {
-    transport::reply_boundary(|| {
-        let plugin = unsafe { state_ref::<Arc<PluginState>>(state)? };
-        let factory = plugin
-            .definition
-            .factories
-            .get(index as usize)
-            .ok_or_else(|| Failure::protocol("unknown native batching factory"))?;
-        wire::encode(&factory.supports_sink_batching()).map_err(Failure::from)
-    })
-}
 
 unsafe extern "C" fn batching_policy(state: *mut c_void) -> Reply {
     transport::reply_boundary(|| {
@@ -638,8 +636,6 @@ static PLUGIN_RECOVERY: abi::recovery::PluginRecoveryV1 = abi::recovery::PluginR
     header: Header::new::<abi::recovery::PluginRecoveryV1>(),
     version: abi::recovery::VERSION,
     reserved: 0,
-    factory: Some(factory_recovery),
-    create: Some(create_component_with_progress),
     inspect: Some(inspect_recovery),
 };
 
@@ -648,8 +644,6 @@ static PLUGIN_CONSUMER_PROGRESS: abi::consumer_progress::PluginConsumerProgressV
         header: Header::new::<abi::consumer_progress::PluginConsumerProgressV1>(),
         version: abi::consumer_progress::VERSION,
         reserved: 0,
-        factory: Some(factory_consumer_progress),
-        create: Some(create_component_with_consumer_progress),
         inspect: Some(inspect_consumer_progress),
         position_policy: Some(input_position_policy),
     };
@@ -659,6 +653,7 @@ static PLUGIN_BOOTSTRAP: abi::bootstrap::PluginBootstrapV1 = abi::bootstrap::Plu
     version: abi::bootstrap::VERSION,
     reserved: 0,
     factories: Some(bootstrap_factories),
+    describe: Some(describe_bootstrap),
     create: Some(create_bootstrap),
 };
 
@@ -666,32 +661,10 @@ static PLUGIN_CONSUMER: abi::consumer::PluginConsumerV1 = abi::consumer::PluginC
     header: Header::new::<abi::consumer::PluginConsumerV1>(),
     version: abi::consumer::VERSION,
     reserved: 0,
-    factory: Some(factory_consumer),
-    create: Some(create_component_with_consumer),
     inspect: Some(inspect_consumer),
     begin: Some(begin_consumer),
     end_batch: Some(end_consumer_batch),
 };
-unsafe extern "C" fn factory_consumer(state: *mut c_void, index: u32) -> Reply {
-    transport::reply_boundary(|| {
-        let plugin = unsafe { state_ref::<Arc<PluginState>>(state)? };
-        let factory = plugin
-            .definition
-            .factories
-            .get(index as usize)
-            .ok_or_else(|| Failure::protocol("unknown native consumer factory"))?;
-        let mode = factory.consumer_mode();
-        let metadata = &plugin.definition.metadata.factories[index as usize];
-        if let Some(mode) = mode {
-            mode.validate_factory(metadata).map_err(Failure::from)?;
-        }
-        wire::encode(&crate::consumer::FactoryConsumer {
-            version: abi::consumer::VERSION,
-            mode,
-        })
-        .map_err(Failure::from)
-    })
-}
 unsafe extern "C" fn inspect_consumer(raw: *mut c_void) -> Reply {
     transport::reply_boundary(|| {
         let instance = unsafe { state_ref::<Arc<Instance>>(raw)? };
@@ -825,6 +798,45 @@ unsafe extern "C" fn bootstrap_factories(state: *mut c_void) -> Reply {
         crate::bootstrap::encode(&state.definition.bootstrap_metadata).map_err(Failure::from)
     })
 }
+/// The factory's declared output for one configuration, validated against
+/// its metadata before the host sees it.
+pub(crate) fn bootstrap_description(
+    factory: &dyn crate::BootstrapFactory,
+    metadata: &crate::BootstrapFactoryMetadata,
+    configuration: &serde_json::Value,
+) -> anyhow::Result<crate::BootstrapOutputDescription> {
+    metadata.configuration.validate(configuration)?;
+    let description = factory.describe(configuration)?;
+    metadata.validate_description(&description)?;
+    Ok(description)
+}
+
+unsafe extern "C" fn describe_bootstrap(
+    state: *mut c_void,
+    index: u32,
+    input: BorrowedBytes,
+) -> Reply {
+    transport::reply_boundary(|| {
+        let state = unsafe { state_ref::<Arc<PluginState>>(state)? };
+        let metadata = state
+            .definition
+            .bootstrap_metadata
+            .get(index as usize)
+            .ok_or_else(|| Failure::protocol("unknown native bootstrap factory"))?;
+        let configuration: serde_json::Value = crate::bootstrap::decode(unsafe {
+            transport::borrowed_bytes(input, abi::bootstrap::MAX_CONTROL_BYTES)?
+        })
+        .map_err(Failure::from)?;
+        let description = bootstrap_description(
+            state.definition.bootstrap_factories[index as usize].as_ref(),
+            metadata,
+            &configuration,
+        )
+        .map_err(Failure::from)?;
+        crate::bootstrap::encode(&description).map_err(Failure::from)
+    })
+}
+
 unsafe extern "C" fn create_bootstrap(
     state: *mut c_void,
     index: u32,
@@ -840,14 +852,25 @@ unsafe extern "C" fn create_bootstrap(
             .bootstrap_metadata
             .get(index as usize)
             .ok_or_else(|| Failure::protocol("unknown native bootstrap factory"))?;
-        let request: CreateRequest = crate::bootstrap::decode(unsafe {
+        let crate::BootstrapCreateRequest { request, session } = crate::bootstrap::decode(unsafe {
             transport::borrowed_bytes(input, abi::bootstrap::MAX_CONTROL_BYTES)?
         })
         .map_err(Failure::from)?;
         metadata.validate_request(&request).map_err(Failure::from)?;
-        if state.definition.bootstrap_factories[index as usize].requires_source_bootstrap() {
+        session.validate().map_err(Failure::from)?;
+        if metadata.pairing.is_some() {
             return Err(Failure::protocol(
                 "bootstrap factory requires its actual source pairing",
+            ));
+        }
+        let factory = state.definition.bootstrap_factories[index as usize].as_ref();
+        let description = bootstrap_description(factory, metadata, &request.configuration)
+            .map_err(Failure::from)?;
+        if description.namespace == crate::ElementNamespace::ServedSource
+            && session.served.is_none()
+        {
+            return Err(Failure::protocol(
+                "bootstrap provider serves a source's namespace but no served source was bound",
             ));
         }
         if metadata.source_progress == progress.is_null() {
@@ -870,9 +893,14 @@ unsafe extern "C" fn create_bootstrap(
             Some(progress)
         };
         let reader = progress.as_ref().map(crate::NativeSourceProgress::reader);
-        let provider = state.definition.bootstrap_factories[index as usize]
-            .create(&request, progress)
+        let provider = factory
+            .create(&request, &session, progress)
             .map_err(Failure::from)?;
+        if provider.completion() != description.completion {
+            return Err(Failure::protocol(
+                "bootstrap provider does not have its declared completion kind",
+            ));
+        }
         let declared = provider.recovery_reader();
         if !match (&reader, &declared) {
             (None, None) => true,
@@ -892,82 +920,6 @@ unsafe extern "C" fn create_bootstrap(
     })
 }
 
-unsafe extern "C" fn factory_recovery(state: *mut c_void, index: u32) -> Reply {
-    transport::reply_boundary(|| {
-        let state = unsafe { state_ref::<Arc<PluginState>>(state)? };
-        let factory = state
-            .definition
-            .factories
-            .get(index as usize)
-            .ok_or_else(|| Failure::protocol("unknown native recovery factory"))?;
-        let source_progress = factory.supports_source_progress();
-        if source_progress
-            && state.definition.metadata.factories[index as usize].role
-                != drasi_computation_contracts::ComponentRole::Source
-        {
-            return Err(Failure::protocol("source progress requires a source"));
-        }
-        crate::progress::encode(&crate::progress::FactoryRecovery {
-            version: abi::recovery::VERSION,
-            source_progress,
-        })
-        .map_err(Failure::from)
-    })
-}
-
-unsafe extern "C" fn factory_consumer_progress(state: *mut c_void, index: u32) -> Reply {
-    transport::reply_boundary(|| {
-        use drasi_computation_contracts::ComponentRole;
-        let state = unsafe { state_ref::<Arc<PluginState>>(state)? };
-        let factory = state
-            .definition
-            .factories
-            .get(index as usize)
-            .ok_or_else(|| Failure::protocol("unknown native consumer progress factory"))?;
-        let consumer_progress = factory.supports_consumer_progress();
-        if consumer_progress
-            && (!matches!(
-                state.definition.metadata.factories[index as usize].role,
-                ComponentRole::Source | ComponentRole::Transformer
-            ) || factory.supports_source_progress())
-        {
-            return Err(Failure::protocol(
-                "consumer progress requires a producer without single-owner progress",
-            ));
-        }
-        crate::consumer_progress::encode(&crate::consumer_progress::FactoryProgress {
-            version: abi::consumer_progress::VERSION,
-            consumer_progress,
-        })
-        .map_err(Failure::from)
-    })
-}
-
-unsafe extern "C" fn factory_services(state: *mut c_void, index: u32) -> Reply {
-    transport::reply_boundary(|| {
-        let state = unsafe { state_ref::<Arc<PluginState>>(state)? };
-        let factory = state
-            .definition
-            .factories
-            .get(index as usize)
-            .ok_or_else(|| Failure::protocol("unknown native service factory"))?;
-        let source_admission = factory.supports_source_admission();
-        let metadata = &state.definition.metadata.factories[index as usize];
-        if source_admission
-            && (metadata.role != drasi_computation_contracts::ComponentRole::Source
-                || metadata.ports.len() != 1)
-        {
-            return Err(Failure::protocol(
-                "admission requires a single-output source",
-            ));
-        }
-        wire::encode(&crate::admission::FactoryServices {
-            version: abi::services::VERSION,
-            source_admission,
-        })
-        .map_err(Failure::from)
-    })
-}
 unsafe extern "C" fn release_plugin(state: *mut c_void) {
     transport::drop_boundary(|| unsafe { drop(Box::from_raw(state.cast::<Arc<PluginState>>())) });
 }
@@ -989,20 +941,19 @@ fn factory_configuration_details(state: &FactoryState) -> Option<&crate::ConfigD
 }
 
 fn validate_create_request(state: &FactoryState, request: &CreateRequest) -> anyhow::Result<()> {
+    let metadata = &state.plugin.definition.metadata.factories[state.index];
     anyhow::ensure!(
         !request.activation_credentials_bound
-            || state.plugin.definition.factories[state.index].supports_activation_credentials(),
-        "native factory does not support activation credentials"
+            || metadata.capabilities.services.activation_credentials,
+        "native factory does not declare activation credentials"
     );
-    let metadata = &state.plugin.definition.metadata.factories[state.index];
     if let Some(directive) = &request.update_directive {
         directive.validate()?;
         anyhow::ensure!(
-            state.plugin.definition.factories[state.index].supports_update_planning()
-                && metadata
-                    .capabilities
-                    .update_modes
-                    .contains(&crate::ComponentUpdateMode::Recreate),
+            metadata
+                .capabilities
+                .update_modes
+                .contains(&crate::ComponentUpdateMode::Recreate),
             "native factory does not declare reconstruction update support"
         );
     }
@@ -1255,188 +1206,20 @@ fn validate_snapshot_inputs(
     Ok(())
 }
 
+/// The single create entry: every bound Host service arrives in one table.
 unsafe extern "C" fn create_component(
     state: *mut c_void,
     input: BorrowedBytes,
-    out: *mut abi::ComponentHandle,
-) -> Status {
-    unsafe {
-        create_component_with_services(
-            state,
-            input,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            false,
-            std::ptr::null(),
-            std::ptr::null(),
-            out,
-        )
-    }
-}
-
-unsafe extern "C" fn create_component_with_admission(
-    state: *mut c_void,
-    input: BorrowedBytes,
-    admission: *const abi::services::SourceAdmissionV1,
-    out: *mut abi::ComponentHandle,
-) -> Status {
-    unsafe {
-        create_component_with_services(
-            state,
-            input,
-            admission,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            false,
-            std::ptr::null(),
-            std::ptr::null(),
-            out,
-        )
-    }
-}
-
-unsafe extern "C" fn create_component_with_progress(
-    state: *mut c_void,
-    input: BorrowedBytes,
-    progress: *const abi::recovery::SourceProgressV1,
-    out: *mut abi::ComponentHandle,
-) -> Status {
-    if progress.is_null() {
-        return transport::status_result(Err(Failure::protocol("missing source progress")));
-    }
-    unsafe {
-        create_component_with_services(
-            state,
-            input,
-            std::ptr::null(),
-            progress,
-            std::ptr::null(),
-            std::ptr::null(),
-            false,
-            std::ptr::null(),
-            std::ptr::null(),
-            out,
-        )
-    }
-}
-
-unsafe extern "C" fn create_component_with_consumer_progress(
-    state: *mut c_void,
-    input: BorrowedBytes,
-    progress: *const abi::consumer_progress::ConsumerProgressV1,
-    out: *mut abi::ComponentHandle,
-) -> Status {
-    if progress.is_null() {
-        return transport::status_result(Err(Failure::protocol("missing consumer progress")));
-    }
-    unsafe {
-        create_component_with_services(
-            state,
-            input,
-            std::ptr::null(),
-            std::ptr::null(),
-            progress,
-            std::ptr::null(),
-            false,
-            std::ptr::null(),
-            std::ptr::null(),
-            out,
-        )
-    }
-}
-
-unsafe extern "C" fn create_component_with_output_snapshots(
-    state: *mut c_void,
-    input: BorrowedBytes,
-    snapshots: *const abi::output_snapshots::OutputSnapshotsV1,
-    out: *mut abi::ComponentHandle,
-) -> Status {
-    if snapshots.is_null() {
-        return transport::status_result(Err(Failure::protocol("missing output-snapshot service")));
-    }
-    unsafe {
-        create_component_with_services(
-            state,
-            input,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            snapshots,
-            false,
-            std::ptr::null(),
-            std::ptr::null(),
-            out,
-        )
-    }
-}
-
-unsafe extern "C" fn create_component_with_consumer(
-    state: *mut c_void,
-    input: BorrowedBytes,
-    out: *mut abi::ComponentHandle,
-) -> Status {
-    unsafe {
-        create_component_with_services(
-            state,
-            input,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            true,
-            std::ptr::null(),
-            std::ptr::null(),
-            out,
-        )
-    }
-}
-
-unsafe extern "C" fn create_component_with_processing(
-    state: *mut c_void,
-    input: BorrowedBytes,
-    processing: *const abi::processing::ProcessingV1,
-    out: *mut abi::ComponentHandle,
-) -> Status {
-    if processing.is_null() {
-        return transport::status_result(Err(Failure::protocol(
-            "missing indexed processing service",
-        )));
-    }
-    unsafe {
-        create_component_with_services(
-            state,
-            input,
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            false,
-            std::ptr::null(),
-            processing,
-            out,
-        )
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-unsafe fn create_component_with_services(
-    state: *mut c_void,
-    input: BorrowedBytes,
-    admission: *const abi::services::SourceAdmissionV1,
-    progress: *const abi::recovery::SourceProgressV1,
-    consumer_progress: *const abi::consumer_progress::ConsumerProgressV1,
-    snapshots: *const abi::output_snapshots::OutputSnapshotsV1,
-    consumer_bound: bool,
-    coordinator: *const abi::bootstrap_coordination::BootstrapCoordinatorHandle,
-    processing: *const abi::processing::ProcessingV1,
+    bindings: *const abi::services::ServiceBindingsV1,
     out: *mut abi::ComponentHandle,
 ) -> Status {
     transport::status_boundary(|| {
         require_output(out)?;
         let state = unsafe { state_ref::<FactoryState>(state)? };
+        let bindings = *unsafe { transport::checked_table(bindings)? };
+        if bindings.reserved != 0 || bindings.consumer > 1 {
+            return Err(Failure::protocol("invalid native service bindings"));
+        }
         let request: CreateRequest = crate::activation_credentials::decode_create_request(unsafe {
             transport::borrowed_bytes(input, abi::MAX_MESSAGE_BYTES)?
         })
@@ -1448,157 +1231,53 @@ unsafe fn create_component_with_services(
             let metadata = &resolved;
             let control = ControlSender::default();
             let factory = &state.plugin.definition.factories[state.index];
+            let declared = &metadata.capabilities.services;
+            let consumer_bound = bindings.consumer == 1;
             anyhow::ensure!(
-                metadata.capabilities.indexed_processing != processing.is_null(),
-                "native transformer requires its negotiated indexed processing service"
+                consumer_bound == declared.consumer.is_some(),
+                "native consumer requires exactly its declared host-owned delivery service"
             );
-            let coordinator = if coordinator.is_null() {
-                None
-            } else {
-                anyhow::ensure!(
-                    factory.supports_bootstrap_coordination()
-                        && metadata.role == drasi_computation_contracts::ComponentRole::Source
-                        && admission.is_null()
-                        && snapshots.is_null()
-                        && !consumer_bound,
-                    "unsupported or conflicting source/bootstrap coordination"
-                );
-                Some(unsafe { bootstrap_coordination::source_lease(coordinator, state, &request)? })
+            let consumer_mode = declared.consumer;
+            let services = ServiceBindings {
+                source_progress: (!bindings.source_progress.is_null())
+                    .then(|| unsafe {
+                        crate::NativeSourceProgress::from_borrowed(bindings.source_progress)
+                    })
+                    .transpose()?,
+                consumer_progress: (!bindings.consumer_progress.is_null())
+                    .then(|| unsafe {
+                        crate::NativeConsumerProgress::from_borrowed(bindings.consumer_progress)
+                    })
+                    .transpose()?,
+                admission: (!bindings.admission.is_null())
+                    .then(|| unsafe {
+                        crate::NativeAdmission::from_borrowed(
+                            bindings.admission,
+                            state.plugin.codec.clone(),
+                        )
+                    })
+                    .transpose()?,
+                output_snapshots: (!bindings.output_snapshots.is_null())
+                    .then(|| unsafe {
+                        crate::NativeOutputSnapshots::from_borrowed(bindings.output_snapshots)
+                    })
+                    .transpose()?,
+                processing: (!bindings.processing.is_null())
+                    .then(|| unsafe { crate::NativeProcessing::from_borrowed(bindings.processing) })
+                    .transpose()?,
             };
-            anyhow::ensure!(
-                factory.supports_consumer_progress() != consumer_progress.is_null(),
-                "native producer requires its negotiated consumer progress binding"
-            );
-            let consumer_mode = factory.consumer_mode();
-            anyhow::ensure!(
-                consumer_bound == consumer_mode.is_some(),
-                "native consumer requires its negotiated host-owned delivery service"
-            );
-            anyhow::ensure!(
-                !consumer_bound
-                    || (admission.is_null() && progress.is_null() && consumer_progress.is_null()),
-                "native consumer cannot bind source admission or progress"
-            );
-            if let Some(mode) = consumer_mode {
-                mode.validate_factory(metadata)?;
-            }
-            anyhow::ensure!(
-                admission.is_null()
-                    || (factory.supports_source_admission()
-                        && metadata.role == drasi_computation_contracts::ComponentRole::Source
-                        && metadata.ports.len() == 1),
-                "unsupported native source admission"
-            );
-            let service = if admission.is_null() {
-                None
-            } else {
-                Some(unsafe {
-                    crate::NativeAdmission::from_borrowed(admission, state.plugin.codec.clone())?
-                })
-            };
-            let (created, progress, consumer_progress) = if !processing.is_null() {
-                anyhow::ensure!(
-                    admission.is_null()
-                        && progress.is_null()
-                        && consumer_progress.is_null()
-                        && snapshots.is_null()
-                        && !consumer_bound
-                        && coordinator.is_none(),
-                    "indexed processing cannot use a conflicting construction service"
-                );
-                let processing = unsafe { crate::NativeProcessing::from_borrowed(processing)? };
+            services.check(declared, metadata.capabilities.indexed_processing)?;
+            if let Some(processing) = &services.processing {
                 anyhow::ensure!(
                     metadata.capabilities.scheduled_processing == processing.scheduling().is_some(),
-                    "native scheduling requires its explicitly negotiated processing extension"
+                    "native scheduling requires its explicitly declared processing extension"
                 );
-                (
-                    factory.create_with_processing(&request, control.clone(), processing)?,
-                    None,
-                    None,
-                )
-            } else if !consumer_progress.is_null() {
-                anyhow::ensure!(
-                    admission.is_null()
-                        && progress.is_null()
-                        && snapshots.is_null()
-                        && !consumer_bound
-                        && !factory.supports_source_progress()
-                        && matches!(
-                            metadata.role,
-                            drasi_computation_contracts::ComponentRole::Source
-                                | drasi_computation_contracts::ComponentRole::Transformer
-                        ),
-                    "unsupported or conflicting native consumer progress binding"
-                );
-                let capability =
-                    unsafe { crate::NativeConsumerProgress::from_borrowed(consumer_progress)? };
-                if let Some(coordinator) = &coordinator {
-                    coordinator.validate_consumers(capability.consumer_ids())?;
-                }
-                let reader = capability.reader();
-                anyhow::ensure!(
-                    request
-                        .scope
-                        .as_ref()
-                        .is_some_and(|scope| scope.graph_id == reader.graph_id())
-                        && &request.id == reader.producer_id(),
-                    "native consumer progress belongs to a different graph or producer"
-                );
-                let created = match &coordinator {
-                    Some(coordinator) => coordinator.create_source(
-                        &request,
-                        control.clone(),
-                        crate::SourceBootstrapLiveProgress::Shared(reader.clone()),
-                    )?,
-                    None => factory.create_with_consumer_progress(
-                        &request,
-                        control.clone(),
-                        capability,
-                    )?,
-                };
-                (created, None, Some(reader))
-            } else if !snapshots.is_null() {
-                anyhow::ensure!(
-                    admission.is_null()
-                        && progress.is_null()
-                        && !consumer_bound
-                        && factory.supports_output_snapshots()
-                        && matches!(
-                            metadata.role,
-                            drasi_computation_contracts::ComponentRole::Sink
-                                | drasi_computation_contracts::ComponentRole::Transformer
-                        ),
-                    "unsupported native output-snapshot binding"
-                );
-                let snapshots = unsafe { crate::NativeOutputSnapshots::from_borrowed(snapshots)? };
-                (
-                    factory.create_with_output_snapshots(
-                        &request,
-                        control.clone(),
-                        Some(snapshots),
-                    )?,
-                    None,
-                    None,
-                )
-            } else if progress.is_null() {
-                anyhow::ensure!(
-                    coordinator.is_none(),
-                    "source/bootstrap coordination requires actual live progress"
-                );
-                (
-                    factory.create_with_admission(&request, control.clone(), service)?,
-                    None,
-                    None,
-                )
-            } else {
-                anyhow::ensure!(
-                    admission.is_null()
-                        && factory.supports_source_progress()
-                        && metadata.role == drasi_computation_contracts::ComponentRole::Source,
-                    "unsupported native source progress binding"
-                );
-                let capability = unsafe { crate::NativeSourceProgress::from_borrowed(progress)? };
-                let reader = capability.reader();
+            }
+            let progress = services
+                .source_progress
+                .as_ref()
+                .map(|progress| progress.reader());
+            if let Some(reader) = &progress {
                 anyhow::ensure!(
                     request
                         .scope
@@ -1607,15 +1286,53 @@ unsafe fn create_component_with_services(
                         && &request.id != reader.component_id(),
                     "native progress belongs to a different graph or to the source itself"
                 );
-                let created = match &coordinator {
-                    Some(coordinator) => coordinator.create_source(
-                        &request,
-                        control.clone(),
-                        crate::SourceBootstrapLiveProgress::Single(reader.clone()),
-                    )?,
-                    None => factory.create_with_progress(&request, control.clone(), capability)?,
-                };
-                (created, Some(reader), None)
+            }
+            let consumer_progress = services
+                .consumer_progress
+                .as_ref()
+                .map(|progress| progress.reader());
+            if let Some(reader) = &consumer_progress {
+                anyhow::ensure!(
+                    request
+                        .scope
+                        .as_ref()
+                        .is_some_and(|scope| scope.graph_id == reader.graph_id())
+                        && &request.id == reader.producer_id(),
+                    "native consumer progress belongs to a different graph or producer"
+                );
+            }
+            let admission = services.admission.is_some();
+            let coordinator = if bindings.coordinator.is_null() {
+                None
+            } else {
+                anyhow::ensure!(
+                    declared.bootstrap_coordination,
+                    "native factory does not declare source/bootstrap coordination"
+                );
+                Some(unsafe {
+                    bootstrap_coordination::source_lease(bindings.coordinator, state, &request)?
+                })
+            };
+            let created = match &coordinator {
+                Some(coordinator) => {
+                    // The coordinator constructs its source from the same,
+                    // single progress binding (the declaration admits no other
+                    // source service beside it).
+                    let live = match (&services.source_progress, &services.consumer_progress) {
+                        (Some(progress), None) => {
+                            crate::SourceBootstrapLiveProgress::Single(progress.reader())
+                        }
+                        (None, Some(progress)) => {
+                            coordinator.validate_consumers(progress.consumer_ids())?;
+                            crate::SourceBootstrapLiveProgress::Shared(progress.reader())
+                        }
+                        _ => anyhow::bail!(
+                            "source/bootstrap coordination requires its actual live progress"
+                        ),
+                    };
+                    coordinator.create_source(&request, control.clone(), live)?
+                }
+                None => factory.create(&request, control.clone(), services)?,
             };
             let mut component = created.component;
             anyhow::ensure!(
@@ -1645,7 +1362,7 @@ unsafe fn create_component_with_services(
                     validate_snapshot_inputs(metadata, sink.as_mut())?;
                     let batching = sink.batching()?;
                     anyhow::ensure!(
-                        factory.supports_sink_batching() || batching.is_none(),
+                        declared.sink_batching || batching.is_none(),
                         "native sink has undeclared batching"
                     );
                     if let Some(batching) = batching {
@@ -1685,24 +1402,29 @@ unsafe fn create_component_with_services(
                 "native management capability mismatch"
             );
             anyhow::ensure!(
-                component.base().supports_input_binding_updates()
+                component.base_mut().input_bindings().is_some()
                     == metadata.capabilities.input_binding_updates,
-                "native input-binding update capability mismatch"
+                "native input-binding handler does not match its declared capability"
             );
-            anyhow::ensure!(
-                component
-                    .transformer()
-                    .and_then(|transformer| transformer.quiescent_bootstrap_input())
-                    == metadata.capabilities.quiescent_bootstrap,
-                "native quiescent bootstrap capability mismatch"
-            );
-            anyhow::ensure!(
-                component
-                    .transformer()
-                    .and_then(|transformer| transformer.durable_bootstrap_input())
-                    == metadata.capabilities.durable_bootstrap,
-                "native durable bootstrap capability mismatch"
-            );
+            if let Ok(transformer) = component.transformer_mut() {
+                let bootstrap = match transformer.bootstrap_input() {
+                    None => (false, false),
+                    Some(crate::BootstrapInput::Quiescent(_)) => (true, false),
+                    Some(crate::BootstrapInput::Durable(_)) => (false, true),
+                };
+                anyhow::ensure!(
+                    bootstrap
+                        == (
+                            metadata.capabilities.quiescent_bootstrap.is_some(),
+                            metadata.capabilities.durable_bootstrap.is_some()
+                        ),
+                    "native bootstrap handler does not match its declared bootstrap input"
+                );
+                anyhow::ensure!(
+                    transformer.durable_output().is_some() == metadata.capabilities.durable_output,
+                    "native durable output handler does not match its declared capability"
+                );
+            }
             let wakeup = component
                 .transformer()
                 .and_then(|value| value.wakeup_source());
@@ -1803,8 +1525,8 @@ unsafe fn create_component_with_services(
                 output_reads,
                 coordinator,
                 damaged,
-                admission: !admission.is_null(),
-                batching: factory.supports_sink_batching(),
+                admission,
+                batching: declared.sink_batching,
                 progress,
                 recovery,
                 consumer_progress,
@@ -2038,7 +1760,7 @@ fn start_operation(
         return Err(Failure::panicked());
     }
     let allowed = match code {
-        INITIALIZE | START | STOP | DISPOSE | PAUSE | RESUME => true,
+        INITIALIZE | START | STOP | DISPOSE | PAUSE | RESUME | WORKER_FAILURE => true,
         NEXT => {
             instance.factory.role == drasi_computation_contracts::ComponentRole::Source
                 && !instance.admission
@@ -2080,7 +1802,7 @@ fn start_operation(
     } else {
         None
     };
-    let guard = if matches!(code, CONTROL | WAKE_WAIT | WAKE_PENDING) {
+    let guard = if matches!(code, CONTROL | WAKE_WAIT | WAKE_PENDING | WORKER_FAILURE) {
         None
     } else {
         instance
@@ -2098,7 +1820,7 @@ fn start_operation(
     let acknowledged = instance
         .administration
         .prepare(&instance, code, context.as_ref())?;
-    let independent = if matches!(code, CONTROL | WAKE_WAIT | WAKE_PENDING) {
+    let independent = if matches!(code, CONTROL | WAKE_WAIT | WAKE_PENDING | WORKER_FAILURE) {
         Some(
             instance
                 .administration
@@ -2132,7 +1854,9 @@ fn start_operation(
         token: token.clone(),
     };
     // Select before boxing so ordinary operations retain no consumer future.
-    let operation = if instance.consumer.is_some() {
+    // A worker-failure wait is cancelled at every processing boundary; it
+    // touches no delivery, so it must not mark the consumer interrupted.
+    let operation = if instance.consumer.is_some() && code != WORKER_FAILURE {
         transport::export_cancellable_operation(
             async move {
                 let _guard = guard;
@@ -2257,6 +1981,11 @@ async fn execute(
     if code == APPLY {
         return management::execute_apply(instance, call).await;
     }
+    if code == WORKER_FAILURE {
+        // Observation only: independent of bootstrap coordination and data.
+        let reason = instance.damaged.wait_worker_failure().await;
+        return Err(Failure::failed(reason).retryable().into());
+    }
     let input = &call.input;
     if !matches!(code, STOP | DISPOSE) {
         if let Some(coordinator) = &instance.coordinator {
@@ -2354,6 +2083,8 @@ async fn execute(
                 .and_then(|context| context.fresh_start);
             let mut context = crate::lifecycle::StartContext::new(scope.clone(), credentials)
                 .with_fresh_start(fresh_start);
+            // Workers of an earlier activation were joined by its STOP.
+            instance.damaged.clear_worker_failure();
             let started = run_hook(&scope, component.base_mut().start(&mut context)).await;
             drop(context);
             if instance.activation_credentials_bound {
@@ -2489,7 +2220,12 @@ async fn execute(
                     "native input-binding update names an undeclared input port"
                 );
             }
-            component.base_mut().bind_inputs(&bindings).await?;
+            component
+                .base_mut()
+                .input_bindings()
+                .ok_or_else(|| anyhow::anyhow!("component does not declare input-binding updates"))?
+                .bind_inputs(&bindings)
+                .await?;
         }
         BOOTSTRAP_INPUT => {
             anyhow::ensure!(
@@ -2513,7 +2249,7 @@ async fn execute(
                 &input.envelope,
                 PortDirection::Input,
             )?;
-            component.transformer_mut()?.bootstrap(input).await?;
+            bootstrap_input(&mut component)?.bootstrap(input).await?;
         }
         BOOTSTRAP_COMPLETE => {
             anyhow::ensure!(
@@ -2533,8 +2269,7 @@ async fn execute(
                 );
                 drasi_computation_contracts::BootstrapCompletion::default()
             };
-            component
-                .transformer_mut()?
+            bootstrap_input(&mut component)?
                 .bootstrap_completed(completion)
                 .await?;
             instance.bootstrapping.store(false, Ordering::Release);
@@ -2548,18 +2283,23 @@ async fn execute(
                 input.is_empty() && !instance.running.load(Ordering::Acquire),
                 "native transformer cannot inspect bootstrap requirements while running"
             );
-            return wire::encode(&component.transformer_mut()?.bootstrap_status()?);
+            return wire::encode(&bootstrap_input(&mut component)?.bootstrap_status()?);
         }
         BOOTSTRAP_RESET => {
             anyhow::ensure!(
                 input.is_empty() && instance.bootstrapping.load(Ordering::Acquire),
                 "native transformer is not initializing"
             );
-            component.transformer_mut()?.reset_bootstrap().await?;
+            match bootstrap_input(&mut component)? {
+                crate::BootstrapInput::Durable(input) => input.reset_bootstrap().await?,
+                crate::BootstrapInput::Quiescent(_) => {
+                    anyhow::bail!("a quiescent bootstrap input cannot be reset")
+                }
+            }
         }
         DELIVERY_RESUME => {
             anyhow::ensure!(input.is_empty(), "delivery resumption takes no payload");
-            component.transformer_mut()?.resume_delivery()?;
+            durable_output(&mut component)?.resume_delivery()?;
         }
         NEXT => {
             let Component::Source(source) = &mut *component else {
@@ -2667,10 +2407,16 @@ async fn execute(
                     PortDirection::Output,
                 )?;
             }
-            component
-                .transformer_mut()?
-                .delivery_completed(&outputs)
-                .await?;
+            if instance.factory.capabilities.durable_output {
+                durable_output(&mut component)?
+                    .delivery_completed(&outputs)
+                    .await?;
+            } else {
+                component
+                    .transformer_mut()?
+                    .delivery_completed(&outputs)
+                    .await?;
+            }
         }
         HANDLE_BATCH => {
             let Component::Sink(sink) = &mut *component else {
@@ -2762,6 +2508,22 @@ async fn execute(
     Ok(Vec::new())
 }
 
+fn bootstrap_input(component: &mut Component) -> anyhow::Result<crate::BootstrapInput<'_>> {
+    component
+        .transformer_mut()?
+        .bootstrap_input()
+        .ok_or_else(|| anyhow::anyhow!("transformer does not declare provider-driven bootstrap"))
+}
+
+fn durable_output(
+    component: &mut Component,
+) -> anyhow::Result<&mut dyn crate::NativeDurableOutput> {
+    component
+        .transformer_mut()?
+        .durable_output()
+        .ok_or_else(|| anyhow::anyhow!("transformer does not declare durable output"))
+}
+
 #[cfg(test)]
 mod definition_tests {
     use super::*;
@@ -2777,14 +2539,28 @@ mod definition_tests {
                 configuration_version: 1,
                 configuration: crate::ConfigSchema::default(),
                 source_progress: false,
+                pairing: None,
             }
+        }
+
+        fn describe(
+            &self,
+            _: &serde_json::Value,
+        ) -> anyhow::Result<crate::BootstrapOutputDescription> {
+            Ok(crate::BootstrapOutputDescription {
+                completion: crate::BootstrapCompletionKind::Quiescent,
+                pairing: None,
+                namespace: crate::ElementNamespace::ServedSource,
+                identity: None,
+            })
         }
 
         fn create(
             &self,
             _: &CreateRequest,
+            _: &crate::BootstrapSession,
             _: Option<crate::NativeSourceProgress>,
-        ) -> anyhow::Result<Arc<dyn crate::NativeBootstrapProvider>> {
+        ) -> anyhow::Result<crate::NativeBootstrapProvider> {
             anyhow::bail!("discovery must not construct a snapshot provider")
         }
     }

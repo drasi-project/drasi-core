@@ -205,11 +205,76 @@ fn source_specification(
 
 /// The bootstrap configuration paired with the source `source` on stream
 /// `changes`: the same flat settings plus the source's component ID.
+/// The standalone snapshot's configuration: the shared settings alone. The
+/// served source and stream come from the graph relation (see
+/// [`bootstrap_provider`]); paired providers take no configuration.
 fn bootstrap_configuration(settings: &Value) -> Value {
-    source_configuration(
-        settings,
-        json!({"source": id("source").as_str(), "stream": "changes"}),
-    )
+    settings.clone()
+}
+
+/// A provider as the graph creates it. A paired factory's provider is opened
+/// by the in-process MySQL source factory's coordinator for `source` (stream
+/// `changes`) from `settings`, bound to `owner`; it requires an owner. The
+/// standalone snapshot serves `source` and its stream from the session.
+fn bootstrap_provider(
+    bootstrap: &computation::NativeBootstrapFactory,
+    query: ComponentId,
+    configuration: Value,
+    owner: Option<Arc<QuerySourceProgress>>,
+) -> Result<Arc<computation::NativeBootstrapProxy>> {
+    if !bootstrap.requires_source_bootstrap() {
+        return bootstrap.create_provider(
+            query,
+            configuration,
+            Some(scope()),
+            owner,
+            drasi_computation_plugin_sdk::BootstrapSession::new(
+                Some(drasi_computation_plugin_sdk::ServedSource {
+                    source: id("source"),
+                    stream: stream("changes"),
+                }),
+                None,
+            ),
+        );
+    }
+    let owner = owner.context("a paired MySQL provider requires its query's progress owner")?;
+    let (implementation, shared) = match bootstrap.metadata().implementation.name.as_ref() {
+        drasi_computation_bootstrap_mysql::MYSQL_BOOTSTRAP => {
+            (drasi_computation_source_mysql::MYSQL_TRANSACTIONS, false)
+        }
+        drasi_computation_bootstrap_mysql::MYSQL_SHARED_TRANSACTION_BOOTSTRAP => (
+            drasi_computation_source_mysql::MYSQL_SHARED_TRANSACTIONS,
+            true,
+        ),
+        _ => (drasi_computation_source_mysql::MYSQL_SHARED_CHANGES, true),
+    };
+    let plugin =
+        computation::NativePlugin::from_definition(drasi_computation_source_mysql::plugin()?)?;
+    let factory = plugin
+        .factories()
+        .iter()
+        .find(|factory| factory.metadata().implementation.name.as_ref() == implementation)
+        .context("paired MySQL source factory")?;
+    let mut mode = json!({"stream": "changes"});
+    if implementation == drasi_computation_source_mysql::MYSQL_SHARED_CHANGES {
+        mode["persistent"] = json!(owner.snapshot().persistent);
+    }
+    let progress = if shared {
+        computation::NativeSourceBootstrapProgress::Shared(Arc::new(ConsumerProgressSet::new(
+            ComponentBatch::GRAPH_ID,
+            id("source"),
+            [owner.clone()],
+        )?))
+    } else {
+        computation::NativeSourceBootstrapProgress::Single(owner.clone())
+    };
+    let coordinator = factory.create_source_bootstrap(
+        id("source"),
+        source_configuration(&configuration, mode),
+        scope(),
+        progress,
+    )?;
+    bootstrap.create_paired_query_provider(query, json!({}), scope(), owner, coordinator, None)
 }
 
 fn source_limits(settings: &Value) -> Result<SourceTransactionLimits> {
@@ -370,27 +435,26 @@ async fn family(dynamic: bool) -> Result<()> {
         "waiting for actual owners must not open replication"
     );
     let bootstrap_settings = bootstrap_configuration(&database.source_settings());
-    assert!(bootstrap
-        .create_provider(id("left"), bootstrap_settings.clone(), Some(scope()), None)
-        .is_err());
-    assert!(bootstrap
-        .create_provider(
+    assert!(
+        bootstrap_provider(bootstrap, id("left"), bootstrap_settings.clone(), None).is_err(),
+        "a paired provider requires its query's progress owner"
+    );
+    assert!(
+        bootstrap_provider(
+            bootstrap,
             id("right"),
             bootstrap_settings.clone(),
-            Some(scope()),
             Some(owners[0].clone()),
         )
-        .is_err());
+        .is_err(),
+        "a paired provider is bound to its own query's owner"
+    );
     let substitute = Arc::new(QuerySourceProgress::new(
         ComponentBatch::GRAPH_ID,
         id("left"),
     )?);
-    let substitute_provider = bootstrap.create_provider(
-        id("left"),
-        bootstrap_settings,
-        Some(scope()),
-        Some(substitute),
-    )?;
+    let substitute_provider =
+        bootstrap_provider(bootstrap, id("left"), bootstrap_settings, Some(substitute))?;
     let actual = Arc::new(QuerySourceProgress::new(
         ComponentBatch::GRAPH_ID,
         id("left"),
@@ -463,10 +527,10 @@ async fn family(dynamic: bool) -> Result<()> {
     let mut outputs = Vec::new();
     let gate = Arc::new(Semaphore::new(1));
     for (label, owner) in ["left", "right"].into_iter().zip(&owners) {
-        let provider = bootstrap.create_provider(
+        let provider = bootstrap_provider(
+            bootstrap,
             owner.component_id().clone(),
             bootstrap_configuration(&database.source_settings()),
-            Some(scope()),
             Some(owner.clone()),
         )?;
         let query = ContinuousQueryTransformer::new_configured(
@@ -793,7 +857,10 @@ async fn tracked_graph(
             ResourceRole::Checkpoint,
             Arc::new(QuerySourceProgressResource(owners[0].clone())),
         )
-    };
+    }
+    // The member queries keep their checkpoints in RocksDB indexes, so the
+    // progress is durable, as the tracked factories require.
+    .with_capabilities(ResourceCapabilities::DURABLE);
     let mut builder = ComponentBatch::builder();
     for (name, role, handle) in [
         ("progress", ResourceRole::Checkpoint, progress),
@@ -873,10 +940,10 @@ async fn tracked_graph(
         .with_source_progress(owner.clone())?
         .with_recovery_scope(INSTANCE)?;
         if !positional {
-            query = query.with_bootstrap(bootstrap.create_provider(
+            query = query.with_bootstrap(bootstrap_provider(
+                bootstrap,
                 owner.component_id().clone(),
                 bootstrap_configuration(&settings),
-                Some(scope()),
                 Some(owner.clone()),
             )?);
         }

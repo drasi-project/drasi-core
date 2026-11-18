@@ -25,27 +25,20 @@ use crate::{
 #[async_trait]
 pub trait NativeComponent: Send + Sync {
     fn descriptor(&self) -> &ComponentDescriptor;
-    fn configuration(&self) -> anyhow::Result<serde_json::Value> {
-        anyhow::bail!(
-            "component {} does not expose its configuration",
-            self.descriptor().id()
-        )
-    }
+    /// The component's current literal configuration. Required: the Host
+    /// validates it against the factory schema at construction and uses it for
+    /// update planning and reconstruction.
+    fn configuration(&self) -> anyhow::Result<serde_json::Value>;
     /// Instance management for Pause and Stop boundary updates. Presence must
     /// match `Capabilities::management`; it is fixed for the object's lifetime.
     fn management(&mut self) -> Option<&mut dyn NativeManagement> {
         None
     }
-    /// Whether this component consumes graph input-binding updates. This must
-    /// agree with the factory's `input_binding_updates` capability.
-    fn supports_input_binding_updates(&self) -> bool {
-        false
-    }
-    /// Called before start and before processing with the current declared
-    /// incoming edges. Calls are serialized with processing and may repeat the
-    /// same bindings; implementations must tolerate repetition and cancellation.
-    async fn bind_inputs(&mut self, _bindings: &[InputBinding]) -> anyhow::Result<()> {
-        anyhow::bail!("component does not support input-binding updates")
+    /// The input-binding update handler. Present exactly when the factory
+    /// declares `Capabilities::input_binding_updates`; fixed for the object's
+    /// lifetime.
+    fn input_bindings(&mut self) -> Option<&mut dyn NativeInputBindings> {
+        None
     }
     /// Snapshot and/or replay providers for this component's declared output
     /// ports. Obtaining them performs no I/O and does not take the component's
@@ -101,6 +94,80 @@ pub trait NativeComponent: Send + Sync {
     async fn dispose(&mut self, ctx: &DisposeContext) -> LifecycleResult;
 }
 
+/// Receives the graph's current incoming bindings (declared by
+/// `Capabilities::input_binding_updates`).
+#[async_trait]
+pub trait NativeInputBindings: Send + Sync {
+    /// Called before start and before processing with the current declared
+    /// incoming edges. Calls are serialized with processing and may repeat the
+    /// same bindings; implementations must tolerate repetition and cancellation.
+    async fn bind_inputs(&mut self, bindings: &[InputBinding]) -> anyhow::Result<()>;
+}
+
+/// Provider-driven initialization of a transformer input. Declared by
+/// `Capabilities::quiescent_bootstrap` (the handler is
+/// [`BootstrapInput::Quiescent`]) or `Capabilities::durable_bootstrap`
+/// ([`BootstrapInput::Durable`]); the input port comes from that declaration.
+#[async_trait]
+pub trait NativeBootstrapInput: Send + Sync {
+    /// Whether this instance's configuration requests initialization and
+    /// whether it is complete. A durable input also says whether a reset is
+    /// allowed.
+    fn bootstrap_status(&self) -> anyhow::Result<BootstrapStatus>;
+    async fn bootstrap(&mut self, input: InputEnvelope) -> anyhow::Result<()>;
+    async fn bootstrap_completed(&mut self, completion: BootstrapCompletion) -> anyhow::Result<()>;
+}
+
+/// Durable initialization: atomic completion with the processing owner's
+/// state, and an explicit reset when the provider can no longer resume.
+#[async_trait]
+pub trait NativeDurableBootstrapInput: NativeBootstrapInput {
+    /// Discard partial initialization state; called only while initializing
+    /// and only when `bootstrap_status` allowed a reset.
+    async fn reset_bootstrap(&mut self) -> anyhow::Result<()>;
+}
+
+/// The bootstrap handler a transformer exposes, matching its declaration.
+pub enum BootstrapInput<'a> {
+    Quiescent(&'a mut dyn NativeBootstrapInput),
+    Durable(&'a mut dyn NativeDurableBootstrapInput),
+}
+
+impl BootstrapInput<'_> {
+    pub fn bootstrap_status(&self) -> anyhow::Result<BootstrapStatus> {
+        match self {
+            Self::Quiescent(input) => input.bootstrap_status(),
+            Self::Durable(input) => input.bootstrap_status(),
+        }
+    }
+    pub async fn bootstrap(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
+        match self {
+            Self::Quiescent(handler) => handler.bootstrap(input).await,
+            Self::Durable(handler) => handler.bootstrap(input).await,
+        }
+    }
+    pub async fn bootstrap_completed(
+        &mut self,
+        completion: BootstrapCompletion,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Quiescent(handler) => handler.bootstrap_completed(completion).await,
+            Self::Durable(handler) => handler.bootstrap_completed(completion).await,
+        }
+    }
+}
+
+/// Delivery tracking for a transformer declaring `Capabilities::durable_output`:
+/// retained output trims only through these hooks, so both are required.
+#[async_trait]
+pub trait NativeDurableOutput: Send + Sync {
+    /// The Host delivered `outputs` to every destination; trim them.
+    async fn delivery_completed(&mut self, outputs: &[OutputEnvelope]) -> anyhow::Result<()>;
+    /// Resume delivering retained, unacknowledged output after the Host bound
+    /// its output destinations.
+    fn resume_delivery(&mut self) -> anyhow::Result<()>;
+}
+
 /// Updates a retained object at a Pause or Stop boundary. Replace is never an
 /// instance operation: the host disposes the old object and constructs anew.
 #[async_trait]
@@ -141,34 +208,21 @@ pub trait NativeSource: NativeComponent {
 
 #[async_trait]
 pub trait NativeTransformer: NativeComponent {
-    /// Optional provider-driven initialization before ordinary processing.
-    /// This first profile requires quiescent writers and has no durable handover.
-    fn quiescent_bootstrap_input(&self) -> Option<PortId> {
+    /// The provider-driven initialization handler. Present exactly when the
+    /// factory declares quiescent or durable bootstrap, as the matching variant.
+    fn bootstrap_input(&mut self) -> Option<BootstrapInput<'_>> {
         None
     }
-    fn durable_bootstrap_input(&self) -> Option<PortId> {
+    /// The durable delivery handler. Present exactly when the factory
+    /// declares `Capabilities::durable_output`.
+    fn durable_output(&mut self) -> Option<&mut dyn NativeDurableOutput> {
         None
     }
-    fn bootstrap_status(&self) -> anyhow::Result<BootstrapStatus> {
-        anyhow::bail!("transformer does not support durable initialization")
-    }
-    async fn reset_bootstrap(&mut self) -> anyhow::Result<()> {
-        anyhow::bail!("transformer does not support bootstrap reset")
-    }
-    async fn bootstrap(&mut self, _input: InputEnvelope) -> anyhow::Result<()> {
-        anyhow::bail!("transformer does not support provider-driven bootstrap")
-    }
-    async fn bootstrap_completed(
-        &mut self,
-        _completion: BootstrapCompletion,
-    ) -> anyhow::Result<()> {
-        anyhow::bail!("transformer does not support provider-driven bootstrap")
-    }
+    /// Delivery notification for a transformer without durable output, which
+    /// retains nothing; a durable transformer receives it through
+    /// [`NativeDurableOutput::delivery_completed`] instead.
     async fn delivery_completed(&mut self, _outputs: &[OutputEnvelope]) -> anyhow::Result<()> {
         Ok(())
-    }
-    fn resume_delivery(&mut self) -> anyhow::Result<()> {
-        anyhow::bail!("transformer does not support durable output resumption")
     }
     fn has_pending_emissions(&self) -> bool {
         false

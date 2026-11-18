@@ -1,0 +1,18 @@
+[package]
+rust-version.workspace = true
+name = "drasi-computation-template-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The one template engine of the native sinks: compiled, strict, unescaped Handlebars with a fixed helper set and a parameter-binding SQL mode"
+readme = "README.md"
+
+[dependencies]
+drasi-computation-contracts = { workspace = true }
+handlebars = "5.1"
+serde_json = "1"
+thiserror = "2"
+
+[lints]
+workspace = true

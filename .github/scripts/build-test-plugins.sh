@@ -72,7 +72,7 @@ done
 cargo build --locked -p drasi-host-sdk --examples
 for fixture in native_recovery native_consumer_progress_metadata \
     native_bootstrap_coordination_metadata native_bootstrap_coordination_partial \
-    native_activation_credentials native_custom_query native_scheduling; do
+    native_activation_credentials native_custom_query native_scheduling native_worker_failure; do
     artifact="${prefix}${fixture}.${ext}"
     stage "$build_dir/examples/$artifact" "$plugin_dir/examples/$artifact"
 done

@@ -87,8 +87,8 @@ Batching is host-owned (`NativeSink::batching`): the sink never queues an
 input privately or acknowledges it early.
 
 - Fixed mode (`batchSize` > 1, `batchFlushTimeoutMs`) and adaptive mode
-  (`batching.mode: adaptive`, throughput-driven between the minimum and
-  maximum) publish a `SinkBatching` policy. The host re-reads it before each
+  (the shared `adaptive` object, throughput-driven between the minimum and
+  maximum by the same `AdaptivePolicy` as the HTTP sink) publish a `SinkBatching` policy. The host re-reads it before each
   batch, so an in-place update takes effect at the next batch. The host
   contract caps one batch at 1024 inputs; `batchSize` above 1024 still caps the
   changes per request at `batchSize`.
@@ -210,7 +210,7 @@ receiver that is down is visible as failing deliveries and warning logs.
 
 - **Pause (in place):** `metadata`, `secretMetadata`, `timeoutMs`,
   `maxRetries`, `retryBudgetMs`, batching (`batchSize`,
-  `batchFlushTimeoutMs`, `batching`, `maxBatchBytes`), `outputTemplates`,
+  `batchFlushTimeoutMs`, `adaptive`, `maxBatchBytes`), `outputTemplates`,
   `outputFormat`, and `requireConnectedAtStart` (read only by the next Start).
   These are read per delivery and are swapped as one set.
 - **Stop (restart):** `endpoint`, TLS fields, `connectTimeoutMs`,

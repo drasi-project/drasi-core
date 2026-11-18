@@ -326,6 +326,9 @@ impl ComputationComponent for NativeConsumerProxy {
     fn control_handler(&self) -> Option<Arc<dyn ControlHandler>> {
         self.component.control_handler()
     }
+    fn worker_failures(&self) -> Option<Arc<dyn drasi_lib::computation::v1::WorkerFailures>> {
+        self.component.worker_failures()
+    }
     fn requires_readiness_confirmation(&self) -> bool {
         self.component.requires_readiness_confirmation()
     }
@@ -462,6 +465,21 @@ impl EnvelopeSink for NativeConsumerProxy {
                     input.port
                 )
             })?;
+        // An uncertain progress commit fenced the runner's storage owner (a
+        // storage failure during live processing). Reopening it from storage
+        // reloads the committed ledger, resolving that uncertainty, so the
+        // graph's retry of the same input resumes at the completed prefix. If
+        // storage still fails, this attempt fails transiently and the graph
+        // retries it later.
+        if guarantee == DeliveryGuarantee::ExactlyOnce
+            && self
+                .runner
+                .as_ref()
+                .is_none_or(DeliveryRunner::recovery_required)
+        {
+            self.close_delivery().await?;
+            self.reopen().await?;
+        }
         // Held while a batch may be open on the plugin: a cancelled delivery
         // (this future dropped mid-await) leaves it set, so cleanup is
         // required before more input.
@@ -485,8 +503,15 @@ impl EnvelopeSink for NativeConsumerProxy {
                     drasi_computation_contracts::lifecycle::lifecycle_error_kind(error),
                     Some(LifecycleErrorKind::Terminal)
                 );
+                // An uncertain commit closed the batch but fenced the
+                // runner; the next attempt reopens it from storage first.
+                let fenced = self
+                    .runner
+                    .as_ref()
+                    .is_some_and(DeliveryRunner::recovery_required);
                 if !closed
                     && (self.mode == ConsumerMode::External
+                        || fenced
                         || error
                             .downcast_ref::<DeliveryError>()
                             .is_some_and(|error| matches!(error, DeliveryError::Handling { .. })))

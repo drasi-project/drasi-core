@@ -170,6 +170,8 @@ pub struct MySqlSnapshot {
     shared_binding: bool,
     rows: bool,
     shared: Arc<Shared>,
+    labels: Option<BootstrapLabels>,
+    activation: Option<super::ActivationCredentials>,
 }
 
 impl MySqlSnapshot {
@@ -224,7 +226,23 @@ impl MySqlSnapshot {
                 lifecycle: tokio::sync::Mutex::new(()),
                 timeout,
             }),
+            labels: None,
+            activation: None,
         })
+    }
+
+    /// Read only the selected tables whose label (the table name) the query
+    /// declares; `None` reads every selected table. The handover still binds
+    /// the source's whole selection.
+    pub fn with_labels(mut self, labels: Option<BootstrapLabels>) -> Self {
+        self.labels = labels;
+        self
+    }
+
+    /// Connect with the paired source's current activation credentials.
+    pub fn with_activation(mut self, activation: super::ActivationCredentials) -> Self {
+        self.activation = Some(activation);
+        self
     }
 
     pub fn for_consumer(
@@ -542,7 +560,8 @@ impl MySqlSnapshot {
         let mut work = Work {
             source: self.source.clone(),
             stream: self.stream.clone(),
-            config: self.config.clone(),
+            config: super::with_activation(&self.config, self.activation.as_ref()),
+            labels: self.labels.clone(),
             owner: self.progress.clone(),
             shared_binding: self.shared_binding,
             rows: self.rows,
@@ -663,6 +682,7 @@ struct Work {
     source: ComponentId,
     stream: StreamId,
     config: MySqlConfig,
+    labels: Option<BootstrapLabels>,
     owner: SourceProgressView,
     shared_binding: bool,
     rows: bool,
@@ -773,10 +793,15 @@ impl Work {
         )
         .await
         .context("MySQL snapshot history verification timed out")??;
+        let selected: catalog::Tables = tables
+            .iter()
+            .filter(|(table, _)| super::table_selected(self.labels.as_ref(), table))
+            .map(|(table, columns)| (table.clone(), columns.clone()))
+            .collect();
         read_rows(
             &mut self.sessions[1],
             &self.config,
-            &tables,
+            &selected,
             &self.source,
             &self.stream,
             timestamp,

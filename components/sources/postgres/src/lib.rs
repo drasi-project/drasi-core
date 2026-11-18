@@ -178,10 +178,7 @@
 
 pub use drasi_postgres_common::{config, connection, decoder, protocol, scram, types};
 pub mod descriptor;
-pub mod native;
 pub mod stream;
-
-pub use native::PostgresTransactionSource as NativePostgresSource;
 
 #[cfg(test)]
 mod position_contract {

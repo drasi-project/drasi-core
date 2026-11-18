@@ -20,6 +20,15 @@ also accepted by the native MySQL bootstrap providers
 | `retention` | `server` \| `untilProcessed` | `server` | tracked: `transactions`, `shared-transactions`, `shared-changes`, `shared-positional-changes` | unsupported |
 | `persistent` | boolean | `false` | `shared-changes`, `shared-positional-changes` | unsupported |
 
+`transactions`, `shared-transactions`, and the shared row factories with
+`persistent: true` declare a durable progress requirement on their progress
+binding (`source_progress` or `consumer_progress`). Bind a progress resource
+that declares durability (the progress of queries with persistent indexes);
+volatile or undeclared progress is refused at binding, before the source
+starts, as an `Incompatible` failure on the source node. Without
+`persistent`, shared row factories accept any progress and keep committed
+rows only for the life of that progress.
+
 `transactions` and `shared-transactions` require `startFrom` `position` or
 `snapshot`. `snapshot` is accepted only by `transactions`,
 `shared-transactions` and `shared-changes`. Positional factories require

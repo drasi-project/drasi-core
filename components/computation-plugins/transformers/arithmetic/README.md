@@ -9,7 +9,7 @@ cargo build -p drasi-computation-transformer-arithmetic --features dynamic-plugi
 
 Both `in` and `out` use `GraphChangeCodec`. Configuration requires `stream`;
 defaults are `field="value"`, `add=0`, `multiply=1`,
-`counter_property="batch_count"`. Arithmetic is `(value + add) * multiply`, with
+`counterProperty="batch_count"`. Arithmetic is `(value + add) * multiply`, with
 checked integer overflow and explicit type errors.
 
 Standalone execution is volatile. Opted-in transaction participation borrows the

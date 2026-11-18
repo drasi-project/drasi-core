@@ -1041,6 +1041,9 @@ pub struct SnapshotWork {
     pub handover: Handover,
     pub outputs: mpsc::Sender<ChangeEnvelope>,
     pub shutdown: watch::Receiver<bool>,
+    /// The query's declared labels; only captured tables whose label is
+    /// requested are read. `None` reads every captured table.
+    pub labels: Option<drasi_computation_contracts::BootstrapLabels>,
 }
 
 pub fn snapshot(mut work: SnapshotWork) -> Result<Option<Handover>> {
@@ -1079,6 +1082,7 @@ pub fn snapshot(mut work: SnapshotWork) -> Result<Option<Handover>> {
         &work.outputs,
         &mut work.shutdown,
         None,
+        work.labels.as_ref(),
     )? {
         return Ok(None);
     }
@@ -1101,6 +1105,7 @@ fn snapshot_rows(
     outputs: &mpsc::Sender<ChangeEnvelope>,
     shutdown: &mut watch::Receiver<bool>,
     progress: Option<(&SourceProgressView, u64)>,
+    labels: Option<&drasi_computation_contracts::BootstrapLabels>,
 ) -> Result<bool> {
     let mut progress = progress
         .map(|(owner, generation)| Ok::<_, anyhow::Error>((owner.subscribe()?, generation)))
@@ -1118,7 +1123,11 @@ fn snapshot_rows(
     };
     let runtime = tokio::runtime::Handle::current();
     let mut ordinal = 0u64;
-    for (name, table) in tables {
+    // A table's rows carry its name as their label: select at table level.
+    for (name, table) in tables
+        .into_iter()
+        .filter(|(name, _)| super::table_selected(labels, name))
+    {
         let outcome = crate::read_table(
             &database.connection,
             source.as_str(),
@@ -1197,6 +1206,8 @@ pub struct GroupSnapshotWork {
     pub proceed: oneshot::Receiver<()>,
     pub outputs: mpsc::Sender<ChangeEnvelope>,
     pub shutdown: watch::Receiver<bool>,
+    /// The member query's declared labels (see [`SnapshotWork::labels`]).
+    pub labels: Option<drasi_computation_contracts::BootstrapLabels>,
 }
 
 pub fn group_snapshot(mut work: GroupSnapshotWork) -> Result<Option<GroupHandover>> {
@@ -1270,6 +1281,7 @@ pub fn group_snapshot(mut work: GroupSnapshotWork) -> Result<Option<GroupHandove
         &work.outputs,
         &mut work.shutdown,
         Some((&work.member, work.generation)),
+        work.labels.as_ref(),
     )? {
         return Ok(None);
     }

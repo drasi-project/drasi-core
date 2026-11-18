@@ -43,7 +43,7 @@ async fn semantics() -> Result<()> {
                     ComputationQueryLanguage::Gql => "gql",
                 });
                 config["stream"] = json!(definition.output_stream);
-                config["outbox_capacity"] = json!(8);
+                config["outboxCapacity"] = json!(8);
                 config["volatile"] = json!(!persistent);
                 let provider: Arc<dyn drasi_core::computation::ComputationIndexProvider> =
                     if persistent {

@@ -122,7 +122,9 @@ async fn graph_mode(
                         id("source"),
                         owners.iter().cloned(),
                     )?),
-                ),
+                )
+                // The member queries' RocksDB indexes keep their cursors.
+                .with_capabilities(ResourceCapabilities::DURABLE),
             )?;
     }
     // The consumer sink requires persistent producer identities.
@@ -170,10 +172,10 @@ async fn graph_mode(
                 );
                 configuration["labels"] = json!(labels);
             }
-            query = query.with_bootstrap(factory.create_provider(
+            query = query.with_bootstrap(bootstrap_provider(
+                factory,
                 id(label),
                 configuration,
-                Some(scope()),
                 tracked.then(|| owner.clone()),
             )?);
         }
@@ -982,10 +984,10 @@ async fn snapshot_cleanup(dynamic: bool) -> Result<()> {
                 == drasi_computation_bootstrap_mysql::MYSQL_STANDALONE_BOOTSTRAP
         })
         .context("standalone factory")?;
-    let provider = factory.create_provider(
+    let provider = bootstrap_provider(
+        factory,
         id("snapshot-owner"),
         bootstrap_configuration(&settings),
-        Some(scope()),
         None,
     )?;
     let mut paused = false;

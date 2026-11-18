@@ -4,6 +4,14 @@
 //! Optional query-owned bootstrap providers. This extension does not change the
 //! base component roles, metadata, tables or source-progress extension.
 //!
+//! Every factory has a required pure describer: from one configuration it
+//! returns the provider's declared bootstrap output (completion kind, source
+//! pairing protocol, element namespace and identity) as MessagePack, and the
+//! host forwards it unchanged to the graph, which checks the provider's edge
+//! when it binds. `create` receives a `BootstrapCreateRequest`: the creation
+//! request plus the session (the served source and stream the graph relation
+//! supplies, and the requesting query's declared labels).
+//!
 //! Factories are configuration-only. Operations are caller-polled and serialized
 //! per provider. NEXT transfers one envelope, never an unbounded snapshot.
 //! Cancelling/dropping a stream requests cancellation; STOP must finish cleanup
@@ -34,6 +42,9 @@ pub struct PluginBootstrapV1 {
     pub version: u32,
     pub reserved: u32,
     pub factories: Option<unsafe extern "C" fn(*mut c_void) -> Reply>,
+    /// Pure: factory index and MessagePack configuration in, MessagePack
+    /// `BootstrapOutputDescription` out. No I/O, clock or external state.
+    pub describe: Option<unsafe extern "C" fn(*mut c_void, u32, BorrowedBytes) -> Reply>,
     pub create: Option<
         unsafe extern "C" fn(
             *mut c_void,
@@ -100,7 +111,7 @@ mod tests {
     #[test]
     fn bootstrap_extension_preserves_frozen_native_tables() {
         let pointer = size_of::<usize>();
-        assert_eq!(size_of::<PluginBootstrapV1>(), 24 + 2 * pointer);
+        assert_eq!(size_of::<PluginBootstrapV1>(), 24 + 3 * pointer);
         assert_eq!(size_of::<BootstrapHandle>(), 2 * pointer);
         assert_eq!(size_of::<BootstrapVTable>(), 16 + 3 * pointer);
         assert_eq!(size_of::<crate::ComponentVTable>(), 16 + 5 * pointer);

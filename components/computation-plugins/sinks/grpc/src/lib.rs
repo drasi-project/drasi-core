@@ -58,17 +58,8 @@ impl Factory for GrpcSinkFactory {
         let config = GrpcSinkConfig::parse(request.request.configuration.clone())?;
         Ok(request.unkeyed_sink(config.on_permanent_failure))
     }
-    fn supports_sink_batching(&self) -> bool {
-        true
-    }
-    fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
-        Some(GrpcSinkConfig::definition().details())
-    }
-    fn supports_update_planning(&self) -> bool {
-        true
-    }
-    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
-        component::assess(request)
+    fn configuration_details(&self) -> drasi_computation_plugin_sdk::ConfigDetails {
+        GrpcSinkConfig::definition().details()
     }
 
     fn metadata(&self) -> FactoryMetadata {
@@ -95,6 +86,10 @@ impl Factory for GrpcSinkFactory {
                     ComponentUpdateMode::Recreate,
                 ],
                 erases_owned_state: true,
+                services: drasi_computation_plugin_sdk::HostServices {
+                    sink_batching: true,
+                    ..Default::default()
+                },
                 ..Capabilities::default()
             },
         }
@@ -104,6 +99,7 @@ impl Factory for GrpcSinkFactory {
         &self,
         request: &CreateRequest,
         _control: ControlSender,
+        _services: drasi_computation_plugin_sdk::ServiceBindings,
     ) -> anyhow::Result<CreatedComponent> {
         let config = GrpcSinkConfig::parse(request.configuration.clone())?;
         let outputs = SinkOutputs::from_inputs(&request.inputs, &config.outputs)?;
@@ -113,6 +109,15 @@ impl Factory for GrpcSinkFactory {
             outputs,
         )?))
         .into())
+    }
+    fn update_planner(&self) -> Option<&dyn drasi_computation_plugin_sdk::UpdatePlanner> {
+        Some(self)
+    }
+}
+
+impl drasi_computation_plugin_sdk::UpdatePlanner for GrpcSinkFactory {
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
+        component::assess(request)
     }
 }
 

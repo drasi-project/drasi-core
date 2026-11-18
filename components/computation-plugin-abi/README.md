@@ -109,20 +109,35 @@ complete cleanup, and cannot authorize restart. Retained cleanup can be retried.
 Disposal fences and settles independent calls/readers; synchronous release is not
 its replacement.
 
-## Optional services, version 2
+## Host services: declared once, bound together
 
-`drasi_computation_plugin_services_v1` is an optional, independently versioned
-extension. The two base entry points, base vtables, ABI version, wire version and
-strict base metadata remain unchanged. Matching wire-version-4 libraries may omit
-this symbol; loading does not grant recovery support.
-An extension without the base entry points is malformed, not a legacy plugin.
-The table's `version` (and each factory's capability reply) must equal the
-host's exactly; version 2 adds the `wait` flag to admission ADMIT requests, so a
-version-1 library is refused at load rather than failing per request.
+A factory declares the Host services its components are constructed with in
+its manifest, `capabilities.services` (`source_progress`, `consumer_progress`,
+`source_admission`, `output_snapshot_reads`, `consumer`, `sink_batching`,
+`bootstrap_coordination`, `activation_credentials`; indexed processing is
+`capabilities.indexed_processing`). Hosts read the declaration from the
+manifest; there are no per-factory capability probes and no per-service create
+callbacks. Manifest validation refuses role violations and contradictory
+combinations (single-owner with consumer-group progress, admission with a
+progress owner, a consumer with Host-owned batching, durable output with
+consumer progress, coordination without exactly one progress mode) at load.
+An extension table a declared service needs (recovery, consumer progress,
+consumer, batching, bootstrap coordination, activation credentials) must be
+present then, or the library is refused before its entry runs.
 
-`PluginServicesV1` has a checked header, version/reserved fields, per-factory
-capability discovery and a service-aware create callback. Only single-output
-sources may declare admission. `SourceAdmissionV1` contains a producer-owned,
+`FactoryVTable::create` is the single constructor. Its non-null
+`services::ServiceBindingsV1` table carries every Host service bound to this
+construction: `admission`, `source_progress`, `consumer_progress`,
+`output_snapshots`, `processing` (a `ScheduledProcessingV1` prefix when
+scheduling is declared), the source's retained `coordinator`, and a nonzero
+`consumer` when Host-owned delivery is bound. Null means unbound. The producer
+refuses an undeclared binding and a missing required one (consumer progress,
+indexed processing, consumer delivery). Each table is borrowed for the call;
+the producer retains what it keeps.
+
+### Source admission
+
+`SourceAdmissionV1` contains a producer-owned,
 revocable context with retain/release, bounded caller-polled requests, immutable
 identity description and synchronous failure reporting. Plugins copy and retain
 the table before returning from creation. All data crosses as bounded
@@ -141,12 +156,11 @@ and commits into its actual outgoing QoS channel. Replacement revokes retained
 capabilities before releasing the remote component. There is no unrestricted
 store, transaction owner or commit method in this interface.
 
-## Optional recovery, version 1
+## Recovery, version 1
 
-`drasi_computation_plugin_recovery_v1` is independent of service-v1 and leaves all
-existing layouts and metadata unchanged. `PluginRecoveryV1` negotiates per-factory
-source progress, constructs with a borrowed `SourceProgressV1`, and inspects the
-immutable instance retention declaration. That declaration is not proof of a
+`drasi_computation_plugin_recovery_v1` is required when a factory declares
+`source_progress`. The bound `SourceProgressV1` arrives in `ServiceBindingsV1`;
+`PluginRecoveryV1` only inspects the immutable instance retention declaration. That declaration is not proof of a
 transaction owner; the host retains and validates its actual local resource.
 
 `SourceProgressV1` offers retain/release, bounded identity/snapshot reads and owned
@@ -156,17 +170,17 @@ checkpoint/transport entries; a binding permits 16 subscriptions, each with one
 active wait. Reads mark only the encoded observation; cancellation never consumes
 an observation. Revocation wakes pending waits and rejects subsequent calls.
 There is no storage I/O, forwarding worker, writable progress object or commit
-operation. Admission and separate replay progress are mutually exclusive bindings.
+operation. Admission and separate replay progress are contradictory declarations.
 An extension without base entry points is malformed, not a legacy fallback.
 
-## Optional consumer progress, version 1
+## Consumer progress, version 1
 
-`drasi_computation_plugin_consumer_progress_v1` separately negotiates a producer's
-complete consumer set. `PluginConsumerProgressV1` supplies per-factory discovery,
-construction with `ConsumerProgressV1`, and immutable upstream-retention inspection.
-An advertising factory requires the binding and must reject unbound creation.
-Only source and transformer producers support it; single-owner recovery cannot
-be combined with this capability. Base ABI 5.0, wire 5 and recovery-v1 are unchanged.
+`drasi_computation_plugin_consumer_progress_v1` is required when a factory
+declares `consumer_progress` (a producer's complete consumer set). The bound
+`ConsumerProgressV1` arrives in `ServiceBindingsV1` and is required for that
+factory; `PluginConsumerProgressV1` inspects the immutable upstream-retention
+declaration and position policy. Only source and transformer producers declare
+it; single-owner recovery and consumer progress are contradictory.
 
 The identity fixes the graph, producer and 1-256 distinct consumer IDs. Each
 snapshot carries every member's existing recovery-v1 snapshot as a binary frame,
@@ -205,8 +219,10 @@ the consumer named by the session request. Preparation,
 snapshot polling, completion and stop retain their provider/generation ownership.
 The query owns the final state/watermark commit; a stream end is not that commit.
 
-`drasi_computation_plugin_consumer_v1` negotiates per-factory external/transactional
-consumer mode, construction, inspection, batch/operation calls and batch release.
+`drasi_computation_plugin_consumer_v1` is required when a factory declares
+`consumer` (external or transactional mode). Construction goes through the
+single create entry with `consumer` set; the extension carries inspection,
+batch/operation calls and batch release.
 It reuses component lifecycle handles and the existing revocable transaction
 request layout. The Host owns progress and commit; the plugin cannot acknowledge
 upstream transport. A full batch uses the existing 64 MiB wire bound, while each

@@ -11,11 +11,9 @@ use drasi_computation_contracts::{
 };
 use drasi_computation_storedproc_common::settings;
 pub use drasi_computation_storedproc_common::settings::{is_loopback_host, SslMode};
-use drasi_postgres_common::{
-    delivery::progress::{
-        ProgressTable, DEFAULT_MAX_STREAMS, DEFAULT_PROGRESS_TABLE, MAX_STREAMS_LIMIT,
-    },
-    sql::CompiledTemplate,
+use drasi_computation_template_common::{ParameterTemplate, Placeholder};
+use drasi_postgres_common::delivery::progress::{
+    ProgressTable, DEFAULT_MAX_STREAMS, DEFAULT_PROGRESS_TABLE, MAX_STREAMS_LIMIT,
 };
 use drasi_reaction_common::OperationType;
 use serde::{Deserialize, Serialize};
@@ -329,14 +327,14 @@ impl PostgresStoredProcConfig {
 pub(crate) struct Commands {
     routes: BTreeMap<String, CommandRoute>,
     default: Option<CommandRoute>,
-    compiled: HashMap<String, CompiledTemplate>,
+    compiled: HashMap<String, ParameterTemplate>,
 }
 
 /// The command chosen for one operation.
 pub(crate) enum Command<'a> {
     /// No template is configured (or it is empty) for this operation.
     None,
-    Template(&'a CompiledTemplate),
+    Template(&'a ParameterTemplate),
 }
 
 impl Commands {
@@ -357,7 +355,7 @@ impl Commands {
                 if !spec.template.trim().is_empty() && !compiled.contains_key(&spec.template) {
                     compiled.insert(
                         spec.template.clone(),
-                        CompiledTemplate::compile_parameter_only(&spec.template)
+                        ParameterTemplate::compile(&spec.template, Placeholder::Dollar)
                             .with_context(|| format!("invalid command template in {name}"))?,
                     );
                 }

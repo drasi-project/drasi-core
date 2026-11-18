@@ -7,14 +7,13 @@
 use anyhow::{ensure, Context, Result};
 pub use drasi_computation_contracts::PermanentFailurePolicy;
 use drasi_computation_contracts::{OutputAliases, SinkOutputs};
+pub use drasi_computation_network_common::batching::AdaptiveBatchSettings;
 pub use drasi_computation_network_common::config::{duration, SecretString};
 use drasi_computation_network_common::{
     config::{normalized_headers, timeout_ms, ClientTls, MAX_RETRIES, RESERVED_HEADERS},
     retry::{RetryPolicy, DEFAULT_RETRY_BUDGET_MS, MAX_RETRY_BUDGET_MS},
 };
-pub use drasi_http_common::reaction::config::{
-    AdaptiveBatchConfig, HttpOutputTemplates, HttpReactionConfig,
-};
+pub use drasi_http_common::reaction::config::{HttpOutputTemplates, HttpReactionConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, time::Duration};
@@ -38,10 +37,6 @@ pub const MAX_POOL_IDLE_PER_HOST: usize = 1024;
 /// Responses that complete a delivery unless configured otherwise. `202
 /// Accepted` is excluded: it only says the request was queued.
 pub const DEFAULT_SUCCESS_STATUS_CODES: [u16; 4] = [200, 201, 203, 204];
-/// Upper bound on adaptive batch size accepted by native host batching.
-pub const MAX_ADAPTIVE_BATCH_SIZE: usize = 65_536;
-/// Upper bound on the adaptive batch timeout accepted by native host batching.
-pub const MAX_ADAPTIVE_BATCH_TIMEOUT_MS: u64 = 60_000;
 
 fn retries() -> u32 {
     DEFAULT_MAX_RETRIES
@@ -89,12 +84,9 @@ pub struct HttpSinkConfig {
     pub secret_headers: BTreeMap<String, SecretString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_templates: Option<HttpOutputTemplates>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "drasi_http_common::reaction::config::adaptive_config_serde"
-    )]
-    pub adaptive: Option<AdaptiveBatchConfig>,
+    /// The shared adaptive batching object; requires `batchEndpoint`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adaptive: Option<AdaptiveBatchSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_endpoint: Option<String>,
     #[serde(default = "batch_bytes")]
@@ -142,7 +134,7 @@ impl HttpSinkConfig {
             Field::new("headers", Object, false, "Static request headers. Names are case-insensitive; x-drasi-component, x-drasi-port and x-drasi-delivery-id are supplied by the sink and may not be set. content-type defaults to application/json.").default(json!({})),
             Field::new("secretHeaders", Object, false, "Secret static request headers (for example API keys), merged into headers. The same naming rules apply and a name may not also appear in headers.").secret(),
             Field::new("outputTemplates", Object, false, "Per-output-alias (routes) and default (defaultTemplate) Handlebars templates for each operation (added, updated, deleted): body template, url, method and headers. Template headers may not name the sink's reserved headers."),
-            Field::new("adaptive", Object, false, "Adaptive batching bounds (adaptiveMinBatchSize, adaptiveMaxBatchSize, adaptiveWindowSize, adaptiveBatchTimeoutMs); requires batchEndpoint. The host retains inputs until delivery completes."),
+            Field::new("adaptive", Object, false, &AdaptiveBatchSettings::field_description("Adaptive host batching; requires batchEndpoint. The host retains inputs until delivery completes.", "65536")),
             Field::new("batchEndpoint", String, false, "Path relative to the base URL for POST {\"batch\":[...]} delivery; requires adaptive."),
             Field::new("maxBatchBytes", Integer, false, "Host collection byte bound for one batch of inputs.").default(batch_bytes()).minimum(1).maximum(MAX_BATCH_BYTES as u64),
             Field::new("maxRequestBytes", Integer, false, "Maximum rendered request body; adaptive batches split at this boundary.").default(request_bytes()).minimum(1).maximum(MAX_REQUEST_BYTES as u64),
@@ -270,16 +262,26 @@ impl HttpSinkConfig {
             drasi_http_common::reaction::config::resolve_http_url(&legacy.base_url, &self.url)
                 .context("url")?;
         }
-        if let Some(adaptive) = &self.adaptive {
-            ensure!(
-                adaptive.adaptive_max_batch_size <= MAX_ADAPTIVE_BATCH_SIZE
-                    && adaptive.adaptive_batch_timeout_ms <= MAX_ADAPTIVE_BATCH_TIMEOUT_MS,
-                "adaptive bounds exceed native batching limits"
-            );
-        }
+        self.validate_batching()?;
         self.validate_template_destinations(&legacy.base_url)?;
         self.client_tls().validate()?;
         Ok(())
+    }
+
+    /// `adaptive` and `batchEndpoint` come together; the adaptive object
+    /// passes the shared validator with the host's batch bound.
+    fn validate_batching(&self) -> Result<()> {
+        match (&self.adaptive, &self.batch_endpoint) {
+            (None, Some(_)) => anyhow::bail!("batchEndpoint requires adaptive"),
+            (Some(_), None) => anyhow::bail!("adaptive requires batchEndpoint"),
+            (None, None) => Ok(()),
+            (Some(adaptive), Some(endpoint)) => {
+                drasi_http_common::reaction::config::validate_batch_endpoint(endpoint)
+                    .context("batchEndpoint")?;
+                adaptive.validate(drasi_computation_network_common::batching::BatchLimit::SINK)?;
+                Ok(())
+            }
+        }
     }
 
     /// Template headers may not name reserved headers, and static template
@@ -335,8 +337,10 @@ impl HttpSinkConfig {
             token: None,
             timeout_ms: self.timeout_ms,
             output_templates: self.output_templates.clone(),
-            adaptive: self.adaptive.clone(),
-            batch_endpoint: self.batch_endpoint.clone(),
+            // Batching is validated natively (`validate_batching`); the
+            // shared configuration only routes templates.
+            adaptive: None,
+            batch_endpoint: None,
         })
     }
 

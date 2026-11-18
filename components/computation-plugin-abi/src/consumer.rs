@@ -20,9 +20,6 @@ pub struct PluginConsumerV1 {
     pub header: Header,
     pub version: u32,
     pub reserved: u32,
-    pub factory: Option<unsafe extern "C" fn(*mut c_void, u32) -> Reply>,
-    pub create:
-        Option<unsafe extern "C" fn(*mut c_void, BorrowedBytes, *mut ComponentHandle) -> Status>,
     pub inspect: Option<unsafe extern "C" fn(*mut c_void) -> Reply>,
     pub begin: Option<
         unsafe extern "C" fn(
@@ -46,7 +43,7 @@ mod tests {
     #[test]
     fn consumer_extension_preserves_frozen_native_tables() {
         let pointer = size_of::<usize>();
-        assert_eq!(size_of::<PluginConsumerV1>(), 24 + 5 * pointer);
+        assert_eq!(size_of::<PluginConsumerV1>(), 24 + 3 * pointer);
         assert_eq!(size_of::<ComponentVTable>(), 16 + 5 * pointer);
         assert_eq!(size_of::<Transaction>(), 16 + 4 * pointer);
         assert_eq!(ABI_VERSION, "5.0.0");

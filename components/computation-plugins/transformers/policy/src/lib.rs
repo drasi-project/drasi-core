@@ -23,7 +23,7 @@ use drasi_computation_contracts::{
 };
 use drasi_computation_plugin_sdk::{
     lifecycle::Assessment, Capabilities, Component, ControlSender, CreateRequest, CreatedComponent,
-    Factory, FactoryMetadata, PluginDefinition, UpdateRequest,
+    Factory, FactoryMetadata, PluginDefinition, ServiceBindings, UpdatePlanner, UpdateRequest,
 };
 use std::sync::Arc;
 
@@ -60,8 +60,8 @@ impl Factory for PolicyFactory {
         Ok(request.volatile_transformer())
     }
 
-    fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
-        Some(PolicyConfig::definition().details())
+    fn configuration_details(&self) -> drasi_computation_plugin_sdk::ConfigDetails {
+        PolicyConfig::definition().details()
     }
 
     fn metadata(&self) -> FactoryMetadata {
@@ -95,18 +95,15 @@ impl Factory for PolicyFactory {
         }
     }
 
-    fn supports_update_planning(&self) -> bool {
-        true
-    }
-
-    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
-        component::assess(request)
+    fn update_planner(&self) -> Option<&dyn UpdatePlanner> {
+        Some(self)
     }
 
     fn create(
         &self,
         request: &CreateRequest,
         _control: ControlSender,
+        _services: ServiceBindings,
     ) -> anyhow::Result<CreatedComponent> {
         Ok(
             Component::Transformer(Box::new(component::PolicyTransformer::new(
@@ -116,5 +113,11 @@ impl Factory for PolicyFactory {
             )?))
             .into(),
         )
+    }
+}
+
+impl UpdatePlanner for PolicyFactory {
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
+        component::assess(request)
     }
 }

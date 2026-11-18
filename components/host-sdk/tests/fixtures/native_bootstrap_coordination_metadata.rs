@@ -58,7 +58,7 @@ pub extern "C" fn drasi_computation_plugin_bootstrap_coordination_v1(
         OnceLock::new();
     TABLE.get_or_init(|| {
         let mut table = unsafe { *export().bootstrap_coordination() };
-        table.create_source = None;
+        table.create_bootstrap = None;
         table
     })
 }

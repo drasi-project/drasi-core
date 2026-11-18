@@ -49,13 +49,16 @@ fn factory_is_an_external_consumer_with_management_and_erase() -> Result<()> {
     let metadata = factory.metadata();
     assert_eq!(metadata.role, ComponentRole::Sink);
     assert_eq!(metadata.completion, Some(SinkCompletion::Handled));
-    assert_eq!(factory.consumer_mode(), Some(ConsumerMode::External));
+    assert_eq!(
+        factory.metadata().capabilities.services.consumer,
+        Some(ConsumerMode::External)
+    );
     ConsumerMode::External.validate_factory(&metadata)?;
     assert!(metadata.capabilities.binds_inputs);
     assert!(metadata.capabilities.management);
     assert!(metadata.capabilities.erases_owned_state);
-    assert!(factory.supports_update_planning());
-    assert!(factory.supports_activation_credentials());
+    assert!(factory.update_planner().is_some());
+    assert!(factory.activation_credentials().is_some());
     assert_eq!(metadata.ports, MsSqlStoredProcSink::ports()?);
     assert_eq!(metadata.ports[0].id().as_str(), "in");
     assert_eq!(metadata.ports[0].direction(), PortDirection::Input);
@@ -68,8 +71,11 @@ fn factory_is_an_external_consumer_with_management_and_erase() -> Result<()> {
 
 #[test]
 fn creation_needs_a_graph_scope_and_does_no_io() -> Result<()> {
-    let created =
-        MsSqlStoredProcFactory.create(&request(config(), false), ControlSender::default())?;
+    let created = MsSqlStoredProcFactory.create(
+        &request(config(), false),
+        ControlSender::default(),
+        drasi_computation_plugin_sdk::ServiceBindings::none(),
+    )?;
     let Component::Consumer(consumer) = created.component else {
         anyhow::bail!("the factory must create an external consumer");
     };
@@ -80,9 +86,16 @@ fn creation_needs_a_graph_scope_and_does_no_io() -> Result<()> {
     let mut unscoped = request(config(), false);
     unscoped.scope = None;
     assert!(MsSqlStoredProcFactory
-        .create(&unscoped, ControlSender::default())
+        .create(
+            &unscoped,
+            ControlSender::default(),
+            drasi_computation_plugin_sdk::ServiceBindings::none()
+        )
         .is_err());
-    let context = MsSqlStoredProcFactory.activation_credential_context(&request(config(), true))?;
+    let context = MsSqlStoredProcFactory
+        .activation_credentials()
+        .expect("credential endpoint")
+        .activation_credential_context(&request(config(), true))?;
     assert_eq!(
         (context.hostname.as_str(), context.port),
         ("no-network-at-construction", 1433)
@@ -96,9 +109,17 @@ fn empty_literals_require_an_identity_binding() -> Result<()> {
     empty["user"] = json!("");
     empty.as_object_mut().expect("object").remove("password");
     assert!(MsSqlStoredProcFactory
-        .create(&request(empty.clone(), false), ControlSender::default())
+        .create(
+            &request(empty.clone(), false),
+            ControlSender::default(),
+            drasi_computation_plugin_sdk::ServiceBindings::none()
+        )
         .is_err());
-    MsSqlStoredProcFactory.create(&request(empty, true), ControlSender::default())?;
+    MsSqlStoredProcFactory.create(
+        &request(empty, true),
+        ControlSender::default(),
+        drasi_computation_plugin_sdk::ServiceBindings::none(),
+    )?;
     Ok(())
 }
 

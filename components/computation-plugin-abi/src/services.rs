@@ -1,40 +1,57 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! Optional service contract, versioned independently of the frozen base tables.
-//! Absence means no services, not a legacy-family fallback. Validate the header
-//! and version before invoking callbacks. All tables obey base ABI ownership.
+//! Host services bound to one construction. A factory declares the services it
+//! is constructed with once, in its manifest capabilities; the Host binds any
+//! subset of them together and passes them through the single
+//! [`FactoryVTable::create`] entry. All tables obey base ABI ownership.
 
 use super::*;
 
-pub const SYMBOL: &[u8] = b"drasi_computation_plugin_services_v1\0";
-/// Version 2: an admission ADMIT request carries `wait` (back-pressure instead
-/// of `Busy`/`CapacityExhausted`). Hosts and plugins require an exact match.
-pub const VERSION: u32 = 2;
-pub type ServicesFn = unsafe extern "C" fn() -> *const PluginServicesV1;
-
-/// Borrows existing plugin/factory handles from this same binary. It neither
-/// owns nor releases them. Factory discovery returns bounded MessagePack.
+/// Every Host service bound to one construction. A null pointer (or zero
+/// `consumer`) means that service is not bound for this construction. The
+/// Host binds only services the factory's manifest declares; the producer
+/// refuses an undeclared binding and a missing required one (consumer
+/// progress, indexed processing, consumer delivery). Each pointer is borrowed
+/// for the duration of the create call; the producer retains what it keeps.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct PluginServicesV1 {
+pub struct ServiceBindingsV1 {
     pub header: Header,
-    pub version: u32,
+    pub admission: *const SourceAdmissionV1,
+    pub source_progress: *const recovery::SourceProgressV1,
+    pub consumer_progress: *const consumer_progress::ConsumerProgressV1,
+    pub output_snapshots: *const output_snapshots::OutputSnapshotsV1,
+    /// `ProcessingV1`, or the `ScheduledProcessingV1` prefix when the factory
+    /// declares scheduled processing.
+    pub processing: *const processing::ProcessingV1,
+    /// The source's retained bootstrap coordinator, created through
+    /// `PluginBootstrapCoordinationV1::create` from the same progress owners.
+    pub coordinator: *const bootstrap_coordination::BootstrapCoordinatorHandle,
+    /// Nonzero when the Host-owned consumer delivery service is bound.
+    pub consumer: u32,
     pub reserved: u32,
-    pub factory: Option<unsafe extern "C" fn(*mut c_void, u32) -> Reply>,
-    pub create: Option<
-        unsafe extern "C" fn(
-            *mut c_void,
-            BorrowedBytes,
-            *const SourceAdmissionV1,
-            *mut ComponentHandle,
-        ) -> Status,
-    >,
 }
 
-/// Host-owned, revocable admission capability. A plugin retaining it copies the
-/// table and calls retain before returning. Only host callbacks touch context.
-/// There is no unrestricted storage, transaction or commit interface.
+impl ServiceBindingsV1 {
+    /// No bound services.
+    pub const fn none() -> Self {
+        Self {
+            header: Header::new::<Self>(),
+            admission: ptr::null(),
+            source_progress: ptr::null(),
+            consumer_progress: ptr::null(),
+            output_snapshots: ptr::null(),
+            processing: ptr::null(),
+            coordinator: ptr::null(),
+            consumer: 0,
+            reserved: 0,
+        }
+    }
+}
+
+/// Host-owned source admission. An ADMIT request carries `wait`
+/// (back-pressure instead of `Busy`/`CapacityExhausted`).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SourceAdmissionV1 {
@@ -65,13 +82,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn optional_service_tables_do_not_extend_the_base_contract() {
+    fn one_binding_table_carries_every_service() {
         let pointer = size_of::<usize>();
-        assert_eq!(size_of::<PluginServicesV1>(), 24 + 2 * pointer);
+        assert_eq!(size_of::<ServiceBindingsV1>(), 24 + 6 * pointer);
         assert_eq!(size_of::<SourceAdmissionV1>(), 16 + 6 * pointer);
         assert_eq!(size_of::<PluginVTable>(), 16 + 3 * pointer);
         assert_eq!(size_of::<FactoryVTable>(), 16 + 4 * pointer);
         assert_eq!(size_of::<ComponentVTable>(), 16 + 5 * pointer);
+        let none = ServiceBindingsV1::none();
+        none.header.validate::<ServiceBindingsV1>().unwrap();
+        assert!(none.admission.is_null() && none.processing.is_null() && none.consumer == 0);
         assert_eq!(ABI_VERSION, "5.0.0");
         assert_eq!(WIRE_VERSION, 5);
     }

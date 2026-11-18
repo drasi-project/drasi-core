@@ -166,7 +166,7 @@ async fn managed_update_case() -> Result<()> {
             anyhow::bail!("counter was not recorded as a factory recipe")
         };
         specification.configuration.insert(
-            Arc::from("interval_ms"),
+            Arc::from("intervalMs"),
             ConfigurationValue::Literal(json!(20)),
         );
         let accepted = core
@@ -189,7 +189,7 @@ async fn managed_update_case() -> Result<()> {
         else {
             anyhow::bail!("live counter configuration is unavailable")
         };
-        assert_eq!(values["interval_ms"], json!(20));
+        assert_eq!(values["intervalMs"], json!(20));
         assert_eq!(values["paused"], json!(true));
         assert_eq!(
             core.apply_desired_state(current.revision, "update-counter", desired)

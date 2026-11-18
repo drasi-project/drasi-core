@@ -28,58 +28,59 @@ is **1**, containing standard binary computation envelopes **1**.
 
 ## Configuration and registration
 
-Both endpoints use `BridgeConfig`; unknown fields reject. This receiver example
+Both endpoints use `BridgeConfig`: camelCase keys at every level, and an unknown
+key at any level (including inside `namespace`, `transport` and `limits`) rejects. This receiver example
 shows all configuration keys:
 
 ```json
 {
-  "link_id": "plant-to-analysis",
-  "sender_instance": "plant",
-  "receiver_instance": "analysis",
-  "sender_endpoint": "to-analysis",
-  "receiver_endpoint": "from-plant",
+  "linkId": "plant-to-analysis",
+  "senderInstance": "plant",
+  "receiverInstance": "analysis",
+  "senderEndpoint": "to-analysis",
+  "receiverEndpoint": "from-plant",
   "stream": "analysis/ingress",
-  "peer_stream": "plant/changes",
+  "peerStream": "plant/changes",
   "delivery": "events",
   "profile": "durable",
-  "failure_scope": "processRestart",
+  "failureScope": "processRestart",
   "namespace": {
     "version": 1,
-    "source_prefixes": [
+    "sourcePrefixes": [
       "plant/",
       "drasi.output/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     ]
   },
   "transport": {
     "kind": "unix",
-    "data_path": "run/analysis-data.sock",
-    "control_path": "run/analysis-control.sock"
+    "dataPath": "run/analysis-data.sock",
+    "controlPath": "run/analysis-control.sock"
   },
   "limits": {
-    "max_envelope_bytes": 1048576,
-    "max_operations": 1024,
-    "max_values": 65536,
-    "max_depth": 32,
-    "max_lineage": 32,
-    "max_annotations": 64,
-    "queue_capacity": 16,
-    "timeout_ms": 5000,
-    "retry_attempts": 3,
-    "retry_delay_ms": 50
+    "maxEnvelopeBytes": 1048576,
+    "maxOperations": 1024,
+    "maxValues": 65536,
+    "maxDepth": 32,
+    "maxLineage": 32,
+    "maxAnnotations": 64,
+    "queueCapacity": 16,
+    "timeoutMs": 5000,
+    "retryAttempts": 3,
+    "retryDelayMs": 50
   }
 }
 ```
 
-The sender exchanges `stream` and `peer_stream`; the rest of its semantic
+The sender exchanges `stream` and `peerStream`; the rest of its semantic
 configuration is identical. `stream` must equal the local graph binding.
-`failure_scope` and `limits` are optional, with defaults shown. All other fields
+`failureScope` and `limits` are optional, with defaults shown. All other fields
 are required. `profile` is explicitly `volatile` or `durable`. Every link uses
 the **exact** standard graph schema descriptor, not just matching names or
 fingerprints. `delivery` is `events` or `complete-transactions`: it selects
 behavior, never a data schema. Source, query, transformer and source-transaction
 data are all ordinary graph data; there is no separate query or transaction
 schema (`query-change`, `graph-change`, `source-transaction`, the old `schema`
-field and `query_prefixes` reject as unknown values or fields, with no alias or
+field and `queryPrefixes` reject as unknown values or fields, with no alias or
 compatibility mode). `complete-transactions` requires every frame to carry its
 own current, valid completion marker (scoped to that frame's change set, with
 the operation count and commit position) and enforces the transaction limits and
@@ -107,9 +108,9 @@ starts workers. Startup/stop remain normal graph lifecycle operations.
 The receiver journal must be dedicated to this link, lossless, persistent, and
 configured for producer admission **before** constructing the source:
 
-- `construction_scope = receiver_instance`
+- `construction_scope = receiverInstance`
 - `graph_id =` the actual receiving graph ID
-- `component_id = receiver_endpoint`
+- `component_id = receiverEndpoint`
 - `failure_scope =` the selected, actually supported failure mode
 - `max_producers = 1`, `receipts_per_producer = 1`
 
@@ -140,7 +141,7 @@ admission. No fragment gets its own acknowledgement.
   queue. The sink declares `Accepted`. Stop, process failure or reconstruction
   can lose accepted queued work. No process-restart guarantee is inferred.
 - **Durable:** success means the actual receiver QoS transaction committed both
-  the envelope and its retry receipt, at `failure_scope`. The sink declares
+  the envelope and its retry receipt, at `failureScope`. The sink declares
   `Handled` **at this admission boundary only**. This does not mean the receiving
   query/subgraph finished, an external effect completed, or a composition drained.
 
@@ -189,7 +190,7 @@ and logical progress remain in inherited context/lineage; a bounded
 Namespace version one is an **explicit identity mapping**, not automatic
 rewriting. Every element namespace (`ElementReference::source_id`) — of a record
 key, relation endpoint, or reference embedded in a value — must match an entry of
-`source_prefixes`. That single list covers physical source namespaces and derived
+`sourcePrefixes`. That single list covers physical source namespaces and derived
 output dataset namespaces alike, because both are graph element namespaces. An
 entry ending in `/` is a prefix requiring at least one more character; any other
 entry is one exact namespace. Entries are limited to 256 bytes, with at most 16.
@@ -201,7 +202,7 @@ actual namespace for each exported output and list it **exactly**, next to the
 physical source prefixes, for example
 `["plant/", "drasi.output/<64 hex digits>"]`. Do not list `drasi.output/` as a
 prefix unless every present and future output of every graph is intended to
-cross. Older `query_prefixes` configurations reject; translate query IDs into
+cross. Older `queryPrefixes` configurations reject; translate query IDs into
 exact dataset namespaces rather than copying the IDs. Prefix checks still apply
 recursively to embedded references.
 Hosts must assign disjoint authority entries when independent producers could
@@ -230,9 +231,9 @@ Decoding never discovers a plugin or calls a child-supplied executable validator
 Graph records are canonical MessagePack (`ElementImage`, `ElementPatch`,
 `ElementBeforeImage`, MessagePack element-reference keys). Before standard
 validation, an iterative MessagePack preflight bounds each record's framing,
-collection counts, node budget (four times `max_values`) and container nesting
-(`8 + 6 × max_depth`, which covers the wrapper variants around at most
-`max_depth` value levels) before serde allocates. Only then are the shared
+collection counts, node budget (four times `maxValues`) and container nesting
+(`8 + 6 × maxDepth`, which covers the wrapper variants around at most
+`maxDepth` value levels) before serde allocates. Only then are the shared
 `ElementImage`, `ElementPatch` (including its set/remove overlap check) and
 `ElementBeforeImage` codecs used to decode the record, which is walked for value,
 depth, string and namespace limits, including element references nested in rich
@@ -312,13 +313,13 @@ still require explicit host qualification.
 
 ### Local IPC
 
-- Unix: `{"kind":"unix","data_path":"...","control_path":"..."}`. Paths are at
+- Unix: `{"kind":"unix","dataPath":"...","controlPath":"..."}`. Paths are at
   most 100 bytes. Parents create/protect the containing directory. Sockets are
   owner-only, peers must match the socket owner's UID, existing paths are never
   unlinked on startup, and cleanup only removes the inode actually owned.
   After an abrupt process exit, an operator/supervisor must verify old process
   ownership before removing a stale socket; the bridge does not guess.
-- Windows: `{"kind":"named_pipe","data_pipe":"\\\\.\\pipe\\...","control_pipe":"\\\\.\\pipe\\..."}`.
+- Windows: `{"kind":"namedPipe","dataPipe":"\\\\.\\pipe\\...","controlPipe":"\\\\.\\pipe\\..."}`.
   The cfg-gated byte-mode adapter rejects remote pipe clients and uses
   first-instance ownership. Access control inherits the hosting process's DACL.
   It needs Windows qualification; Unix tests do not constitute that evidence.
@@ -328,9 +329,9 @@ still require explicit host qualification.
 ```json
 {
   "kind": "tls",
-  "data_address": "127.0.0.1:7443",
-  "control_address": "127.0.0.1:7444",
-  "server_name": "analysis.example"
+  "dataAddress": "127.0.0.1:7443",
+  "controlAddress": "127.0.0.1:7444",
+  "serverName": "analysis.example"
 }
 ```
 
@@ -351,10 +352,10 @@ parser in each host. Its strict JSON shape is:
   "kind": "bridgeTls",
   "version": 1,
   "role": "client",
-  "trust_roots": ["tls/ca.der"],
-  "certificate_chain": ["tls/client.der"],
-  "private_key": "tls/client-key.der",
-  "peer_certificate_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  "trustRoots": ["tls/ca.der"],
+  "certificateChain": ["tls/client.der"],
+  "privateKey": "tls/client-key.der",
+  "peerCertificateSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 }
 ```
 

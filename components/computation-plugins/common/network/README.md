@@ -14,7 +14,7 @@ contains no component implementation, plugin export or registered factory.
 | `update` | always | `BoundaryPlanner` for classifying configuration changes, `ensure_same_component`, `inputs_changed` |
 | `retry` | `sink` | Sink delivery retries: jittered exponential backoff, `Retry-After`, a total time budget; `InputOutcome` applies a sink's `onPermanentFailure` to the changes of one input |
 | `wire` | protocol features | HTTP and gRPC change conversion, and sink output projection |
-| `batching` | sink features | Adaptive sink batching |
+| `batching` | sink and `ingress` features | The one adaptive batching configuration (`AdaptiveBatchSettings`, the published `adaptive` object), its validator and the sink host-batching policy |
 | `diag!` | always | Logging through `log` when the host installed a logger, otherwise warnings and errors to standard error |
 
 Each component owns its configuration type, defaults and validation, and builds

@@ -15,6 +15,7 @@
 
 mod component;
 pub mod config;
+pub mod coordinator;
 mod management;
 #[cfg(test)]
 mod tests;
@@ -25,13 +26,14 @@ use drasi_computation_contracts::{
     ComponentRole, ComponentUpdateMode, GraphChangeCodec, ImplementationIdentity, StreamId,
 };
 use drasi_computation_plugin_sdk::{
-    lifecycle::Assessment, ActivationCredentialContext, Capabilities, Component, ConfigDetails,
-    ControlSender, CreateRequest, CreatedComponent, Factory, FactoryMetadata,
-    NativeConsumerProgress, NativeSourceProgress, PluginDefinition, UpdateRequest,
+    lifecycle::Assessment, wire::DescribeRequest, ActivationCredentialContext,
+    ActivationCredentialEndpoint, Capabilities, Component, ComponentDescription, ConfigDetails,
+    ControlSender, CreateRequest, CreatedComponent, Factory, FactoryMetadata, HostServices,
+    NativeConsumerProgress, PluginDefinition, ServiceBindings, SourceBootstrapCoordination,
+    UpdatePlanner, UpdateRequest,
 };
 use drasi_mysql_common::native::{
     progress::ConsumerBinding,
-    rows,
     source::{SourceStatus, StatusSink},
     MySqlSource,
 };
@@ -39,7 +41,8 @@ use std::sync::Arc;
 
 pub use component::MySqlComponent;
 pub use drasi_mysql_common::native::{
-    MySqlOutput, MySqlRetention, MySqlSourceSettings, MySqlTableKey, MySqlTlsMode, StartFrom,
+    MySqlOutput, MySqlProgress, MySqlRetention, MySqlSourceSettings, MySqlTableKey, MySqlTlsMode,
+    StartFrom,
 };
 
 pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
@@ -94,6 +97,13 @@ fn metadata(mode: Mode) -> FactoryMetadata {
             erases_owned_state: true,
             // Outputs carry source replay progress, not a producer identity of their
             // own (Host admission, when bound, publishes under its durable identity).
+            services: HostServices {
+                source_progress: progress(mode, false) == MySqlProgress::Single,
+                consumer_progress: matches!(progress(mode, false), MySqlProgress::Group { .. }),
+                bootstrap_coordination: coordinator::protocol(mode).is_some(),
+                activation_credentials: true,
+                ..HostServices::default()
+            },
             ..Capabilities::default()
         },
     }
@@ -117,6 +127,44 @@ fn credential_context(mode: Mode, request: &CreateRequest) -> Result<ActivationC
     Ok(context)
 }
 
+/// The declared description, with the coordination offer of a mode that
+/// pairs with a bootstrap provider: outputs carry only source replay progress,
+/// kept in the progress bound to the source. A mode whose cursors must
+/// survive a process restart requires that progress to be durable, so the
+/// graph refuses wiring it to volatile progress before anything starts.
+fn describe(mode: Mode, request: &DescribeRequest) -> Result<ComponentDescription> {
+    let config = SourceConfig::from_value(mode, &request.request.configuration)?;
+    coordinator::declare(
+        mode,
+        request,
+        description(mode, config.persistent, &request.descriptor),
+    )
+}
+
+/// The description of a `mode` source; `persistent` applies to the shared
+/// row modes only.
+pub fn description(
+    mode: Mode,
+    persistent: bool,
+    descriptor: &drasi_computation_contracts::ComponentDescriptor,
+) -> ComponentDescription {
+    drasi_mysql_common::native::description(progress(mode, persistent), descriptor)
+}
+
+/// Where a `mode` source keeps its replay progress.
+pub fn progress(mode: Mode, persistent: bool) -> MySqlProgress {
+    match mode {
+        Mode::Changes | Mode::UntrackedTransactions | Mode::PositionalChanges => {
+            MySqlProgress::None
+        }
+        Mode::Transactions => MySqlProgress::Single,
+        Mode::SharedTransactions => MySqlProgress::Group { durable: true },
+        Mode::SharedChanges | Mode::SharedPositionalChanges => MySqlProgress::Group {
+            durable: persistent,
+        },
+    }
+}
+
 /// Logs readiness changes with the component identity. The host's
 /// `ControlSender` is bound only for components with a control interface,
 /// which this source does not have.
@@ -132,7 +180,12 @@ fn status_sink(id: &drasi_computation_contracts::ComponentId) -> StatusSink {
 }
 
 fn component(config: SourceConfig, source: MySqlSource) -> CreatedComponent {
-    Component::Source(Box::new(MySqlComponent { config, source })).into()
+    Component::Source(Box::new(MySqlComponent {
+        config,
+        source,
+        activation: None,
+    }))
+    .into()
 }
 
 /// An untracked source (`changes`, `untracked-transactions`,
@@ -171,181 +224,168 @@ fn consumers(
     ConsumerBinding::new(&request.id, view, progress.consumer_ids())
 }
 
-macro_rules! common_factory_methods {
-    ($mode:expr) => {
-        fn metadata(&self) -> FactoryMetadata {
-            metadata($mode)
+macro_rules! mysql_factory {
+    ($factory:ty, $mode:expr) => {
+        impl UpdatePlanner for $factory {
+            fn assess(&self, request: &UpdateRequest) -> Result<Assessment> {
+                management::assess($mode, request)
+            }
         }
-        fn configuration_details(&self) -> Option<ConfigDetails> {
-            Some(config::definition($mode).details())
+        impl ActivationCredentialEndpoint for $factory {
+            fn activation_credential_context(
+                &self,
+                request: &CreateRequest,
+            ) -> Result<ActivationCredentialContext> {
+                credential_context($mode, request)
+            }
         }
-        fn supports_update_planning(&self) -> bool {
-            true
+        impl SourceBootstrapCoordination for $factory {
+            fn create_bootstrap_coordinator(
+                &self,
+                request: &CreateRequest,
+                progress: drasi_computation_plugin_sdk::SourceBootstrapProgress,
+            ) -> Result<Arc<dyn drasi_computation_plugin_sdk::NativeSourceBootstrapCoordinator>>
+            {
+                Ok(Arc::new(coordinator::Coordinator::new(
+                    request,
+                    parse($mode, request)?,
+                    progress,
+                )?))
+            }
         }
-        fn assess(&self, request: &UpdateRequest) -> Result<Assessment> {
-            management::assess($mode, request)
-        }
-        fn supports_activation_credentials(&self) -> bool {
-            true
-        }
-        fn activation_credential_context(
-            &self,
-            request: &CreateRequest,
-        ) -> Result<ActivationCredentialContext> {
-            credential_context($mode, request)
+        impl Factory for $factory {
+            fn describe(&self, request: &DescribeRequest) -> Result<ComponentDescription> {
+                describe($mode, request)
+            }
+            fn metadata(&self) -> FactoryMetadata {
+                metadata($mode)
+            }
+            fn configuration_details(&self) -> ConfigDetails {
+                config::definition($mode).details()
+            }
+            fn update_planner(&self) -> Option<&dyn UpdatePlanner> {
+                Some(self)
+            }
+            fn activation_credentials(&self) -> Option<&dyn ActivationCredentialEndpoint> {
+                Some(self)
+            }
+            fn bootstrap_coordination(&self) -> Option<&dyn SourceBootstrapCoordination> {
+                coordinator::protocol($mode).map(|_| self as &dyn SourceBootstrapCoordination)
+            }
+            fn create(
+                &self,
+                request: &CreateRequest,
+                _: ControlSender,
+                services: ServiceBindings,
+            ) -> Result<CreatedComponent> {
+                create($mode, request, services)
+            }
         }
     };
 }
 
-impl Factory for MySqlChangesFactory {
-    /// Outputs carry only source replay progress unless published through a Host admission channel.
-    fn describe(
-        &self,
-        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
-    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.source_description(
-            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
-            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
-        ))
-    }
-    common_factory_methods!(Mode::Changes);
-    fn create(&self, request: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
-        create_untracked(Mode::Changes, request)
+mysql_factory!(MySqlChangesFactory, Mode::Changes);
+mysql_factory!(
+    MySqlUntrackedTransactionsFactory,
+    Mode::UntrackedTransactions
+);
+mysql_factory!(MySqlPositionalChangesFactory, Mode::PositionalChanges);
+mysql_factory!(MySqlTransactionsFactory, Mode::Transactions);
+mysql_factory!(MySqlSharedTransactionsFactory, Mode::SharedTransactions);
+mysql_factory!(MySqlSharedChangesFactory, Mode::SharedChanges);
+mysql_factory!(
+    MySqlSharedPositionalChangesFactory,
+    Mode::SharedPositionalChanges
+);
+
+/// Constructs a `mode` source from the progress its declaration binds.
+fn create(
+    mode: Mode,
+    request: &CreateRequest,
+    services: ServiceBindings,
+) -> Result<CreatedComponent> {
+    match mode {
+        Mode::Changes | Mode::UntrackedTransactions | Mode::PositionalChanges => {
+            create_untracked(mode, request)
+        }
+        Mode::Transactions => create_transactions(
+            request,
+            services
+                .source_progress
+                .context("MySQL transactions require their actual query progress owner")?,
+        ),
+        Mode::SharedTransactions => create_shared_transactions(
+            request,
+            services
+                .consumer_progress
+                .context("MySQL shared transactions require their actual fixed consumer set")?,
+        ),
+        Mode::SharedChanges | Mode::SharedPositionalChanges => create_shared_rows(
+            mode,
+            request,
+            &services
+                .consumer_progress
+                .context("MySQL shared rows require their actual fixed consumer set")?,
+        ),
     }
 }
 
-impl Factory for MySqlUntrackedTransactionsFactory {
-    /// Outputs carry only source replay progress unless published through a Host admission channel.
-    fn describe(
-        &self,
-        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
-    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.source_description(
-            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
-            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
-        ))
-    }
-    common_factory_methods!(Mode::UntrackedTransactions);
-    fn create(&self, request: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
-        create_untracked(Mode::UntrackedTransactions, request)
-    }
+fn create_transactions(
+    request: &CreateRequest,
+    progress: drasi_computation_plugin_sdk::NativeSourceProgress,
+) -> Result<CreatedComponent> {
+    let config = parse(Mode::Transactions, request)?;
+    let scope = request
+        .scope
+        .as_ref()
+        .context("MySQL transactions require graph scope")?;
+    let reader = progress.reader();
+    anyhow::ensure!(
+        reader.graph_id() == scope.graph_id,
+        "MySQL progress belongs to another graph"
+    );
+    let stream = StreamId::try_new(config.stream.clone())?;
+    let engine = config.engine_config(&request.id)?;
+    let source = if config.settings.start_from == StartFrom::Snapshot {
+        MySqlSource::with_published_bootstrap(
+            request.id.clone(),
+            stream,
+            engine,
+            Some(reader),
+            None,
+        )?
+    } else {
+        MySqlSource::new(request.id.clone(), stream, engine, Some(reader))?
+    };
+    Ok(component(
+        config,
+        source.with_status(status_sink(&request.id)),
+    ))
 }
 
-impl Factory for MySqlPositionalChangesFactory {
-    /// Outputs carry only source replay progress unless published through a Host admission channel.
-    fn describe(
-        &self,
-        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
-    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.source_description(
-            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
-            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
-        ))
-    }
-    common_factory_methods!(Mode::PositionalChanges);
-    fn create(&self, request: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
-        create_untracked(Mode::PositionalChanges, request)
-    }
-}
-
-impl Factory for MySqlTransactionsFactory {
-    /// Outputs carry only source replay progress unless published through a Host admission channel.
-    fn describe(
-        &self,
-        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
-    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.source_description(
-            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
-            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
-        ))
-    }
-    common_factory_methods!(Mode::Transactions);
-    fn supports_source_progress(&self) -> bool {
-        true
-    }
-    fn create(&self, _: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
-        anyhow::bail!("MySQL transactions require their actual query progress owner")
-    }
-    fn create_with_progress(
-        &self,
-        request: &CreateRequest,
-        _: ControlSender,
-        progress: NativeSourceProgress,
-    ) -> Result<CreatedComponent> {
-        let config = parse(Mode::Transactions, request)?;
-        let scope = request
-            .scope
-            .as_ref()
-            .context("MySQL transactions require graph scope")?;
-        let reader = progress.reader();
-        anyhow::ensure!(
-            reader.graph_id() == scope.graph_id,
-            "MySQL progress belongs to another graph"
-        );
-        let stream = StreamId::try_new(config.stream.clone())?;
-        let engine = config.engine_config(&request.id)?;
-        let source = if config.settings.start_from == StartFrom::Snapshot {
-            MySqlSource::with_published_bootstrap(
-                request.id.clone(),
-                stream,
-                engine,
-                Some(reader),
-                None,
-            )?
-        } else {
-            MySqlSource::new(request.id.clone(), stream, engine, Some(reader))?
-        };
-        Ok(component(
-            config,
-            source.with_status(status_sink(&request.id)),
-        ))
-    }
-}
-
-impl Factory for MySqlSharedTransactionsFactory {
-    /// Outputs carry only source replay progress unless published through a Host admission channel.
-    fn describe(
-        &self,
-        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
-    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.source_description(
-            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
-            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
-        ))
-    }
-    common_factory_methods!(Mode::SharedTransactions);
-    fn supports_consumer_progress(&self) -> bool {
-        true
-    }
-    fn create(&self, _: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
-        anyhow::bail!("MySQL shared transactions require their actual fixed consumer set")
-    }
-    fn create_with_consumer_progress(
-        &self,
-        request: &CreateRequest,
-        _: ControlSender,
-        progress: NativeConsumerProgress,
-    ) -> Result<CreatedComponent> {
-        let config = parse(Mode::SharedTransactions, request)?;
-        let consumers = consumers(request, &progress)?;
-        let stream = StreamId::try_new(config.stream.clone())?;
-        let engine = config.engine_config(&request.id)?;
-        let source = if config.settings.start_from == StartFrom::Snapshot {
-            MySqlSource::with_published_bootstrap(
-                request.id.clone(),
-                stream,
-                engine,
-                None,
-                Some(consumers),
-            )?
-        } else {
-            MySqlSource::new_with_consumer_progress(request.id.clone(), stream, engine, consumers)?
-        };
-        Ok(component(
-            config,
-            source.with_status(status_sink(&request.id)),
-        ))
-    }
+fn create_shared_transactions(
+    request: &CreateRequest,
+    progress: NativeConsumerProgress,
+) -> Result<CreatedComponent> {
+    let config = parse(Mode::SharedTransactions, request)?;
+    let consumers = consumers(request, &progress)?;
+    let stream = StreamId::try_new(config.stream.clone())?;
+    let engine = config.engine_config(&request.id)?;
+    let source = if config.settings.start_from == StartFrom::Snapshot {
+        MySqlSource::with_published_bootstrap(
+            request.id.clone(),
+            stream,
+            engine,
+            None,
+            Some(consumers),
+        )?
+    } else {
+        MySqlSource::new_with_consumer_progress(request.id.clone(), stream, engine, consumers)?
+    };
+    Ok(component(
+        config,
+        source.with_status(status_sink(&request.id)),
+    ))
 }
 
 /// A shared row source (`shared-changes`, `shared-positional-changes`).
@@ -361,9 +401,6 @@ fn create_shared_rows(
         StreamId::try_new(config.stream.clone())?,
         config.engine_config(&request.id)?,
         consumers,
-        rows::Options {
-            persistent: config.persistent,
-        },
     )?;
     if mode.positional() {
         source = source.with_positional_metadata()?;
@@ -372,60 +409,4 @@ fn create_shared_rows(
         config,
         source.with_status(status_sink(&request.id)),
     ))
-}
-
-impl Factory for MySqlSharedChangesFactory {
-    /// Outputs carry only source replay progress unless published through a Host admission channel.
-    fn describe(
-        &self,
-        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
-    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.source_description(
-            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
-            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
-        ))
-    }
-    common_factory_methods!(Mode::SharedChanges);
-    fn supports_consumer_progress(&self) -> bool {
-        true
-    }
-    fn create(&self, _: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
-        anyhow::bail!("MySQL shared rows require their actual fixed consumer set")
-    }
-    fn create_with_consumer_progress(
-        &self,
-        request: &CreateRequest,
-        _: ControlSender,
-        progress: NativeConsumerProgress,
-    ) -> Result<CreatedComponent> {
-        create_shared_rows(Mode::SharedChanges, request, &progress)
-    }
-}
-
-impl Factory for MySqlSharedPositionalChangesFactory {
-    /// Outputs carry only source replay progress unless published through a Host admission channel.
-    fn describe(
-        &self,
-        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
-    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.source_description(
-            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
-            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
-        ))
-    }
-    common_factory_methods!(Mode::SharedPositionalChanges);
-    fn supports_consumer_progress(&self) -> bool {
-        true
-    }
-    fn create(&self, _: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
-        anyhow::bail!("positional MySQL replay requires its actual fixed consumer set")
-    }
-    fn create_with_consumer_progress(
-        &self,
-        request: &CreateRequest,
-        _: ControlSender,
-        progress: NativeConsumerProgress,
-    ) -> Result<CreatedComponent> {
-        create_shared_rows(Mode::SharedPositionalChanges, request, &progress)
-    }
 }

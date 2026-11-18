@@ -27,6 +27,9 @@ use std::sync::Arc;
 pub struct MySqlComponent {
     pub(crate) config: SourceConfig,
     pub(crate) source: MySqlSource,
+    /// The activation credentials shared with paired bootstrap providers,
+    /// when the bootstrap coordinator constructed this source.
+    pub(crate) activation: Option<drasi_mysql_common::native::ActivationCredentials>,
 }
 
 fn refused(reason: impl std::fmt::Display) -> ApplyError {
@@ -92,6 +95,11 @@ impl NativeComponent for MySqlComponent {
         let credentials = ctx
             .take_credentials()
             .map(|credentials| credentials.into_auth_pair());
+        if let Some(activation) = &self.activation {
+            *activation
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = credentials.clone();
+        }
         let cancellation = ctx.cancellation().clone();
         self.source
             .start_with(Activation {
@@ -118,6 +126,12 @@ impl NativeComponent for MySqlComponent {
     /// Both honour the deadline and keep ownership on timeout.
     async fn stop(&mut self, ctx: &StopContext) -> LifecycleResult {
         self.source.stop_with(ctx.mode(), ctx.deadline()).await?;
+        // The activation's credentials end with it.
+        if let Some(activation) = &self.activation {
+            *activation
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
         Ok(())
     }
     /// The source owns no server-side state (no slot, no table, no

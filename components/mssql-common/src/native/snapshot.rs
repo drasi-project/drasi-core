@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::{
-    catalog::{read_catalog, read_snapshot_catalog},
+    catalog::{read_catalog, read_snapshot_catalog, Table},
     element, element_size,
     markers::new_marker,
     quoted,
@@ -266,6 +266,7 @@ pub fn start_snapshot(
     authentication: Authentication,
     source: String,
     labels: Vec<String>,
+    requested: Option<drasi_computation_contracts::BootstrapLabels>,
     marker_prefix: Option<String>,
 ) -> Result<(Arc<SnapshotRun>, SnapshotRows)> {
     settings.validate()?;
@@ -282,7 +283,10 @@ pub fn start_snapshot(
                 settings,
                 authentication,
                 source,
-                labels,
+                TableSelection {
+                    configured: labels,
+                    requested,
+                },
                 marker_prefix,
                 sender,
                 cancel,
@@ -290,6 +294,34 @@ pub fn start_snapshot(
         },
     )
 }
+/// The tables one snapshot reads: the configured label list is the upper
+/// bound and the query's declared labels narrow it.
+struct TableSelection {
+    configured: Vec<String>,
+    requested: Option<drasi_computation_contracts::BootstrapLabels>,
+}
+
+impl TableSelection {
+    fn reads(&self, table: &Table) -> bool {
+        let configured = self.configured.is_empty()
+            || self.configured.iter().any(|label| {
+                label.eq_ignore_ascii_case(&table.name)
+                    || label.eq_ignore_ascii_case(&table.canonical())
+            });
+        // A row's label is its table's name.
+        configured && table_selected(self.requested.as_ref(), &table.name)
+    }
+}
+
+/// Whether a table is read for a query declaring `labels` (`None` reads
+/// every selected table).
+pub fn table_selected(
+    labels: Option<&drasi_computation_contracts::BootstrapLabels>,
+    table: &str,
+) -> bool {
+    labels.is_none_or(|labels| labels.requests_node(table))
+}
+
 fn check_cancel(cancel: &watch::Receiver<bool>) -> Result<()> {
     ensure!(!*cancel.borrow(), "SQL Server snapshot cancelled");
     Ok(())
@@ -299,7 +331,7 @@ async fn database_snapshot(
     settings: NativeSettings,
     authentication: Authentication,
     source: String,
-    labels: Vec<String>,
+    selection: TableSelection,
     marker_prefix: Option<String>,
     sender: Sender,
     cancel: watch::Receiver<bool>,
@@ -457,7 +489,7 @@ async fn database_snapshot(
             &mut session,
             &settings,
             &source,
-            &labels,
+            &selection,
             &catalog,
             &sender,
             &cancel,
@@ -588,7 +620,7 @@ async fn stream_tables(
     session: &mut TiberiusSession,
     settings: &NativeSettings,
     source: &str,
-    labels: &[String],
+    selection: &TableSelection,
     catalog: &Catalog,
     sender: &Sender,
     cancel: &watch::Receiver<bool>,
@@ -598,12 +630,7 @@ async fn stream_tables(
     let timestamp = u64::try_from(chrono::Utc::now().timestamp_millis())?;
     let client = session.client_mut();
     for table in &catalog.tables {
-        if !labels.is_empty()
-            && !labels.iter().any(|label| {
-                label.eq_ignore_ascii_case(&table.name)
-                    || label.eq_ignore_ascii_case(&table.canonical())
-            })
-        {
+        if !selection.reads(table) {
             continue;
         }
         check_cancel(cancel)?;

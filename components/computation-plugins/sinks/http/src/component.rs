@@ -30,15 +30,13 @@ use drasi_computation_plugin_sdk::lifecycle::{
 use drasi_computation_plugin_sdk::{
     ApplyUpdateRequest, NativeComponent, NativeManagement, NativeSink, UpdateRequest,
 };
-use drasi_http_common::{
-    adaptive_batcher::AdaptiveBatchConfig,
-    reaction::{
-        config::{
-            parse_http_method, resolve_http_url, HttpCallSpec, HttpReactionConfig, OperationType,
-            TemplateRouting,
-        },
-        output::BatchEnvelope,
+use drasi_computation_template_common::change_context;
+use drasi_http_common::reaction::{
+    config::{
+        parse_http_method, resolve_http_url, HttpCallSpec, HttpReactionConfig, OperationType,
+        TemplateRouting,
     },
+    output::BatchEnvelope,
 };
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use std::time::Duration;
@@ -84,22 +82,7 @@ fn adaptive_policy(config: &HttpSinkConfig) -> Result<Option<AdaptivePolicy>> {
     config
         .adaptive
         .as_ref()
-        .map(|adaptive| {
-            let max_wait = Duration::from_millis(adaptive.adaptive_batch_timeout_ms);
-            AdaptivePolicy::new(
-                AdaptiveBatchConfig {
-                    min_batch_size: adaptive.adaptive_min_batch_size,
-                    max_batch_size: adaptive.adaptive_max_batch_size,
-                    throughput_window: Duration::from_millis(
-                        adaptive.adaptive_window_size as u64 * 100,
-                    ),
-                    max_wait_time: max_wait,
-                    min_wait_time: Duration::from_millis(1).min(max_wait),
-                    adaptive_enabled: true,
-                },
-                config.max_batch_bytes,
-            )
-        })
+        .map(|adaptive| AdaptivePolicy::from_settings(adaptive, config.max_batch_bytes))
         .transpose()
 }
 
@@ -166,7 +149,7 @@ impl HttpSink {
     /// header, size) is a per-change error for the failure policy; nothing
     /// falls back to a default.
     fn render(&self, notification: &ChangeNotification) -> Result<Request> {
-        let context = notification.to_json()?;
+        let context = change_context(notification)?;
         let spec = self.spec(notification);
         let url = match spec.map(|spec| spec.extension.url.as_str()) {
             Some(url) if !url.is_empty() => {
@@ -211,16 +194,17 @@ impl HttpSink {
     /// One batch item: the route's body template, which must render JSON, or
     /// the default change notification when no body template applies.
     fn batch_item(&self, notification: &ChangeNotification) -> Result<serde_json::Value> {
-        let context = notification.to_json()?;
+        let context = change_context(notification)?;
         match self
             .spec(notification)
             .map(|spec| spec.template.as_str())
             .filter(|template| !template.is_empty())
         {
-            Some(template) => {
-                let rendered = self.live.renderer.render(template, &context)?;
-                serde_json::from_str(&rendered).context("batch body template did not render JSON")
-            }
+            Some(template) => self
+                .live
+                .renderer
+                .render_json(template, &context)
+                .context("batch body template"),
             None => Ok(context),
         }
     }
@@ -366,12 +350,14 @@ fn insert_output_headers(headers: &mut HeaderMap, output: &SinkOutput) -> Result
 
 /// Classifies each configuration change by the weakest safe boundary.
 ///
-/// * Pause (in place): everything read per delivery — templates, headers,
-///   secret headers, token, timeout, request size, retries, retry budget
-///   and success statuses.
+/// * Pause (in place): everything read per delivery or per host collection —
+///   templates, headers, secret headers, token, timeout, request size,
+///   retries, retry budget, success statuses, adaptive bounds and
+///   maxBatchBytes (the host reads `batching()` before every collection).
 /// * Stop (restart): destination and connection settings bound into the
-///   client or the host batching declaration — url, baseUrl, batchEndpoint,
-///   TLS, connect timeout, connection pool, adaptive and maxBatchBytes.
+///   client — url, baseUrl, batchEndpoint, TLS, connect timeout and the
+///   connection pool. Enabling or disabling `adaptive` also changes
+///   `batchEndpoint`, so it restarts.
 /// * Replace: output aliases, changed input bindings, or
 ///   `onPermanentFailure` (part of the description captured at construction).
 pub(crate) fn plan(
@@ -387,11 +373,11 @@ pub(crate) fn plan(
     planner.field("url", c.url != p.url, Stop);
     planner.field("baseUrl", c.base_url != p.base_url, Stop);
     planner.field("batchEndpoint", c.batch_endpoint != p.batch_endpoint, Stop);
-    planner.field("adaptive", c.adaptive != p.adaptive, Stop);
+    planner.field("adaptive", c.adaptive != p.adaptive, Pause);
     planner.field(
         "maxBatchBytes",
         c.max_batch_bytes != p.max_batch_bytes,
-        Stop,
+        Pause,
     );
     planner.field(
         "tls",
@@ -579,7 +565,11 @@ impl NativeManagement for HttpSink {
             _ => {}
         }
         let live = Live::new(&proposed).map_err(refused)?;
-        if boundary == UpdateBoundary::Stop {
+        // A changed policy starts from the idle tier; an unchanged one keeps
+        // its throughput history.
+        if self.config.adaptive != proposed.adaptive
+            || self.config.max_batch_bytes != proposed.max_batch_bytes
+        {
             self.adaptive = adaptive_policy(&proposed).map_err(refused)?;
         }
         self.live = live;
@@ -596,10 +586,18 @@ impl NativeSink for HttpSink {
     fn batching(&self) -> Result<Option<SinkBatching>> {
         Ok(self.adaptive.as_ref().map(AdaptivePolicy::current))
     }
+    /// Accepts any nonempty batch within the host's input bound, even one
+    /// collected under an earlier tier; `process` splits it at the current
+    /// item target and `maxRequestBytes`.
     async fn handle_batch(&mut self, inputs: Vec<InputEnvelope>) -> Result<()> {
-        self.batching()?
-            .context("HTTP adaptive batching is disabled")?
-            .validate_inputs(&inputs)?;
+        ensure!(
+            self.adaptive.is_some(),
+            "HTTP adaptive batching is disabled"
+        );
+        ensure!(
+            !inputs.is_empty() && inputs.len() <= SinkBatching::MAX_INPUTS,
+            "sink batch is empty or exceeds the host input bound"
+        );
         self.process(inputs).await
     }
     async fn handle(&mut self, input: InputEnvelope) -> Result<()> {

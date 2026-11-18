@@ -65,7 +65,17 @@ fn add_execution(
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("query execution settings are not an object"))?;
     for (key, value) in settings.iter().filter(|(_, value)| !value.is_null()) {
-        configuration[key] = value.clone();
+        // The native query plugin's keys are camelCase at every level; only
+        // the source-transaction limits have multi-word names.
+        if key == "source_transactions" {
+            configuration["sourceTransactions"] = serde_json::json!({
+                "maxChanges": value["max_changes"],
+                "maxBytes": value["max_bytes"],
+                "maxDurationMs": value["max_duration_ms"],
+            });
+        } else {
+            configuration[key] = value.clone();
+        }
     }
     Ok(())
 }
@@ -83,10 +93,10 @@ pub(super) fn configuration_for_update(
         "query": values.get("query").ok_or_else(|| anyhow::anyhow!("query text is missing"))?,
         "stream": values.get("stream").ok_or_else(|| anyhow::anyhow!("query stream is missing"))?,
         "language": values.get("language").cloned().unwrap_or_else(|| serde_json::json!("cypher")),
-        "outbox_capacity": values.get("outbox_capacity").cloned().unwrap_or_else(|| serde_json::json!(1000)),
+        "outboxCapacity": values.get("outbox_capacity").cloned().unwrap_or_else(|| serde_json::json!(1000)),
         "recovery": values.get("recovery").cloned().unwrap_or_else(|| serde_json::json!("strict")),
         "publication": values.get("publication").cloned().unwrap_or_else(|| serde_json::json!("atomic")),
-        "reset_configuration": values.get("reset_configuration").cloned().unwrap_or(serde_json::json!(false)),
+        "resetConfiguration": values.get("reset_configuration").cloned().unwrap_or(serde_json::json!(false)),
         "bootstrap": edge_bootstrap
             || specification.dependencies.get("bootstrap").is_some_and(|ids| !ids.is_empty()),
     });
@@ -264,10 +274,10 @@ impl QueryConstructor for NativeQueryConstructor {
                     ComputationQueryLanguage::Gql => "gql",
                 },
                 "stream": construction.definition.output_stream,
-                "outbox_capacity": construction.definition.outbox_capacity,
+                "outboxCapacity": construction.definition.outbox_capacity,
                 // A bootstrap edge is bound at start in place of a resource.
                 "bootstrap": construction.bootstrap.is_some() || construction.edge_bootstrap,
-                "reset_configuration": construction.reset_configuration,
+                "resetConfiguration": construction.reset_configuration,
                 "recovery": match construction.options.recovery {
                     QueryRecoveryPolicy::Strict => "strict",
                     QueryRecoveryPolicy::AutoReset => "auto_reset",

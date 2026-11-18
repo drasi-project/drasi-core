@@ -22,9 +22,8 @@
 
 pub mod descriptor;
 pub mod provider;
-pub use drasi_http_common::bootstrap::{
-    auth, config, content_parser, pagination, response, template_engine,
-};
+pub use drasi_http_common::bootstrap::{auth, config, pagination, response};
+pub use drasi_http_common::{content, template};
 
 pub use config::HttpBootstrapConfig;
 pub use provider::HttpBootstrapProvider;

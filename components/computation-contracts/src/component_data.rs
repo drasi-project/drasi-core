@@ -42,12 +42,21 @@ pub struct SinkBatching {
 }
 
 impl SinkBatching {
+    /// Largest `max_inputs` the host accepts.
+    pub const MAX_INPUTS: usize = 1024;
+    /// Largest `max_operations` the host accepts.
+    pub const MAX_OPERATIONS: usize = 65_536;
+    /// Largest `max_bytes` the host accepts.
+    pub const MAX_BYTES: usize = 64 * 1024 * 1024;
+    /// Largest `max_delay_ms` the host accepts.
+    pub const MAX_DELAY_MS: u64 = 60_000;
+
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
-            (1..=1024).contains(&self.max_inputs)
-                && (1..=65_536).contains(&self.max_operations)
-                && (1..=64 * 1024 * 1024).contains(&self.max_bytes)
-                && (1..=60_000).contains(&self.max_delay_ms),
+            (1..=Self::MAX_INPUTS).contains(&self.max_inputs)
+                && (1..=Self::MAX_OPERATIONS).contains(&self.max_operations)
+                && (1..=Self::MAX_BYTES).contains(&self.max_bytes)
+                && (1..=Self::MAX_DELAY_MS).contains(&self.max_delay_ms),
             "sink batching requires 1..=1024 inputs, 1..=65536 operations, 1..=67108864 bytes and 1..=60000ms"
         );
         Ok(())

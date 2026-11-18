@@ -3,21 +3,19 @@
 
 //! A command template compiled once and rendered many times.
 //!
-//! [`super::render_command`] builds a Handlebars registry for every render.
-//! A [`CommandTemplate`] compiles its source once (at component construction)
-//! and reuses the registry, with the same strict mode and the same `param` and
-//! `json` helpers. It also enforces the SQL Server parameter limit for one
-//! command, so a command that the server would refuse fails before any
-//! effect, with a clear and permanent error.
+//! A [`CommandTemplate`] is compiled once (at component construction) by the
+//! shared native template engine (`drasi-computation-template-common`) under
+//! its parameter-only rule: strict rendering, the shared helper set, and
+//! `{{param …}}` as the only way to emit a value, bound as `@P1…@Pn`. It also
+//! enforces the SQL Server parameter limit for one command, so a command that
+//! the server would refuse fails before any effect, with a clear and
+//! permanent error.
 //!
-//! A `CommandTemplate` does not decide which templates are safe. Callers that
-//! require parameter-only SQL (the native stored-procedure sink) validate the
-//! source first.
+//! The legacy reaction keeps [`super::render_command`].
 
-use anyhow::{anyhow, Result};
-use handlebars::Handlebars;
-use serde_json::{Map, Value};
-use std::sync::{Arc, Mutex};
+use anyhow::Result;
+use drasi_computation_template_common::{ParameterTemplate, Placeholder};
+use serde_json::Value;
 
 /// SQL Server accepts at most 2 100 parameters in one RPC request. Tiberius
 /// sends a parameterized command through `sp_executesql`, whose statement and
@@ -26,8 +24,6 @@ use std::sync::{Arc, Mutex};
 pub const MAX_RPC_PARAMETERS: usize = 2_100;
 /// The largest number of `{{param …}}` values one rendered command may bind.
 pub const MAX_BOUND_PARAMETERS: usize = MAX_RPC_PARAMETERS - 2;
-
-const NAME: &str = "command";
 
 /// A rendered command exceeded [`MAX_BOUND_PARAMETERS`]. Rendering the same
 /// change again produces the same count, so this failure is permanent.
@@ -60,26 +56,15 @@ pub struct RenderedCommand {
 
 /// A compiled, reusable command template.
 pub struct CommandTemplate {
-    registry: Handlebars<'static>,
-    parameters: Arc<Mutex<Vec<Value>>>,
-    empty: bool,
+    template: ParameterTemplate,
 }
 
 impl CommandTemplate {
-    /// Compiles `source`. An empty or whitespace-only source renders nothing.
+    /// Compiles `source` under the parameter-only rule. An empty or
+    /// whitespace-only source renders nothing.
     pub fn compile(source: &str) -> Result<Self> {
-        let parameters = Arc::new(Mutex::new(Vec::new()));
-        let mut registry = super::template::build_handlebars(Arc::clone(&parameters));
-        let empty = source.trim().is_empty();
-        if !empty {
-            registry
-                .register_template_string(NAME, source)
-                .map_err(|error| anyhow!("invalid Handlebars command template: {error}"))?;
-        }
         Ok(Self {
-            registry,
-            parameters,
-            empty,
+            template: ParameterTemplate::compile(source, Placeholder::AtP)?,
         })
     }
 
@@ -88,31 +73,24 @@ impl CommandTemplate {
     ///
     /// Fails on a missing field (strict mode) and with
     /// [`ParameterLimitExceeded`] when the command binds too many values.
-    pub fn render(&mut self, context: &Map<String, Value>) -> Result<Option<RenderedCommand>> {
-        if self.empty {
+    pub fn render(&self, context: &Value) -> Result<Option<RenderedCommand>> {
+        if self.template.is_empty() {
             return Ok(None);
         }
-        self.buffer()?.clear();
-        let rendered = self.registry.render(NAME, context);
-        let parameters = std::mem::take(&mut *self.buffer()?);
-        let sql =
-            rendered.map_err(|error| anyhow!("failed to render command template: {error}"))?;
-        if sql.trim().is_empty() {
+        let rendered = self.template.render(context)?;
+        if rendered.sql.trim().is_empty() {
             return Ok(None);
         }
-        if parameters.len() > MAX_BOUND_PARAMETERS {
+        if rendered.parameters.len() > MAX_BOUND_PARAMETERS {
             return Err(ParameterLimitExceeded {
-                count: parameters.len(),
+                count: rendered.parameters.len(),
             }
             .into());
         }
-        Ok(Some(RenderedCommand { sql, parameters }))
-    }
-
-    fn buffer(&self) -> Result<std::sync::MutexGuard<'_, Vec<Value>>> {
-        self.parameters
-            .lock()
-            .map_err(|_| anyhow!("command parameter buffer poisoned"))
+        Ok(Some(RenderedCommand {
+            sql: rendered.sql,
+            parameters: rendered.parameters,
+        }))
     }
 }
 
@@ -121,13 +99,13 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn context(value: Value) -> Map<String, Value> {
-        value.as_object().expect("object").clone()
+    fn context(value: Value) -> Value {
+        value
     }
 
     #[test]
     fn compiled_templates_render_repeatedly_with_fresh_parameters() -> Result<()> {
-        let mut template =
+        let template =
             CommandTemplate::compile("EXEC p {{param after.id}}, {{param (json after)}}")?;
         for id in [1, 2] {
             let rendered = template
@@ -154,9 +132,9 @@ mod tests {
     #[test]
     fn empty_and_excluded_commands_render_nothing() -> Result<()> {
         assert!(CommandTemplate::compile("  ")?
-            .render(&Map::new())?
+            .render(&json!({}))?
             .is_none());
-        let mut conditional =
+        let conditional =
             CommandTemplate::compile("{{#if after.on}}EXEC p {{param after.id}}{{/if}}")?;
         assert!(conditional
             .render(&context(json!({"after": {"on": false, "id": 1}})))?
@@ -167,7 +145,7 @@ mod tests {
     #[test]
     fn the_parameter_limit_is_enforced_per_command() -> Result<()> {
         let values: Vec<u64> = (0..MAX_BOUND_PARAMETERS as u64 + 1).collect();
-        let mut template =
+        let template =
             CommandTemplate::compile("EXEC p {{#each after.values}}{{param this}},{{/each}}")?;
         let error = template
             .render(&context(json!({"after": {"values": values}})))

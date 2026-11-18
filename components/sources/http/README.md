@@ -1016,8 +1016,8 @@ The internal batch channel capacity is automatically calculated as `max_batch_si
 #### Webhook Modules
 
 - **auth.rs**: HMAC signature and Bearer token verification
-- **content_parser.rs**: JSON, XML, YAML, and text payload parsing
-- **template_engine.rs**: Handlebars template processing with custom helpers
+- **content** (`drasi_http_common::content`): JSON, XML, YAML, and text payload parsing, shared with the HTTP bootstrap reader
+- **template** (`drasi_http_common::template`): Handlebars template processing with custom helpers, shared with the HTTP bootstrap reader
 - **route_matcher.rs**: Route pattern matching and condition evaluation
 
 ### Data Flow

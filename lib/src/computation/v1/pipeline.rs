@@ -1013,7 +1013,7 @@ impl ComputationPipelineBuilder {
             let scheduled = authorize_helper(
                 &mut ids,
                 &query_id,
-                ComponentId::derive_owned(&query_id, "query-scheduled")?,
+                ComponentId::derive_owned(&query_id, super::QUERY_SCHEDULED_HELPER)?,
             )?;
             let scheduled_stream = StreamId::try_new(format!("{scheduled}/out"))?;
             let scheduled_factory = builtin_factory::<QueryScheduledSourceFactory>();

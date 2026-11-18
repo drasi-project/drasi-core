@@ -13,14 +13,40 @@ not register a dummy processing component or start a separate graph or service.
 | `drasi.postgres/shared-row-bootstrap` | Per-query snapshots and one shared configured-slot row source, including memory queries and late enrollment | Actual query owner; no fabricated persistent state or ownership of the configured slot |
 | `drasi.postgres/shared-transaction-bootstrap` | Per-query snapshots and one shared configured-slot whole-transaction source | Actual atomic persistent transaction-query owner; distinct whole-commit boundary, no ownership of the configured slot |
 
+Every factory declares its bootstrap output, which the graph checks when the
+provider's edge binds; see the
+[native bootstrap provider standard](../NATIVE-BOOTSTRAP-PROVIDER-GUIDE.md).
+The coordinated and shared factories are **paired**: they take no
+configuration, and the native PostgreSQL source's coordinator opens their
+providers from the source's own identity, stream, settings (including its
+publication, tables, keys and slot ownership) and current activation
+credentials. Each source mode declares its own coordination protocol
+(`drasi_postgres_common::replication::coordination`), and the graph refuses a
+paired provider on a source that does not declare the same protocol. The
+provider implementations (`PostgresSnapshot`, `PostgresSharedSnapshot`) live in
+the source crate (`drasi_computation_source_postgres::bootstrap`). Every
+provider reads only the published or configured tables whose label a query
+declares.
+
 ## Standalone snapshots
 
-Select `drasi.postgres/snapshot` with `source`, `stream` and a secret `settings`
-object containing `host` (default `localhost`), `port` (5432), `database`, `user`,
-`password` (empty), `ssl_mode` (`prefer`), optional `tls_ca_pem`, explicit `tables`,
-optional `table_keys`, and positive `max_tables`, `max_protocol_bytes`,
-`io_timeout_ms`, `max_duration_ms`. Tables may be schema-qualified; selection,
-keys and bounds are validated before connection.
+Select `drasi.postgres/snapshot` with one flat camelCase object, like the
+SQLite and MySQL standalone snapshots: `host` (default `localhost`), `port`
+(5432), `database`, `user`, `password` (empty; the only secret, a secret
+reference), `sslMode` (`prefer`), optional `tlsCaPem`, explicit `tables`,
+optional `tableKeys` (`[{"table": "...", "keyColumns": [...]}]`), and positive
+`maxTables` (256), `maxProtocolBytes` (16 MiB), `ioTimeoutMs` (30000) and
+`maxDurationMs` (300000). The connection, TLS and key options are published
+from the same definition as the native source's
+(`drasi_postgres_common::replication::definition`), so they carry the source's
+descriptions, defaults and allowed values; an unknown key at any level
+(including the retired nested `settings` object and snake_case names) is
+refused. Tables may be schema-qualified; selection,
+keys and bounds are validated before connection. The served source and stream
+are not configured: the graph relation supplies the source whose `bootstrap`
+input the provider is connected to (or the single source a query reads, for a
+query-local provider), and the provider declares a quiescent completion in
+that source's namespace.
 
 The provider uses a normal PostgreSQL connection, REPEATABLE READ/READ ONLY and
 bounded server-cursor fetches. A SELECT-only role works with `wal_level=replica`.
@@ -40,12 +66,12 @@ streams fail rather than returning an empty successful snapshot.
 ## Configured-slot shared snapshots
 
 Use `drasi.postgres/shared-row-bootstrap` with
-`drasi.postgres/shared-changes`. Its configuration is `source` and `stream`
-beside the same flat settings the live source takes (see the source's
-[CONFIGURATION.md](../../sources/postgres/CONFIGURATION.md); only `password` is
-secret), and must match the live source's semantic binding.
-Supply the actual query-owned `QuerySourceProgress`, query ID and graph/instance
-scope. Construction is configuration-only. The factory supports both persistent
+`drasi.postgres/shared-changes`. It takes no configuration: connected to the
+shared source's `bootstrap` input, it is opened by that source's coordinator
+with the source's own settings (see the source's
+[CONFIGURATION.md](../../sources/postgres/CONFIGURATION.md)), so it always
+matches the live source's semantic binding. The shared sources offer their
+protocol without requiring it. Construction is configuration-only. The factory supports both persistent
 and ordinary memory query owners; it does not write a managed-slot ownership
 record or claim that volatile query progress is durable.
 
@@ -114,31 +140,32 @@ one live source for the group, not one source/slot per query.
 
 ## Managed coordinated snapshots
 
-The factory accepts `source` and `stream` beside the flat settings of the
-[transaction source](../../sources/postgres/CONFIGURATION.md). Coordinated
-snapshots require managed slot ownership: the slot prefix is derived from the
-graph and source identifiers, so the source and the provider agree on it
-without configuration, and erasing removal of the source drops every slot
-with that prefix, including an abandoned unfinished snapshot slot. The host must provide the actual
-query-owned `QuerySourceProgress`, a matching query ID and instance/graph scope.
-In a graph, the Host publishes the factory as a bootstrap provider node
-connected to the source's `bootstrap` input; Rust callers can also attach the
-returned provider directly with `with_bootstrap`. The source and bootstrap may be independently loaded libraries;
-only host-owned committed progress connects their handover.
+The factory takes no configuration. It pairs with a
+[transaction source](../../sources/postgres/CONFIGURATION.md) configured with
+`coordinatedSnapshot: true`, which requires the pairing. Coordinated snapshots
+require managed slot ownership: the slot prefix is derived from the graph and
+the source's own identity (the source whose coordinator opened the provider,
+never a configured name), and erasing removal of the source drops every slot
+with that prefix, including an abandoned unfinished snapshot slot. In a graph,
+the Host publishes the factory as a bootstrap provider node connected to the
+source's `bootstrap` input and opens each query's provider from the source's
+coordinator. Outside a graph, create the coordinator from the source factory
+and open the provider through it:
 
 ```rust,ignore
-let plugin = drasi_host_sdk::computation::NativePlugin::from_definition(
-    drasi_computation_bootstrap_postgres::plugin()?,
+let coordinator = source_factory.create_source_bootstrap(
+    source_id.clone(),
+    source_configuration.clone(),
+    scope.clone(),
+    NativeSourceBootstrapProgress::Single(actual_query_progress.clone()),
 )?;
-let snapshot = plugin.bootstrap_factories()[0].create_provider(
+let snapshot = bootstrap_plugin.bootstrap_factories()[0].create_paired_query_provider(
     query_id,
-    serde_json::json!({
-        "source": source_id, "stream": "postgres/out",
-        "database": "shop", "user": "drasi", "password": {"secret": "postgres-password"},
-        "publication": "drasi_orders"
-    }),
-    Some(scope),
-    Some(actual_query_progress.clone()),
+    serde_json::json!({}),
+    scope,
+    actual_query_progress.clone(),
+    coordinator.clone(),
+    None, // or the query's labels
 )?;
 ```
 
@@ -173,9 +200,9 @@ not silently upgraded. They fail explicitly; this is not a state-transparent
 rollout onto an existing installation. Preserve its slot and durable data until
 an explicit transition is selected, rather than deleting state to force startup.
 
-The source uses `coordinatedSnapshot: true` and the same source ID, stream and
-semantic settings. It waits for the committed position and verifies its binding
-against PostgreSQL before starting replication or sending feedback.
+The source uses `coordinatedSnapshot: true`. It waits for the committed
+position and verifies its binding against PostgreSQL before starting
+replication or sending feedback.
 
 For ordinary row queries, select `drasi.postgres/coordinated-row-bootstrap`
 with `drasi.postgres/changes` and `persistent=true`. The initial row-sequence
@@ -197,7 +224,7 @@ filters, inheritance and partition-root remapping reject explicitly.
 ```sh
 cargo build -p drasi-computation-bootstrap-postgres --features dynamic-plugin
 make build-native-postgres-plugins
-cargo test -p drasi-source-postgres --test native_transactions
+cargo test -p drasi-computation-source-postgres --test native_transactions
 ```
 
 The legacy `BootstrapProvider` callback remains available for unconverted

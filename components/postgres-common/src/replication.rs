@@ -29,6 +29,8 @@ use crate::{
     connection::{format_lsn, parse_lsn, ReplicationConnection},
 };
 
+pub mod coordination;
+pub mod definition;
 pub mod error;
 pub mod rows;
 pub mod schema;

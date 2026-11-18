@@ -84,7 +84,7 @@ register the same factory through the validated native ABI. `drasi-lib` itself
 does not depend on the Host SDK or bundle a query plugin.
 
 The factory accepts optional `stream`, `result: {"label": "..."}` and positive
-`outbox_capacity` settings. The default stream is `<component>/out`; native
+`outboxCapacity` settings. Every key is camelCase and unknown keys are refused. The default stream is `<component>/out`; native
 retention defaults to one output. Result datasets use the existing
 instance/graph/component/output identity calculation. Retention capacity is an
 operational setting and does not change the query's semantic fingerprint.
@@ -213,7 +213,11 @@ and decoder middleware. Enable `middleware-jq` for JQ, or
 registry to `plugin_with_middleware_registry`; factories and pipeline instances
 are retained rather than recreated per input. Host-process Rust registry entries
 are not automatically transferred across a dynamically loaded library boundary.
-Unknown kinds fail construction before indexes are opened.
+The factory publishes its registry's kinds in its configuration schema (an
+enum on each `middleware` entry's `kind`), so the graph rejects a definition
+naming an unregistered kind when it binds the query; the published list is
+exactly the registry the library was built with, never inferred later.
+Construction checks the same registry before indexes are opened.
 
 `cargo test --locked -p drasi-host-sdk --test native_query_plugin shared_query_middleware_` compares loaded and linked query
 behavior and covers aliases, derived query input, bootstrap origins and an actual
@@ -267,7 +271,7 @@ Its first persistence profile accepts ordinary raw-source batches, with
 restart-stable, monotonic sequence numbers per input port/stream. The caller must
 resume those sources correctly; a source that restarts its counter cannot safely
 be reattached to retained checkpoints. Complete source transactions require
-`source_transactions` limits (`max_changes`, `max_bytes`, `max_duration_ms`).
+`sourceTransactions` limits (`maxChanges`, `maxBytes`, `maxDurationMs`).
 They use the existing evaluator's net-transaction projection, preserve opaque
 source positions, and track logical source sequence separately from replay
 transport sequence. Persistent producer input is bound to its exact epoch and
@@ -280,7 +284,7 @@ This is the atomic profile's contract; non-atomic publication uses the separate
 phases below.
 Only one output may await graph
 handoff. No subsequent input can overwrite that obligation. The existing
-`delivery_completed` hook records confirmation; direct callers must invoke it
+`NativeDurableOutput::delivery_completed` hook records confirmation; direct callers must invoke it
 after handling the returned output, just as the graph does.
 
 Startup validates the stored configuration and scope, restores the persistent
@@ -524,7 +528,7 @@ not evaluated twice; AutoReset can recover a history gap with a fresh snapshot.
 These are per-input cuts, not a globally atomic distributed snapshot.
 
 The standard native middleware transformer also accepts optional quiescent
-bootstrap. Its initial and live records pass through the same map/relabel
+bootstrap. Its initial and live records pass through the same middleware
 pipeline before it exposes them as its output snapshot.
 
 ## Development

@@ -49,6 +49,8 @@ struct ProbeState {
     fresh_starts: Mutex<Vec<Option<bool>>>,
     /// Overrides the live instance assessment to model drift after approval.
     live_assessment: Mutex<Option<Assessment>>,
+    /// The next start registers an owned worker that panics.
+    panic_worker: AtomicBool,
 }
 
 impl ProbeState {
@@ -170,6 +172,49 @@ struct ProbeFactory {
     options: Options,
 }
 
+fn value_details() -> crate::ConfigDetails {
+    crate::ConfigDetails {
+        fields: [(
+            "value".to_string(),
+            crate::configuration::ConfigFieldDetails {
+                description: "Test value.".into(),
+                ..Default::default()
+            },
+        )]
+        .into(),
+    }
+}
+
+impl crate::UpdatePlanner for ProbeFactory {
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
+        assert!(request.current.update_directive.is_none());
+        assert!(request.proposed.update_directive.is_none());
+        assert!(!request.current.activation_credentials_bound);
+        assert!(!request.proposed.activation_credentials_bound);
+        match self.state.enter("plan") {
+            Some(Fault::Error | Fault::Pending | Fault::Damaged) => {
+                anyhow::bail!("injected planner failure")
+            }
+            Some(Fault::Panic) => panic!("injected planner panic"),
+            None => {}
+        }
+        anyhow::ensure!(
+            request.proposed.configuration["value"].as_i64().unwrap() >= 0,
+            "unsupported negative value"
+        );
+        Ok(Assessment::from(self.options.plan))
+    }
+}
+
+impl crate::ActivationCredentialEndpoint for ProbeFactory {
+    fn activation_credential_context(
+        &self,
+        _: &CreateRequest,
+    ) -> anyhow::Result<crate::ActivationCredentialContext> {
+        anyhow::bail!("fixture does not inspect credential endpoints")
+    }
+}
+
 impl Factory for ProbeFactory {
     fn describe(
         &self,
@@ -218,6 +263,14 @@ impl Factory for ProbeFactory {
                     Vec::new()
                 },
                 erases_owned_state: self.options.deletion,
+                services: crate::HostServices {
+                    activation_credentials: self.options.credentials,
+                    consumer: self
+                        .options
+                        .consumer
+                        .then_some(crate::ConsumerMode::External),
+                    ..Default::default()
+                },
                 management: self
                     .options
                     .modes
@@ -229,43 +282,27 @@ impl Factory for ProbeFactory {
         }
     }
 
-    fn supports_update_planning(&self) -> bool {
-        self.options.planner
+    fn configuration_details(&self) -> crate::ConfigDetails {
+        value_details()
     }
 
-    fn supports_activation_credentials(&self) -> bool {
-        self.options.credentials
-    }
-
-    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
-        assert!(request.current.update_directive.is_none());
-        assert!(request.proposed.update_directive.is_none());
-        assert!(!request.current.activation_credentials_bound);
-        assert!(!request.proposed.activation_credentials_bound);
-        match self.state.enter("plan") {
-            Some(Fault::Error | Fault::Pending | Fault::Damaged) => {
-                anyhow::bail!("injected planner failure")
-            }
-            Some(Fault::Panic) => panic!("injected planner panic"),
-            None => {}
-        }
-        anyhow::ensure!(
-            request.proposed.configuration["value"].as_i64().unwrap() >= 0,
-            "unsupported negative value"
-        );
-        Ok(Assessment::from(self.options.plan))
-    }
-
-    fn consumer_mode(&self) -> Option<crate::ConsumerMode> {
+    fn update_planner(&self) -> Option<&dyn crate::UpdatePlanner> {
         self.options
-            .consumer
-            .then_some(crate::ConsumerMode::External)
+            .planner
+            .then_some(self as &dyn crate::UpdatePlanner)
+    }
+
+    fn activation_credentials(&self) -> Option<&dyn crate::ActivationCredentialEndpoint> {
+        self.options
+            .credentials
+            .then_some(self as &dyn crate::ActivationCredentialEndpoint)
     }
 
     fn create(
         &self,
         request: &CreateRequest,
         _: ControlSender,
+        _: ServiceBindings,
     ) -> anyhow::Result<CreatedComponent> {
         self.state.enter("create");
         self.state
@@ -422,6 +459,14 @@ impl ComputationComponent for Probe {
             stop: Some(stop),
             handle: worker,
         });
+        if self.state.panic_worker.swap(false, Ordering::SeqCst) {
+            // Panics on the I/O runtime after `start` returned.
+            drasi_computation_contracts::workers::try_spawn_owned_worker(
+                &tokio::sync::RwLock::new(None),
+                async { panic!("injected worker panic") },
+            )
+            .map_err(anyhow::Error::from)?;
+        }
         Ok(self.state.call("start").await?)
     }
 
@@ -708,14 +753,14 @@ impl Harness {
     fn create_bytes(&self, bytes: &[u8]) -> anyhow::Result<RawComponent> {
         let mut component = abi::ComponentHandle::null();
         unsafe {
-            let create = if self.consumer {
-                (*self.exported.consumer()).create.unwrap()
-            } else {
-                (*self.factory.vtable).create.unwrap()
+            let bindings = abi::services::ServiceBindingsV1 {
+                consumer: u32::from(self.consumer),
+                ..abi::services::ServiceBindingsV1::none()
             };
-            let status = create(
+            let status = (*self.factory.vtable).create.unwrap()(
                 self.factory.state,
                 BorrowedBytes::new(bytes),
+                &bindings,
                 &mut component,
             );
             let result = transport::take_status(status);
@@ -2105,6 +2150,68 @@ async fn wakeups_remain_independent_and_service_run_is_not_a_lifecycle_alias() -
         ]
     );
     Ok(())
+}
+
+async fn worker_panic_fails_the_activation() -> anyhow::Result<()> {
+    let harness = Harness::new(Options {
+        role: ComponentRole::Sink,
+        ..Default::default()
+    })?;
+    let component = harness.create()?;
+    component.run(INITIALIZE).await?;
+    // Without an activation there is no owned work to observe.
+    assert_eq!(
+        component.begin(WORKER_FAILURE, &[]).err().unwrap().code,
+        abi::status::CLOSED
+    );
+    harness.state.panic_worker.store(true, Ordering::SeqCst);
+    component.run(START).await?;
+    let failure = tokio::time::timeout(
+        Duration::from_secs(10),
+        component.begin(WORKER_FAILURE, &[])?,
+    )
+    .await?
+    .unwrap_err();
+    assert_eq!(failure.code, abi::status::FAILED, "{failure:?}");
+    assert!(failure.retryable, "{failure:?}");
+    assert!(
+        failure
+            .message
+            .contains("native worker panicked: injected worker panic"),
+        "{failure:?}"
+    );
+    // Only the activation failed: the object is not quarantined, keeps
+    // reporting the failure, and its next activation starts healthy.
+    assert_eq!(
+        component
+            .begin(WORKER_FAILURE, &[])?
+            .await
+            .unwrap_err()
+            .code,
+        abi::status::FAILED
+    );
+    component.run(STOP).await?;
+    component.run(START).await?;
+    let mut healthy = component.begin(WORKER_FAILURE, &[])?;
+    tokio::task::yield_now().await;
+    assert!(futures_util::poll!(&mut healthy).is_pending());
+    // Lifecycle work proceeds beside the independent wait, which STOP ends.
+    let mut stop = component.begin(STOP, &[])?;
+    assert!(futures_util::poll!(&mut stop).is_pending());
+    assert_eq!(healthy.await.unwrap_err().code, abi::status::CLOSED);
+    stop.await?;
+    component.run(DISPOSE).await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn worker_panic_fails_the_activation_current_thread() -> anyhow::Result<()> {
+    worker_panic_fails_the_activation().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_panic_fails_the_activation_multi_thread() -> anyhow::Result<()> {
+    worker_panic_fails_the_activation().await
 }
 
 #[tokio::test]

@@ -133,6 +133,15 @@ impl StateAdministration {
         if state.retiring && !matches!(code, STOP | DISPOSE) {
             return Err(Failure::closed());
         }
+        // Only a started activation owns workers; otherwise there is no
+        // failure to observe, which is not itself a failure.
+        if code == WORKER_FAILURE {
+            return if state.activation == Activation::Started && state.update.is_none() {
+                Ok(false)
+            } else {
+                Err(Failure::closed())
+            };
+        }
         if state.update.is_some() && !matches!(code, APPLY | STOP | DISPOSE) {
             return Err(Failure::failed("native component has an incomplete update"));
         }

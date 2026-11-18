@@ -3,6 +3,23 @@
 
 //! Query-scoped native bootstrap. Factories construct providers without I/O;
 //! the query owns preparation, snapshot polling, final commit and cleanup.
+//!
+//! A bootstrap factory is a declared graph component like a source or sink:
+//!
+//! - [`BootstrapFactory::describe`] is pure and returns the provider's
+//!   [`BootstrapOutputDescription`]: how its sessions complete (quiescent or
+//!   durable), the coordination protocol it requires of a paired source, its
+//!   element namespace and, when it must match, its element identity. The
+//!   Host forwards it unchanged and the graph checks the provider's edge when
+//!   it binds.
+//! - A provider is either [`QuiescentBootstrapProvider`] (records only) or
+//!   [`DurableBootstrapProvider`] (watermarks, completion state, progress),
+//!   matching the declared completion; every hook of each is required.
+//! - The graph relation supplies the served source and stream
+//!   ([`BootstrapSession::served`]) and the requesting query's declared labels
+//!   ([`BootstrapSession::labels`]); providers never read them from their own
+//!   configuration. A paired provider is created by the source library's
+//!   coordinator, which uses the source's own settings.
 
 use crate::{
     abi::{self, bootstrap::*},
@@ -19,6 +36,10 @@ use drasi_computation_contracts::{
     BootstrapPreparation, BootstrapState, BootstrapWatermark, ComponentId,
     ComputationBootstrapSnapshot, ImplementationIdentity, PluginIdentity, SourceProgressView,
     StreamId,
+};
+pub use drasi_computation_contracts::{
+    BootstrapCompletionKind, BootstrapLabels, BootstrapOutputDescription, BootstrapProtocol,
+    ElementIdentity, ElementNamespace,
 };
 use drasi_core_types::interface::StorageDurability;
 use futures_core::Stream;
@@ -43,6 +64,11 @@ pub struct BootstrapFactoryMetadata {
     pub configuration_version: u32,
     pub configuration: ConfigSchema,
     pub source_progress: bool,
+    /// The coordination protocol a paired factory requires of the source it
+    /// serves. A paired factory's providers are created by that source
+    /// library's coordinator through [`BootstrapFactory::create_with_source_bootstrap`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing: Option<BootstrapProtocol>,
 }
 impl BootstrapFactoryMetadata {
     pub fn validate(&self, plugin: &PluginIdentity) -> anyhow::Result<()> {
@@ -58,8 +84,46 @@ impl BootstrapFactoryMetadata {
         for name in self.configuration.fields.keys() {
             drasi_computation_contracts::validate_identifier("configuration field", name)?;
         }
+        anyhow::ensure!(
+            self.pairing.is_none() || self.source_progress,
+            "a paired bootstrap factory requires the query's actual source progress"
+        );
         Ok(())
     }
+
+    /// Check a factory's declared output against this metadata: the pairing
+    /// is the factory's, a paired or progress-bound provider completes
+    /// durably, and a paired provider serves its source's namespace.
+    pub fn validate_description(
+        &self,
+        description: &BootstrapOutputDescription,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            description.pairing == self.pairing,
+            "bootstrap description pairing differs from the factory's declared pairing"
+        );
+        anyhow::ensure!(
+            matches!(
+                description.completion,
+                BootstrapCompletionKind::Quiescent | BootstrapCompletionKind::Durable
+            ),
+            "a bootstrap provider declares a quiescent or durable completion"
+        );
+        anyhow::ensure!(
+            !self.source_progress || description.completion == BootstrapCompletionKind::Durable,
+            "a progress-bound bootstrap provider must complete durably"
+        );
+        anyhow::ensure!(
+            self.pairing.is_none() || description.namespace == ElementNamespace::ServedSource,
+            "a paired bootstrap provider serves its source's element namespace"
+        );
+        anyhow::ensure!(
+            description.namespace != ElementNamespace::Undeclared,
+            "a bootstrap provider declares its element namespace"
+        );
+        Ok(())
+    }
+
     pub fn validate_request(&self, request: &CreateRequest) -> anyhow::Result<()> {
         anyhow::ensure!(
             request.implementation == self.implementation
@@ -74,58 +138,191 @@ impl BootstrapFactoryMetadata {
     }
 }
 
-/// Plugin-side snapshot provider. Host-owned retirement, query and storage
-/// objects are not part of this interface.
-#[async_trait]
-pub trait NativeBootstrapProvider: Send + Sync {
-    fn validate_query_scope(
-        &self,
-        _instance_id: &str,
-        _graph_id: &str,
-        _component_id: &ComponentId,
-    ) -> anyhow::Result<()> {
+/// The source whose element namespace a provider serves and the stream its
+/// records belong to. The graph relation supplies it: the source whose
+/// bootstrap input the provider is connected to, and that source's output
+/// stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ServedSource {
+    pub source: ComponentId,
+    pub stream: StreamId,
+}
+
+/// What one bootstrap session asks of a provider, from the graph rather than
+/// the provider's configuration.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BootstrapSession {
+    /// The served source, for a provider declaring
+    /// [`ElementNamespace::ServedSource`]; `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub served: Option<ServedSource>,
+    /// The labels the requesting query reads; `None` asks for everything the
+    /// provider is configured for. A configured selection is only an upper
+    /// bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<BootstrapLabels>,
+}
+
+impl BootstrapSession {
+    pub fn new(served: Option<ServedSource>, labels: Option<BootstrapLabels>) -> Self {
+        Self { served, labels }
+    }
+
+    /// The served source, required by providers declaring
+    /// [`ElementNamespace::ServedSource`].
+    pub fn served(&self) -> anyhow::Result<&ServedSource> {
+        self.served.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "bootstrap provider serves a source's element namespace but no served source \
+                 was supplied by its graph relation"
+            )
+        })
+    }
+
+    /// Whether the requesting query reads elements labelled `label`.
+    pub fn selects(&self, label: &str) -> bool {
+        drasi_computation_contracts::labels_select(self.labels.as_ref(), label)
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(labels) = &self.labels {
+            labels.validate()?;
+        }
         Ok(())
-    }
-    fn recovery_reader(&self) -> Option<drasi_computation_contracts::SourceProgressView> {
-        None
-    }
-    async fn stop(&self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn prepare(&self) -> anyhow::Result<BootstrapPreparation> {
-        Ok(BootstrapPreparation::Ready)
-    }
-    async fn prepare_with_state(
-        &self,
-        _state: &dyn BootstrapState,
-    ) -> anyhow::Result<BootstrapPreparation> {
-        self.prepare().await
-    }
-    /// Request a prepared snapshot even after the query completed bootstrap.
-    /// Initial bootstrap and explicit reset may request one without this signal.
-    fn has_pending_snapshot(&self) -> anyhow::Result<bool> {
-        Ok(false)
-    }
-    async fn snapshot(&self) -> anyhow::Result<ComputationBootstrapSnapshot>;
-    async fn snapshot_with_state(
-        &self,
-        _state: &dyn BootstrapState,
-    ) -> anyhow::Result<ComputationBootstrapSnapshot> {
-        self.snapshot().await
-    }
-    async fn complete_snapshot(&self) -> anyhow::Result<Vec<BootstrapWatermark>> {
-        Ok(Vec::new())
-    }
-    fn completion_state(&self) -> anyhow::Result<Option<Bytes>> {
-        Ok(None)
     }
 }
 
+/// The bytes the host sends to a bootstrap factory's `create`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapCreateRequest {
+    pub request: CreateRequest,
+    pub session: BootstrapSession,
+}
+
+/// The bytes the host sends to a source coordinator's `open`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceBootstrapOpen {
+    pub query: ComponentId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<BootstrapLabels>,
+}
+
+/// A provider that only streams records: no watermarks, no completion state,
+/// no progress binding and always-ready preparation. Every hook is required.
+#[async_trait]
+pub trait QuiescentBootstrapProvider: Send + Sync {
+    /// Reject use by any query other than the one the provider was created
+    /// for.
+    fn validate_query_scope(
+        &self,
+        instance_id: &str,
+        graph_id: &str,
+        component_id: &ComponentId,
+    ) -> anyhow::Result<()>;
+    /// The snapshot. Its watermarks must be empty.
+    async fn snapshot(&self) -> anyhow::Result<ComputationBootstrapSnapshot>;
+    /// Finish asynchronous snapshot cleanup, including owned workers. Retain
+    /// unfinished work on error; the host retries before reuse.
+    async fn stop(&self) -> anyhow::Result<()>;
+}
+
+/// A provider whose completion establishes a durable handover: source
+/// watermarks, completion state and/or the query's source progress. Every
+/// hook is required, so a forgotten watermark or completion state is a
+/// compile error rather than an empty handover.
+#[async_trait]
+pub trait DurableBootstrapProvider: Send + Sync {
+    fn validate_query_scope(
+        &self,
+        instance_id: &str,
+        graph_id: &str,
+        component_id: &ComponentId,
+    ) -> anyhow::Result<()>;
+    /// The query progress reader the provider is bound to, if any. It must be
+    /// the reader the factory or coordinator received.
+    fn recovery_reader(&self) -> Option<SourceProgressView>;
+    /// Establish readiness before the query decides whether its persisted
+    /// state can be reused. `state` is the query-owned bootstrap state when
+    /// the query has one.
+    async fn prepare(
+        &self,
+        state: Option<&dyn BootstrapState>,
+    ) -> anyhow::Result<BootstrapPreparation>;
+    /// Request a prepared snapshot even after the query completed bootstrap.
+    fn has_pending_snapshot(&self) -> anyhow::Result<bool>;
+    async fn snapshot(
+        &self,
+        state: Option<&dyn BootstrapState>,
+    ) -> anyhow::Result<ComputationBootstrapSnapshot>;
+    /// Boundaries that become available only after the stream closes.
+    async fn complete_snapshot(&self) -> anyhow::Result<Vec<BootstrapWatermark>>;
+    /// Final handover state, committed atomically with the watermarks.
+    fn completion_state(&self) -> anyhow::Result<Option<Bytes>>;
+    async fn stop(&self) -> anyhow::Result<()>;
+}
+
+/// A constructed provider, typed by its declared completion.
+#[derive(Clone)]
+pub enum NativeBootstrapProvider {
+    Quiescent(Arc<dyn QuiescentBootstrapProvider>),
+    Durable(Arc<dyn DurableBootstrapProvider>),
+}
+
+impl NativeBootstrapProvider {
+    pub fn completion(&self) -> BootstrapCompletionKind {
+        match self {
+            Self::Quiescent(_) => BootstrapCompletionKind::Quiescent,
+            Self::Durable(_) => BootstrapCompletionKind::Durable,
+        }
+    }
+
+    pub fn recovery_reader(&self) -> Option<SourceProgressView> {
+        match self {
+            Self::Quiescent(_) => None,
+            Self::Durable(provider) => provider.recovery_reader(),
+        }
+    }
+
+    pub fn validate_query_scope(
+        &self,
+        instance_id: &str,
+        graph_id: &str,
+        component_id: &ComponentId,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Quiescent(provider) => {
+                provider.validate_query_scope(instance_id, graph_id, component_id)
+            }
+            Self::Durable(provider) => {
+                provider.validate_query_scope(instance_id, graph_id, component_id)
+            }
+        }
+    }
+
+    pub async fn stop(&self) -> anyhow::Result<()> {
+        match self {
+            Self::Quiescent(provider) => provider.stop().await,
+            Self::Durable(provider) => provider.stop().await,
+        }
+    }
+}
+
+/// A native bootstrap factory: a declared graph component.
 pub trait BootstrapFactory: Send + Sync + 'static {
     fn metadata(&self) -> BootstrapFactoryMetadata;
-    fn requires_source_bootstrap(&self) -> bool {
-        false
-    }
+    /// Pure: the provider's declared bootstrap output for one configuration.
+    /// No I/O, clock or external state. Its pairing must equal the
+    /// metadata's, and a paired or progress-bound provider completes durably.
+    fn describe(
+        &self,
+        configuration: &serde_json::Value,
+    ) -> anyhow::Result<BootstrapOutputDescription>;
+    /// A paired factory's provider, opened from the source library's
+    /// coordinator. Only factories declaring `pairing` are asked.
     fn create_with_source_bootstrap(
         &self,
         _request: &CreateRequest,
@@ -134,12 +331,89 @@ pub trait BootstrapFactory: Send + Sync + 'static {
         anyhow::bail!("bootstrap factory does not implement source pairing")
     }
     /// Configuration only. A progress binding, when declared, is the actual
-    /// query-owned reader; it is not a private checkpoint store.
+    /// query-owned reader; it is not a private checkpoint store. The provider
+    /// variant must match the declared completion. Only unpaired factories
+    /// are asked.
     fn create(
         &self,
         request: &CreateRequest,
+        session: &BootstrapSession,
         progress: Option<NativeSourceProgress>,
-    ) -> anyhow::Result<Arc<dyn NativeBootstrapProvider>>;
+    ) -> anyhow::Result<NativeBootstrapProvider>;
+}
+
+/// The bootstrap factory of a paired family: its providers are created by the
+/// source library's coordinator from the source's own settings, so it takes
+/// no configuration. It declares `protocol` and a durable completion in the
+/// served source's namespace; the graph refuses it on any source that does
+/// not offer the same protocol.
+pub struct PairedBootstrapFactory {
+    implementation: ImplementationIdentity,
+    protocol: BootstrapProtocol,
+}
+
+impl PairedBootstrapFactory {
+    pub fn new(implementation: ImplementationIdentity, protocol: BootstrapProtocol) -> Self {
+        Self {
+            implementation,
+            protocol,
+        }
+    }
+
+    fn description(&self) -> BootstrapOutputDescription {
+        BootstrapOutputDescription {
+            completion: BootstrapCompletionKind::Durable,
+            pairing: Some(self.protocol.clone()),
+            namespace: ElementNamespace::ServedSource,
+            identity: None,
+        }
+    }
+}
+
+impl BootstrapFactory for PairedBootstrapFactory {
+    fn metadata(&self) -> BootstrapFactoryMetadata {
+        BootstrapFactoryMetadata {
+            implementation: self.implementation.clone(),
+            configuration_version: 1,
+            configuration: ConfigSchema::from_fields(std::iter::empty()),
+            source_progress: true,
+            pairing: Some(self.protocol.clone()),
+        }
+    }
+    fn describe(
+        &self,
+        configuration: &serde_json::Value,
+    ) -> anyhow::Result<BootstrapOutputDescription> {
+        self.metadata().configuration.validate(configuration)?;
+        Ok(self.description())
+    }
+    fn create_with_source_bootstrap(
+        &self,
+        request: &CreateRequest,
+        source: crate::NativeSourceBootstrap,
+    ) -> anyhow::Result<crate::LinkedBootstrapProvider> {
+        self.metadata()
+            .configuration
+            .validate(&request.configuration)?;
+        anyhow::ensure!(
+            source.metadata().protocol == self.protocol,
+            "paired source coordinates {} but this provider requires {}",
+            source.metadata().protocol,
+            self.protocol
+        );
+        source.open()
+    }
+    fn create(
+        &self,
+        _: &CreateRequest,
+        _: &BootstrapSession,
+        _: Option<NativeSourceProgress>,
+    ) -> anyhow::Result<NativeBootstrapProvider> {
+        anyhow::bail!(
+            "paired bootstrap provider {} is created by its source's coordinator",
+            self.protocol
+        )
+    }
 }
 
 pub fn encode<T: Serialize>(value: &T) -> anyhow::Result<Vec<u8>> {
@@ -323,7 +597,7 @@ struct SnapshotSlot {
     waker: Option<std::task::Waker>,
 }
 struct Instance {
-    provider: Arc<dyn NativeBootstrapProvider>,
+    provider: NativeBootstrapProvider,
     codec: Arc<BinaryEnvelopeCodec>,
     stream: Mutex<SnapshotSlot>,
     busy: AtomicBool,
@@ -390,12 +664,17 @@ impl Instance {
                     "bootstrap already prepared"
                 );
                 self.validate_reader()?;
-                let preparation = match state {
-                    Some(state) => self.provider.prepare_with_state(&state).await?,
-                    None => self.provider.prepare().await?,
+                let (preparation, pending) = match &self.provider {
+                    // A quiescent provider is always ready and never asks for
+                    // a snapshot after a completed bootstrap.
+                    NativeBootstrapProvider::Quiescent(_) => (BootstrapPreparation::Ready, false),
+                    NativeBootstrapProvider::Durable(provider) => {
+                        let state = state.as_ref().map(|state| state as &dyn BootstrapState);
+                        let preparation = provider.prepare(state).await?;
+                        (preparation, provider.has_pending_snapshot()?)
+                    }
                 };
                 self.validate_reader()?;
-                let pending = self.provider.has_pending_snapshot()?;
                 self.reprepare_allowed.store(
                     preparation != BootstrapPreparation::Ready,
                     Ordering::Release,
@@ -414,9 +693,19 @@ impl Instance {
                 let ComputationBootstrapSnapshot {
                     changes,
                     watermarks,
-                } = match state {
-                    Some(state) => self.provider.snapshot_with_state(&state).await?,
-                    None => self.provider.snapshot().await?,
+                } = match &self.provider {
+                    NativeBootstrapProvider::Quiescent(provider) => {
+                        let snapshot = provider.snapshot().await?;
+                        anyhow::ensure!(
+                            snapshot.watermarks.is_empty(),
+                            "a quiescent bootstrap provider returned watermarks"
+                        );
+                        snapshot
+                    }
+                    NativeBootstrapProvider::Durable(provider) => {
+                        let state = state.as_ref().map(|state| state as &dyn BootstrapState);
+                        provider.snapshot(state).await?
+                    }
                 };
                 let watermarks: Vec<Watermark> = watermarks.into_iter().map(Into::into).collect();
                 validate_watermarks(&watermarks)?;
@@ -479,15 +768,19 @@ impl Instance {
                     self.ended.load(Ordering::Acquire),
                     "bootstrap stream has not completed"
                 );
-                let watermarks: Vec<Watermark> = self
-                    .provider
-                    .complete_snapshot()
-                    .await?
-                    .into_iter()
-                    .map(Into::into)
-                    .collect();
+                let (watermarks, state) = match &self.provider {
+                    NativeBootstrapProvider::Quiescent(_) => (Vec::new(), None),
+                    NativeBootstrapProvider::Durable(provider) => (
+                        provider
+                            .complete_snapshot()
+                            .await?
+                            .into_iter()
+                            .map(Watermark::from)
+                            .collect::<Vec<_>>(),
+                        provider.completion_state()?,
+                    ),
+                };
                 validate_watermarks(&watermarks)?;
-                let state = self.provider.completion_state()?;
                 if let Some(state) = &state {
                     validate_state(state)?;
                 }
@@ -539,7 +832,7 @@ impl Drop for OperationGuard {
 }
 
 pub(crate) fn export_provider(
-    provider: Arc<dyn NativeBootstrapProvider>,
+    provider: NativeBootstrapProvider,
     codec: Arc<BinaryEnvelopeCodec>,
     reader: Option<SourceProgressView>,
 ) -> BootstrapHandle {
@@ -664,20 +957,122 @@ mod tests {
         calls: std::sync::atomic::AtomicUsize,
     }
     #[async_trait]
-    impl NativeBootstrapProvider for RetryPreparation {
-        async fn prepare(&self) -> anyhow::Result<BootstrapPreparation> {
+    impl DurableBootstrapProvider for RetryPreparation {
+        fn validate_query_scope(&self, _: &str, _: &str, _: &ComponentId) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn recovery_reader(&self) -> Option<SourceProgressView> {
+            None
+        }
+        async fn prepare(
+            &self,
+            _: Option<&dyn BootstrapState>,
+        ) -> anyhow::Result<BootstrapPreparation> {
             Ok(if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 self.initial
             } else {
                 BootstrapPreparation::Ready
             })
         }
-        async fn snapshot(&self) -> anyhow::Result<ComputationBootstrapSnapshot> {
+        fn has_pending_snapshot(&self) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+        async fn snapshot(
+            &self,
+            _: Option<&dyn BootstrapState>,
+        ) -> anyhow::Result<ComputationBootstrapSnapshot> {
             Ok(ComputationBootstrapSnapshot {
                 changes: Box::pin(futures_util::stream::empty()),
                 watermarks: Vec::new(),
             })
         }
+        async fn complete_snapshot(&self) -> anyhow::Result<Vec<BootstrapWatermark>> {
+            Ok(Vec::new())
+        }
+        fn completion_state(&self) -> anyhow::Result<Option<Bytes>> {
+            Ok(None)
+        }
+        async fn stop(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A quiescent provider that (wrongly) returns a watermark.
+    struct LeakingWatermark;
+    #[async_trait]
+    impl QuiescentBootstrapProvider for LeakingWatermark {
+        fn validate_query_scope(&self, _: &str, _: &str, _: &ComponentId) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn snapshot(&self) -> anyhow::Result<ComputationBootstrapSnapshot> {
+            Ok(ComputationBootstrapSnapshot {
+                changes: Box::pin(futures_util::stream::empty()),
+                watermarks: vec![BootstrapWatermark {
+                    stream: StreamId::try_new("leak/out")?,
+                    source_id: None,
+                    sequence: 1,
+                    position: None,
+                    producer: None,
+                }],
+            })
+        }
+        async fn stop(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn quiescent_provider_is_always_ready_and_cannot_hand_over() -> anyhow::Result<()> {
+        let provider = export_provider(
+            NativeBootstrapProvider::Quiescent(Arc::new(LeakingWatermark)),
+            Arc::new(wire::codec(&[
+                drasi_computation_contracts::GraphChangeCodec::schema(),
+            ])?),
+            None,
+        );
+        let prepared: Prepared = invoke(&provider, PREPARE).await?;
+        assert_eq!(
+            BootstrapPreparation::from(prepared.preparation),
+            BootstrapPreparation::Ready
+        );
+        assert!(!prepared.pending);
+        let error = invoke::<SnapshotStarted>(&provider, SNAPSHOT)
+            .await
+            .err()
+            .expect("watermarks are refused")
+            .to_string();
+        assert!(error.contains("quiescent"), "{error}");
+        invoke::<()>(&provider, STOP).await?;
+        unsafe { (*provider.vtable).release.expect("fixture release")(provider.state) };
+        Ok(())
+    }
+
+    #[test]
+    fn description_must_match_declared_pairing_and_completion() -> anyhow::Result<()> {
+        let protocol = BootstrapProtocol::new("drasi.test/coordinated", 1);
+        let factory = PairedBootstrapFactory::new(
+            ImplementationIdentity::try_new("drasi.test/paired", "1")?,
+            protocol.clone(),
+        );
+        let metadata = factory.metadata();
+        let description = factory.describe(&serde_json::json!({}))?;
+        metadata.validate_description(&description)?;
+        assert!(
+            factory
+                .describe(&serde_json::json!({"source": "x"}))
+                .is_err(),
+            "a paired provider takes no source configuration"
+        );
+        let mut unpaired = description.clone();
+        unpaired.pairing = None;
+        assert!(metadata.validate_description(&unpaired).is_err());
+        let mut quiescent = description.clone();
+        quiescent.completion = BootstrapCompletionKind::Quiescent;
+        assert!(metadata.validate_description(&quiescent).is_err());
+        let mut own = description;
+        own.namespace = ElementNamespace::Own;
+        assert!(metadata.validate_description(&own).is_err());
+        Ok(())
     }
     async fn invoke<T: serde::de::DeserializeOwned>(
         provider: &BootstrapHandle,
@@ -706,10 +1101,10 @@ mod tests {
         ] {
             for snapshot_first in [false, true] {
                 let provider = export_provider(
-                    Arc::new(RetryPreparation {
+                    NativeBootstrapProvider::Durable(Arc::new(RetryPreparation {
                         initial,
                         calls: std::sync::atomic::AtomicUsize::new(0),
-                    }),
+                    })),
                     Arc::new(wire::codec(&[
                         drasi_computation_contracts::GraphChangeCodec::schema(),
                     ])?),

@@ -37,7 +37,7 @@ take the same settings.
 
 ```sh
 make build-native-postgres-plugins
-cargo test -p drasi-source-postgres --test native_transactions -- --ignored --test-threads=1
+cargo test -p drasi-computation-source-postgres --test native_transactions -- --ignored --test-threads=1
 ```
 
 The live suite needs a Docker-compatible runtime (Podman works). It runs the

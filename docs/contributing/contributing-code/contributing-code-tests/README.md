@@ -79,7 +79,7 @@ Locally, start a Docker-compatible API (Podman is supported) and run:
 
 ```sh
 make build-test-plugins
-cargo test --locked -p drasi-source-postgres --test native_transactions -- --ignored --nocapture --test-threads=1
+cargo test --locked -p drasi-computation-source-postgres --test native_transactions -- --ignored --nocapture --test-threads=1
 cargo run --locked -p xtask -- list-integration-test-matrix
 ```
 

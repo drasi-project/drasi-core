@@ -147,16 +147,26 @@ fn factory_metadata_constructs_without_database_io() -> anyhow::Result<()> {
         assert_eq!(metadata.ports[0].direction(), PortDirection::Output);
         assert!(metadata.capabilities.management);
         assert!(metadata.capabilities.erases_owned_state);
-        let details = SqliteFactory(mode)
-            .configuration_details()
-            .expect("configuration details");
+        let details = SqliteFactory(mode).configuration_details();
         details.validate_schema(&metadata.configuration)?;
         let id = ComponentId::generate();
         let descriptor = SqliteSource::describe(id.clone(), mode.output())?;
         assert_eq!(descriptor.ports(), metadata.ports.as_slice());
     }
-    assert!(SqliteFactory(Mode::Replay).supports_source_progress());
-    assert!(SqliteFactory(Mode::Shared).supports_consumer_progress());
+    assert!(
+        SqliteFactory(Mode::Replay)
+            .metadata()
+            .capabilities
+            .services
+            .source_progress
+    );
+    assert!(
+        SqliteFactory(Mode::Shared)
+            .metadata()
+            .capabilities
+            .services
+            .consumer_progress
+    );
     Ok(())
 }
 
@@ -171,7 +181,11 @@ fn journal_factories_refuse_standalone_construction_and_memory_paths() {
             json!({"stream": "sqlite/out", "path": path}),
         );
         assert!(factory(mode)
-            .create(&request, ControlSender::default())
+            .create(
+                &request,
+                ControlSender::default(),
+                drasi_computation_plugin_sdk::ServiceBindings::none()
+            )
             .is_err());
     }
     let memory = drasi_computation_plugin_sdk::testing::create_request(
@@ -179,7 +193,11 @@ fn journal_factories_refuse_standalone_construction_and_memory_paths() {
         &ComponentId::try_new(SOURCE_ID).expect("id"),
         json!({"stream": "sqlite/out", "path": null}),
     );
-    let error = match factory(Mode::Changes).create(&memory, ControlSender::default()) {
+    let error = match factory(Mode::Changes).create(
+        &memory,
+        ControlSender::default(),
+        drasi_computation_plugin_sdk::ServiceBindings::none(),
+    ) {
         Ok(_) => panic!("in-memory source without initSql must be refused"),
         Err(error) => error,
     };

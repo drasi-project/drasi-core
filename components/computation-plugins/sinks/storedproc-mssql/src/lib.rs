@@ -82,45 +82,26 @@ impl Factory for MsSqlStoredProcFactory {
                     ComponentUpdateMode::Recreate,
                 ],
                 erases_owned_state: true,
+                services: drasi_computation_plugin_sdk::HostServices {
+                    consumer: Some(ConsumerMode::External),
+                    activation_credentials: true,
+                    ..Default::default()
+                },
                 ..Capabilities::default()
             },
         }
     }
 
-    fn configuration_details(&self) -> Option<ConfigDetails> {
-        Some(MsSqlStoredProcConfig::definition().details())
+    fn configuration_details(&self) -> ConfigDetails {
+        MsSqlStoredProcConfig::definition().details()
     }
 
-    fn consumer_mode(&self) -> Option<ConsumerMode> {
-        Some(ConsumerMode::External)
-    }
-
-    fn supports_update_planning(&self) -> bool {
-        true
-    }
-
-    fn assess(&self, request: &UpdateRequest) -> Result<Assessment> {
-        management::assess(request)
-    }
-
-    fn supports_activation_credentials(&self) -> bool {
-        true
-    }
-
-    fn activation_credential_context(
+    fn create(
         &self,
         request: &CreateRequest,
-    ) -> Result<ActivationCredentialContext> {
-        let config = MsSqlStoredProcConfig::parse(request.configuration.clone())?;
-        let context = ActivationCredentialContext {
-            hostname: config.host,
-            port: config.port,
-        };
-        context.validate()?;
-        Ok(context)
-    }
-
-    fn create(&self, request: &CreateRequest, _control: ControlSender) -> Result<CreatedComponent> {
+        _control: ControlSender,
+        _services: drasi_computation_plugin_sdk::ServiceBindings,
+    ) -> Result<CreatedComponent> {
         let config = MsSqlStoredProcConfig::parse(request.configuration.clone())?;
         let scope = request.scope.as_ref().ok_or_else(|| {
             anyhow::anyhow!("the SQL Server sink requires its graph scope (cursor owner)")
@@ -133,6 +114,35 @@ impl Factory for MsSqlStoredProcFactory {
             request.activation_credentials_bound,
         )?))
         .into())
+    }
+    fn update_planner(&self) -> Option<&dyn drasi_computation_plugin_sdk::UpdatePlanner> {
+        Some(self)
+    }
+    fn activation_credentials(
+        &self,
+    ) -> Option<&dyn drasi_computation_plugin_sdk::ActivationCredentialEndpoint> {
+        Some(self)
+    }
+}
+
+impl drasi_computation_plugin_sdk::UpdatePlanner for MsSqlStoredProcFactory {
+    fn assess(&self, request: &UpdateRequest) -> Result<Assessment> {
+        management::assess(request)
+    }
+}
+
+impl drasi_computation_plugin_sdk::ActivationCredentialEndpoint for MsSqlStoredProcFactory {
+    fn activation_credential_context(
+        &self,
+        request: &CreateRequest,
+    ) -> Result<ActivationCredentialContext> {
+        let config = MsSqlStoredProcConfig::parse(request.configuration.clone())?;
+        let context = ActivationCredentialContext {
+            hostname: config.host,
+            port: config.port,
+        };
+        context.validate()?;
+        Ok(context)
     }
 }
 

@@ -13,11 +13,11 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use drasi_computation_contracts::{
-    BootstrapPreparation, BootstrapState, BootstrapWatermark, ChangeEnvelope, ComponentId,
-    ComputationBootstrapSnapshot, SourceProgressView, StreamId,
+    BootstrapLabels, BootstrapPreparation, BootstrapProtocol, BootstrapState, BootstrapWatermark,
+    ChangeEnvelope, ComponentId, ComputationBootstrapSnapshot, SourceProgressView, StreamId,
 };
 use drasi_computation_plugin_sdk::{
-    Component, ControlSender, CreateRequest, CreatedComponent, NativeBootstrapProvider,
+    Component, ControlSender, CreateRequest, CreatedComponent, DurableBootstrapProvider,
     NativeSourceBootstrapCoordinator, SourceBootstrapLiveProgress, SourceBootstrapProgress,
 };
 use drasi_sqlite_common::native::{
@@ -210,6 +210,10 @@ impl Coordinator {
 
 #[async_trait]
 impl NativeSourceBootstrapCoordinator for Coordinator {
+    fn protocol(&self) -> BootstrapProtocol {
+        drasi_sqlite_common::native::coordination_protocol(self.config.mode == Mode::Shared)
+    }
+
     fn create_source(
         &self,
         request: &CreateRequest,
@@ -267,7 +271,8 @@ impl NativeSourceBootstrapCoordinator for Coordinator {
         &self,
         query: &ComponentId,
         progress: SourceProgressView,
-    ) -> Result<Arc<dyn NativeBootstrapProvider>> {
+        labels: Option<&BootstrapLabels>,
+    ) -> Result<Arc<dyn DurableBootstrapProvider>> {
         self.ensure_active()?;
         let expected = self
             .members
@@ -291,6 +296,7 @@ impl NativeSourceBootstrapCoordinator for Coordinator {
         self.ensure_active()?;
         Ok(Arc::new(Provider {
             snapshot,
+            labels: labels.cloned(),
             progress: expected.clone(),
             retired: self.retired.clone(),
             instance: self
@@ -325,6 +331,9 @@ enum ProviderSnapshot {
 
 struct Provider {
     snapshot: ProviderSnapshot,
+    /// The query's declared labels: only the captured tables it reads are
+    /// snapshotted.
+    labels: Option<BootstrapLabels>,
     progress: SourceProgressView,
     retired: Retired,
     instance: String,
@@ -351,7 +360,7 @@ impl Provider {
 }
 
 #[async_trait]
-impl NativeBootstrapProvider for Provider {
+impl DurableBootstrapProvider for Provider {
     fn recovery_reader(&self) -> Option<SourceProgressView> {
         Some(self.progress.clone())
     }
@@ -365,25 +374,30 @@ impl NativeBootstrapProvider for Provider {
         );
         Ok(())
     }
-    async fn prepare_with_state(&self, state: &dyn BootstrapState) -> Result<BootstrapPreparation> {
+    async fn prepare(&self, state: Option<&dyn BootstrapState>) -> Result<BootstrapPreparation> {
         self.ensure_active()?;
+        let state =
+            state.context("SQLite paired bootstrap requires its actual query-owned state")?;
         match &self.snapshot {
             ProviderSnapshot::Single(snapshot) => snapshot.prepare_with_state(state).await,
             ProviderSnapshot::Shared(snapshot) => snapshot.prepare_with_state(state).await,
         }
     }
-    async fn snapshot(&self) -> Result<ComputationBootstrapSnapshot> {
-        anyhow::bail!("SQLite paired bootstrap requires its actual query-owned state")
+    fn has_pending_snapshot(&self) -> Result<bool> {
+        Ok(false)
     }
-    async fn snapshot_with_state(
+    async fn snapshot(
         &self,
-        state: &dyn BootstrapState,
+        state: Option<&dyn BootstrapState>,
     ) -> Result<ComputationBootstrapSnapshot> {
+        let state =
+            state.context("SQLite paired bootstrap requires its actual query-owned state")?;
         self.ensure_source_owner()?;
+        let labels = self.labels.clone();
         let changes: Pin<Box<dyn futures::Stream<Item = Result<ChangeEnvelope>> + Send>> =
             match &self.snapshot {
                 ProviderSnapshot::Single(snapshot) => {
-                    let reader = snapshot.snapshot_with_state(state).await?;
+                    let reader = snapshot.snapshot_with_labels(state, labels).await?;
                     Box::pin(futures::stream::try_unfold(
                         reader,
                         |mut reader| async move {
@@ -392,7 +406,7 @@ impl NativeBootstrapProvider for Provider {
                     ))
                 }
                 ProviderSnapshot::Shared(snapshot) => {
-                    let reader = snapshot.snapshot_with_state(state).await?;
+                    let reader = snapshot.snapshot_with_labels(state, labels).await?;
                     Box::pin(futures::stream::try_unfold(
                         reader,
                         |mut reader| async move {

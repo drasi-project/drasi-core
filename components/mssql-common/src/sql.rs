@@ -5,8 +5,8 @@
 //!
 //! [`render_command`] and [`validate_template`] serve the legacy reaction and
 //! accept any compilable template. The native stored-procedure sink compiles
-//! a [`CommandTemplate`] once, after applying the shared parameter-only rule
-//! from `drasi-reaction-common`.
+//! a [`CommandTemplate`] once with the shared native template engine and its
+//! parameter-only rule (`drasi-computation-template-common`).
 
 mod command;
 mod connect;

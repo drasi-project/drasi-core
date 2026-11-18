@@ -58,9 +58,44 @@ async fn collect(provider: &SqliteBootstrapProvider) -> Result<Vec<SourceChange>
         .into_iter()
         .flatten()
         .collect();
-    assert!(provider.complete_snapshot().await?.is_empty());
-    assert!(provider.completion_state()?.is_none());
     Ok(changes)
+}
+
+fn label(change: &SourceChange) -> String {
+    node(change).get_metadata().labels[0].to_string()
+}
+
+#[test]
+fn query_labels_select_tables_within_the_configured_upper_bound() -> Result<()> {
+    both(|| async {
+        let (_directory, path) = seed(
+            "CREATE TABLE orders(id INTEGER PRIMARY KEY, total INTEGER);
+             CREATE TABLE items(id INTEGER PRIMARY KEY, name TEXT);
+             CREATE TABLE audit(id INTEGER PRIMARY KEY, note TEXT);
+             INSERT INTO orders VALUES (1, 10);
+             INSERT INTO items VALUES (1, 'a');
+             INSERT INTO audit VALUES (1, 'x');",
+        )?;
+        let labels = BootstrapLabels::new(["orders", "audit"], Vec::<String>::new())?;
+        let selected = provider(settings(&path))?.with_labels(Some(labels.clone()));
+        let mut read: Vec<_> = collect(&selected).await?.iter().map(label).collect();
+        read.sort();
+        assert_eq!(read, ["audit", "orders"], "only requested tables are read");
+        selected.stop().await?;
+        let mut bounded = settings(&path);
+        bounded.tables = vec!["orders".into(), "items".into()];
+        let bounded = provider(bounded)?.with_labels(Some(labels));
+        let read: Vec<_> = collect(&bounded).await?.iter().map(label).collect();
+        assert_eq!(
+            read,
+            ["orders"],
+            "the configured tables bound what a query's labels can select"
+        );
+        bounded.stop().await?;
+        let unrestricted = provider(settings(&path))?;
+        assert_eq!(collect(&unrestricted).await?.len(), 3);
+        unrestricted.stop().await
+    })
 }
 
 fn node(change: &SourceChange) -> &Element {

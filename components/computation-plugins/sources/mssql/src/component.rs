@@ -179,6 +179,19 @@ impl MsSqlSource {
         self.state.shared.settings()
     }
 
+    /// The credentials the source's current activation connects with, for
+    /// its paired bootstrap providers: the activation identity's when one is
+    /// bound (never falling back to literals), else the literal credentials.
+    pub(crate) fn credential_source(
+        &self,
+    ) -> drasi_mssql_common::native::provider::CredentialSource {
+        let state = self.state.clone();
+        Arc::new(move || {
+            let settings = state.shared.settings()?;
+            state.authentication(&settings)
+        })
+    }
+
     fn source_config(&self) -> Result<SourceConfig> {
         Ok(SourceConfig {
             stream: self.stream.as_str().to_owned(),
@@ -402,7 +415,13 @@ impl MsSqlSource {
             log::debug!("SQL Server source owns no barrier markers; nothing to erase");
             return Ok(());
         };
-        let authentication = self.state.authentication(&settings).with_context(|| {
+        // The host resolves credentials anew for an erasing dispose, so a
+        // source reconstructed after a restart erases without starting.
+        let authentication = match ctx.credentials().cloned() {
+            Some(credentials) => self.authentication(&settings, Some(credentials)),
+            None => self.state.authentication(&settings),
+        }
+        .with_context(|| {
             format!(
                 "erasing this source's barrier markers needs credentials; delete them manually \
                  with DELETE FROM {} WHERE UPPER(LEFT(CONVERT(char(36), token), 18)) = '{}'",
@@ -551,7 +570,9 @@ impl NativeComponent for MsSqlSource {
     }
     /// Requires a stopped source. `Erase` deletes this source's orphaned
     /// barrier markers (decision D-1), idempotently; without `barrierTable`
-    /// it owns nothing and succeeds.
+    /// it owns nothing and succeeds. Connects with the dispose's freshly
+    /// resolved activation credentials when the host supplies them (MS-22),
+    /// so a source that never started in this process can still erase.
     async fn dispose(&mut self, ctx: &DisposeContext) -> LifecycleResult {
         if self.worker.get_mut().is_some() {
             return Err(anyhow::anyhow!("dispose requires a stopped SQL Server source").into());

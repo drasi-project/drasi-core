@@ -504,6 +504,66 @@ async fn erase_removes_only_this_sources_orphan_markers_and_is_idempotent() {
         .unwrap();
 }
 
+/// MS-22: a provider-bound source reconstructed after a restart has never
+/// started, so it holds no credentials of its own. An erasing dispose
+/// connects with the credentials the host resolves for it; without them it
+/// refuses (naming the manual cleanup) and never falls back to literals.
+#[tokio::test]
+async fn erase_authenticates_with_fresh_dispose_credentials_without_a_start() {
+    let db = MemoryDatabase::new();
+    db.add_table("Items", 7);
+    let mine = markers::marker_prefix("graph", SOURCE_ID);
+    db.with(|s| s.markers = Some(vec![markers::new_marker(&mine).unwrap()]));
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let connectors: ConnectorFactory = {
+        let (db, seen) = (db.clone(), seen.clone());
+        Arc::new(move |_, authentication: &Authentication| {
+            seen.lock().unwrap().push(authentication.clone());
+            Arc::new(db.clone()) as Arc<dyn CdcConnector>
+        })
+    };
+    let id = ComponentId::try_new(SOURCE_ID).unwrap();
+    let progress = Arc::new(Progress {
+        id: id.clone(),
+        state: watch::channel(snapshot([(true, None), (true, None)])).0,
+    });
+    let mut source = MsSqlSource::new(
+        id,
+        config(json!({"barrierTable": "dbo.DrasiBarrier", "user": "", "password": null})),
+        ConsumerProgressView::new(progress),
+        &[
+            ComponentId::try_new(CONSUMER_A).unwrap(),
+            ComponentId::try_new(CONSUMER_B).unwrap(),
+        ],
+        true,
+        connectors,
+    )
+    .unwrap();
+    let error = step(source.dispose(&dispose_ctx(StateIntent::Erase, 1)))
+        .await
+        .expect_err("no credentials to erase with");
+    assert!(format!("{error:#}").contains("DELETE FROM"), "{error:#}");
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "connected without credentials"
+    );
+    let fresh = dispose_ctx(StateIntent::Erase, 2).with_credentials(Some(
+        ActivationCredentials::UsernamePassword {
+            username: "provider".into(),
+            password: "fresh".into(),
+        },
+    ));
+    step(source.dispose(&fresh)).await.unwrap();
+    assert_eq!(
+        seen.lock().unwrap().as_slice(),
+        [Authentication::Sql {
+            user: "provider".into(),
+            password: "fresh".into(),
+        }]
+    );
+    assert_eq!(db.with(|s| s.markers.as_ref().unwrap().len()), 0);
+}
+
 fn update(
     current: &SourceConfig,
     proposed: &SourceConfig,

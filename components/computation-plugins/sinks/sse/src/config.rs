@@ -3,6 +3,7 @@
 
 //! Configuration, validation and update planning for `drasi.network/sse-sink`.
 
+use crate::render::SseRenderer;
 use anyhow::{ensure, Context, Result};
 use axum::http::HeaderValue;
 use drasi_computation_contracts::{OutputAliases, SinkOutputs};
@@ -14,7 +15,7 @@ use drasi_computation_plugin_sdk::{
     lifecycle::{Assessment, UpdateBoundary},
     UpdateRequest,
 };
-use drasi_reaction_common::sse::{QueryConfig, SseRenderer};
+use drasi_reaction_common::sse::QueryConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::HashMap, net::IpAddr, time::Duration};
@@ -203,12 +204,7 @@ impl SseSinkConfig {
             "listening on non-loopback address {} requires authToken, or allowUnauthenticated: true behind an authenticating proxy",
             self.host
         );
-        SseRenderer::validate(
-            &self.routes,
-            self.default_template.as_ref(),
-            &self.routes.keys().cloned().collect::<Vec<_>>(),
-        )?;
-        let paths = self.renderer().static_paths();
+        let paths = self.renderer()?.static_paths();
         ensure!(
             paths.len() <= self.max_paths && paths.iter().all(|path| valid_path(path)),
             "configured SSE paths are invalid or exceed maxPaths"
@@ -240,15 +236,14 @@ impl SseSinkConfig {
     /// Checks that depend on the incoming edges: routes must name an output of
     /// this sink.
     pub(crate) fn validate_outputs(&self, outputs: &SinkOutputs) -> Result<()> {
-        SseRenderer::validate(
-            &self.routes,
-            self.default_template.as_ref(),
+        SseRenderer::validate_routes(
+            self.routes.keys(),
             &outputs.aliases().map(str::to_owned).collect::<Vec<_>>(),
-        )?;
-        Ok(())
+        )
     }
 
-    pub(crate) fn renderer(&self) -> SseRenderer {
+    /// Compiles every body and path template.
+    pub(crate) fn renderer(&self) -> Result<SseRenderer> {
         SseRenderer::new(
             self.sse_path.clone(),
             self.routes.clone(),

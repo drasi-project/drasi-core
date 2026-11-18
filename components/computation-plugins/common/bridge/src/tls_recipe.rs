@@ -32,7 +32,7 @@ pub enum TlsRole {
 /// Shared by normal hosts and Server. Configuration contains paths, never
 /// inline private-key bytes. DER roots/chains and unencrypted PKCS8 DER keys only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TlsResourceRecipe {
     pub kind: TlsRecipeKind,
     pub version: u32,

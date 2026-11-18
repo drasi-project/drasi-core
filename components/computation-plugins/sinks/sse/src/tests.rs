@@ -298,20 +298,19 @@ impl Factory for Observed {
     fn metadata(&self) -> FactoryMetadata {
         SseFactory.metadata()
     }
-    fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
+    fn configuration_details(&self) -> drasi_computation_plugin_sdk::ConfigDetails {
         SseFactory.configuration_details()
     }
-    fn supports_update_planning(&self) -> bool {
-        SseFactory.supports_update_planning()
+    fn update_planner(&self) -> Option<&dyn drasi_computation_plugin_sdk::UpdatePlanner> {
+        Some(self)
     }
-    fn assess(
+    fn create(
         &self,
-        request: &drasi_computation_plugin_sdk::UpdateRequest,
-    ) -> Result<drasi_computation_plugin_sdk::lifecycle::Assessment> {
-        SseFactory.assess(request)
-    }
-    fn create(&self, request: &CreateRequest, control: ControlSender) -> Result<CreatedComponent> {
-        match SseFactory.create(request, control)?.component {
+        request: &CreateRequest,
+        control: ControlSender,
+        services: drasi_computation_plugin_sdk::ServiceBindings,
+    ) -> Result<CreatedComponent> {
+        match SseFactory.create(request, control, services)?.component {
             Component::Sink(inner) => Ok(Component::Sink(Box::new(ObservedSink {
                 inner,
                 probe: self.probe.clone(),
@@ -319,6 +318,15 @@ impl Factory for Observed {
             .into()),
             _ => anyhow::bail!("SSE factory did not create a sink"),
         }
+    }
+}
+
+impl drasi_computation_plugin_sdk::UpdatePlanner for Observed {
+    fn assess(
+        &self,
+        request: &drasi_computation_plugin_sdk::UpdateRequest,
+    ) -> Result<drasi_computation_plugin_sdk::lifecycle::Assessment> {
+        drasi_computation_plugin_sdk::UpdatePlanner::assess(&SseFactory, request)
     }
 }
 
@@ -382,8 +390,8 @@ fn metadata_is_valid() -> Result<()> {
     plugin()?;
     let capabilities = SseFactory.metadata().capabilities;
     assert!(capabilities.management && capabilities.erases_owned_state);
-    assert!(SseFactory.supports_update_planning());
-    let details = SseFactory.configuration_details().context("details")?;
+    assert!(SseFactory.update_planner().is_some());
+    let details = SseFactory.configuration_details();
     details.validate_schema(&SseFactory.metadata().configuration)?;
     let schema = &SseFactory.metadata().configuration;
     for secret in ["authToken", "authTokenSecondary", "tlsPrivateKeyPem"] {
@@ -516,6 +524,8 @@ fn assessment_matrix() -> Result<()> {
     request.proposed.inputs = moved;
     assert_eq!(
         SseFactory
+            .update_planner()
+            .expect("factory planner")
             .assess(&request)?
             .plan()
             .map(|plan| UpdateBoundary::from(plan.mode)),
@@ -808,6 +818,36 @@ async fn cancelled_cleanup_retains_the_server_and_blocks_restart() -> Result<()>
     sink.stop(&contexts::stop(StopMode::Drain)).await?;
     sink.start(&mut contexts::start()).await?;
     assert!(sink.local_address().is_some());
+    sink.stop(&contexts::stop(StopMode::Drain)).await?;
+    Ok(())
+}
+
+/// A panicked listener was reported when it panicked (through the SDK's
+/// owned-worker observation); stopping afterwards succeeds and the sink can
+/// start again.
+#[tokio::test(flavor = "current_thread")]
+async fn stop_after_a_listener_panic_succeeds_and_allows_restart() -> Result<()> {
+    let mut sink = direct_sink(base(0))?;
+    let activation = test_support::activation(&sink.config)?;
+    sink.running = Some(Running {
+        activation,
+        server: tokio::sync::RwLock::new(None),
+        address: "127.0.0.1:0".parse()?,
+    });
+    let (panicked, observed) = tokio::sync::oneshot::channel::<()>();
+    drasi_computation_contracts::workers::spawn_owned_worker(
+        &sink.running.as_ref().context("owner")?.server,
+        async move {
+            let _guard = panicked;
+            panic!("injected listener panic");
+        },
+    )
+    .await?;
+    // The sender drops when the listener unwinds.
+    let _ = observed.await;
+    sink.stop(&contexts::stop(StopMode::Drain)).await?;
+    assert!(sink.running.is_none());
+    sink.start(&mut contexts::start()).await?;
     sink.stop(&contexts::stop(StopMode::Drain)).await?;
     Ok(())
 }
@@ -1298,5 +1338,52 @@ async fn handle_requires_a_started_listener() -> Result<()> {
     sink.handle(input(1)?).await?;
     sink.stop(&contexts::stop(StopMode::Drain)).await?;
     assert!(sink.handle(input(2)?).await.is_err());
+    Ok(())
+}
+
+#[test]
+fn unknown_helpers_in_any_branch_are_refused_at_construction() {
+    for spec in [
+        json!({"template": "{{#if after}}{{lowercase after.name}}{{/if}}"}),
+        json!({"template": "", "path": "items/{{#if after}}{{upper identity.id}}{{/if}}"}),
+        json!({"template": "{{> partial}}"}),
+    ] {
+        let config = with(base(free_port()), json!({"routes": {"q": {"added": spec}}}));
+        assert!(
+            create_sink(&SseFactory, &component_id(), config, &inputs()).is_err(),
+            "{spec}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn render_failures_are_permanent_and_never_publish_a_fallback_or_raw_path() -> Result<()> {
+    for spec in [
+        // The inserted element carries no `before`: strict rendering fails.
+        json!({"template": "{{before.name}}"}),
+        json!({"template": "", "path": "items/{{before.id}}"}),
+    ] {
+        let port = free_port();
+        let mut sink = started(with(base(port), json!({"routes": {"q": {"added": spec}}}))).await?;
+        let mut stream = open(client().get(url(port, "/events"))).await?;
+        let error = sink.handle(input(1)?).await.unwrap_err();
+        assert_eq!(
+            drasi_computation_contracts::delivery_failure_class(&error),
+            Some(drasi_computation_contracts::DeliveryFailureClass::Permanent),
+            "{spec}"
+        );
+        assert_eq!(
+            client()
+                .get(url(port, "/events/items/%7B%7Bbefore.id%7D%7D"))
+                .send()
+                .await?
+                .status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "the unrendered path is never created"
+        );
+        // Nothing was broadcast before the stream closed.
+        sink.stop(&contexts::stop(StopMode::Drain)).await?;
+        assert!(stream.data().await.is_err(), "{spec}: no frame was sent");
+    }
     Ok(())
 }

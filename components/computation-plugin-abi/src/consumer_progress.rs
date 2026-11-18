@@ -22,16 +22,6 @@ pub struct PluginConsumerProgressV1 {
     pub header: Header,
     pub version: u32,
     pub reserved: u32,
-    pub factory: Option<unsafe extern "C" fn(*mut c_void, u32) -> Reply>,
-    /// An advertising factory requires this binding; the base create path fails.
-    pub create: Option<
-        unsafe extern "C" fn(
-            *mut c_void,
-            BorrowedBytes,
-            *const ConsumerProgressV1,
-            *mut ComponentHandle,
-        ) -> Status,
-    >,
     /// Immutable upstream retention declaration, not consumer durability proof.
     pub inspect: Option<unsafe extern "C" fn(*mut c_void) -> Reply>,
     /// Borrowed immutable policy, or a null table when none was declared.
@@ -118,14 +108,14 @@ mod tests {
     #[test]
     fn consumer_progress_preserves_base_and_single_owner_layouts() {
         let pointer = size_of::<usize>();
-        assert_eq!(size_of::<PluginConsumerProgressV1>(), 24 + 4 * pointer);
+        assert_eq!(size_of::<PluginConsumerProgressV1>(), 24 + 2 * pointer);
         assert_eq!(size_of::<InputPositionPolicyV1>(), 16 + 5 * pointer);
         assert_eq!(size_of::<ConsumerProgressV1>(), 16 + 6 * pointer);
         assert_eq!(
             size_of::<ConsumerProgressSubscriptionV1>(),
             16 + 4 * pointer
         );
-        assert_eq!(size_of::<recovery::PluginRecoveryV1>(), 24 + 3 * pointer);
+        assert_eq!(size_of::<recovery::PluginRecoveryV1>(), 24 + pointer);
         assert_eq!(size_of::<recovery::SourceProgressV1>(), 16 + 6 * pointer);
         assert_eq!(
             size_of::<recovery::ProgressSubscriptionV1>(),

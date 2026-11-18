@@ -13,6 +13,23 @@ use drasi_core::models::{ElementReference, SourceChange};
 pub struct Factory;
 
 impl sdk::Factory for Factory {
+    /// Every field described (fixture).
+    fn configuration_details(&self) -> sdk::ConfigDetails {
+        sdk::ConfigDetails {
+            fields: sdk::Factory::metadata(self)
+                .configuration
+                .fields
+                .into_keys()
+                .map(|name| {
+                    let details = sdk::configuration::ConfigFieldDetails {
+                        description: format!("Fixture field {name}."),
+                        ..Default::default()
+                    };
+                    (name, details)
+                })
+                .collect(),
+        }
+    }
     fn describe(
         &self,
         _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
@@ -52,18 +69,13 @@ impl sdk::Factory for Factory {
 
     fn create(
         &self,
-        _: &sdk::CreateRequest,
-        _: sdk::ControlSender,
-    ) -> anyhow::Result<sdk::CreatedComponent> {
-        anyhow::bail!("fixture requires host-owned indexed processing")
-    }
-
-    fn create_with_processing(
-        &self,
         request: &sdk::CreateRequest,
         _: sdk::ControlSender,
-        processing: sdk::NativeProcessing,
+        services: sdk::ServiceBindings,
     ) -> anyhow::Result<sdk::CreatedComponent> {
+        let processing = services
+            .processing
+            .ok_or_else(|| anyhow::anyhow!("fixture requires its declared processing binding"))?;
         Ok(sdk::Component::Transformer(Box::new(Transformer {
             descriptor: self.metadata().descriptor(request.id.clone())?,
             configuration: request.configuration.clone(),

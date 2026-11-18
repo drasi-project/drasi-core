@@ -185,6 +185,27 @@ impl RelabelMiddlewareFactory {
     }
 }
 
+#[async_trait]
+impl crate::stateless::StatelessMiddleware for RelabelMiddleware {
+    async fn apply(&self, change: SourceChange) -> Result<Vec<SourceChange>, MiddlewareError> {
+        RelabelMiddleware::apply(self, change).await
+    }
+}
+
+impl crate::stateless::StatelessMiddlewareFactory for RelabelMiddlewareFactory {
+    fn kind(&self) -> &'static str {
+        "relabel"
+    }
+
+    fn build_stateless(
+        &self,
+        config: &SourceMiddlewareConfig,
+    ) -> Result<Box<dyn crate::stateless::StatelessMiddleware>, MiddlewareSetupError> {
+        self.build(config)
+            .map(|value| Box::new(value) as Box<dyn crate::stateless::StatelessMiddleware>)
+    }
+}
+
 #[cfg(feature = "engine-adapter")]
 #[async_trait]
 impl SourceMiddleware for RelabelMiddleware {
