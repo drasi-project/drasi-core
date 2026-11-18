@@ -608,6 +608,17 @@ snapshot/live subscription.
 This is not the full bootstrap-consumer protocol, and the read service does not
 itself retain the live suffix or order component activation.
 
+`upstream_snapshots::UpstreamSnapshots` builds transformer initialization on
+this reader. It covers transformers that also set `Capabilities::binds_inputs`
+and use `GraphChangeCodec` inputs. `load_all` reads every bound edge of one
+port at start and returns the elements as full-image `Insert` changes.
+`admit` matches a live envelope to its edge by producer progress. It skips an
+envelope the edge's snapshot covers (same epoch, sequence at or below it), and
+reads an edge again when its producer epoch changes, deleting elements it no
+longer has. Positions and contributed elements change only through `commit`,
+after the component accepts the batch. `SnapshotSource` abstracts the reader
+for tests. `drasi.standard/policy` uses it.
+
 ## Declared input bindings
 
 A sink or transformer that needs to know where its data comes from sets
