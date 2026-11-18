@@ -102,6 +102,28 @@ upstream continuous query that labels each workload/cluster pair
 }
 ```
 
+### Inputs from a continuous query
+
+The transformer has no joins: when a decision depends on several kinds of
+record (for example a workload, a deployment and the rules that link them),
+an upstream continuous query should produce one row per thing to decide, with
+everything the policy reads, as in the example above. Set the query's
+`result.label` and list that label in `labels`. Each row's result-node
+identity becomes its decision's identity, so put a readable key in a column
+and copy it with `output_properties` (for example `"id": "$element.properties.id"`).
+
+Keep each row's content to what the policy reads. A change to any column
+changes `policy_input_fingerprint` and re-emits the decision, even if the
+outcome is the same. Two query behaviours matter here:
+
+- `collect()` does not keep a stable order, so a collected list can change
+  order without changing content. Prefer per-row values, or collect only
+  values that cannot repeat in a different order (at most one per row).
+- An aggregating query keeps a group after all of its matched elements are
+  deleted, recomputed over an empty set. To retract the row, and so its
+  decision, add `count(...) AS matches` in a `WITH` and filter
+  `WHERE matches > 0` before `RETURN`.
+
 ## Decisions
 
 Each retained input has exactly one decision node. The node has the input's
