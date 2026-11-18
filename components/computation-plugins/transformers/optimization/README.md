@@ -235,14 +235,16 @@ deployments under a policy, health and capacity:
 
 - Inputs from upstream queries: one `PlanContext` (run and revision),
   `PlanItem` (demand and current deployment), `PlanBin` (capacity and health),
-  and `PlanPair` (one policy decision per workload and deployment, joined with
-  the demand, current deployment and capacity).
-- Binary `assign` over allowed pairs on healthy deployments with room.
+  `PlanCandidate` (every workload and deployment pair, joined upstream with
+  the demand, current deployment and capacity) and `PolicyResult` (one policy
+  decision per pair).
+- Binary `assign` over candidates that are allowed (`inSet` the allowed
+  decisions), on a healthy deployment, with room.
 - Exactly-one and capacity constraints; minimize moves, then peak utilization.
 - A `loss` scenario per healthy deployment, read through the status row's
   `scenarios.loss.failures`.
-- Preconditions that give `unknown` for unknown health, undecided or missing
-  policy, and inputs from another revision.
+- Preconditions that give `unknown` for unknown health, an undecided policy,
+  a candidate without a decision, and inputs from another revision.
 - `summaries` of all and of moved assignments, and `signature` /
   `solutionSignature` to detect stale approvals.
 
