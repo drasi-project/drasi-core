@@ -234,6 +234,7 @@ fn plugin_exports_and_constructs_through_the_factory() -> Result<()> {
     let metadata = PolicyFactory.metadata();
     assert_eq!(&*metadata.implementation.name, "drasi.standard/policy");
     assert!(metadata.capabilities.management && metadata.capabilities.continuations);
+    assert!(metadata.capabilities.startup_continuation && metadata.capabilities.binds_inputs);
     assert!(PolicyFactory.supports_update_planning());
     let request = drasi_computation_plugin_sdk::testing::create_request(
         &PolicyFactory,
