@@ -44,7 +44,7 @@ compatibility shims or automatic migration of old state are planned.
 | Scaling and maintainability | [Removed-component bookkeeping](#cw-33), [memory limits](#cw-29), [disk work](#cw-28), [processing repetition](#cw-32), [management code](#cw-34) |
 | Public API, dependencies and release | [API curation](#cw-69), [legacy dependencies](#cw-66), [capabilities and delegation](#cw-72), [release documentation](#cw-73) |
 | Optional capabilities | [Store housekeeping](#cw-71), [pipe policies](#cw-74), [isolated hosts](#cw-75), [mixed scheduling proof](#cw-82) |
-| Test quality and CI | [Credential-provider tests](#cw-83), [CI gates](#cw-85), [repeated tests](#cw-86), [asynchronous tests](#cw-37), [build and fixture cost](#cw-87), [failing failure-policy tests](#cw-105) |
+| Test quality and CI | [Credential-provider tests](#cw-83), [CI gates](#cw-85), [repeated tests](#cw-86), [asynchronous tests](#cw-37), [build and fixture cost](#cw-87) |
 | Behavior coverage | [Backend conformance](#cw-89), [loaded query plugin](#cw-77), [status and results](#cw-10), [query matching](#cw-13), [grouped results](#cw-12) |
 | Recovery and failure | [Native input recovery](#cw-14), [completion proof](#cw-36), [interrupted reset](#cw-20), [safe stop](#cw-05), [overlapping changes](#cw-07), [cleanup](#cw-08), [combined failures](#cw-39), [extension failures](#cw-03), [retry questions](#cw-21), [ownership and limits](#cw-35) |
 | Native boundaries, platforms and performance | [Real plugin libraries](#cw-41), [Protocol Buffers compiler](#cw-67), [isolated host profiles](#cw-91), [complete suites](#cw-78), [large applications](#cw-40), [native query overhead](#cw-79) |
@@ -4890,37 +4890,6 @@ source lifecycle tests about 744 s.
 feature groups) show shorter feedback without lost coverage, weaker isolation,
 hidden cleanup failures or changed result oracles. Application performance is
 [CW-40](#cw-40) and [CW-79](#cw-79), not this item.
-
-<a id="cw-105"></a>
-
-#### Fix the failing native-error failure-policy tests (CW-105)
-
-**Kind:** Investigation. **Area:** Core. **Priority:** High. **Effort:** Small
-to medium.
-
-`native_errors_keep_nodes_controller_siblings_and_control_requests_usable_current_thread`
-fails deterministically, on HEAD as well as on the working tree. The
-`_multi_thread` variant is intermittent: 3 of 5 runs failed on HEAD and 2 of 5
-on the working tree. The failure surfaces the test's own
-`"invalid native component state"` error, so either the scenario's
-expectations are stale or a native error is no longer contained as the test
-requires (nodes, controller, siblings and control requests stay usable).
-
-**What remains:** reproduce on both flavours, find whether the product or the
-test is wrong, and fix it without raising the 10 s timeout or weakening the
-assertions.
-
-**Example:**
-
-```bash
-cargo test -p drasi-lib --test computation_failure_policy -- native_errors_keep_nodes
-```
-
-**Evidence:** `drasi-core/lib/tests/computation_failure_policy.rs:27` (error
-type), `:135` (`scenario`), `:367-382` (the two tests).
-
-**Done when:** both variants pass repeatedly (for example 20 consecutive runs
-each) on HEAD of the branch.
 
 ### Semantic, application and API coverage
 

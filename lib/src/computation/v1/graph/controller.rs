@@ -3757,13 +3757,21 @@ impl Operations {
         for mut group in std::mem::take(&mut self.draining) {
             // A failed consumer cannot satisfy an already installed handled
             // drain. Retain its actual cause instead of waiting for the deadline.
+            // A rejected control notification that did not damage the
+            // generation only degrades the component; it does not prevent the
+            // drain. Any other recorded failure does.
             if let Some(cause) = group.selected.iter().find_map(|index| {
                 if group.feedback.is_none() && !group.waiting.contains_key(index) {
                     return None;
                 }
-                graph.observed().components[graph.nodes[*index].descriptor.id()]
-                    .failure
+                let observed = graph.observed();
+                let node = &observed.components[graph.nodes[*index].descriptor.id()];
+                node.failure
                     .as_ref()
+                    .filter(|failure| {
+                        node.lifecycle == ComponentLifecycle::Failed
+                            || failure.phase != FailurePhase::Control
+                    })
                     .map(|failure| failure.cause.clone())
             }) {
                 self.fail_drain(graph, group, GraphError::Reported { cause });
