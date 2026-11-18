@@ -18,7 +18,8 @@
 //! on top of the shared template primitives in
 //! [`drasi_lib::reactions::common::templates`]. The `template` field
 //! inherited from [`TemplateSpec`] is the HTTP request body; `url`,
-//! `method`, and `headers` come from the flattened [`HttpCallExt`].
+//! `method`, `headers`, and response validation come from the flattened
+//! [`HttpCallExt`].
 
 use anyhow::Context;
 use reqwest::{
@@ -59,9 +60,15 @@ pub struct HttpCallExt {
     /// Header values support Handlebars templates.
     #[serde(default)]
     pub headers: HashMap<String, String>,
+
+    /// Reject a successful response when this RFC 6901 JSON pointer resolves
+    /// to a non-empty value. This value is literal and is not templated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reject_non_empty_json_pointer: Option<String>,
 }
 
-/// Spec for a single HTTP call: a body template plus URL, method, headers.
+/// Spec for a single HTTP call: a body template plus URL, method, headers, and
+/// optional response validation.
 pub type HttpCallSpec = TemplateSpec<HttpCallExt>;
 
 /// Per-query configuration: separate [`HttpCallSpec`] for each operation.
@@ -110,11 +117,12 @@ pub struct HttpReactionConfig {
 
     /// Optional per-query and default-template overrides.
     ///
-    /// In standard (per-result) mode the `url`, `method`, `headers`, and body
-    /// `template` all apply. In adaptive (batch) mode only the body `template`
-    /// is used to render each item placed in the
+    /// In standard (per-result) mode the `url`, `method`, `headers`, response
+    /// validator, and body `template` all apply. In adaptive (batch) mode only
+    /// the body `template` is used to render each item placed in the
     /// [`crate::output::BatchEnvelope`]; `url`/`method`/`headers` do not apply
-    /// because a batch is a single POST to `batch_endpoint`.
+    /// because a batch is a single POST to `batch_endpoint`. Configuring a
+    /// per-call response validator with adaptive mode is rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_templates: Option<HttpOutputTemplates>,
 
@@ -296,6 +304,9 @@ fn validate_call_spec(spec: &HttpCallSpec) -> anyhow::Result<()> {
     validate_template_str(&spec.template).context("body template")?;
     validate_template_str(&spec.extension.url).context("url template")?;
     parse_http_method(&spec.extension.method).context("HTTP method")?;
+    if let Some(pointer) = &spec.extension.reject_non_empty_json_pointer {
+        validate_json_pointer(pointer).context("rejectNonEmptyJsonPointer")?;
+    }
     for (key, value) in &spec.extension.headers {
         HeaderName::from_bytes(key.as_bytes())
             .with_context(|| format!("invalid HTTP header name '{key}'"))?;
@@ -303,6 +314,30 @@ fn validate_call_spec(spec: &HttpCallSpec) -> anyhow::Result<()> {
         if !value.contains("{{") {
             HeaderValue::from_str(value)
                 .with_context(|| format!("invalid static value for HTTP header '{key}'"))?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_json_pointer(pointer: &str) -> anyhow::Result<()> {
+    if pointer.is_empty() {
+        anyhow::bail!("must not be empty");
+    }
+    if !pointer.starts_with('/') {
+        anyhow::bail!("must begin with '/'");
+    }
+
+    let bytes = pointer.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'~' {
+            index += 1;
+            continue;
+        }
+
+        match bytes.get(index + 1) {
+            Some(b'0' | b'1') => index += 2,
+            _ => anyhow::bail!("contains a malformed '~' escape; only '~0' and '~1' are valid"),
         }
     }
     Ok(())
@@ -320,6 +355,13 @@ fn validate_query_config(qc: &HttpQueryConfig) -> anyhow::Result<()> {
         validate_call_spec(spec).context("'deleted' template")?;
     }
     Ok(())
+}
+
+fn has_response_validator(qc: &HttpQueryConfig) -> bool {
+    [&qc.added, &qc.updated, &qc.deleted]
+        .into_iter()
+        .flatten()
+        .any(|spec| spec.extension.reject_non_empty_json_pointer.is_some())
 }
 
 impl HttpReactionConfig {
@@ -384,6 +426,20 @@ impl HttpReactionConfig {
                         "output template route '{key}' does not match any subscribed query id"
                     );
                 }
+            }
+
+            if self.adaptive.is_some()
+                && (templates
+                    .default_template
+                    .as_ref()
+                    .is_some_and(has_response_validator)
+                    || templates.routes.values().any(has_response_validator))
+            {
+                anyhow::bail!(
+                    "`rejectNonEmptyJsonPointer` is not supported in `adaptive` mode; \
+                     adaptive delivery sends a coalesced batch request and would ignore \
+                     per-call response validation"
+                );
             }
         }
 
