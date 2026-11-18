@@ -5,9 +5,9 @@
 //! resilience, approval identities and preconditions. Inputs are the rows that
 //! upstream continuous queries produce: one `PlanContext` (run and revision),
 //! `PlanItem` (workload demand and current deployment), `PlanBin` (deployment
-//! capacity and health) and `PlanPair` (one policy decision per workload and
-//! deployment, joined with the workload's demand and current deployment and
-//! the deployment's capacity).
+//! capacity and health), `PlanCandidate` (every workload and deployment pair,
+//! with the workload's demand and current deployment and the deployment's
+//! capacity) and `PolicyResult` (one policy decision per pair).
 
 use super::*;
 
@@ -27,9 +27,14 @@ fn placement_model() -> Value {
              "where": [{"property": "health", "op": "==", "value": "healthy"}]},
             {"name": "unhealthy", "label": "PlanBin", "key": ["id"],
              "where": [{"property": "health", "op": "==", "value": "unhealthy"}]},
-            {"name": "decisions", "label": "PlanPair", "key": ["subject", "target"]},
-            {"name": "pairs", "label": "PlanPair", "key": ["subject", "target"], "where": [
-                {"property": "allowed", "op": "==", "value": true},
+            {"name": "decisions", "label": "PolicyResult", "key": ["subject", "target"]},
+            {"name": "allowed", "label": "PolicyResult", "key": ["subject", "target"], "where": [
+                {"property": "state", "op": "==", "value": "allowed"},
+                {"property": "allowed", "op": "==", "value": true}
+            ]},
+            {"name": "candidates", "label": "PlanCandidate", "key": ["subject", "target"]},
+            {"name": "pairs", "label": "PlanCandidate", "key": ["subject", "target"], "where": [
+                {"inSet": "allowed", "match": {"subject": "subject", "target": "target"}},
                 {"inSet": "healthy", "match": {"target": "id"}},
                 {"property": "capacity_tpm", "op": ">=", "valueProperty": "demand_tpm"}
             ]}
@@ -69,13 +74,15 @@ fn placement_model() -> Value {
              "where": [{"property": "health", "op": "notIn", "value": ["healthy", "unhealthy"]}]},
             {"name": "policy-known", "set": "decisions", "max": 0,
              "where": [{"property": "state", "op": "notIn", "value": ["allowed", "denied"]}]},
-            {"name": "policy-loaded-items", "set": "items", "max": 0,
-             "where": [{"notInSet": "decisions", "match": {"id": "subject"}}]},
-            {"name": "policy-loaded-bins", "set": "bins", "max": 0,
-             "where": [{"notInSet": "decisions", "match": {"id": "target"}}]},
+            {"name": "candidates-loaded", "set": "items", "max": 0,
+             "where": [{"notInSet": "candidates", "match": {"id": "subject"}}]},
+            {"name": "policy-complete", "set": "candidates", "max": 0,
+             "where": [{"notInSet": "decisions", "match": {"subject": "subject", "target": "target"}}]},
             {"name": "same-revision", "set": "items", "max": 0,
              "where": [{"notInSet": "context", "match": {"run_epoch": "run_epoch", "revision": "revision"}}]},
             {"name": "same-run", "set": "bins", "max": 0,
+             "where": [{"notInSet": "context", "match": {"run_epoch": "run_epoch"}}]},
+            {"name": "same-run-policy", "set": "decisions", "max": 0,
              "where": [{"notInSet": "context", "match": {"run_epoch": "run_epoch"}}]}
         ],
         "summaries": [
@@ -175,15 +182,23 @@ impl Fleet {
                 json!({"id": id, "run_epoch": "run-1", "capacity_tpm": capacity, "health": health}),
             );
         }
+        for (subject, demand, current) in &self.items {
+            for (target, capacity, _) in &self.bins {
+                add(
+                    "PlanCandidate",
+                    format!("candidate:{subject}/{target}"),
+                    json!({"subject": subject, "target": target, "run_epoch": "run-1",
+                           "demand_tpm": demand, "current": current, "capacity_tpm": capacity}),
+                );
+            }
+        }
         for (subject, target, state) in &self.policy {
-            let (_, demand, current) = self.items.iter().find(|i| i.0 == *subject).expect("item");
-            let (_, capacity, _) = self.bins.iter().find(|b| b.0 == *target).expect("bin");
             add(
-                "PlanPair",
-                format!("pair:{subject}/{target}"),
+                "PolicyResult",
+                format!("decision:{subject}/{target}"),
                 json!({"subject": subject, "target": target, "state": state,
                        "allowed": *state == "allowed", "run_epoch": "run-1",
-                       "demand_tpm": demand, "current": current, "capacity_tpm": capacity}),
+                       "reason": "", "policy_hash": "p", "basis": "b"}),
             );
         }
         records
@@ -405,9 +420,17 @@ async fn placement_is_unknown_rather_than_guessed_on_incomplete_inputs() -> Resu
     let mut optimization = started(placement_model()).await?;
     sync(&mut optimization, &mut BTreeMap::new(), records).await?;
     check(&answer(snapshot(&optimization).await?), "same-revision");
+    // One decision missing.
+    fleet.policy.retain(|p| !(p.0 == "batch" && p.1 == "US-C"));
+    let a = solve(&fleet).await?;
+    check(&a, "policy-complete");
+    assert!(a.status_row["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .ends_with("[batch, US-C]"));
     // Policy not loaded yet.
     fleet.policy.clear();
-    check(&solve(&fleet).await?, "policy-loaded-items");
+    check(&solve(&fleet).await?, "policy-complete");
     // Only the context loaded so far.
     let context: BTreeMap<_, _> = Fleet::seed()
         .records()
