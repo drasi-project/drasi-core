@@ -157,13 +157,13 @@ consumers.
   its emission (`GraphChangeCodec::derive_changes` preserves the input's
   annotations) and must not split one source transaction across emissions
   unless it declares how it completes them (the query transformer's
-  `source_transactions` setting).
+  `sourceTransactions` setting).
 
 ## Management
 
 - A transformer whose configuration can change without reconstruction
-  implements `Factory::supports_update_planning` and `Factory::assess` (pure:
-  configuration only), implements `NativeManagement`, and declares
+  returns an `UpdatePlanner` from `Factory::update_planner` (its `assess` is
+  pure: configuration only), implements `NativeManagement`, and declares
   `management: true` with every supported `update_modes` entry.
 - Classify each field by the weakest safe boundary: per-envelope values can
   change in place (Pause); values bound at start need a restart (Stop);

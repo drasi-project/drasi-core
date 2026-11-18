@@ -181,7 +181,7 @@ providers when `coordinatedSnapshot` is true.
 - Journal factories take an exclusive lock: no other process may open the
   file while the source runs. With `walMode`, other processes may read.
 - Transaction factories need a transaction-enabled query
-  (`source_transactions`). Journal factories declare that their progress
+  (`sourceTransactions`). Journal factories declare that their progress
   binding must be durable: bind the progress of queries with persistent
   storage. The graph refuses a volatile or undeclared progress resource
   before the source starts.
