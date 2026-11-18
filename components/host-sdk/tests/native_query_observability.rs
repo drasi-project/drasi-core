@@ -684,9 +684,13 @@ mod traces {
             roots[0].links.links[0].span_context.span_id().to_bytes(),
             [42; 8]
         );
-        assert!(roots[0]
-            .attributes
-            .contains(&opentelemetry::KeyValue::new("input_count", 3_i64)));
+        assert!(
+            roots[0]
+                .attributes
+                .contains(&opentelemetry::KeyValue::new("input_count", 3_i64)),
+            "bootstrap root attributes: {:?}",
+            roots[0].attributes
+        );
         assert!(!spans.iter().any(|span| matches!(
             span.name.as_ref(),
             "query.evaluate"

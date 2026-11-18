@@ -8,7 +8,7 @@ use std::{
     cell::RefCell,
     future::Future,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, TryLockError},
     task::{Context, Poll},
 };
 
@@ -110,8 +110,8 @@ impl QueryScope {
         let observation = self
             .0
             .observation
-            .lock()
-            .map_err(|_| TelemetryError::Poisoned)?;
+            .try_lock()
+            .map_err(observation_lock_error)?;
         let observation = observation.as_ref().ok_or(TelemetryError::Retired)?;
         let mut work = Some(work);
         let mut result = None;
@@ -179,13 +179,22 @@ impl QueryObservationGuard {
             .scope
             .0
             .observation
-            .lock()
-            .map_err(|_| TelemetryError::Poisoned)?
+            .try_lock()
+            .map_err(observation_lock_error)?
             .take()
         {
             observation.finish(result)?;
         }
         Ok(())
+    }
+}
+
+fn observation_lock_error<T>(error: TryLockError<T>) -> TelemetryError {
+    match error {
+        TryLockError::WouldBlock => {
+            TelemetryError::Invalid("native query observation is busy".into())
+        }
+        TryLockError::Poisoned(_) => TelemetryError::Poisoned,
     }
 }
 
