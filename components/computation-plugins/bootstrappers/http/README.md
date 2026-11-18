@@ -14,8 +14,6 @@ cargo build -p drasi-computation-bootstrap-http --features dynamic-plugin
 
 ```json
 {
-  "source": "rooms",
-  "stream": "rooms/out",
   "settings": {
     "endpoints": [{
       "url": "https://api.example/rooms",
@@ -46,8 +44,18 @@ cargo build -p drasi-computation-bootstrap-http --features dynamic-plugin
 }
 ```
 
-`source`, `stream` and `settings` are required. Other fields have the defaults
-shown, except absent `nodeLabels`/`relationLabels` select all mapped labels.
+`settings` is required. Other fields have the defaults shown, except absent
+`nodeLabels`/`relationLabels` select all mapped labels. They are an upper
+bound: each query receives only the mapped elements whose labels it declares
+(the query's labels arrive with its bootstrap request).
+
+The served source and stream are not configured. The provider declares a
+quiescent completion in its served source's namespace; the graph relation
+supplies that source: the HTTP or gRPC source whose `bootstrap` input the
+provider node is connected to, or the single source a query reads when the
+provider is that query's local provider. An edge that gives the provider no
+single served source is refused when it binds. See the
+[native bootstrap provider standard](../NATIVE-BOOTSTRAP-PROVIDER-GUIDE.md).
 `settings` uses the existing [HTTP bootstrap configuration](../../../bootstrappers/http/README.md):
 multiple endpoints, GET/POST/PUT, headers/body, bearer/API-key/basic/OAuth2 client
 credentials, offset/page/cursor/Link/next-URL pagination, JSON/XML/YAML parsing
@@ -57,11 +65,14 @@ shared with the legacy provider, not copied into another transport.
 
 ## Hosting and lifetime
 
-Create one provider for each query, using the hosting DrasiLib instance/graph
-scope and that query's component ID. Bind it with
-`computation_pipeline().query_bootstrap(query_id, provider)` or a native
-bootstrap resource recipe, then enable bootstrap on that query. Use the same
-source ID, element IDs and labels as the live HTTP/gRPC source.
+In a graph, connect the provider node's `snapshot` output to the live
+source's `bootstrap` input; each session gets its own provider. Outside a
+graph, create one provider for each query with
+`NativeBootstrapFactory::create_query_provider`, passing the hosting
+instance/graph scope, that query's component ID and a `BootstrapSession`
+naming the served source and stream, and bind it with
+`computation_pipeline().query_bootstrap(query_id, provider)`. Use the same
+labels as the live HTTP/gRPC source.
 
 Construction validates configuration but opens no socket, resolves no credential
 environment variables and starts no worker. Snapshot polling owns the REST

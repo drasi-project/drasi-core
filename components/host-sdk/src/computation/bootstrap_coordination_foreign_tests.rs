@@ -181,7 +181,9 @@ unsafe extern "C" fn malformed_stop(
 unsafe extern "C" fn changed_description(context: *mut c_void) -> abi::Reply {
     transport::reply_boundary(|| {
         let bytes = unsafe { take_reply(ORIGINAL.get().unwrap().describe.unwrap()(context))? };
-        let mut request: CreateRequest = bootstrap::decode(&bytes).map_err(Failure::from)?;
+        let mut described: sdk::CoordinatorDescription =
+            bootstrap::decode(&bytes).map_err(Failure::from)?;
+        let request = &mut described.source;
         match request.configuration["describeMismatch"].as_str().unwrap() {
             "source" => {
                 request.id = ComponentId::try_new("14fc8e0c-3927-5cea-ab9d-1845e4431b0a").unwrap()
@@ -195,7 +197,7 @@ unsafe extern "C" fn changed_description(context: *mut c_void) -> abi::Reply {
             "configuration" => request.configuration["changed"] = json!(true),
             _ => unreachable!(),
         }
-        bootstrap::encode(&request).map_err(Failure::from)
+        bootstrap::encode(&described).map_err(Failure::from)
     })
 }
 
@@ -353,7 +355,7 @@ async fn bootstrap_coordination_constructor_only_describes_and_validates_immutab
             before
         );
         assert!(malformed
-            .bind_query(query.component_id(), &scope(0), &query)
+            .bind_query(query.component_id(), &scope(0), &query, None)
             .is_err());
         readers_active(&export(shared).state, true);
         let mut pending = Subscriptions::new(&export(shared).state)?;

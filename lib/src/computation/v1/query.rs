@@ -507,11 +507,13 @@ impl ContinuousQueryTransformer {
                 self.definition.id
             )
         })?;
-        let edges = super::PipeBootstrapProvider::new(
+        // Every producer is asked for only the labels this query reads.
+        let edges = super::PipeBootstrapProvider::new_with_labels(
             self.definition.graph_id.as_str(),
             self.bootstrap_ports.clone(),
             control,
             self.source_progress.clone(),
+            super::query_configuration::bootstrap_labels(&self.execution, &self.definition)?,
         )?;
         if self.bootstrap_complete.load(Ordering::Acquire) {
             edges.mark_completed();
@@ -1878,8 +1880,15 @@ pub fn indexed_description(
         ResourceDurability::Volatile => ProgressPersistence::Volatile,
         ResourceDurability::Undeclared => ProgressPersistence::Undeclared,
     };
+    // A query reads durable or quiescent initialization on its bootstrap
+    // input and serves its committed output snapshot on its bootstrap output.
     ComponentDescription::new(progress)
         .with_outputs(descriptor, OutputDescription::following(durability))
+        .with_bootstrap_ports(
+            descriptor,
+            drasi_computation_contracts::BootstrapInputDescription::DURABLE,
+            drasi_computation_contracts::BootstrapOutputDescription::OUTPUT_SNAPSHOT,
+        )
 }
 
 /// The declared durability of the single resource bound to `dependency`

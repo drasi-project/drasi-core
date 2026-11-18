@@ -112,6 +112,12 @@ crate-type = ["cdylib"]
 test = false
 
 [[example]]
+name = "native_worker_failure"
+path = "tests/fixtures/native_worker_failure.rs"
+crate-type = ["cdylib"]
+test = false
+
+[[example]]
 name = "native_custom_query"
 path = "tests/fixtures/native_custom_query.rs"
 crate-type = ["cdylib"]

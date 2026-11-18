@@ -94,10 +94,11 @@ fn minimum_selects_one_actual_member_and_fresh_members_require_the_configured_fl
 }
 
 #[test]
-fn every_member_must_have_valid_persistent_unfenced_progress_even_when_not_the_minimum() {
+fn every_member_must_have_valid_unfenced_progress_even_when_not_the_minimum() {
+    // Durability is declared (`description`) and checked when the graph binds
+    // the progress resource, so it is not a runtime fault here.
     let source = ComponentId::try_new(SOURCE_ID).expect("source");
     for fault in [
-        "persistence",
         "failure",
         "readiness",
         "admission",
@@ -106,7 +107,6 @@ fn every_member_must_have_valid_persistent_unfenced_progress_even_when_not_the_m
     ] {
         let mut fast = state(Some(position(1, 200)), 1).as_ref().clone();
         match fault {
-            "persistence" => fast.persistent = false,
             "failure" => fast.failure = Some("failed".into()),
             "readiness" => fast.ready = false,
             "admission" => fast.admitting = false,

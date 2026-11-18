@@ -16,11 +16,11 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use drasi_computation_contracts::{
-    BootstrapPreparation, BootstrapState, BootstrapWatermark, ChangeEnvelope, ComponentId,
-    ComputationBootstrapSnapshot, GraphChangeCodec, SourceProgressKey, SourceProgressView,
-    StreamId,
+    BootstrapLabels, BootstrapPreparation, BootstrapState, BootstrapWatermark, ChangeEnvelope,
+    ComponentId, ComputationBootstrapSnapshot, GraphChangeCodec, SourceProgressKey,
+    SourceProgressView, StreamId,
 };
-use drasi_computation_plugin_sdk::{NativeBootstrapProvider, Scope};
+use drasi_computation_plugin_sdk::DurableBootstrapProvider;
 use drasi_core_types::{interface::FailureMode, models::SourceChange};
 use drasi_postgres_common::replication::rows::{row_checkpoint, RowPosition};
 use drasi_postgres_common::{
@@ -35,8 +35,29 @@ use drasi_postgres_common::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
 };
+
+/// The source's current activation settings (its configuration with any
+/// host-supplied activation credentials), shared with its paired providers.
+pub(crate) type Activation = Arc<RwLock<PostgresTransactionConfig>>;
+
+/// `config` with the user and password the source's current activation
+/// connects with, when the provider is paired with a source.
+pub(crate) fn with_activation(
+    config: &PostgresTransactionConfig,
+    activation: Option<&Activation>,
+) -> PostgresTransactionConfig {
+    match activation {
+        Some(activation) => {
+            let active = activation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            config.with_credentials(active.user.clone(), active.password.clone())
+        }
+        None => config.clone(),
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -54,16 +75,18 @@ fn is_false(value: &bool) -> bool {
     !value
 }
 
-/// Query-owned durable state authorizes only this provider's UUID-suffixed slots.
-/// The committed watermark transfers the slot to the separately hosted source.
+/// Query-owned durable state authorizes only this provider's UUID-suffixed slots,
+/// named under the paired source's own managed prefix. The committed watermark
+/// transfers the slot to that source. Created only by the source's coordinator.
 pub struct PostgresSnapshot {
     source: ComponentId,
     stream: StreamId,
     config: PostgresTransactionConfig,
     progress: SourceProgressView,
     handover: Arc<Mutex<Option<Handover>>>,
-    pub(crate) query_scope: Option<(Scope, ComponentId)>,
     rows: bool,
+    labels: Option<BootstrapLabels>,
+    activation: Option<Activation>,
 }
 
 impl PostgresSnapshot {
@@ -81,9 +104,26 @@ impl PostgresSnapshot {
             config,
             progress,
             handover: Arc::new(Mutex::new(None)),
-            query_scope: None,
             rows: false,
+            labels: None,
+            activation: None,
         })
+    }
+
+    /// Read only the published tables whose label the query declares.
+    pub fn with_labels(mut self, labels: Option<BootstrapLabels>) -> Self {
+        self.labels = labels;
+        self
+    }
+
+    /// Connect with the paired source's current activation credentials.
+    pub(crate) fn with_activation(mut self, activation: Option<Activation>) -> Self {
+        self.activation = activation;
+        self
+    }
+
+    fn connection_config(&self) -> PostgresTransactionConfig {
+        with_activation(&self.config, self.activation.as_ref())
     }
 
     pub fn rows(
@@ -105,7 +145,11 @@ impl PostgresSnapshot {
             .clone())
     }
 
-    fn config_for(&self, handover: &Handover) -> Result<PostgresTransactionConfig> {
+    fn config_for(
+        &self,
+        base: &PostgresTransactionConfig,
+        handover: &Handover,
+    ) -> Result<PostgresTransactionConfig> {
         validate_managed_slot(self.config.managed_prefix()?, &handover.slot)?;
         anyhow::ensure!(
             handover.version == 1
@@ -113,16 +157,15 @@ impl PostgresSnapshot {
                 && (!handover.completed || handover.boundary.is_some_and(|lsn| lsn > 0)),
             "invalid PostgreSQL handover state"
         );
-        Ok(self
-            .config
-            .with_active_slot(handover.slot.clone(), handover.boundary.unwrap_or(0)))
+        Ok(base.with_active_slot(handover.slot.clone(), handover.boundary.unwrap_or(0)))
     }
 
     async fn begin(&self, state: &dyn BootstrapState) -> Result<ComputationBootstrapSnapshot> {
-        let mut connection = connect(&self.config).await?;
+        let base = self.connection_config();
+        let mut connection = connect(&base).await?;
         if let Some(previous) = self.current()? {
             anyhow::ensure!(!previous.completed, "completed PostgreSQL initialization requires explicit retirement, not automatic replacement");
-            let config = self.config_for(&previous)?;
+            let config = self.config_for(&base, &previous)?;
             let (_, binding) =
                 source_binding(&mut connection, &config, &self.source, &self.stream).await?;
             anyhow::ensure!(
@@ -153,10 +196,10 @@ impl PostgresSnapshot {
         }
         let slot = format!(
             "{}_{}",
-            self.config.managed_prefix()?,
+            base.managed_prefix()?,
             uuid::Uuid::new_v4().simple()
         );
-        let config = self.config.with_active_slot(slot.clone(), 0);
+        let config = base.with_active_slot(slot.clone(), 0);
         let (keys, binding) =
             source_binding(&mut connection, &config, &self.source, &self.stream).await?;
         validate_snapshot_publication(&mut connection, &config).await?;
@@ -198,6 +241,7 @@ impl PostgresSnapshot {
             timestamp,
             self.source.clone(),
             self.stream.clone(),
+            self.labels.as_ref(),
         )
         .await?;
         reader.completed = Some((handover, self.handover.clone()));
@@ -217,14 +261,14 @@ impl PostgresSnapshot {
 }
 
 #[async_trait]
-impl NativeBootstrapProvider for PostgresSnapshot {
+impl DurableBootstrapProvider for PostgresSnapshot {
     fn recovery_reader(&self) -> Option<SourceProgressView> {
         Some(self.progress.clone())
     }
 
     fn validate_query_scope(
         &self,
-        instance_id: &str,
+        _instance_id: &str,
         graph_id: &str,
         component_id: &ComponentId,
     ) -> Result<()> {
@@ -232,18 +276,15 @@ impl NativeBootstrapProvider for PostgresSnapshot {
             self.progress.graph_id() == graph_id && self.progress.component_id() == component_id,
             "PostgreSQL snapshot belongs to another query"
         );
-        if let Some((scope, query)) = &self.query_scope {
-            anyhow::ensure!(
-                scope.instance_id == instance_id
-                    && scope.graph_id == graph_id
-                    && query == component_id,
-                "PostgreSQL snapshot query scope changed"
-            );
-        }
         Ok(())
     }
 
-    async fn prepare_with_state(&self, state: &dyn BootstrapState) -> Result<BootstrapPreparation> {
+    fn has_pending_snapshot(&self) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn prepare(&self, state: Option<&dyn BootstrapState>) -> Result<BootstrapPreparation> {
+        let state = state.context("PostgreSQL snapshot requires query-owned handover state")?;
         state.durability().require(FailureMode::ProcessRestart)?;
         let progress = self.progress.snapshot()?;
         anyhow::ensure!(
@@ -256,7 +297,7 @@ impl NativeBootstrapProvider for PostgresSnapshot {
             .map(|bytes| serde_json::from_slice::<Handover>(&bytes))
             .transpose()?;
         if let Some(handover) = &handover {
-            self.config_for(handover)?;
+            self.config_for(&self.config, handover)?;
             let row_position = if self.rows {
                 row_checkpoint(&progress, &self.source, handover.binding)?
             } else {
@@ -301,14 +342,11 @@ impl NativeBootstrapProvider for PostgresSnapshot {
         Ok(BootstrapPreparation::Ready)
     }
 
-    async fn snapshot(&self) -> Result<ComputationBootstrapSnapshot> {
-        anyhow::bail!("PostgreSQL snapshot requires query-owned handover state")
-    }
-
-    async fn snapshot_with_state(
+    async fn snapshot(
         &self,
-        state: &dyn BootstrapState,
+        state: Option<&dyn BootstrapState>,
     ) -> Result<ComputationBootstrapSnapshot> {
+        let state = state.context("PostgreSQL snapshot requires query-owned handover state")?;
         tokio::time::timeout(self.config.timeout(), self.begin(state))
             .await
             .context("PostgreSQL snapshot initialization timed out")?
@@ -352,6 +390,14 @@ impl NativeBootstrapProvider for PostgresSnapshot {
         }])
     }
 
+    /// The snapshot's connection and imported transaction belong to its
+    /// stream, which the host drops before stopping; a created slot is
+    /// recorded in the query-owned handover state and is released or adopted
+    /// by the next preparation, so there is no owned worker to finish.
+    async fn stop(&self) -> Result<()> {
+        Ok(())
+    }
+
     fn completion_state(&self) -> Result<Option<Bytes>> {
         let handover = self.current()?.context("missing PostgreSQL handover")?;
         anyhow::ensure!(handover.completed, "PostgreSQL snapshot is incomplete");
@@ -384,9 +430,10 @@ impl SnapshotReader {
         timestamp: u64,
         source: ComponentId,
         stream: StreamId,
+        labels: Option<&BootstrapLabels>,
     ) -> Result<Self> {
         validate_retention(&mut connection, &config).await?;
-        let tables = snapshot_tables(&mut connection, &config, keys).await?;
+        let tables = snapshot_tables(&mut connection, &config, keys, labels).await?;
         Ok(Self {
             connection,
             config,
@@ -582,14 +629,32 @@ pub(super) async fn validate_snapshot_publication(
     Ok(())
 }
 
+/// Whether the query reads a published table: its rows carry the table's
+/// label (`schema.table`, or `table` in `public`). `None` reads every table.
+pub(crate) fn table_selected(
+    labels: Option<&BootstrapLabels>,
+    namespace: &str,
+    name: &str,
+) -> bool {
+    labels.is_none_or(|labels| {
+        labels.requests_node(&drasi_postgres_common::replication::schema::table_label(
+            namespace, name,
+        ))
+    })
+}
+
 async fn snapshot_tables(
     connection: &mut Connection,
     config: &PostgresTransactionConfig,
     keys: TableKeys,
+    labels: Option<&BootstrapLabels>,
 ) -> Result<VecDeque<SnapshotTable>> {
     let mut tables = VecDeque::new();
     let mut bytes = 0usize;
-    for ((namespace, name), keys) in keys {
+    for ((namespace, name), keys) in keys
+        .into_iter()
+        .filter(|((namespace, name), _)| table_selected(labels, namespace, name))
+    {
         connection
             .query_rows(
                 format!(

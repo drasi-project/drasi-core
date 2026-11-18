@@ -330,9 +330,22 @@ async fn rest() -> Result<RestServer> {
     })
 }
 
+/// The served source a snapshot connected to the HTTP source's bootstrap
+/// input receives from that graph relation.
+fn served() -> drasi_computation_plugin_sdk::BootstrapSession {
+    drasi_computation_plugin_sdk::BootstrapSession::new(
+        Some(drasi_computation_plugin_sdk::ServedSource {
+            source: ComponentId::try_new(NETWORK_SOURCE_ID).expect("fixture source"),
+            stream: drasi_lib::computation::v1::StreamId::try_new("source/out")
+                .expect("fixture stream"),
+        }),
+        None,
+    )
+}
+
 fn snapshot_config(address: SocketAddr) -> Value {
     json!({
-        "source":NETWORK_SOURCE_ID,"stream":"source/out","outputCapacity":1,
+        "outputCapacity":1,
         "maxDurationMs":5000,"settings":{"maxRetries":1,"retryDelayMs":1,"maxPages":4,
             "endpoints":[{
                 "url":format!("http://{address}/rows"),
@@ -482,6 +495,7 @@ async fn native_http_bootstrap_oauth_pagination_retry_and_live_update_share_one_
                     generation: 1,
                 }),
                 None,
+                served(),
             )?;
             let pipeline = core
                 .computation_pipeline()?
@@ -615,6 +629,7 @@ async fn native_http_bootstrap_bounds_and_cancelled_streams_never_report_partial
                     generation: 1,
                 }),
                 None,
+                served(),
             )?;
             provider.prepare().await?;
             assert!(provider
@@ -635,6 +650,7 @@ async fn native_http_bootstrap_bounds_and_cancelled_streams_never_report_partial
                 generation: 1,
             }),
             None,
+            served(),
         )?;
         provider.prepare().await?;
         let mut old = provider.snapshot().await?.changes;
@@ -666,6 +682,7 @@ async fn native_http_bootstrap_bounds_and_cancelled_streams_never_report_partial
                 generation: 1,
             }),
             None,
+            served(),
         )?;
         provider.prepare().await?;
         let events = provider

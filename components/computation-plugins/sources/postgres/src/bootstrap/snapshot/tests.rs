@@ -277,8 +277,8 @@ async fn snapshot_rows_use_database_clock_before_boundary_not_host_wall_clock() 
     let state = State::default();
     tokio::time::timeout(Duration::from_secs(10), async {
         tokio::try_join!(database(listener, &state), async {
-            provider.prepare_with_state(&state).await?;
-            let snapshot = provider.snapshot_with_state(&state).await?;
+            provider.prepare(Some(&state)).await?;
+            let snapshot = provider.snapshot(Some(&state)).await?;
             let envelopes = snapshot.changes.try_collect::<Vec<_>>().await?;
             assert_eq!(envelopes.len(), 1);
             let changes = GraphChangeCodec::decode_changes(&envelopes[0])?;
@@ -303,5 +303,44 @@ async fn snapshot_rows_use_database_clock_before_boundary_not_host_wall_clock() 
         Result::<()>::Ok(())
     })
     .await??;
+    Ok(())
+}
+
+#[test]
+fn query_labels_select_published_tables_by_their_labels() -> Result<()> {
+    let labels = BootstrapLabels::new(["person", "sales.orders"], Vec::<String>::new())?;
+    assert!(table_selected(Some(&labels), "public", "person"));
+    assert!(
+        table_selected(Some(&labels), "sales", "orders"),
+        "a table outside public is labelled schema.table"
+    );
+    assert!(!table_selected(Some(&labels), "public", "orders"));
+    assert!(!table_selected(Some(&labels), "public", "address"));
+    assert!(
+        table_selected(None, "public", "address"),
+        "no request reads every table"
+    );
+    Ok(())
+}
+
+#[test]
+fn paired_snapshots_connect_with_the_sources_activation() -> Result<()> {
+    let config: PostgresTransactionConfig = serde_json::from_value(serde_json::json!({
+        "host": "127.0.0.1", "database": "database", "user": "configured",
+        "password": "configured", "publication": "publication"
+    }))?;
+    assert_eq!(with_activation(&config, None).user, "configured");
+    let activation: Activation = Arc::new(std::sync::RwLock::new(
+        config.with_credentials("granted".into(), "secret".into()),
+    ));
+    let active = with_activation(&config, Some(&activation));
+    assert_eq!(
+        (active.user.as_str(), active.password.as_str()),
+        ("granted", "secret")
+    );
+    assert_eq!(
+        active.publication, config.publication,
+        "only credentials change"
+    );
     Ok(())
 }

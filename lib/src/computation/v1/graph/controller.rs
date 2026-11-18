@@ -2843,6 +2843,9 @@ pub(super) fn check_edge_compatibility(
     ) else {
         return Ok(());
     };
+    if is_bootstrap_port(graph, &edge.definition.from) {
+        return check_bootstrap_edge_compatibility(graph, edge, &producer, &consumer);
+    }
     let output = producer.output(&edge.definition.from.port);
     let input = consumer.input(&edge.definition.to.port);
     drasi_computation_contracts::check_edge(output, &edge.capabilities, input).map_err(|source| {
@@ -2862,6 +2865,173 @@ pub(super) fn check_edge_compatibility(
             source,
         }
     })
+}
+
+fn is_bootstrap_port(graph: &ComputationGraph, endpoint: &super::Endpoint) -> bool {
+    graph
+        .ids
+        .get(&endpoint.component)
+        .and_then(|index| {
+            graph.nodes[*index]
+                .descriptor
+                .ports()
+                .iter()
+                .find(|port| port.id() == &endpoint.port)
+        })
+        .is_some_and(|port| port.kind() == crate::computation::v1::PortKind::Bootstrap)
+}
+
+/// A neighbour's description for a bootstrap relay lookup. A neighbour that
+/// is not constructed yet, or is busy, is unknown: its edge is checked when it
+/// binds instead.
+fn neighbour_description(
+    graph: &ComputationGraph,
+    id: &ComponentId,
+) -> Option<drasi_computation_contracts::ComponentDescription> {
+    let index = *graph.ids.get(id)?;
+    graph.components[index].description().ok().flatten()
+}
+
+/// The completion a relay's consumers observe: the completion of the
+/// providers on the relay's own bootstrap inputs. `None` while one of them is
+/// unknown.
+fn relayed_completion_of(
+    graph: &ComputationGraph,
+    relay: &ComponentId,
+    visited: &mut BTreeSet<ComponentId>,
+) -> Option<drasi_computation_contracts::BootstrapCompletionKind> {
+    use drasi_computation_contracts::BootstrapCompletionKind;
+    if !visited.insert(relay.clone()) {
+        return Some(BootstrapCompletionKind::Undeclared);
+    }
+    let mut upstream = Vec::new();
+    for edge in graph.edges.values() {
+        if &edge.definition.to.component != relay
+            || !is_bootstrap_port(graph, &edge.definition.from)
+        {
+            continue;
+        }
+        let producer = neighbour_description(graph, &edge.definition.from.component)?;
+        let mut completion = producer
+            .bootstrap_output(&edge.definition.from.port)
+            .completion;
+        if completion == BootstrapCompletionKind::Relayed {
+            completion = relayed_completion_of(graph, &edge.definition.from.component, visited)?;
+        }
+        upstream.push(completion);
+    }
+    Some(drasi_computation_contracts::relayed_completion(upstream))
+}
+
+/// Check a bootstrap edge: the provider's declared output (a relay resolved
+/// through its own providers) against the consumer's bootstrap input and
+/// coordination offer. When the consumer is a source relay, the provider's
+/// completion must also be acceptable to every consumer the source already
+/// serves, so a mismatch is found by whichever edge binds last.
+fn check_bootstrap_edge_compatibility(
+    graph: &ComputationGraph,
+    edge: &EdgeSnapshot,
+    producer: &drasi_computation_contracts::ComponentDescription,
+    consumer: &drasi_computation_contracts::ComponentDescription,
+) -> GraphResult<()> {
+    use drasi_computation_contracts::{BootstrapCompletionKind, Incompatibility};
+    let mut output = producer.bootstrap_output(&edge.definition.from.port);
+    let mut unresolved = false;
+    if output.completion == BootstrapCompletionKind::Relayed {
+        let mut visited = BTreeSet::new();
+        match relayed_completion_of(graph, &edge.definition.from.component, &mut visited) {
+            Some(completion) => output.completion = completion,
+            // An upstream provider is not constructed yet: its own edge to
+            // this relay checks the relay's consumers when it binds.
+            None => {
+                unresolved = true;
+                output.completion = BootstrapCompletionKind::Durable;
+            }
+        }
+    }
+    let input = consumer.bootstrap_input(&edge.definition.to.port);
+    // The source whose namespace the provider serves, by the same rule the
+    // Host uses to supply it to each session.
+    let consumer_id = &edge.definition.to.component;
+    let served_id = crate::computation::v1::served_source(
+        consumer_id,
+        |id| graph.ids.get(id).map(|index| &graph.nodes[*index]),
+        graph.edges.values().map(|edge| &edge.definition),
+    )
+    .map(|(source, _)| source);
+    let served_description = served_id
+        .as_ref()
+        .filter(|id| *id != consumer_id)
+        .and_then(|id| neighbour_description(graph, id));
+    let served = match (&served_id, &served_description) {
+        (None, _) => drasi_computation_contracts::ServedNamespace::Unavailable,
+        (Some(id), _) if id == consumer_id => {
+            drasi_computation_contracts::ServedNamespace::Source(consumer)
+        }
+        (Some(_), Some(description)) => {
+            drasi_computation_contracts::ServedNamespace::Source(description)
+        }
+        (Some(_), None) => drasi_computation_contracts::ServedNamespace::Pending,
+    };
+    let incompatible = |source: Incompatibility, context: String| GraphError::Incompatible {
+        component: edge.definition.to.component.clone(),
+        phase: FailurePhase::Binding,
+        context,
+        source,
+    };
+    let checked =
+        drasi_computation_contracts::check_bootstrap_edge(&output, consumer, input, served);
+    let checked = match (unresolved, checked) {
+        (true, Err(Incompatibility::BootstrapCompletion { .. })) => Ok(()),
+        (_, checked) => checked,
+    };
+    checked.map_err(|source| {
+        incompatible(
+            source,
+            format!(
+                "bootstrap input '{}:{}' ({input:?}) cannot be connected to bootstrap output \
+                 '{}:{}' ({output:?})",
+                edge.definition.to.component,
+                edge.definition.to.port,
+                edge.definition.from.component,
+                edge.definition.from.port,
+            ),
+        )
+    })?;
+    if !input.is_some_and(|input| input.source_relay) || unresolved {
+        return Ok(());
+    }
+    for downstream in graph.edges.values() {
+        if downstream.definition.from.component != edge.definition.to.component
+            || !is_bootstrap_port(graph, &downstream.definition.from)
+        {
+            continue;
+        }
+        let Some(served) = neighbour_description(graph, &downstream.definition.to.component) else {
+            continue;
+        };
+        let accepts = served.bootstrap_input(&downstream.definition.to.port);
+        if accepts.is_some_and(|accepts| {
+            accepts.accepts == drasi_computation_contracts::BootstrapAcceptance::Quiescent
+        }) && output.completion != BootstrapCompletionKind::Quiescent
+        {
+            return Err(incompatible(
+                Incompatibility::BootstrapCompletion {
+                    accepts: drasi_computation_contracts::BootstrapAcceptance::Quiescent,
+                    completion: output.completion,
+                },
+                format!(
+                    "source '{}' relays bootstrap output '{}:{}' to quiescent input '{}:{}'",
+                    edge.definition.to.component,
+                    edge.definition.from.component,
+                    edge.definition.from.port,
+                    downstream.definition.to.component,
+                    downstream.definition.to.port,
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Record an edge whose declarations are incompatible: the edge is failed and
@@ -2898,7 +3068,12 @@ pub(super) fn is_edge_incompatibility(failure: &ComponentFailure) -> bool {
             failure.cause.underlying(),
             GraphError::Incompatible {
                 source: drasi_computation_contracts::Incompatibility::ProducerIdentity { .. }
-                    | drasi_computation_contracts::Incompatibility::Replay { .. },
+                    | drasi_computation_contracts::Incompatibility::Replay { .. }
+                    | drasi_computation_contracts::Incompatibility::BootstrapPairing { .. }
+                    | drasi_computation_contracts::Incompatibility::BootstrapCoordinationRequired { .. }
+                    | drasi_computation_contracts::Incompatibility::BootstrapNamespace
+                    | drasi_computation_contracts::Incompatibility::BootstrapCompletion { .. }
+                    | drasi_computation_contracts::Incompatibility::BootstrapIdentity { .. },
                 ..
             }
         )
@@ -5194,6 +5369,7 @@ impl Operations {
                         &resources,
                     )
                     .await?;
+                    let worker_failures = component.worker_failures();
                     let budget = super::NodeWorkBudget::default();
                     let processing = budget
                         .run(run_node(
@@ -5214,10 +5390,26 @@ impl Operations {
                             &delivery,
                             startup_work,
                         ));
-                    let result = if let Some(feedback) = &feedback {
-                        feedback.scope(processing).await
-                    } else {
-                        processing.await
+                    let processing = async {
+                        if let Some(feedback) = &feedback {
+                            feedback.scope(processing).await
+                        } else {
+                            processing.await
+                        }
+                    };
+                    // A failed owned worker fails the node even while no
+                    // operation of the component is in flight (an idle sink).
+                    let result = match &worker_failures {
+                        Some(failures) => tokio::select! {
+                            biased;
+                            result = processing => result,
+                            failure = failures.wait() => Err(component_error(
+                                &node,
+                                "owned worker",
+                                crate::computation::v1::LifecycleError::retryable(failure).into(),
+                            )),
+                        },
+                        None => processing.await,
                     };
                     if result.is_ok() {
                         if let Some(fence) = progress_fence {

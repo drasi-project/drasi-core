@@ -53,6 +53,7 @@ pub(super) fn file_provider(
         sqlite::provider_configuration(database),
         scope(generation),
         None,
+        sqlite::provider_session(sqlite::PROVIDER_SOURCE, "sqlite/out")?,
     )
 }
 

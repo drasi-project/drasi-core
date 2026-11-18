@@ -850,6 +850,7 @@ unsafe fn read_bootstrap(
                 table.version == abi::bootstrap::VERSION
                     && table.reserved == 0
                     && table.factories.is_some()
+                    && table.describe.is_some()
                     && table.create.is_some(),
                 "incompatible or incomplete native bootstrap extension"
             );

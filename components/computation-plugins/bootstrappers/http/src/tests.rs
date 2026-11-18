@@ -2,14 +2,32 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
-use drasi_computation_plugin_sdk::{ExportedPlugin, Scope};
+use drasi_computation_contracts::{BootstrapLabels, StreamId};
+use drasi_computation_plugin_sdk::{ExportedPlugin, Scope, ServedSource};
+use drasi_core_types::models::{
+    Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
+};
 use serde_json::{json, Value};
 
 const SOURCE_ID: &str = "4a4b64d8-9d8b-5ddd-867d-2f925822946c";
 
+fn session() -> Result<BootstrapSession> {
+    Ok(BootstrapSession::new(
+        Some(ServedSource {
+            source: ComponentId::try_new(SOURCE_ID)?,
+            stream: StreamId::try_new("events/out")?,
+        }),
+        None,
+    ))
+}
+
+fn create(request: &CreateRequest) -> Result<NativeBootstrapProvider> {
+    HttpBootstrapFactory.create(request, &session()?, None)
+}
+
 fn configuration() -> Value {
     json!({
-        "source":SOURCE_ID,"stream":"events/out","settings":{"endpoints":[{
+        "settings":{"endpoints":[{
             "url":"https://example.invalid/snapshot",
             "response":{"mappings":[{"elementType":"node","template":{"id":"{{item.id}}","labels":["Item"]}}]}
         }]}
@@ -39,7 +57,12 @@ fn construction_is_query_scoped_and_does_not_resolve_or_fetch_credentials() -> R
     request.configuration["settings"]["endpoints"][0]["auth"] = json!({
         "type":"bearer","token_env":"DRASI_NATIVE_BOOTSTRAP_NOT_RESOLVED_AT_CONSTRUCTION"
     });
-    let provider = HttpBootstrapFactory.create(&request, None)?;
+    let provider = create(&request)?;
+    assert_eq!(
+        provider.completion(),
+        BootstrapCompletionKind::Quiescent,
+        "the provider has its declared completion"
+    );
     provider.validate_query_scope("instance", "graph", &request.id)?;
     assert!(provider
         .validate_query_scope("different", "graph", &request.id)
@@ -52,7 +75,76 @@ fn construction_is_query_scoped_and_does_not_resolve_or_fetch_credentials() -> R
         )
         .is_err());
     request.scope = None;
-    assert!(HttpBootstrapFactory.create(&request, None).is_err());
+    assert!(create(&request).is_err());
+    Ok(())
+}
+
+#[test]
+fn namespace_comes_from_the_graph_relation_not_configuration() -> Result<()> {
+    let description = HttpBootstrapFactory.describe(&configuration())?;
+    assert_eq!(description.namespace, ElementNamespace::ServedSource);
+    assert_eq!(description.pairing, None);
+    HttpBootstrapFactory
+        .metadata()
+        .validate_description(&description)?;
+    let mut legacy = configuration();
+    legacy["source"] = json!(SOURCE_ID);
+    legacy["stream"] = json!("events/out");
+    assert!(
+        HttpBootstrapFactory.describe(&legacy).is_err(),
+        "a configured source namespace is refused"
+    );
+    let request = request()?;
+    let unserved = HttpBootstrapFactory.create(&request, &BootstrapSession::default(), None);
+    assert!(
+        unserved.is_err(),
+        "a provider without a served source from its relation is refused"
+    );
+    Ok(())
+}
+
+fn node(label: &str) -> SourceChange {
+    SourceChange::Insert {
+        element: Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new(SOURCE_ID, "1"),
+                labels: std::sync::Arc::from([std::sync::Arc::from(label)]),
+                effective_from: 0,
+            },
+            properties: ElementPropertyMap::new(),
+        },
+    }
+}
+
+fn relation(label: &str) -> SourceChange {
+    SourceChange::Insert {
+        element: Element::Relation {
+            metadata: ElementMetadata {
+                reference: ElementReference::new(SOURCE_ID, "r"),
+                labels: std::sync::Arc::from([std::sync::Arc::from(label)]),
+                effective_from: 0,
+            },
+            in_node: ElementReference::new(SOURCE_ID, "1"),
+            out_node: ElementReference::new(SOURCE_ID, "2"),
+            properties: ElementPropertyMap::new(),
+        },
+    }
+}
+
+#[test]
+fn query_labels_select_mapped_elements() -> Result<()> {
+    let labels = BootstrapLabels::new(["Order"], ["PLACED"])?;
+    assert!(snapshot::requested(Some(&labels), &node("Order")));
+    assert!(!snapshot::requested(Some(&labels), &node("Item")));
+    assert!(snapshot::requested(Some(&labels), &relation("PLACED")));
+    assert!(
+        !snapshot::requested(Some(&labels), &relation("Order")),
+        "a node label does not select a relation"
+    );
+    assert!(
+        snapshot::requested(None, &node("Item")),
+        "no request selects everything"
+    );
     Ok(())
 }
 
@@ -88,10 +180,7 @@ fn nested_typos_and_invalid_limits_are_rejected_before_io() -> Result<()> {
             }
             _ => unreachable!(),
         }
-        assert!(
-            HttpBootstrapFactory.create(&request, None).is_err(),
-            "{field}"
-        );
+        assert!(create(&request).is_err(), "{field}");
     }
     Ok(())
 }
@@ -123,7 +212,7 @@ fn published_authentication_and_pagination_shapes_are_accepted() -> Result<()> {
         let mut request = request()?;
         request.configuration["settings"]["endpoints"][0]["auth"] = auth;
         request.configuration["settings"]["endpoints"][0]["pagination"] = pagination;
-        HttpBootstrapFactory.create(&request, None)?;
+        create(&request)?;
     }
     Ok(())
 }

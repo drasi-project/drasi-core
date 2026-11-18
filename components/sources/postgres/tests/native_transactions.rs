@@ -209,11 +209,69 @@ fn settings_fields(
 }
 
 /// A coordinated or shared bootstrap provider's flat configuration.
-fn bootstrap_flat(
+/// A coordinated or shared provider opened as the graph pairs it: by the
+/// in-process source factory's coordinator for `source`, from the source's
+/// own flat configuration (stream `changes`). The provider takes no
+/// configuration of its own.
+fn paired_provider(
+    bootstrap: &drasi_host_sdk::computation::NativeBootstrapFactory,
+    query: ComponentId,
     source: impl Into<String>,
     config: &PostgresTransactionConfig,
-) -> serde_json::Value {
-    flat(config, serde_json::json!({"source": source.into()}))
+    scope: drasi_computation_plugin_sdk::Scope,
+    owner: Arc<QuerySourceProgress>,
+) -> Result<Arc<drasi_host_sdk::computation::NativeBootstrapProxy>> {
+    use drasi_computation_bootstrap_postgres as bootstrap_plugin;
+    use drasi_host_sdk::computation::{NativePlugin, NativeSourceBootstrapProgress};
+    let source = ComponentId::try_new(source.into())?;
+    let (implementation, extra, shared) = match bootstrap.metadata().implementation.name.as_ref() {
+        bootstrap_plugin::POSTGRES_BOOTSTRAP => (
+            "drasi/postgres-transactions",
+            serde_json::json!({"coordinatedSnapshot": true}),
+            false,
+        ),
+        bootstrap_plugin::POSTGRES_ROW_BOOTSTRAP => (
+            "drasi.postgres/changes",
+            serde_json::json!({"coordinatedSnapshot": true, "persistent": true}),
+            false,
+        ),
+        bootstrap_plugin::POSTGRES_SHARED_ROW_BOOTSTRAP => (
+            "drasi.postgres/shared-changes",
+            serde_json::json!({"persistent": owner.snapshot().persistent}),
+            true,
+        ),
+        bootstrap_plugin::POSTGRES_SHARED_TRANSACTION_BOOTSTRAP => (
+            "drasi.postgres/shared-transactions",
+            serde_json::json!({}),
+            true,
+        ),
+        other => anyhow::bail!("{other} is not a paired PostgreSQL bootstrap"),
+    };
+    let plugin = NativePlugin::from_definition(drasi_computation_source_postgres::plugin()?)?;
+    let factory = plugin
+        .factories()
+        .iter()
+        .find(|factory| factory.metadata().implementation.name.as_ref() == implementation)
+        .context("paired PostgreSQL source factory")?;
+    let progress = if shared {
+        NativeSourceBootstrapProgress::Shared(Arc::new(ConsumerProgressSet::new(
+            scope.graph_id.clone(),
+            source.clone(),
+            [owner.clone()],
+        )?))
+    } else {
+        NativeSourceBootstrapProgress::Single(owner.clone())
+    };
+    let coordinator =
+        factory.create_source_bootstrap(source, flat(config, extra), scope.clone(), progress)?;
+    bootstrap.create_paired_query_provider(
+        query,
+        serde_json::json!({}),
+        scope,
+        owner,
+        coordinator,
+        None,
+    )
 }
 
 /// The fixture settings with managed slot ownership, as coordinated

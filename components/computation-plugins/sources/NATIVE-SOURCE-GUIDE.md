@@ -1,7 +1,7 @@
 # Native source standard
 
 This guide states what a production native source (`NativeComponent` +
-`NativeSource`) must do beyond compiling against the ABI 4 SDK. It applies to
+`NativeSource`) must do beyond compiling against the ABI 5 SDK. It applies to
 every crate in this directory. The HTTP and gRPC sources are the reference
 implementations. For the SDK contracts themselves, see the
 [native SDK guide](../../computation-plugin-sdk/README.md).
@@ -14,7 +14,7 @@ implementations. For the SDK contracts themselves, see the
 | `start` | Observe `ctx.cancellation()` and `ctx.deadline()` across every await, including waits for progress readiness. Never use a configuration timeout as the overall start budget. A failed or cancelled start leaves nothing running, and the object can be started again after Stop. |
 | `pause` | **Either** gate the source's independent work (no new admission or external reads, in-flight work settled, memory bounded, liveness keepalives maintained) **or** return `lifecycle::unsupported(...)`. Never return `nothing_to_do()` while workers keep producing or admitting. A source with no independent worker, whose output only the host pulls, may succeed, but must say so in its design document. A cancelled or expired Pause must leave the source running as before. |
 | `resume` | Reopen exactly what Pause closed. Recover from upstream timeouts that fired while paused by re-establishing from the last committed position. |
-| `stop` | `Drain`: finish the in-flight unit (request, frame, transaction) within `ctx.deadline()`, then close gracefully. `Abort`: cancel promptly. On expiry, return a retryable error and keep ownership of unfinished work, so a later Stop completes it. Report an earlier processing failure once, through `next()` or status, not as a Stop failure. |
+| `stop` | `Drain`: finish the in-flight unit (request, frame, transaction) within `ctx.deadline()`, then close gracefully. `Abort`: cancel promptly. On expiry, return a retryable error and keep ownership of unfinished work, so a later Stop completes it. Report an earlier processing failure once, through `next()` or status, not as a Stop failure; a worker panic is already reported by the SDK when it happens (register workers with `workers::spawn_owned_worker` inside an operation), so a joined `WorkerCleanupError::Join` is not a Stop failure either. |
 | `dispose` | Implement both intents. Under `Erase`, remove exactly the state the component owns (replication slots, journal tables, producer registrations), never borrowed or shared state. Make it idempotent: "already gone" is success, and a retry repeats safely. Declare `erases_owned_state` whenever removal with erase should succeed. A component that owns nothing declares it with a documented no-op. |
 
 Own independent workers with the SDK's `ActivationScope` (re-exported from

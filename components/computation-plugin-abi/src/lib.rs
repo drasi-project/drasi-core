@@ -371,6 +371,12 @@ pub mod operation {
     /// Management apply of an accepted update at a Pause or Stop boundary.
     /// Begun only through `management::PluginManagementV1::apply`.
     pub const APPLY: u32 = 28;
+    /// Independent of data and lifecycle calls, like WAKE_WAIT: completes with
+    /// a retryable failure once work the current activation registered outside
+    /// its operations (an owned worker) has failed, for example by panicking.
+    /// It stays pending while that work is healthy and never succeeds. Begun
+    /// only while the component runs; STOP and PAUSE end it with CLOSED.
+    pub const WORKER_FAILURE: u32 = 29;
 }
 
 pub const POLL_PENDING: u32 = 0;

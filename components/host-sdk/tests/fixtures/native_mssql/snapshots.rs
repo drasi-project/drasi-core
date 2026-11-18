@@ -47,13 +47,11 @@ pub(super) async fn least_privilege(dynamic: bool) -> Result<()> {
         .find(|f| f.metadata().implementation.name.as_ref() == "drasi.mssql/snapshot")
         .context("read-only factory")?;
     for labels in [json!(["ReadOnlyItems"]), json!(["Unmatched"])] {
-        let provider = factory.create_provider(
+        let provider = crate::bootstrap_provider(
+            factory,
             id("snapshot"),
-            crate::provider_config(
-                &db.read_only_settings(),
-                json!({"source":id("items").as_str(),"stream":stream("items"),"labels":labels}),
-            ),
-            Some(scope()),
+            crate::provider_config(&db.read_only_settings(), json!({"labels":labels})),
+            scope(),
             None,
         )?;
         let proof = async {
@@ -87,13 +85,11 @@ pub(super) async fn least_privilege(dynamic: bool) -> Result<()> {
         proof?;
         cleanup?;
     }
-    let provider = factory.create_provider(
+    let provider = crate::bootstrap_provider(
+        factory,
         id("snapshot"),
-        crate::provider_config(
-            &db.read_only_settings(),
-            json!({"source":id("items").as_str(),"stream":stream("items")}),
-        ),
-        Some(scope()),
+        crate::provider_config(&db.read_only_settings(), json!({})),
+        scope(),
         None,
     )?;
     provider.prepare().await?;
@@ -146,13 +142,11 @@ pub(super) async fn concurrent_cut_and_cleanup(dynamic: bool) -> Result<()> {
         format!("{}.Items", db.schema),
         format!("{}.Companion", db.schema)
     ]);
-    let provider = factory.create_provider(
+    let provider = crate::bootstrap_provider(
+        factory,
         id("snapshot"),
-        crate::provider_config(
-            &settings,
-            json!({"source":id("items").as_str(),"stream":stream("items")}),
-        ),
-        Some(scope()),
+        crate::provider_config(&settings, json!({})),
+        scope(),
         Some(owner),
     )?;
     provider.prepare().await?;
@@ -213,13 +207,11 @@ pub(super) async fn concurrent_cut_and_cleanup(dynamic: bool) -> Result<()> {
     )?);
     let mut limited_settings = db.settings();
     limited_settings["maxRows"] = json!(1);
-    let limited = factory.create_provider(
+    let limited = crate::bootstrap_provider(
+        factory,
         id("limited"),
-        crate::provider_config(
-            &limited_settings,
-            json!({"source":id("items").as_str(),"stream":stream("items")}),
-        ),
-        Some(scope()),
+        crate::provider_config(&limited_settings, json!({})),
+        scope(),
         Some(owner),
     )?;
     limited.prepare().await?;
@@ -267,13 +259,11 @@ pub(super) async fn concurrent_cut_and_cleanup(dynamic: bool) -> Result<()> {
     )?);
     let mut settings = db.settings();
     settings["stopTimeoutMs"] = json!(50);
-    let cancelled = factory.create_provider(
+    let cancelled = crate::bootstrap_provider(
+        factory,
         id("cancelled"),
-        crate::provider_config(
-            &settings,
-            json!({"source":id("items").as_str(),"stream":stream("items")}),
-        ),
-        Some(scope()),
+        crate::provider_config(&settings, json!({})),
+        scope(),
         Some(owner),
     )?;
     cancelled.prepare().await?;
@@ -352,13 +342,11 @@ pub(super) async fn large_snapshots_and_tiny_cdc_pages(dynamic: bool) -> Result<
         let owner = coordinated
             .then(|| QuerySourceProgress::new(ComponentBatch::GRAPH_ID, id("large")).map(Arc::new))
             .transpose()?;
-        let provider = factory.create_provider(
+        let provider = crate::bootstrap_provider(
+            factory,
             id("large"),
-            crate::provider_config(
-                &settings,
-                json!({"source":id("items").as_str(),"stream":stream("items")}),
-            ),
-            Some(scope()),
+            crate::provider_config(&settings, json!({})),
+            scope(),
             owner,
         )?;
         provider.prepare().await?;
@@ -446,13 +434,11 @@ pub(super) async fn large_snapshots_and_tiny_cdc_pages(dynamic: bool) -> Result<
     let mut settings = db.read_only_settings();
     settings["maxRows"] = json!(1);
     settings["maxBytes"] = json!(1024);
-    let provider = factory.create_provider(
+    let provider = crate::bootstrap_provider(
+        factory,
         id("oversized"),
-        crate::provider_config(
-            &settings,
-            json!({"source":id("items").as_str(),"stream":stream("items")}),
-        ),
-        Some(scope()),
+        crate::provider_config(&settings, json!({})),
+        scope(),
         None,
     )?;
     provider.prepare().await?;

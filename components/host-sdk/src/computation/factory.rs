@@ -529,6 +529,7 @@ impl NativeFactory {
         );
         let description: drasi_lib::computation::v1::ComponentDescription =
             serde_json::from_slice(&response)?;
+        let description = self.with_bootstrap_facts(description, descriptor)?;
         description
             .validate(descriptor)
             .map_err(|reason| anyhow::anyhow!("invalid native description: {reason}"))?;
@@ -538,6 +539,47 @@ impl NativeFactory {
             self.metadata.implementation.name
         );
         Ok(description)
+    }
+    /// The Host owns the bootstrap ports it adds to every instance, so it
+    /// declares their facts: a source relays its consumers' sessions to the
+    /// provider on its bootstrap input (whose namespace it is) and completes
+    /// them as that provider does; a transformer accepts the initialization
+    /// its capability names and serves committed output snapshots. Plugins
+    /// declare no bootstrap port facts, and only a source offers coordination.
+    fn with_bootstrap_facts(
+        &self,
+        description: drasi_lib::computation::v1::ComponentDescription,
+        descriptor: &ComponentDescriptor,
+    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+        use drasi_computation_contracts::{BootstrapInputDescription, BootstrapOutputDescription};
+        use drasi_lib::computation::v1::PortDescription;
+        anyhow::ensure!(
+            !description.ports.values().any(|port| matches!(
+                port,
+                PortDescription::BootstrapInput(_) | PortDescription::BootstrapOutput(_)
+            )),
+            "native plugins do not declare bootstrap port facts; the host owns those ports"
+        );
+        anyhow::ensure!(
+            (description.coordination.is_none() && description.element_identity.is_none())
+                || self.metadata.role == ComponentRole::Source,
+            "only a native source declares bootstrap coordination or element identity"
+        );
+        anyhow::ensure!(
+            description.coordination.is_none() || self.bootstrap_coordination.is_some(),
+            "native source declares bootstrap coordination without a coordinator"
+        );
+        let capabilities = &self.metadata.capabilities;
+        let input = match self.metadata.role {
+            ComponentRole::Source => BootstrapInputDescription::SOURCE_RELAY,
+            _ if capabilities.quiescent_bootstrap.is_some() => BootstrapInputDescription::QUIESCENT,
+            _ => BootstrapInputDescription::DURABLE,
+        };
+        let output = match self.metadata.role {
+            ComponentRole::Source => BootstrapOutputDescription::RELAYED,
+            _ => BootstrapOutputDescription::OUTPUT_SNAPSHOT,
+        };
+        Ok(description.with_bootstrap_ports(descriptor, input, output))
     }
     fn supports_input_progress(&self) -> bool {
         self.descriptor.dependencies.contains_key("input_progress")
@@ -1780,7 +1822,10 @@ impl ComponentFactory for NativeFactory {
         // library's coordinator from its own progress owners, so the paired
         // provider node shares the live engine.
         let running = context.output_catalogue().clone();
-        let source_bootstrap = if self.bootstrap_coordination.is_some()
+        // Only a source that declares coordination creates its coordinator;
+        // the graph refuses any provider on its bootstrap input that is not
+        // paired through the same protocol when coordination is required.
+        let source_bootstrap = if description.coordination.is_some()
             && admission.is_none()
             && !context.bootstrap_producers().is_empty()
         {
@@ -1795,13 +1840,24 @@ impl ComponentFactory for NativeFactory {
             };
             owners
                 .map(|owners| {
-                    self.create_source_bootstrap_with_identity(
+                    let coordinator = self.create_source_bootstrap_with_identity(
                         context.component_id.clone(),
                         configuration.clone(),
                         scope.clone(),
                         owners,
                         identity.clone(),
-                    )
+                    )?;
+                    let declared = description
+                        .coordination
+                        .as_ref()
+                        .map(|coordination| &coordination.protocol);
+                    anyhow::ensure!(
+                        declared == Some(coordinator.protocol()),
+                        "native source coordinator implements {} but the source declares {:?}",
+                        coordinator.protocol(),
+                        declared
+                    );
+                    Ok(coordinator)
                 })
                 .transpose()
                 .map_err(ComponentCreationError::terminal)?

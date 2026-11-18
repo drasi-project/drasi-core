@@ -274,7 +274,9 @@ fn producer(
         builder,
         "consumers",
         ResourceRole::Checkpoint,
-        ResourceHandle::new(ResourceRole::Checkpoint, consumers),
+        // Every member query keeps its progress in RocksDB indexes.
+        ResourceHandle::new(ResourceRole::Checkpoint, consumers)
+            .with_capabilities(ResourceCapabilities::DURABLE),
     )?;
     builder = resource(
         builder,
@@ -448,40 +450,121 @@ fn shared_construction_retains_real_owners_and_does_not_reinterpret_single_owner
     Ok(())
 }
 
+/// Replay requires durable progress, declared in the source's description:
+/// the graph refuses binding either progress shape to volatile (or
+/// undeclared) progress, records the incompatibility on the source node and
+/// never starts it. Port 9 has no MySQL server, so a start would fail
+/// differently.
 #[tokio::test(flavor = "current_thread")]
-async fn shared_replay_rejects_volatile_actual_owners_before_opening_a_socket() -> Result<()> {
-    let owners = owners("graph");
-    let mut queries = Vec::new();
-    for owner in &owners {
-        let mut query = ContinuousQueryTransformer::new(
-            query_definition(owner),
-            Arc::new(InMemoryComputationProvider),
-        )
-        .await?
-        .with_source_progress(owner.clone())?;
-        query.start(&lifecycle_ctx::start()).await?;
-        queries.push(query);
-    }
-    let mut settings = config(9, MySqlOutput::Transactions);
-    settings.replay = Some(MySqlRetention::Server);
-    settings.start = MySqlStartPosition::Position {
-        file: "mysql-bin.000001".into(),
-        position: 4,
-    };
-    let mut source = MySqlSource::new_with_consumer_progress(
-        id(77),
-        stream("changes"),
-        settings,
-        group("graph", &owners),
-    )?;
-    let error = source
-        .start(&lifecycle_ctx::start())
-        .await
-        .expect_err("persistent-only replay");
-    assert!(error.to_string().contains("persistent"), "{error:#}");
-    source.stop(&lifecycle_ctx::stop()).await?;
-    for query in &mut queries {
-        query.stop(&lifecycle_ctx::stop()).await?;
+async fn replay_bound_to_volatile_progress_is_refused_at_binding() -> Result<()> {
+    for (slot, capabilities) in [
+        ("consumer_progress", Some(ResourceCapabilities::VOLATILE)),
+        ("source_progress", Some(ResourceCapabilities::VOLATILE)),
+        ("consumer_progress", None),
+    ] {
+        let owners = owners("native-mysql");
+        let mut settings = config(9, MySqlOutput::Transactions);
+        settings.replay = Some(MySqlRetention::Server);
+        settings.start = MySqlStartPosition::Position {
+            file: "mysql-bin.000001".into(),
+            position: 4,
+        };
+        let factory = Arc::new(MySqlSourceFactory::default());
+        let handle = if slot == "consumer_progress" {
+            ResourceHandle::new(ResourceRole::Checkpoint, group("native-mysql", &owners))
+        } else {
+            ResourceHandle::new(
+                ResourceRole::Checkpoint,
+                Arc::new(QuerySourceProgressResource(owners[0].clone())),
+            )
+        };
+        let handle = match capabilities {
+            Some(capabilities) => handle.with_capabilities(capabilities),
+            None => handle,
+        };
+        let specification = ComponentSpecification {
+            descriptor: MySqlSource::describe(id(77), MySqlOutput::Transactions)?,
+            role: ComponentRole::Source,
+            completion: None,
+            implementation: factory.descriptor().implementation.clone(),
+            configuration_version: 1,
+            configuration: BTreeMap::from([
+                (
+                    Arc::from("stream"),
+                    ConfigurationValue::Literal("changes".into()),
+                ),
+                (
+                    Arc::from("settings"),
+                    ConfigurationValue::Reference {
+                        resource: ResourceId::try_new("settings")?,
+                        key: Arc::from("mysql"),
+                        secret: true,
+                    },
+                ),
+            ]),
+            dependencies: BTreeMap::from([(
+                Arc::from(slot),
+                vec![ResourceId::try_new("progress")?],
+            )]),
+        };
+        let builder = resource(
+            ComputationGraph::builder("native-mysql"),
+            "progress",
+            ResourceRole::Checkpoint,
+            handle,
+        )?;
+        let builder = resource(
+            builder,
+            "settings",
+            ResourceRole::SecretStore,
+            ResourceHandle::new(
+                ResourceRole::SecretStore,
+                Arc::new(ConfigurationResolverResource(Arc::new(Settings(
+                    serde_json::to_value(&settings)?,
+                )))),
+            ),
+        )?;
+        let mut graph = builder
+            .component(
+                ComponentName::try_new("source").expect("fixture component name"),
+                specification,
+                factory,
+            )
+            .bind_stream(endpoint(&id(77), "out"), stream("changes"))
+            .build()?;
+        let run = graph.run()?;
+        let control = run.control();
+        let (run, outcome) = tokio::join!(run, async {
+            let outcome = async {
+                control
+                    .start_components(GraphRevision(1), GraphSelection::All)
+                    .await?;
+                let node = control.observed().components[&id(77)].clone();
+                let failure = node.failure.context("binding failure")?;
+                anyhow::ensure!(
+                    failure.phase == FailurePhase::Binding
+                        && matches!(
+                            failure.cause.underlying(),
+                            GraphError::Incompatible {
+                                source: Incompatibility::ResourceDurability { .. },
+                                ..
+                            }
+                        ),
+                    "{slot} {capabilities:?}: {failure:?}"
+                );
+                control
+                    .stop_components(GraphRevision(1), GraphSelection::All)
+                    .await?;
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            control.cancel();
+            outcome
+        });
+        let cleanup = graph.shutdown().await;
+        outcome?;
+        assert!(matches!(run, Ok(()) | Err(GraphError::Cancelled)));
+        cleanup?;
     }
     Ok(())
 }

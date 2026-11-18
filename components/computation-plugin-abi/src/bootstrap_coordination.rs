@@ -91,6 +91,8 @@ pub struct BootstrapCoordinatorVTable {
     pub retain: Option<unsafe extern "C" fn(*mut c_void)>,
     pub release: Option<unsafe extern "C" fn(*mut c_void)>,
     pub describe: Option<unsafe extern "C" fn(*mut c_void) -> Reply>,
+    /// Open one query's provider. The bytes are a MessagePack
+    /// `SourceBootstrapOpen`: the query and its declared labels.
     pub open: Option<
         unsafe extern "C" fn(*mut c_void, BorrowedBytes, *mut bootstrap::BootstrapHandle) -> Status,
     >,

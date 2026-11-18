@@ -15,6 +15,7 @@
 
 mod component;
 pub mod config;
+pub mod coordinator;
 mod management;
 #[cfg(test)]
 mod tests;
@@ -25,13 +26,13 @@ use drasi_computation_contracts::{
     ComponentRole, ComponentUpdateMode, GraphChangeCodec, ImplementationIdentity, StreamId,
 };
 use drasi_computation_plugin_sdk::{
-    lifecycle::Assessment, ActivationCredentialContext, Capabilities, Component, ConfigDetails,
-    ControlSender, CreateRequest, CreatedComponent, Factory, FactoryMetadata,
-    NativeConsumerProgress, NativeSourceProgress, PluginDefinition, UpdateRequest,
+    lifecycle::Assessment, wire::DescribeRequest, ActivationCredentialContext, Capabilities,
+    Component, ComponentDescription, ConfigDetails, ControlSender, CreateRequest, CreatedComponent,
+    Factory, FactoryMetadata, NativeConsumerProgress, NativeSourceProgress, PluginDefinition,
+    UpdateRequest,
 };
 use drasi_mysql_common::native::{
     progress::ConsumerBinding,
-    rows,
     source::{SourceStatus, StatusSink},
     MySqlSource,
 };
@@ -39,7 +40,8 @@ use std::sync::Arc;
 
 pub use component::MySqlComponent;
 pub use drasi_mysql_common::native::{
-    MySqlOutput, MySqlRetention, MySqlSourceSettings, MySqlTableKey, MySqlTlsMode, StartFrom,
+    MySqlOutput, MySqlProgress, MySqlRetention, MySqlSourceSettings, MySqlTableKey, MySqlTlsMode,
+    StartFrom,
 };
 
 pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
@@ -117,6 +119,44 @@ fn credential_context(mode: Mode, request: &CreateRequest) -> Result<ActivationC
     Ok(context)
 }
 
+/// The declared description, with the coordination offer of a mode that
+/// pairs with a bootstrap provider: outputs carry only source replay progress,
+/// kept in the progress bound to the source. A mode whose cursors must
+/// survive a process restart requires that progress to be durable, so the
+/// graph refuses wiring it to volatile progress before anything starts.
+fn describe(mode: Mode, request: &DescribeRequest) -> Result<ComponentDescription> {
+    let config = SourceConfig::from_value(mode, &request.request.configuration)?;
+    coordinator::declare(
+        mode,
+        request,
+        description(mode, config.persistent, &request.descriptor),
+    )
+}
+
+/// The description of a `mode` source; `persistent` applies to the shared
+/// row modes only.
+pub fn description(
+    mode: Mode,
+    persistent: bool,
+    descriptor: &drasi_computation_contracts::ComponentDescriptor,
+) -> ComponentDescription {
+    drasi_mysql_common::native::description(progress(mode, persistent), descriptor)
+}
+
+/// Where a `mode` source keeps its replay progress.
+pub fn progress(mode: Mode, persistent: bool) -> MySqlProgress {
+    match mode {
+        Mode::Changes | Mode::UntrackedTransactions | Mode::PositionalChanges => {
+            MySqlProgress::None
+        }
+        Mode::Transactions => MySqlProgress::Single,
+        Mode::SharedTransactions => MySqlProgress::Group { durable: true },
+        Mode::SharedChanges | Mode::SharedPositionalChanges => MySqlProgress::Group {
+            durable: persistent,
+        },
+    }
+}
+
 /// Logs readiness changes with the component identity. The host's
 /// `ControlSender` is bound only for components with a control interface,
 /// which this source does not have.
@@ -132,7 +172,12 @@ fn status_sink(id: &drasi_computation_contracts::ComponentId) -> StatusSink {
 }
 
 fn component(config: SourceConfig, source: MySqlSource) -> CreatedComponent {
-    Component::Source(Box::new(MySqlComponent { config, source })).into()
+    Component::Source(Box::new(MySqlComponent {
+        config,
+        source,
+        activation: None,
+    }))
+    .into()
 }
 
 /// An untracked source (`changes`, `untracked-transactions`,
@@ -173,6 +218,9 @@ fn consumers(
 
 macro_rules! common_factory_methods {
     ($mode:expr) => {
+        fn describe(&self, request: &DescribeRequest) -> Result<ComponentDescription> {
+            describe($mode, request)
+        }
         fn metadata(&self) -> FactoryMetadata {
             metadata($mode)
         }
@@ -188,6 +236,20 @@ macro_rules! common_factory_methods {
         fn supports_activation_credentials(&self) -> bool {
             true
         }
+        fn supports_bootstrap_coordination(&self) -> bool {
+            coordinator::protocol($mode).is_some()
+        }
+        fn create_bootstrap_coordinator(
+            &self,
+            request: &CreateRequest,
+            progress: drasi_computation_plugin_sdk::SourceBootstrapProgress,
+        ) -> Result<Arc<dyn drasi_computation_plugin_sdk::NativeSourceBootstrapCoordinator>> {
+            Ok(Arc::new(coordinator::Coordinator::new(
+                request,
+                parse($mode, request)?,
+                progress,
+            )?))
+        }
         fn activation_credential_context(
             &self,
             request: &CreateRequest,
@@ -198,16 +260,6 @@ macro_rules! common_factory_methods {
 }
 
 impl Factory for MySqlChangesFactory {
-    /// Outputs carry only source replay progress unless published through a Host admission channel.
-    fn describe(
-        &self,
-        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
-    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.source_description(
-            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
-            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
-        ))
-    }
     common_factory_methods!(Mode::Changes);
     fn create(&self, request: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
         create_untracked(Mode::Changes, request)
@@ -215,16 +267,6 @@ impl Factory for MySqlChangesFactory {
 }
 
 impl Factory for MySqlUntrackedTransactionsFactory {
-    /// Outputs carry only source replay progress unless published through a Host admission channel.
-    fn describe(
-        &self,
-        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
-    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.source_description(
-            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
-            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
-        ))
-    }
     common_factory_methods!(Mode::UntrackedTransactions);
     fn create(&self, request: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
         create_untracked(Mode::UntrackedTransactions, request)
@@ -232,16 +274,6 @@ impl Factory for MySqlUntrackedTransactionsFactory {
 }
 
 impl Factory for MySqlPositionalChangesFactory {
-    /// Outputs carry only source replay progress unless published through a Host admission channel.
-    fn describe(
-        &self,
-        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
-    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.source_description(
-            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
-            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
-        ))
-    }
     common_factory_methods!(Mode::PositionalChanges);
     fn create(&self, request: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
         create_untracked(Mode::PositionalChanges, request)
@@ -249,16 +281,6 @@ impl Factory for MySqlPositionalChangesFactory {
 }
 
 impl Factory for MySqlTransactionsFactory {
-    /// Outputs carry only source replay progress unless published through a Host admission channel.
-    fn describe(
-        &self,
-        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
-    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.source_description(
-            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
-            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
-        ))
-    }
     common_factory_methods!(Mode::Transactions);
     fn supports_source_progress(&self) -> bool {
         true
@@ -303,16 +325,6 @@ impl Factory for MySqlTransactionsFactory {
 }
 
 impl Factory for MySqlSharedTransactionsFactory {
-    /// Outputs carry only source replay progress unless published through a Host admission channel.
-    fn describe(
-        &self,
-        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
-    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.source_description(
-            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
-            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
-        ))
-    }
     common_factory_methods!(Mode::SharedTransactions);
     fn supports_consumer_progress(&self) -> bool {
         true
@@ -361,9 +373,6 @@ fn create_shared_rows(
         StreamId::try_new(config.stream.clone())?,
         config.engine_config(&request.id)?,
         consumers,
-        rows::Options {
-            persistent: config.persistent,
-        },
     )?;
     if mode.positional() {
         source = source.with_positional_metadata()?;
@@ -375,16 +384,6 @@ fn create_shared_rows(
 }
 
 impl Factory for MySqlSharedChangesFactory {
-    /// Outputs carry only source replay progress unless published through a Host admission channel.
-    fn describe(
-        &self,
-        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
-    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.source_description(
-            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
-            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
-        ))
-    }
     common_factory_methods!(Mode::SharedChanges);
     fn supports_consumer_progress(&self) -> bool {
         true
@@ -403,16 +402,6 @@ impl Factory for MySqlSharedChangesFactory {
 }
 
 impl Factory for MySqlSharedPositionalChangesFactory {
-    /// Outputs carry only source replay progress unless published through a Host admission channel.
-    fn describe(
-        &self,
-        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
-    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.source_description(
-            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
-            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
-        ))
-    }
     common_factory_methods!(Mode::SharedPositionalChanges);
     fn supports_consumer_progress(&self) -> bool {
         true

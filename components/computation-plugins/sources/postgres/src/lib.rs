@@ -12,6 +12,7 @@
 //!
 //! See `DESIGN.md` and `CONFIGURATION.md` in this crate.
 
+pub mod bootstrap;
 mod component;
 pub mod config;
 mod management;
@@ -28,8 +29,8 @@ use drasi_computation_contracts::{
 use drasi_computation_plugin_sdk::{
     lifecycle::Assessment, wire::DescribeRequest, ActivationCredentialContext, Capabilities,
     Component, ComponentDescription, ConfigDetails, ControlSender, CreateRequest, CreatedComponent,
-    Factory, FactoryMetadata, NativeConsumerProgress, NativeSourceProgress, PluginDefinition,
-    UpdateRequest,
+    Factory, FactoryMetadata, NativeConsumerProgress, NativeSourceBootstrapCoordinator,
+    NativeSourceProgress, PluginDefinition, SourceBootstrapProgress, UpdateRequest,
 };
 use std::sync::Arc;
 
@@ -128,7 +129,13 @@ fn credential_context(mode: Mode, request: &CreateRequest) -> Result<ActivationC
 /// graph refuses wiring it to volatile progress before anything starts.
 fn describe(mode: Mode, request: &DescribeRequest) -> Result<ComponentDescription> {
     let config = SourceConfig::from_value(mode, &request.request.configuration)?;
-    Ok(description(mode, config.recoverable(), &request.descriptor))
+    let description = description(mode, config.recoverable(), &request.descriptor);
+    // The source owns its paired providers' settings: it declares the
+    // protocol they must use instead of their configuration repeating its own.
+    Ok(match bootstrap::offer(mode, config.coordinated_snapshot) {
+        Some(offer) => description.with_coordination(offer),
+        None => description,
+    })
 }
 
 /// The description of a `mode` source whose cursors are `recoverable` across
@@ -172,6 +179,19 @@ macro_rules! common_factory_methods {
         }
         fn supports_activation_credentials(&self) -> bool {
             true
+        }
+        fn supports_bootstrap_coordination(&self) -> bool {
+            true
+        }
+        fn create_bootstrap_coordinator(
+            &self,
+            request: &CreateRequest,
+            progress: SourceBootstrapProgress,
+        ) -> Result<Arc<dyn NativeSourceBootstrapCoordinator>> {
+            let (config, _) = parse($mode, request)?;
+            Ok(Arc::new(bootstrap::coordinator::Coordinator::new(
+                request, $mode, config, progress,
+            )?))
         }
         fn activation_credential_context(
             &self,

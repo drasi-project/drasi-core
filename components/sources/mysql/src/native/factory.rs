@@ -94,11 +94,32 @@ impl Default for MySqlSourceFactory {
 
 #[async_trait]
 impl ComponentFactory for MySqlSourceFactory {
+    /// The same description the constructed source declares: the progress
+    /// binding selects whole-transaction (`source_progress`) or consumer-set
+    /// (`consumer_progress`) replay, both of which require durable progress.
     fn describe(
         &self,
-        _context: &drasi_lib::computation::v1::ConstructionContext,
+        context: &drasi_lib::computation::v1::ConstructionContext,
     ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
-        Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
+        use drasi_mysql_common::native::MySqlProgress;
+        let bound = |slot: &str| {
+            context
+                .specification
+                .dependencies
+                .get(slot)
+                .is_some_and(|ids| !ids.is_empty())
+        };
+        let progress = if bound("source_progress") {
+            MySqlProgress::Single
+        } else if bound("consumer_progress") {
+            MySqlProgress::Group { durable: true }
+        } else {
+            MySqlProgress::None
+        };
+        Ok(drasi_mysql_common::native::description(
+            progress,
+            &context.specification.descriptor,
+        ))
     }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor

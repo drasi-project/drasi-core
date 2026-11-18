@@ -1,102 +1,51 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! Bootstrap configuration: one flat camelCase object, the same shared
-//! [`MySqlSourceSettings`] as the native MySQL source plus `source`,
-//! `stream`, `retention` (coordinated factories) and `labels` (standalone).
-//!
-//! Use the same values as the live source: the coordinated handover is bound
-//! to the source's selected tables, keys, stream and identity.
+//! The standalone snapshot's configuration: one flat camelCase object, the
+//! same shared [`MySqlSourceSettings`] as the native MySQL source plus
+//! `labels`. The served source (whose element identities and server id the
+//! snapshot uses) and its stream come from the graph relation, not from this
+//! configuration. The coordinated providers take no configuration: the
+//! paired source's coordinator uses the source's own settings.
 
 use anyhow::{Context, Result};
-use drasi_computation_contracts::{ComponentId, StreamId};
+use drasi_computation_contracts::ComponentId;
 use drasi_computation_plugin_sdk::{ConfigDefinition, ConfigOption, ConfigType};
-use drasi_mysql_common::native::{
-    settings::*, MySqlConfig, MySqlOutput, MySqlRetention, MySqlSourceSettings,
-};
+use drasi_mysql_common::native::{settings::*, MySqlConfig, MySqlOutput, MySqlSourceSettings};
 use serde_json::{json, Value};
 
-/// Which provider a configuration belongs to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
-    /// Coordinated loading for whole-transaction sources.
-    Transactions,
-    /// Coordinated loading for shared row sources.
-    Rows,
-    /// Repeatable-read loading without a handover.
-    Standalone,
-}
-
-/// A parsed bootstrap configuration.
+/// A parsed standalone snapshot configuration.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BootstrapConfig {
-    pub source: ComponentId,
-    pub stream: StreamId,
-    pub retention: MySqlRetention,
+    /// Upper bound on the tables loaded, within `settings.tables`; empty
+    /// loads the whole allowlist. A query's labels narrow it further.
     pub labels: Vec<String>,
     pub settings: MySqlSourceSettings,
 }
 
 impl BootstrapConfig {
-    /// Parses `value` for `kind`, rejecting unknown and foreign fields.
-    pub fn from_value(kind: Kind, value: &Value) -> Result<Self> {
+    /// Parses `value`, rejecting unknown and foreign fields.
+    pub fn from_value(value: &Value) -> Result<Self> {
         let mut object = value
             .as_object()
             .context("MySQL bootstrap configuration must be an object")?
             .clone();
-        let text = |object: &mut serde_json::Map<String, Value>, name: &str| -> Result<String> {
-            match object.remove(name) {
-                Some(Value::String(value)) => Ok(value),
-                Some(_) => anyhow::bail!("{name} must be a string"),
-                None => anyhow::bail!("{name} is required"),
-            }
-        };
-        let source = ComponentId::try_new(text(&mut object, "source")?)?;
-        let stream = StreamId::try_new(text(&mut object, "stream")?)?;
-        let retention = match object.remove("retention") {
-            None => MySqlRetention::Server,
-            Some(_) if kind == Kind::Standalone => {
-                anyhow::bail!("retention is not supported by the standalone snapshot")
-            }
-            Some(value) => match value.as_str() {
-                Some("server") => MySqlRetention::Server,
-                Some("untilProcessed") => MySqlRetention::UntilProcessed,
-                _ => anyhow::bail!("retention must be \"server\" or \"untilProcessed\""),
-            },
-        };
         let labels = match object.remove("labels") {
             None => Vec::new(),
-            Some(_) if kind != Kind::Standalone => {
-                anyhow::bail!("labels are only supported by the standalone snapshot")
-            }
             Some(value) => serde_json::from_value(value).context("labels must be strings")?,
         };
         let settings: MySqlSourceSettings =
             serde_json::from_value(Value::Object(object)).context("invalid MySQL settings")?;
-        let config = Self {
-            source,
-            stream,
-            retention,
-            labels,
-            settings,
-        };
-        config.engine_config(kind)?;
-        Ok(config)
+        Ok(Self { labels, settings })
     }
 
-    /// The engine configuration, with `serverId` derived from the paired
-    /// source's identity like the source derives it.
-    pub fn engine_config(&self, kind: Kind) -> Result<MySqlConfig> {
-        let (output, replay) = match kind {
-            Kind::Transactions => (MySqlOutput::Transactions, Some(self.retention)),
-            Kind::Rows => (MySqlOutput::Changes, Some(self.retention)),
-            Kind::Standalone => (MySqlOutput::Changes, None),
-        };
-        let config = self.settings.engine_config(&self.source, output, replay)?;
-        match kind {
-            Kind::Rows => config.validate_rows()?,
-            _ => config.validate()?,
-        }
+    /// The engine configuration for the served `source`, with `serverId`
+    /// derived from its identity like the source derives it.
+    pub fn engine_config(&self, source: &ComponentId) -> Result<MySqlConfig> {
+        let config = self
+            .settings
+            .engine_config(source, MySqlOutput::Changes, None)?;
+        config.validate()?;
         Ok(config)
     }
 }
@@ -159,29 +108,13 @@ fn shared_options() -> Vec<ConfigOption> {
     ]
 }
 
-/// The published configuration for `kind`.
-pub fn definition(kind: Kind) -> ConfigDefinition {
-    let mut options = vec![
-        ConfigOption::new(
-            "source",
-            ConfigType::ComponentId,
-            true,
-            "The paired native MySQL source component.",
-        ),
-        string("stream", true, "The paired source's output stream."),
-    ];
-    options.extend(shared_options());
-    match kind {
-        Kind::Standalone => options.push(
-            ConfigOption::new("labels", ConfigType::Array, false, "Restricts loading to these tables of the allowlist; empty loads the whole allowlist.")
-                .default(json!([])),
-        ),
-        _ => options.push(
-            string("retention", false, "The paired source's retention: server or untilProcessed.")
-                .default("server")
-                .allowed([json!("server"), json!("untilProcessed")]),
-        ),
-    }
+/// The published standalone configuration.
+pub fn definition() -> ConfigDefinition {
+    let mut options = shared_options();
+    options.push(
+        ConfigOption::new("labels", ConfigType::Array, false, "Upper bound on the tables loaded, within the allowlist; empty loads the whole allowlist. Each query's labels narrow it further.")
+            .default(json!([])),
+    );
     ConfigDefinition::try_new(options).expect("constant MySQL bootstrap configuration")
 }
 
@@ -191,11 +124,9 @@ mod tests {
 
     fn base() -> Value {
         json!({
-            "source": "8b637385-6167-54c4-9589-3dda2fcd1d21",
-            "stream": "changes",
             "database": "app",
             "user": "drasi",
-            "startFrom": "snapshot"
+            "tables": ["items"]
         })
     }
 
@@ -212,18 +143,18 @@ mod tests {
         let serialized = serde_json::to_value(&settings).unwrap();
         let mut expected: Vec<_> = serialized.as_object().unwrap().keys().cloned().collect();
         expected.sort();
-        let mut published: Vec<_> = definition(Kind::Rows)
+        let mut published: Vec<_> = definition()
             .schema()
             .fields
             .keys()
             .map(|name| name.to_string())
-            .filter(|name| !matches!(name.as_str(), "source" | "stream" | "retention"))
+            .filter(|name| name != "labels")
             .collect();
         published.sort();
         assert_eq!(published, expected);
         let defaults =
             serde_json::to_value(MySqlSourceSettings::new("localhost", 3306, "a", "u")).unwrap();
-        for (name, field) in definition(Kind::Rows).details().fields {
+        for (name, field) in definition().details().fields {
             if let (Some(default), Some(actual)) = (field.default, defaults.get(&name)) {
                 assert_eq!(actual, &default, "{name}");
             }
@@ -231,41 +162,30 @@ mod tests {
     }
 
     #[test]
-    fn flat_configuration_parses_per_kind() {
-        let config = BootstrapConfig::from_value(Kind::Transactions, &base()).unwrap();
-        assert_eq!(config.retention, MySqlRetention::Server);
-        let mut rows = base();
-        rows["retention"] = json!("untilProcessed");
-        assert_eq!(
-            BootstrapConfig::from_value(Kind::Rows, &rows)
-                .unwrap()
-                .retention,
-            MySqlRetention::UntilProcessed
-        );
+    fn flat_configuration_has_no_source_or_stream() {
         let mut labels = base();
         labels["labels"] = json!(["items"]);
-        assert!(BootstrapConfig::from_value(Kind::Transactions, &labels).is_err());
-        let mut standalone = base();
-        standalone["startFrom"] = json!("end");
-        standalone["tables"] = json!(["items"]);
-        standalone["labels"] = json!(["items"]);
-        BootstrapConfig::from_value(Kind::Standalone, &standalone).unwrap();
+        let config = BootstrapConfig::from_value(&labels).unwrap();
+        assert_eq!(config.labels, ["items"]);
         let mut legacy = base();
         legacy["settings"] = json!({});
-        assert!(BootstrapConfig::from_value(Kind::Transactions, &legacy).is_err());
-        let mut fake = base();
-        fake["source"] = json!("source");
-        assert!(BootstrapConfig::from_value(Kind::Transactions, &fake).is_err());
-        for kind in [Kind::Transactions, Kind::Rows, Kind::Standalone] {
-            let schema = definition(kind).schema();
-            let secret: Vec<_> = schema
-                .fields
-                .iter()
-                .filter(|(_, field)| field.secret)
-                .map(|(name, _)| name.to_string())
-                .collect();
-            assert_eq!(secret, vec!["password", "tlsClientKeyPem"]);
-            definition(kind).details().validate_schema(&schema).unwrap();
+        assert!(BootstrapConfig::from_value(&legacy).is_err());
+        for field in ["source", "stream", "retention"] {
+            let mut foreign = base();
+            foreign[field] = json!("x");
+            assert!(
+                BootstrapConfig::from_value(&foreign).is_err(),
+                "{field} comes from the graph relation or the paired source"
+            );
         }
+        let schema = definition().schema();
+        let secret: Vec<_> = schema
+            .fields
+            .iter()
+            .filter(|(_, field)| field.secret)
+            .map(|(name, _)| name.to_string())
+            .collect();
+        assert_eq!(secret, vec!["password", "tlsClientKeyPem"]);
+        definition().details().validate_schema(&schema).unwrap();
     }
 }

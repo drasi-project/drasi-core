@@ -16,7 +16,7 @@ what is different for sinks.
 | `start` | Observe `ctx.cancellation()` and `ctx.deadline()` across every connect, retry and readiness wait. A connection loop must not outlive the start budget. Prefer lazy connection: a destination that is down is a delivery failure, not a start failure, unless the configuration explicitly requires a connection at start. A cancelled start leaves nothing running and the object startable. |
 | `pause` | **Host-driven sinks** (no worker of their own: HTTP, gRPC, log) may succeed and need no gate. The host calls no `handle` while paused and lets the in-flight one settle before Pause returns. **Sinks with workers** (the SSE server, a profiler reporter, driver keepalives) must gate them with the SDK's `ActivationScope` and `PauseGate` (see the source guide), or return `lifecycle::unsupported(...)`. Never return success while a worker keeps serving or reporting. |
 | `resume` | Reopen exactly what Pause closed. |
-| `stop` | `Drain`: let the in-flight delivery or connection finish within `ctx.deadline()`, then close. `Abort`: cancel promptly. On expiry, return a retryable error and keep ownership (`join_owned_worker_gracefully` for servers). Never report an earlier delivery failure as a Stop failure. |
+| `stop` | `Drain`: let the in-flight delivery or connection finish within `ctx.deadline()`, then close. `Abort`: cancel promptly. On expiry, return a retryable error and keep ownership (`join_owned_worker_gracefully` for servers). Never report an earlier delivery failure, or a worker panic already reported through the SDK, as a Stop failure. |
 | `dispose` | Implement both intents. Under `Erase`, remove exactly the destination-side state the sink owns (cursor rows, sender ledgers), idempotently. A sink that owns nothing declares `erases_owned_state` with a documented no-op. |
 | `handle` / `handle_batch` | Return `Ok` only when the declared completion is met (see below). A failure must leave the sink able to retry the same input without Stop and Start; never latch an "interrupted" flag. A handler holds no state outside its future, because the host cancels an in-flight handle by dropping it. |
 
@@ -101,6 +101,13 @@ declaration: a settled skip from a consumer that declares `stall`, or an
 unsettled permanent failure of an operation under `skip` (for example a
 destination cursor rejection), fails the node instead. A transactional
 consumer supports only `stall`.
+
+If the runner's own storage fails a commit (its outcome then unknown), the
+runner is fenced and the delivery fails transiently, so the graph keeps the
+input and retries it. Before that retry the host reopens the runner from
+storage, which reloads the committed ledger and resolves the uncertainty; the
+retry resumes at the completed prefix once storage works again, in the same
+activation. A delivery cancelled mid-batch still needs a restart.
 
 **Retries inside a sink.** A sink may make bounded fast retries of one request
 before it returns (`drasi_computation_network_common::retry`: exponential

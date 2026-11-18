@@ -6,8 +6,9 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use drasi_computation_bootstrap_postgres::NativeBootstrapProvider;
-use drasi_computation_plugin_sdk::{lifecycle as native_lifecycle, NativeComponent, NativeSource};
+use drasi_computation_plugin_sdk::{
+    lifecycle as native_lifecycle, DurableBootstrapProvider, NativeComponent, NativeSource,
+};
 use drasi_computation_source_postgres::PostgresTransactionSource as NativePostgresSource;
 use drasi_core::interface::StorageDurability;
 use drasi_lib::computation::v1::{
@@ -61,7 +62,7 @@ impl PostgresTransactionSource {
     ) -> Result<(Self, Arc<PostgresSnapshot>)> {
         let progress = progress.into();
         let snapshot = Arc::new(PostgresSnapshot {
-            inner: drasi_computation_bootstrap_postgres::PostgresSnapshot::new(
+            inner: drasi_computation_source_postgres::bootstrap::PostgresSnapshot::new(
                 id.clone(),
                 stream.clone(),
                 config.clone(),
@@ -184,7 +185,7 @@ impl EnvelopeSource for PostgresTransactionSource {
 }
 
 pub struct PostgresSnapshot {
-    inner: drasi_computation_bootstrap_postgres::PostgresSnapshot,
+    inner: drasi_computation_source_postgres::bootstrap::PostgresSnapshot,
     source: ComponentId,
     stream: StreamId,
     config: PostgresTransactionConfig,
@@ -219,16 +220,16 @@ impl ComputationBootstrapProvider for PostgresSnapshot {
             .validate_query_scope(instance_id, graph_id, component_id)
     }
     async fn prepare_with_state(&self, state: &dyn BootstrapState) -> Result<BootstrapPreparation> {
-        self.inner.prepare_with_state(state).await
+        self.inner.prepare(Some(state)).await
     }
     async fn snapshot(&self) -> Result<ComputationBootstrapSnapshot> {
-        self.inner.snapshot().await
+        self.inner.snapshot(None).await
     }
     async fn snapshot_with_state(
         &self,
         state: &dyn BootstrapState,
     ) -> Result<ComputationBootstrapSnapshot> {
-        self.inner.snapshot_with_state(state).await
+        self.inner.snapshot(Some(state)).await
     }
     async fn complete_snapshot(&self) -> Result<Vec<BootstrapWatermark>> {
         self.inner.complete_snapshot().await

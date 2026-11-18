@@ -34,6 +34,52 @@ pub use settings::{MySqlSourceSettings, MySqlTableKey, StartFrom};
 pub use snapshot::MySqlSnapshot;
 pub use source::MySqlSource;
 
+/// Where a source's replay progress is bound and whether it must survive a
+/// process restart, which decides its declared description.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MySqlProgress {
+    /// No replay: the source keeps no progress.
+    None,
+    /// Whole transactions replay from one query's committed cursor
+    /// (`source_progress`), which must be durable.
+    Single,
+    /// The source replays for a fixed consumer set (`consumer_progress`).
+    /// `durable` cursors must survive a process restart.
+    Group { durable: bool },
+}
+
+/// The description a MySQL source declares, for the loaded plugin and the
+/// in-process wrapper alike. Outputs carry only source replay progress, kept
+/// in the bound progress resource. A source whose cursors must survive a
+/// process restart requires that resource to be durable, so the graph
+/// refuses binding it to volatile progress before anything starts; a source
+/// without replay keeps no progress of its own.
+pub fn description(
+    progress: MySqlProgress,
+    descriptor: &drasi_computation_contracts::ComponentDescriptor,
+) -> drasi_computation_contracts::ComponentDescription {
+    use drasi_computation_contracts::{
+        ComponentDescription, DependencyRequirement, DurabilityRequirement, OutputDescription,
+        ProgressPersistence,
+    };
+    let (dependency, durable) = match progress {
+        MySqlProgress::None => {
+            return ComponentDescription::new(ProgressPersistence::Volatile)
+                .with_outputs(descriptor, OutputDescription::UNTRACKED)
+        }
+        MySqlProgress::Single => ("source_progress", true),
+        MySqlProgress::Group { durable } => ("consumer_progress", durable),
+    };
+    let (persistence, durability) = if durable {
+        (ProgressPersistence::Durable, DurabilityRequirement::Durable)
+    } else {
+        (ProgressPersistence::Volatile, DurabilityRequirement::Any)
+    };
+    ComponentDescription::new(persistence)
+        .with_outputs(descriptor, OutputDescription::UNTRACKED)
+        .with_dependency(dependency, DependencyRequirement { durability })
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MySqlConnectionConfig {
@@ -286,6 +332,61 @@ impl MySqlConfig {
         config.connection.user = user;
         config.connection.password = password;
         config
+    }
+}
+
+/// The user and password a source's current activation connects with, shared
+/// with its paired bootstrap providers. `None` while the source is not
+/// activated with host credentials.
+pub type ActivationCredentials = std::sync::Arc<std::sync::RwLock<Option<(String, String)>>>;
+
+/// `config` with the paired source's activation credentials, if any.
+pub fn with_activation(
+    config: &MySqlConfig,
+    activation: Option<&ActivationCredentials>,
+) -> MySqlConfig {
+    let credentials = activation.and_then(|activation| {
+        activation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    });
+    match credentials {
+        Some((user, password)) => config.with_credentials(user, password),
+        None => config.clone(),
+    }
+}
+
+/// Whether a table is read for a query declaring `labels`: a row's label is
+/// its table's name, and `None` reads every selected table.
+pub fn table_selected(
+    labels: Option<&drasi_computation_contracts::BootstrapLabels>,
+    table: &str,
+) -> bool {
+    labels.is_none_or(|labels| labels.requests_node(table))
+}
+
+/// Source/bootstrap coordination protocols shared by the native MySQL source
+/// (which declares and implements them) and the bootstrap library (whose
+/// paired factories require them).
+pub mod coordination {
+    use drasi_computation_contracts::BootstrapProtocol;
+
+    /// `drasi.mysql/transactions` with `startFrom: snapshot` and
+    /// `drasi.mysql/coordinated-bootstrap`.
+    pub const TRANSACTIONS: &str = "drasi.mysql/coordinated-transactions";
+    /// `drasi.mysql/shared-transactions` with `startFrom: snapshot` and
+    /// `drasi.mysql/shared-transaction-bootstrap`.
+    pub const SHARED_TRANSACTIONS: &str = "drasi.mysql/shared-transactions";
+    /// `drasi.mysql/shared-changes` with `startFrom: snapshot` and
+    /// `drasi.mysql/shared-row-bootstrap`.
+    pub const SHARED_ROWS: &str = "drasi.mysql/shared-rows";
+    /// Version of every MySQL coordination protocol.
+    pub const VERSION: u32 = 1;
+
+    /// The versioned protocol named `name` (one of the constants above).
+    pub fn protocol(name: &str) -> BootstrapProtocol {
+        BootstrapProtocol::new(name, VERSION)
     }
 }
 

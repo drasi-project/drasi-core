@@ -442,11 +442,13 @@ async fn build_graph_mode(
                         }
                 })
                 .context("shared PostgreSQL bootstrap factory")?;
-            let provider = factory.create_provider(
+            let provider = paired_provider(
+                factory,
                 named_id(name),
-                bootstrap_flat(id(77).to_string(), &database.config),
-                Some(libraries::scope(ComponentBatch::GRAPH_ID)),
-                Some(owners[index].clone()),
+                id(77).to_string(),
+                &database.config,
+                libraries::scope(ComponentBatch::GRAPH_ID),
+                owners[index].clone(),
             )?;
             query = query.with_bootstrap(match snapshot_gates {
                 Some(gates) => bootstrap::gated(provider, gates[index].clone()),

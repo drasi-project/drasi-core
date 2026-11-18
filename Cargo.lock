@@ -3446,6 +3446,7 @@ version = "0.11.3"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bytes",
  "chrono",
  "drasi-computation-contracts",
  "drasi-computation-plugin-sdk",
@@ -3463,6 +3464,7 @@ version = "0.11.3"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bytes",
  "drasi-computation-contracts",
  "drasi-computation-plugin-sdk",
  "drasi-core-types",
@@ -3513,10 +3515,12 @@ dependencies = [
  "drasi-computation-plugin-sdk",
  "drasi-core-types",
  "drasi-postgres-common",
+ "futures",
  "log",
  "serde",
  "serde_json",
  "tokio",
+ "uuid 1.26.1",
 ]
 
 [[package]]

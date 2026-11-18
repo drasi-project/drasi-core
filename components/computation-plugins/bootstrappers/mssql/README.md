@@ -4,31 +4,49 @@
 this family is verified by unit tests and database-free Host checks only.**
 
 One bootstrap-role crate exports two explicit factories, both through the real
-static SDK and the native ABI 4.0 dynamic library:
+static SDK and the native ABI 5.0 dynamic library:
 
 | Factory | Permissions and behavior |
 |---|---|
 | `drasi.mssql/snapshot` | Standalone **read-only** table snapshot. Explicit `tables`, primary/custom keys, SELECT/catalog visibility and the database's SNAPSHOT-isolation option. No CDC catalogs, marker, DDL or data writes. Returns **no CDC handover watermark**. |
-| `drasi.mssql/bootstrap` | Opt-in coordinated CDC snapshot. Requires actual query progress and an explicitly configured, administrator-provisioned CDC `barrierTable`. Writes and deletes its own marker. Holds shared table locks only while it fixes a SNAPSHOT-isolation view and commits the marker, then reads row versions without blocking writers; needs `ALLOW_SNAPSHOT_ISOLATION ON`. |
+| `drasi.mssql/bootstrap` | Opt-in coordinated CDC snapshot, paired with a `drasi.mssql/changes` source that owns an administrator-provisioned CDC `barrierTable`. Writes and deletes its own marker in the source's barrier table. Holds shared table locks only while it fixes a SNAPSHOT-isolation view and commits the marker, then reads row versions without blocking writers; needs `ALLOW_SNAPSHOT_ISOLATION ON`. |
+
+Both declare their bootstrap output, which the graph checks when the
+provider's edge binds; see the
+[native bootstrap provider standard](../NATIVE-BOOTSTRAP-PROVIDER-GUIDE.md).
 
 ## Configuration
 
-Both take one flat camelCase object: `source` (the paired source's component
-ID), `stream`, optional `labels` and optional `stopTimeoutMs` (how long
-`stop` waits for snapshot cleanup, default `30000`), beside **the same
-settings the native source accepts** (see the source's
-[CONFIGURATION.md](../../sources/mssql/CONFIGURATION.md)). `password` is the
-only secret. Bootstrap factories receive no activation credentials, so they
-always use `user` and `password`; encryption is required by default, as for
-the source. Read-only mode requires `barrierTable` to be absent and
-`tables` to be explicit; coordinated mode requires `barrierTable`.
+`drasi.mssql/bootstrap` takes **no configuration**. The source owns its
+connection settings, tables, keys and `barrierTable`, and declares the
+`drasi.mssql/coordinated-changes` coordination protocol when it has a
+`barrierTable`. Connect the provider node to that source's `bootstrap` input:
+the source's coordinator opens each query's provider from the source's own
+request and connects with the source's current activation credentials
+(including an Entra ID token), so the markers it writes are the ones the
+source erases. The graph refuses the provider on a source that does not
+declare the protocol.
+
+`drasi.mssql/snapshot` takes one flat camelCase object: optional `labels` (an
+upper bound on the tables read) and optional `stopTimeoutMs` (how long `stop`
+waits for snapshot cleanup, default `30000`), beside **the same settings the
+native source accepts** (see the source's
+[CONFIGURATION.md](../../sources/mssql/CONFIGURATION.md)) except
+`barrierTable`, which it refuses. `tables` must be explicit. `password` is the
+only secret; the standalone snapshot uses `user` and `password` (no activation
+credentials), and encryption is required by default, as for the source. The
+served source and stream are not configured: the graph relation supplies the
+source whose `bootstrap` input the provider is connected to (or the single
+source a query reads, for a query-local provider).
 
 ```json
-{"source": "585da1dd-2d7d-5cec-bcf7-e84ac13a88f8", "stream": "orders/out",
- "labels": ["Orders"], "host": "sql.internal", "database": "shop",
+{"labels": ["Orders"], "host": "sql.internal", "database": "shop",
  "user": "drasi_cdc", "password": {"secret": "mssql-password"},
- "tables": ["dbo.Orders"], "barrierTable": "drasi.Barrier"}
+ "tables": ["dbo.Orders"]}
 ```
+
+Each query reads only the selected tables whose label (the table name) it
+declares, within `labels` when configured.
 
 Schema-qualified table identities and
 type conversion agree with the source. Unknown labels produce no rows, without releasing the coordinated table fence.
@@ -95,6 +113,8 @@ There is no public DrasiLib SQL API or general SQL service.
 Each marker's `token` starts with 64 bits derived from the graph and the
 paired **source** (`SHA-256("drasi.mssql/marker/v1", graph, source)`),
 followed by 64 random bits, so every marker belongs to exactly one source.
+The source is the one whose coordinator opened the provider, never a
+configured identity, and the barrier table is the source's own.
 The provider deletes its marker after each attempt. A process crash or a
 failed cleanup may leave one behind; **the source owns those markers** and
 deletes every marker with its prefix on erasing removal, idempotently. The

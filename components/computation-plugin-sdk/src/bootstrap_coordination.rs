@@ -7,10 +7,12 @@ use crate::{
     abi::{self, bootstrap_coordination::*},
     bootstrap,
     transport::{self, Failure},
-    ControlSender, CreateRequest, CreatedComponent, NativeBootstrapProvider,
+    ControlSender, CreateRequest, CreatedComponent, DurableBootstrapProvider,
 };
 use async_trait::async_trait;
-use drasi_computation_contracts::{ComponentId, ConsumerProgressView, SourceProgressView};
+use drasi_computation_contracts::{
+    BootstrapLabels, BootstrapProtocol, ComponentId, ConsumerProgressView, SourceProgressView,
+};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, ffi::c_void, sync::Arc};
 
@@ -32,6 +34,11 @@ pub enum SourceBootstrapLiveProgress {
 
 #[async_trait]
 pub trait NativeSourceBootstrapCoordinator: Send + Sync {
+    /// The coordination protocol this coordinator implements. It must equal
+    /// the protocol the source declares in its description
+    /// (`ComponentDescription::coordination`); paired providers require it.
+    fn protocol(&self) -> BootstrapProtocol;
+
     /// Configuration-only source construction using this coordinator's engine.
     fn create_source(
         &self,
@@ -40,22 +47,41 @@ pub trait NativeSourceBootstrapCoordinator: Send + Sync {
         live: SourceBootstrapLiveProgress,
     ) -> anyhow::Result<CreatedComponent>;
 
-    /// Open a provider using the SDK's captured actual member reader.
+    /// Open a provider using the SDK's captured actual member reader. The
+    /// provider uses the source's own settings and selects only the elements
+    /// carrying `labels` (the query's declared labels) within the source's
+    /// own selection; `None` selects everything the source captures.
     fn open(
         &self,
         query: &ComponentId,
         progress: SourceProgressView,
-    ) -> anyhow::Result<Arc<dyn NativeBootstrapProvider>>;
+        labels: Option<&BootstrapLabels>,
+    ) -> anyhow::Result<Arc<dyn DurableBootstrapProvider>>;
 
     /// Retire the actual workers and leases before the host revokes readers.
     async fn stop(&self) -> anyhow::Result<()>;
 }
 
+/// The typed pairing a paired provider receives: the actual source and the
+/// coordination protocol it declared, the query, and the query's labels. A
+/// provider never reads the source's configuration or implementation.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceBootstrapMetadata {
-    pub source: CreateRequest,
+    pub source: ComponentId,
+    pub protocol: BootstrapProtocol,
     pub query: ComponentId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<BootstrapLabels>,
+}
+
+/// What a source coordinator's `describe` returns: the source request it
+/// was created for and the protocol it implements.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoordinatorDescription {
+    pub source: CreateRequest,
+    pub protocol: BootstrapProtocol,
 }
 
 /// A query-scoped pairing supplied only to its independently loaded bootstrapper.
@@ -143,6 +169,19 @@ impl Drop for LinkedBootstrapProvider {
             unsafe { (*raw.vtable).release.expect("validated")(raw.state) };
         }
     }
+}
+
+pub(crate) unsafe fn decode_open(
+    bytes: abi::BorrowedBytes,
+) -> Result<crate::bootstrap::SourceBootstrapOpen, Failure> {
+    let open: crate::bootstrap::SourceBootstrapOpen = bootstrap::decode(unsafe {
+        transport::borrowed_bytes(bytes, abi::bootstrap::MAX_CONTROL_BYTES)?
+    })
+    .map_err(Failure::from)?;
+    if let Some(labels) = &open.labels {
+        labels.validate().map_err(Failure::from)?;
+    }
+    Ok(open)
 }
 
 pub(crate) unsafe fn decode_query(bytes: abi::BorrowedBytes) -> Result<ComponentId, Failure> {

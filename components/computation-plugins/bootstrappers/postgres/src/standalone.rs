@@ -6,10 +6,10 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use drasi_computation_contracts::{
-    BootstrapWatermark, ChangeEnvelope, ComponentId, ComputationBootstrapSnapshot,
-    GraphChangeCodec, StreamId,
+    BootstrapLabels, ChangeEnvelope, ComponentId, ComputationBootstrapSnapshot, GraphChangeCodec,
+    StreamId,
 };
-use drasi_computation_plugin_sdk::{NativeBootstrapProvider, Scope};
+use drasi_computation_plugin_sdk::{QuiescentBootstrapProvider, Scope};
 use drasi_core_types::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
@@ -167,6 +167,7 @@ pub struct PostgresBootstrapProvider {
     source: ComponentId,
     stream: StreamId,
     config: Arc<PostgresBootstrapConfig>,
+    labels: Option<BootstrapLabels>,
     run: Mutex<Option<Arc<Run>>>,
     lifecycle: AsyncMutex<()>,
     pub(crate) query_scope: Option<(Scope, ComponentId)>,
@@ -183,10 +184,19 @@ impl PostgresBootstrapProvider {
             source,
             stream,
             config: Arc::new(config),
+            labels: None,
             run: Mutex::new(None),
             lifecycle: AsyncMutex::new(()),
             query_scope: None,
         })
+    }
+
+    /// Read only the configured tables whose label (`schema.table`, or
+    /// `table` in `public`) the query declares; `None` reads them all. The
+    /// configured selection stays the upper bound.
+    pub fn with_labels(mut self, labels: Option<BootstrapLabels>) -> Self {
+        self.labels = labels;
+        self
     }
 
     fn current(&self) -> Result<Option<Arc<Run>>> {
@@ -223,7 +233,14 @@ impl PostgresBootstrapProvider {
             .await?;
         let mut tables = VecDeque::new();
         let mut metadata_bytes = 0usize;
-        for selected in &self.config.tables {
+        for selected in self.config.tables.iter().filter(|selected| {
+            let (schema, table) = table_name(selected);
+            self.labels.as_ref().is_none_or(|labels| {
+                labels.requests_node(&drasi_postgres_common::replication::schema::table_label(
+                    schema, table,
+                ))
+            })
+        }) {
             let (schema, table) = table_name(selected);
             let rows = connection.query_rows(format!(
                 "SELECT a.attname, CASE WHEN t.typtype='d' THEN t.typbasetype ELSE a.atttypid END::text \
@@ -324,7 +341,7 @@ impl PostgresBootstrapProvider {
 }
 
 #[async_trait]
-impl NativeBootstrapProvider for PostgresBootstrapProvider {
+impl QuiescentBootstrapProvider for PostgresBootstrapProvider {
     fn validate_query_scope(&self, instance: &str, graph: &str, query: &ComponentId) -> Result<()> {
         if let Some((scope, owner)) = &self.query_scope {
             anyhow::ensure!(
@@ -368,15 +385,6 @@ impl NativeBootstrapProvider for PostgresBootstrapProvider {
             )),
             watermarks: Vec::new(),
         })
-    }
-
-    async fn complete_snapshot(&self) -> Result<Vec<BootstrapWatermark>> {
-        anyhow::ensure!(
-            self.current()?
-                .is_some_and(|run| run.complete.load(Ordering::Acquire)),
-            "PostgreSQL snapshot was not exhausted"
-        );
-        Ok(Vec::new())
     }
 
     async fn stop(&self) -> Result<()> {
@@ -527,11 +535,10 @@ impl Reader {
                 for (column, value) in table.relation.columns.iter().zip(&values) {
                     properties.insert(&column.name, value.to_element_value());
                 }
-                let label = if table.relation.namespace == "public" {
-                    table.relation.name.clone()
-                } else {
-                    format!("{}.{}", table.relation.namespace, table.relation.name)
-                };
+                let label = drasi_postgres_common::replication::schema::table_label(
+                    &table.relation.namespace,
+                    &table.relation.name,
+                );
                 Element::Node {
                     metadata: ElementMetadata {
                         reference: ElementReference::new(

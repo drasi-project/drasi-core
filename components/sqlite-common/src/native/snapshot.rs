@@ -361,7 +361,18 @@ impl SqliteSnapshot {
         Ok(BootstrapPreparation::Ready)
     }
 
+    /// The snapshot of every captured table.
     pub async fn snapshot_with_state(&self, state: &dyn BootstrapState) -> Result<SnapshotReader> {
+        self.snapshot_with_labels(state, None).await
+    }
+
+    /// The snapshot of the captured tables whose label (the table name) the
+    /// query declares; `None` reads every captured table.
+    pub async fn snapshot_with_labels(
+        &self,
+        state: &dyn BootstrapState,
+        labels: Option<drasi_computation_contracts::BootstrapLabels>,
+    ) -> Result<SnapshotReader> {
         let _lifecycle = self.shared.lifecycle.lock().await;
         let lease =
             tokio::time::timeout(self.config.timeout(), self.shared.gate.clone().lock_owned())
@@ -437,6 +448,7 @@ impl SqliteSnapshot {
             handover,
             outputs,
             shutdown: run.shutdown.subscribe(),
+            labels,
         };
         let owned_run = run.clone();
         spawn_owned_blocking_worker(&self.shared.worker, move || {

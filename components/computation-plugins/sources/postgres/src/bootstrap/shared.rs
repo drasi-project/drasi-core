@@ -4,10 +4,10 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use drasi_computation_contracts::{
-    BootstrapPreparation, BootstrapWatermark, ChangeEnvelope, ComponentId,
-    ComputationBootstrapSnapshot, SourceProgressView, StreamId,
+    BootstrapLabels, BootstrapPreparation, BootstrapState, BootstrapWatermark, ChangeEnvelope,
+    ComponentId, ComputationBootstrapSnapshot, SourceProgressView, StreamId,
 };
-use drasi_computation_plugin_sdk::{NativeBootstrapProvider, Scope};
+use drasi_computation_plugin_sdk::DurableBootstrapProvider;
 use drasi_postgres_common::{
     connection::parse_lsn,
     replication::{
@@ -20,8 +20,9 @@ use drasi_postgres_common::{
 use std::sync::{Arc, Mutex};
 use tokio::sync::{watch, Mutex as AsyncMutex};
 
-use crate::snapshot::{
-    export_snapshot, snapshot_timestamp, validate_snapshot_publication, SnapshotReader,
+use super::snapshot::{
+    export_snapshot, snapshot_timestamp, validate_snapshot_publication, with_activation,
+    Activation, SnapshotReader,
 };
 
 struct Run {
@@ -64,6 +65,7 @@ impl Position {
 
 /// Snapshot initialization for an existing configured slot, with no ownership
 /// transfer of that slot and no fabricated persistent bootstrap state.
+/// Created only by the shared source's coordinator, from its own settings.
 pub struct PostgresSharedSnapshot {
     source: ComponentId,
     stream: StreamId,
@@ -72,7 +74,8 @@ pub struct PostgresSharedSnapshot {
     mode: Mode,
     run: Mutex<Option<Arc<Run>>>,
     lifecycle: AsyncMutex<()>,
-    pub(crate) query_scope: Option<(Scope, ComponentId)>,
+    labels: Option<BootstrapLabels>,
+    activation: Option<Activation>,
 }
 
 impl PostgresSharedSnapshot {
@@ -111,8 +114,21 @@ impl PostgresSharedSnapshot {
             mode,
             run: Mutex::new(None),
             lifecycle: AsyncMutex::new(()),
-            query_scope: None,
+            labels: None,
+            activation: None,
         })
+    }
+
+    /// Read only the published tables whose label the query declares.
+    pub fn with_labels(mut self, labels: Option<BootstrapLabels>) -> Self {
+        self.labels = labels;
+        self
+    }
+
+    /// Connect with the paired source's current activation credentials.
+    pub(crate) fn with_activation(mut self, activation: Option<Activation>) -> Self {
+        self.activation = activation;
+        self
     }
 
     fn current(&self) -> Result<Option<Arc<Run>>> {
@@ -124,38 +140,40 @@ impl PostgresSharedSnapshot {
     }
 
     async fn begin(&self, run: Arc<Run>) -> Result<Reader> {
-        let mut exporter = connect(&self.config).await?;
+        let config = Arc::new(with_activation(&self.config, self.activation.as_ref()));
+        let mut exporter = connect(&config).await?;
         // A managed slot is named for the source, so the provider may create
         // it before the source's first start.
-        ensure_slot(&mut exporter, &self.config, true).await?;
-        validate_retention(&mut exporter, &self.config).await?;
-        let confirmed = idle_slot(&mut exporter, &self.config).await?;
+        ensure_slot(&mut exporter, &config, true).await?;
+        validate_retention(&mut exporter, &config).await?;
+        let confirmed = idle_slot(&mut exporter, &config).await?;
         let (keys, binding) =
-            source_binding(&mut exporter, &self.config, &self.source, &self.stream).await?;
-        validate_snapshot_publication(&mut exporter, &self.config).await?;
-        let timestamp = snapshot_timestamp(&mut exporter, &self.config).await?;
+            source_binding(&mut exporter, &config, &self.source, &self.stream).await?;
+        validate_snapshot_publication(&mut exporter, &config).await?;
+        let timestamp = snapshot_timestamp(&mut exporter, &config).await?;
         let temporary = format!("drasi_snapshot_{}", uuid::Uuid::new_v4().simple());
         let (boundary, snapshot) =
-            export_snapshot(&mut exporter, &self.config, &temporary, true).await?;
+            export_snapshot(&mut exporter, &config, &temporary, true).await?;
         anyhow::ensure!(
             confirmed <= boundary,
             "configured PostgreSQL slot is beyond the exported snapshot"
         );
-        let mut connection = connect(&self.config).await?;
+        let mut connection = connect(&config).await?;
         connection.query_rows(
             format!("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY; SET TRANSACTION SNAPSHOT '{snapshot}'"),
-            self.config.max_protocol_bytes,
+            config.max_protocol_bytes,
         ).await?;
         // No command is sent to the exporter after EXPORT_SNAPSHOT. The reader
         // now owns the imported snapshot; closing the exporter removes only its temporary slot.
         drop(exporter);
         let reader = SnapshotReader::new(
             connection,
-            (*self.config).clone(),
+            (*config).clone(),
             keys,
             timestamp,
             self.source.clone(),
             self.stream.clone(),
+            self.labels.as_ref(),
         )
         .await?;
         *run.reader.lock().await = Some(reader);
@@ -172,32 +190,41 @@ impl PostgresSharedSnapshot {
             run,
             position,
             confirmed,
-            config: self.config.clone(),
+            config,
         })
     }
 }
 
 #[async_trait]
-impl NativeBootstrapProvider for PostgresSharedSnapshot {
+impl DurableBootstrapProvider for PostgresSharedSnapshot {
     fn recovery_reader(&self) -> Option<SourceProgressView> {
         Some(self.progress.clone())
     }
 
-    fn validate_query_scope(&self, instance: &str, graph: &str, query: &ComponentId) -> Result<()> {
+    fn validate_query_scope(
+        &self,
+        _instance: &str,
+        graph: &str,
+        query: &ComponentId,
+    ) -> Result<()> {
         anyhow::ensure!(
             self.progress.graph_id() == graph && self.progress.component_id() == query,
             "shared PostgreSQL snapshot belongs to another query"
         );
-        if let Some((scope, owner)) = &self.query_scope {
-            anyhow::ensure!(
-                scope.instance_id == instance && scope.graph_id == graph && owner == query,
-                "shared PostgreSQL snapshot query scope changed"
-            );
-        }
         Ok(())
     }
 
-    async fn prepare(&self) -> Result<BootstrapPreparation> {
+    fn has_pending_snapshot(&self) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn completion_state(&self) -> Result<Option<bytes::Bytes>> {
+        Ok(None)
+    }
+
+    /// Volatile and persistent query owners are both supported: the shared
+    /// handover is the configured slot's position, not query-owned state.
+    async fn prepare(&self, _state: Option<&dyn BootstrapState>) -> Result<BootstrapPreparation> {
         let progress = self.progress.snapshot()?;
         anyhow::ensure!(
             progress.recovered && progress.failure.is_none(),
@@ -233,7 +260,10 @@ impl NativeBootstrapProvider for PostgresSharedSnapshot {
         Ok(BootstrapPreparation::Ready)
     }
 
-    async fn snapshot(&self) -> Result<ComputationBootstrapSnapshot> {
+    async fn snapshot(
+        &self,
+        _state: Option<&dyn BootstrapState>,
+    ) -> Result<ComputationBootstrapSnapshot> {
         let _lifecycle = self.lifecycle.lock().await;
         anyhow::ensure!(
             self.current()?.is_none(),

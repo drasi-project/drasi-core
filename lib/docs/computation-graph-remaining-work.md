@@ -29,7 +29,7 @@ link to their testing obligations there rather than repeating them. The
 [testing guide](../../docs/contributing/contributing-code/contributing-code-tests/)
 describes ordinary Cargo and CI execution.
 
-The ABI 4 design is an unreleased breaking change. Converting every plugin to
+The ABI 5 design is an unreleased breaking change. Converting every plugin to
 the native SDK and retiring old adapters are not merge prerequisites, and no
 compatibility shims or automatic migration of old state are planned.
 
@@ -337,11 +337,20 @@ far.
   query adapter) derive the describer's resource capabilities from the bound
   objects; resource handles created without `with_capabilities` stay
   undeclared and satisfy no requirement.
-- Most sources declare their own progress persistence as `Undeclared`;
-  declare it where a requirement needs it. The PostgreSQL and SQLite sources
-  declare theirs and require a durable progress binding
-  (`source_progress`/`consumer_progress`) for the modes whose cursors must
-  survive a restart.
+- Bootstrap facts are declared: providers declare completion (quiescent or
+  durable), pairing protocol, element namespace and identity; sources declare
+  their coordination offer and element identity; the Host declares bootstrap
+  port facts; the graph checks bootstrap edges (`check_bootstrap_edge`), and a
+  relay's completion is resolved through its own providers.
+- Most network sources declare their own progress persistence as
+  `Undeclared`; declare it where a requirement needs it. The PostgreSQL,
+  SQLite and MySQL sources declare theirs and require a durable progress
+  binding (`source_progress`/`consumer_progress`) for the modes whose cursors
+  must survive a restart (their untracked modes declare `Volatile`); the SQL
+  Server source declares the durability of its bound consumer progress.
+- Component progress persistence is declared but not yet compared along an
+  edge: nothing refuses a `Volatile` source feeding a query with durable
+  progress (see [MY-36](#my-36)).
 - The further facts identified by the compatibility audit (recovery and
   control messages, ordering, bootstrap capabilities, archive and atomic
   publication support, credential kinds) belong in this model rather than in
@@ -1843,12 +1852,13 @@ plugin and cause, and the rule is enforced.
 
 **Kind:** Issue. **Priority:** Medium (P1). **Effort:** Small.
 
-The Host SDK README still states native ABI 2.0.0 and wire version 2; the real
-values are ABI 4.0.0, wire 4 and ordinary ABI 0.19.0. Only seven plugins have
+The quoted ABI versions are fixed: every native document now states ABI 5.0.0,
+wire 5 and ordinary ABI 0.19, and
+`computation-plugin-sdk/tests/documented_abi_version.rs` fails when a document
+quotes another native ABI, wire version or ordinary ABI. Only some plugins have
 `DESIGN.md` and `CONFIGURATION.md`.
 
-**What remains:** fix the Host SDK README; derive version text from the ABI
-constants or test it; require the two documents for every native plugin
+**What remains:** require the two documents for every native plugin
 (per-plugin READMEs are plugin work). Explain in the guides that native
 libraries stay loaded for the process lifetime, so a rebuild needs a restart.
 
@@ -1964,10 +1974,32 @@ documentation gaps are unknown and untracked.
   implements update planning; none of the four has `DESIGN.md` or
   `CONFIGURATION.md`.
 
+**Progress:** the providers' declarations and pairing were reworked
+(`computation-plugins/bootstrappers/NATIVE-BOOTSTRAP-PROVIDER-GUIDE.md`):
+every bootstrap factory has a pure `describe` the Host forwards unchanged;
+paired providers (PostgreSQL, MySQL, SQL Server, SQLite coordinated) are
+opened by their source's coordinator through a declared protocol checked when
+the edge binds; unpaired providers take their element namespace and stream
+from the graph relation instead of `source`/`stream` keys; the SQLite file
+snapshot declares its element identities and is refused on a source with
+other tables or keys; quiescent-versus-durable completion is checked at
+binding; queries pass their labels and providers select tables and endpoints
+by them; `NativeBootstrapProvider` is split into required
+`QuiescentBootstrapProvider` and `DurableBootstrapProvider` hooks.
+
 **What remains:** review each plugin against the native sink and source
 standards (lifecycle hooks, erase, update planning, configuration and secrets,
 retries, tests, documentation) and record the findings as per-plugin entries
-here, as the source and sink sections do.
+here, as the source and sink sections do. Port the container suites that
+still construct coordinated providers outside the graph
+(`components/sources/postgres/tests/native_transactions`,
+`host-sdk/tests/native_mysql_components.rs`,
+`host-sdk/tests/fixtures/native_mysql`, `host-sdk/tests/fixtures/native_mssql`)
+to the paired path: create the source's coordinator
+(`NativeFactory::create_source_bootstrap`) and open providers with
+`create_paired_query_provider`, or wire the provider node into the graph.
+Flatten the standalone PostgreSQL snapshot configuration (PGA-10) and build
+the SQL Server snapshot schema from the source's option list (MSA-6).
 
 **Example:** whether a SQLite initial-data provider stopped mid-snapshot
 releases its read transaction within the stop deadline is not known.
@@ -1993,20 +2025,9 @@ Each source has its own section. Work shared by every plugin is under
 
 #### Pair the source and its initial-data providers through the coordinator (PG-13)
 
-**Kind:** Improvement. **Priority:** High. **Effort:** Medium.
+**Kind:** Improvement. **Priority:** High. **Effort:** Medium. **Status:** Resolved.
 
-The source and its coordinated and shared bootstrap providers share one configuration shape and derived slot identity, but are configured and validated separately. An operator can give them different databases or publications, and the host cannot check that they belong together. The coupling is hidden state: a provider whose `source` names another source's ID creates slots in that source's managed namespace, which that source's erase then drops (or which pin WAL until it does), and no edge or declaration lets the graph refuse it. PostgreSQL is the only coordinated native source that does not use the ABI 5 pairing.
-
-**What remains:**
-
-- Implement `supports_bootstrap_coordination` and `create_bootstrap_coordinator` for the coordinated and shared factories, as the SQLite source does.
-- Validate that the provider's request matches the source's configuration and scope; keep element-ID and type mapping in `postgres-common`.
-
-**Example:** a `drasi.postgres/shared-transactions` source with `publicationName: orders_pub` and a coordinated provider configured with `publicationName: order_pub` start independently; the coordinator would reject the mismatch at creation.
-
-**Evidence:** no coordinator in `drasi-core/components/computation-plugins/sources/postgres/src/lib.rs`; SQLite reference `drasi-core/components/computation-plugins/sources/sqlite/src/lib.rs:157-177`; SDK hooks `drasi-core/components/computation-plugin-sdk/src/export.rs:86-93`.
-
-**Done when:** coordinated and shared PostgreSQL sources create their providers through the coordinator, and a mismatched provider is refused in a test.
+The PostgreSQL source now implements `supports_bootstrap_coordination` and `create_bootstrap_coordinator` for every mode and declares its coordination protocol (`drasi_postgres_common::replication::coordination`): required by `drasi/postgres-transactions` and `drasi.postgres/changes` with `coordinatedSnapshot: true`, optional for the shared modes. The coordinator opens each query's provider (`PostgresSnapshot`/`PostgresSharedSnapshot`, now in the source crate) from the source's own identity, stream, settings and activation credentials, so managed slots are always named under that source's prefix. The coordinated and shared bootstrap factories take no configuration (`PairedBootstrapFactory`), and the graph refuses a provider on a source that does not declare the same protocol when the edge binds (`lib/tests/computation_bootstrap_binding.rs`). The PostgreSQL container suites under `components/sources/postgres/tests` still construct coordinated providers outside the graph and need porting to the paired path (see [CW-103](#cw-103)).
 
 <a id="pg-truncate-reset"></a>
 
@@ -2133,7 +2154,9 @@ GTIDs are used only for the initial start position; checkpoints store file/offse
 
 #### Pair the MySQL source and bootstrapper through the coordinator (MY-16)
 
-**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+**Kind:** Issue. **Priority:** High. **Effort:** Medium. **Status:** Resolved: the transactions, shared-transactions and shared-changes sources with `startFrom: snapshot` declare and implement a coordination protocol (`drasi_mysql_common::native::coordination`); their coordinator opens `MySqlSnapshot` from the source's own settings, binding and activation credentials, and the paired factories take no configuration. A provider on the wrong source is refused when the edge binds. SQL Server has the same pairing (`drasi.mssql/coordinated-changes`, offered by a source that owns a `barrierTable`).
+
+Original problem:
 
 The source and `drasi-core/components/computation-plugins/bootstrappers/mysql` take the same flat settings and share committed progress, but are not paired through the SDK bootstrap coordinator. The provider names its source in a free `source` field and repeats the source's `stream`, `tables`, `tableKeys` and connection settings; nothing checks the pairing at wiring. A provider with `tables: [a, b]` beside a source with `[a]` loads both tables and only then the source refuses to start (binding differs); a wrong `source` records the watermark under another ID and the real source fails forever with "no complete consumer-owned boundary". Compatibility is thus discovered at start, after expensive work. Use `supports_bootstrap_coordination`/`create_bootstrap_coordinator` as SQLite does, so the provider receives the source's settings and binding and mismatches are refused when the edge is bound. The SQL Server source and provider have the same gap (their `barrierTable`, `tables` and `source` are duplicated too).
 
@@ -2149,7 +2172,7 @@ The source and `drasi-core/components/computation-plugins/bootstrappers/mysql` t
 
 The MySQL source can take its login from activation credentials, but the bootstrap providers connect with their literal `user` and `password` only. A source that uses an identity provider therefore cannot be paired with a password-less provider. This is the MySQL counterpart of [MS-22](#ms-22) and needs the same SDK and Host change.
 
-**What remains:** pass activation credentials to bootstrap providers, or document that MySQL initial loading needs a literal login even when the source uses an identity provider. The SDK and Host already pass freshly resolved activation credentials to an erasing dispose (`DisposeContext::credentials`); any MySQL source or provider erase that connects should use them, as the PostgreSQL source does.
+**What remains:** the coordinated providers now connect with the paired source's current activation credentials (the source's coordinator shares them, [MY-16](#pair-the-mysql-source-and-bootstrapper-through-the-coordinator-my-16)). The standalone `drasi.mysql/snapshot` still connects with its literal login; pass it activation credentials or document that standalone initial loading needs a literal login. (The MySQL source's erase connects to nothing, since it owns no server-side state, so unlike the PostgreSQL and SQL Server sources it needs no `DisposeContext::credentials`.)
 
 **Evidence:** `drasi-core/components/computation-plugins/bootstrappers/mysql/src/config.rs` (`user`, `password`; no credential context).
 
@@ -2181,7 +2204,9 @@ An untracked (volatile) MySQL factory keeps no position: after a restart it star
 
 The live test that covers it was changed to expect this: with the untracked factory the offline update is asserted to be missing after restart, while the coordinated (tracked) factory replays it.
 
-**What remains:** an owner decision: either document the behaviour as intended for untracked factories (in the MySQL CONFIGURATION.md and the native source guide), or refuse, at configuration time, an untracked source feeding a query with persistent progress, as the graph already refuses volatile producers for exactly-once consumers.
+The untracked factories now declare `ProgressPersistence::Volatile` (and the tracked ones durable progress requirements), so the fact is declared. The graph does not act on it: query inputs are unkeyed and no edge check compares a producer's progress persistence with the consuming query's, so the pairing is still accepted.
+
+**What remains:** an owner decision: either document the behaviour as intended for untracked factories (the MySQL DESIGN.md describes it), or add the edge rule (CW-106): a query whose progress is durable declares that its inputs need a producer whose progress is not `Volatile`, and the graph refuses the edge at binding. The rule would apply to every volatile source (HTTP, gRPC, SQLite `changes`, PostgreSQL volatile rows), not only MySQL.
 
 **Example:** stop a graph whose `drasi.mysql/changes` source feeds a RocksDB-backed query, run `UPDATE items SET value='offline' WHERE code=3`, start again: the query still shows the old value, and only a later update reaches it.
 
@@ -2270,7 +2295,7 @@ The engine sits behind a database seam with typed failures, but readiness, recon
 
 The source can take its login from activation credentials, including a Microsoft Entra ID token, but bootstrap factories receive no activation credentials. The paired providers therefore always need a literal `user` and `password` (a secret reference), and a provider configured without them is refused.
 
-**What remains:** pass activation credentials to bootstrap providers (an SDK and Host change shared with the other database bootstrappers, including the PostgreSQL providers), or document that bootstrap needs a SQL login even when the source uses an identity provider. The SDK and Host already pass freshly resolved activation credentials to an erasing dispose (`DisposeContext::credentials`); the SQL Server source's erase should connect with them, as the PostgreSQL source does.
+**What remains:** the coordinated `drasi.mssql/bootstrap` provider is now opened by the source's coordinator and authenticates with the source's current activation credentials, including an Entra ID token. The standalone `drasi.mssql/snapshot` still needs a literal SQL login. (The source's own erase already connects with the freshly resolved credentials of the erasing dispose, `DisposeContext::credentials`, so a source rebuilt after a restart erases its markers without starting.)
 
 **Example:** an Azure SQL database with SQL authentication disabled can stream changes through the source with an Entra ID token, but its initial data cannot be loaded.
 
@@ -5109,6 +5134,8 @@ admission path are not yet covered by a real process-kill test.
 | `drasi-core/components/host-sdk/tests/native_network/durable.rs:352-626` | Native HTTP and gRPC sources recover accepted input after process exit when the client never received its receipt. |
 | `drasi-core/components/host-sdk/tests/native_query_plugin/durable_shared.rs:487-561`, `durable_bootstrap_crash.rs:54-152` | Loaded query plugin: shared-journal exit before/after commit; SQLite bootstrap exit while partial and after completion. |
 | `drasi-core/components/sources/{http,grpc}/tests/wal_integration.rs` | Ordinary HTTP/gRPC source WAL crash/replay. WAL pruning waits for the initial subscriptions (`drasi-core/lib/src/sources/base.rs:589-640`). |
+| `drasi-core/components/host-sdk/tests/native_storedproc_crash.rs` (RCA-5, Podman, `make test-native-storedproc-crash`) | Loaded MySQL and PostgreSQL stored-procedure consumers: a child process exits after the destination committed an operation but before the host recorded its progress, and after the last progress commit but before acknowledgement, for `exactlyOnce` (rows == inputs; empty cursor epoch) and `atLeastOnce` (inputs plus at most the one in-flight batch for a restarted in-memory producer under a new epoch; a persistent producer keeps its epoch and repeats nothing). SQL Server needs its explicit fixture and is not in this matrix. |
+| `drasi-core/components/host-sdk/src/computation/consumer_handoff_tests.rs` (`native_consumer_storage_failure_is_retryable_and_resumes_without_loss`, RCA-7) | Loaded native consumer (external and transactional) in a graph whose consumer-progress storage fails from the first completion commit (applied or refused) until it recovers: the node shows a retryable `Processing` failure and does not acknowledge its input; after recovery the graph's in-place retry reopens the fenced ledger and resumes in the same generation without loss or a second effect. Operator Retry (replacement) while storage is still down is not qualified: replacement waits on the sink's drain. |
 
 **What remains:**
 
@@ -5423,6 +5450,17 @@ components in the graph keep running.
 **Done when:** Each audited callback has a test or a documented reason it is
 safe; failures produce useful diagnostics, damaged objects are not reused, and
 unrelated healthy work continues.
+
+**Resolved (RCA-8): panics in owned workers.** A panic inside a worker
+registered with `workers::spawn_owned_worker` (or its `try_`/blocking variants)
+from a native operation is reported to the SDK instance when it happens; the
+Host waits on the independent `WORKER_FAILURE` operation through
+`ComputationComponent::worker_failures` while the node processes, so the node
+fails within a bounded time as a retryable `Processing` failure, withdraws its
+readiness, and Retry starts it cleanly
+(`drasi-core/components/host-sdk/tests/native_worker_failure.rs`, loaded on both
+Tokio flavours; `drasi-core/lib/tests/computation_worker_failures.rs`). Workers
+started with plain `tokio::spawn` remain unobserved until joined.
 
 <a id="cw-21"></a>
 

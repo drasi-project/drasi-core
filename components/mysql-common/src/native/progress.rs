@@ -151,12 +151,8 @@ impl Starting {
 
 fn validate(state: &SourceProgressSnapshot) -> Result<()> {
     anyhow::ensure!(
-        state.ready
-            && state.recovered
-            && state.admitting
-            && state.persistent
-            && state.failure.is_none(),
-        "MySQL replay requires ready, admitting, persistent and unfenced consumer progress"
+        state.ready && state.recovered && state.admitting && state.failure.is_none(),
+        "MySQL replay requires ready, admitting and unfenced consumer progress"
     );
     Ok(())
 }

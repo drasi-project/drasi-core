@@ -214,14 +214,13 @@ async fn open(
         ComponentBatch::GRAPH_ID,
         component_id(46),
     )?);
-    let bootstrap = plugins.bootstrap.bootstrap_factories()[0].create_provider(
+    let bootstrap = paired_provider(
+        &plugins.bootstrap.bootstrap_factories()[0],
         component_id(46),
-        bootstrap_flat(
-            component_id(77).to_string(),
-            &coordinated_config(&database.config),
-        ),
-        Some(scope(ComponentBatch::GRAPH_ID)),
-        Some(progress.clone()),
+        component_id(77).to_string(),
+        &coordinated_config(&database.config),
+        scope(ComponentBatch::GRAPH_ID),
+        progress.clone(),
     )?;
     let query = query(path.join("query").as_path(), progress.clone())
         .await?
@@ -529,14 +528,13 @@ async fn native_bootstrap_rejects_a_same_named_but_different_actual_owner() -> R
     let database = Database::new().await?;
     let expected = progress();
     let other = progress();
-    let snapshot = plugins.bootstrap.bootstrap_factories()[0].create_provider(
+    let snapshot = paired_provider(
+        &plugins.bootstrap.bootstrap_factories()[0],
         component_id(46),
-        bootstrap_flat(
-            component_id(77).to_string(),
-            &coordinated_config(&database.config),
-        ),
-        Some(scope(expected.graph_id())),
-        Some(expected.clone()),
+        component_id(77).to_string(),
+        &coordinated_config(&database.config),
+        scope(expected.graph_id()),
+        expected.clone(),
     )?;
     let path = tempfile::tempdir()?;
     let mut query = query(path.path(), other)
@@ -916,14 +914,13 @@ fn bootstrap(
     database: &Database,
     owner: Arc<QuerySourceProgress>,
 ) -> Result<Arc<dyn ComputationBootstrapProvider>> {
-    Ok(plugins.bootstrap.bootstrap_factories()[0].create_provider(
+    Ok(paired_provider(
+        &plugins.bootstrap.bootstrap_factories()[0],
         component_id(46),
-        bootstrap_flat(
-            component_id(77).to_string(),
-            &coordinated_config(&database.config),
-        ),
-        Some(scope(owner.graph_id())),
-        Some(owner),
+        component_id(77).to_string(),
+        &coordinated_config(&database.config),
+        scope(owner.graph_id()),
+        owner,
     )?)
 }
 

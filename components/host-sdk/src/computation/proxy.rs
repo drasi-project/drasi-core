@@ -1461,6 +1461,9 @@ impl ComputationComponent for NativeComponentProxy {
             _ => {}
         }
     }
+    fn worker_failures(&self) -> Option<Arc<dyn WorkerFailures>> {
+        Some(Arc::new(NativeWorkerFailures(self.inner.clone())))
+    }
     fn control_handler(&self) -> Option<Arc<dyn ControlHandler>> {
         let native = self
             .metadata
@@ -2188,6 +2191,31 @@ impl ComputationService for NativeComponentProxy {
         self.inner.unit(abi::operation::RUN, &[]).await
     }
 }
+/// Waits on the plugin's independent WORKER_FAILURE operation while the graph
+/// processes the component.
+pub(super) struct NativeWorkerFailures(pub(super) Arc<RemoteComponent>);
+#[async_trait]
+impl WorkerFailures for NativeWorkerFailures {
+    async fn wait(&self) -> anyhow::Error {
+        match self.0.unit(abi::operation::WORKER_FAILURE, &[]).await {
+            Err(error) if !no_worker_failure(&error) => error,
+            // No activation (CLOSED), an ended wait or an unexpected success
+            // reports nothing; the next processing operation waits again.
+            _ => std::future::pending().await,
+        }
+    }
+}
+fn no_worker_failure(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<Failure>())
+        .is_some_and(|failure| {
+            matches!(
+                failure.code,
+                abi::status::CLOSED | abi::status::CANCELLED | abi::status::UNSUPPORTED
+            )
+        })
+}
 struct NativeWakeup(Arc<RemoteComponent>);
 #[async_trait]
 impl WakeupSource for NativeWakeup {
@@ -2217,6 +2245,9 @@ impl ComputationComponent for NativeTransactionalProxy {
     }
     fn output_readers(&self) -> OutputReaders {
         self.component.output_readers()
+    }
+    fn worker_failures(&self) -> Option<Arc<dyn WorkerFailures>> {
+        self.component.worker_failures()
     }
     async fn initialize(&mut self, context: &InitializeContext) -> anyhow::Result<()> {
         self.component.initialize(context).await

@@ -2,7 +2,7 @@
 
 `drasi-computation-sink-storedproc-postgres` exports one native
 ComputationGraph factory, `drasi.postgres/storedproc` (implementation `1`,
-configuration version `1`, native ABI 4.0, consumer extension). Its `in` port
+configuration version `1`, native ABI 5.0, consumer extension). Its `in` port
 accepts standard graph-change envelopes from any source, transformer or query
 ([sink input contract](../../SINKS.md)). It runs inside the hosting graph,
 statically or as a separately loaded library, and does not depend on

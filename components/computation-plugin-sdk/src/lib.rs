@@ -5,11 +5,11 @@
 //! and capability contracts. No legacy Source/Reaction interfaces are involved.
 
 pub use drasi_computation_contracts::{
-    ComponentDescription, ComponentUpdateData, ComponentUpdateMode, ComponentUpdatePlan,
-    DeliveryFailure, DeliveryFailureClass, DeliveryGuarantee, DependencyCapabilities,
-    DependencyRequirement, DurabilityRequirement, InputDelivery, OutputDescription,
-    PermanentFailurePolicy, PortFormatAlternative, PortFormatCatalogue, ProgressPersistence,
-    ResourceCapabilities, ResourceDurability, SinkBatching,
+    BootstrapCoordination, ComponentDescription, ComponentUpdateData, ComponentUpdateMode,
+    ComponentUpdatePlan, DeliveryFailure, DeliveryFailureClass, DeliveryGuarantee,
+    DependencyCapabilities, DependencyRequirement, DurabilityRequirement, InputDelivery,
+    OutputDescription, PermanentFailurePolicy, PortFormatAlternative, PortFormatCatalogue,
+    ProgressPersistence, ResourceCapabilities, ResourceDurability, SinkBatching,
 };
 pub use drasi_computation_plugin_abi as abi;
 /// The facade plugins write diagnostics and operator output through; see
@@ -44,10 +44,16 @@ pub mod wire;
 
 pub use activation_credentials::{ActivationCredentialContext, ActivationCredentials};
 pub use admission::{AdmissionError, AdmissionErrorKind, NativeAdmission};
-pub use bootstrap::{BootstrapFactory, BootstrapFactoryMetadata, NativeBootstrapProvider};
+pub use bootstrap::{
+    BootstrapCompletionKind, BootstrapCreateRequest, BootstrapFactory, BootstrapFactoryMetadata,
+    BootstrapLabels, BootstrapOutputDescription, BootstrapProtocol, BootstrapSession,
+    DurableBootstrapProvider, ElementIdentity, ElementNamespace, NativeBootstrapProvider,
+    PairedBootstrapFactory, QuiescentBootstrapProvider, ServedSource, SourceBootstrapOpen,
+};
 pub use bootstrap_coordination::{
-    LinkedBootstrapProvider, NativeSourceBootstrap, NativeSourceBootstrapCoordinator,
-    SourceBootstrapLiveProgress, SourceBootstrapMetadata, SourceBootstrapProgress,
+    CoordinatorDescription, LinkedBootstrapProvider, NativeSourceBootstrap,
+    NativeSourceBootstrapCoordinator, SourceBootstrapLiveProgress, SourceBootstrapMetadata,
+    SourceBootstrapProgress,
 };
 pub use component::{
     NativeComponent, NativeManagement, NativeService, NativeSink, NativeSource, NativeTransformer,

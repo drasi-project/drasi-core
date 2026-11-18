@@ -66,8 +66,10 @@ Replace runtime-only imports with `drasi-computation-contracts` data types and
 the SDK's `NativeComponent`/processing traits. A native source receives only a
 `SourceProgressView`, not the host's `QuerySourceProgress` owner. It declares
 `replay_retention()` separately when needed; the SDK still verifies the exact
-negotiated reader and consumer identity. Bootstrap factories return
-`NativeBootstrapProvider`. Graph-local control handlers, admission owners,
+negotiated reader and consumer identity. Bootstrap factories describe their
+output (`BootstrapFactory::describe`) and return a `NativeBootstrapProvider`:
+a `QuiescentBootstrapProvider` or a `DurableBootstrapProvider`, every hook
+required. Graph-local control handlers, admission owners,
 query APIs and construction contexts are intentionally absent from these
 plugin-side traits.
 
@@ -91,7 +93,7 @@ dynamic-plugin = []
 
 [package.metadata.drasi-plugin]
 abi-family = "computation"
-abi-version = "4.0.0"
+abi-version = "5.0.0"
 kind = "example-native"
 ```
 
@@ -353,8 +355,17 @@ A plugin publishes provider components through the bootstrap extension
 `BootstrapProvider` role. A provider node has one `snapshot` output and no live
 ports; it serves one provider instance per session for the consumer named in
 the request. Provider nodes accept a `source_progress` dependency for durable
-bootstrap. Source-paired providers reach the coordinator their connected source
-creates; there is no coordinator dependency to declare.
+bootstrap. The node's description is the factory's pure `describe` answer
+(completion, pairing protocol, element namespace, identity), forwarded
+unchanged; the graph checks the provider's edge against the consumer's
+bootstrap input and the source's declared coordination and identities when it
+binds. Source-paired providers (`BootstrapFactoryMetadata::pairing`, usually
+`PairedBootstrapFactory`) reach the coordinator their connected source
+creates; there is no coordinator dependency to declare, and they never read
+the source's configuration. Every session carries the requesting query's
+labels and, for a provider serving a source's namespace, the served source
+and stream from the graph relation (`BootstrapSession`). See the
+[native bootstrap provider standard](../computation-plugins/bootstrappers/NATIVE-BOOTSTRAP-PROVIDER-GUIDE.md).
 
 A consumer bootstraps either from its inputs' `snapshot` outputs or from one
 local provider connected directly to its `bootstrap` input. With a local
@@ -412,7 +423,7 @@ the metadata schema and enforce their conditional requirements in construction.
 annotation. The separately negotiated versioned creation envelope sets it for
 existing factory callbacks, including progress and coordinated-source creation.
 Ordinary Rust request literals set it to `false`; the base request encoding,
-base ABI 4.0.0 layouts, and wire version 4 remain unchanged.
+base ABI 5.0.0 layouts, and wire version 5 remain unchanged.
 
 Implement `NativeComponent::start_with_credentials(ActivationCredentials)` for
 the bound path. It runs **inside the normal START operation**, with the same
@@ -440,8 +451,8 @@ cancellation-safe under the existing operation-ownership contract.
 ## Configuration descriptions
 
 The optional `configuration-v1` entry point publishes field descriptions, defaults,
-integer limits and allowed values without changing the frozen ABI 4.0 metadata or
-wire version 4. A matching-wire plugin may omit the extension; the host does not
+integer limits and allowed values without changing the frozen ABI 5.0 metadata or
+wire version 5. A matching-wire plugin may omit the extension; the host does not
 invent missing descriptions. A present but malformed extension is an error,
 including during metadata-only discovery.
 
@@ -476,7 +487,7 @@ source processing lock. Reads must remain possible while `next()` is pending.
 This is data-schema discovery, not the factory's configuration schema.
 
 The optional `source_schema_v1` extension carries a bounded MessagePack
-`Option<SourceSchema>` without changing ABI 4.0.0 or envelope wire version 4.
+`Option<SourceSchema>` without changing ABI 5.0.0 or envelope wire version 5.
 The SDK permits one schema read per source at a time, limits replies to 1 MiB
 and reads to 30 seconds, and rejects results from stopped or replaced
 activations. Cancellation releases the read slot. Actual failures remain errors;
@@ -730,6 +741,22 @@ restartable; reconstruction creates a fresh instance. The Host preserves
 distinguish damage from an ordinary terminal error. Task cancellation alone is
 not classified as a panic.
 
+A panic inside an owned worker is different: it unwinds only that task, not an
+operation of the instance. Register workers with
+`drasi_computation_contracts::workers::spawn_owned_worker` (or
+`try_spawn_owned_worker` / `spawn_owned_blocking_worker`) from inside a
+component operation (`start`, `handle`, ...), or from a worker registered that
+way. Each such worker reports its panic to the instance when it happens, and
+joining it still returns the panic. The SDK records the first worker failure of
+the activation; the Host waits on it through the independent `WORKER_FAILURE`
+operation while the graph processes the component, so the node fails promptly
+as a retryable `Processing` failure and withdraws its readiness even when no
+operation is in flight (an idle sink). The instance is not quarantined: Retry,
+or Stop then Start, begins a new activation without that failure. A component's
+`stop` therefore treats a panicked worker's `WorkerCleanupError::Join` as
+already reported rather than as a Stop failure. Workers spawned with plain
+`tokio::spawn` are not observed.
+
 Returned terminal errors retain the graph node and its diagnostics. Unrelated
 branches and host management continue. Rejected custom control messages do not
 close the inbox. Graceful graph stop waits for an admitted data operation,
@@ -764,7 +791,7 @@ hot-unload promise. Native plugins are trusted in-process code, not a sandbox.
 
 ## Envelopes and schemas
 
-Metadata and configuration are UTF-8 JSON. Native wire version 4 uses named
+Metadata and configuration are UTF-8 JSON. Native wire version 5 uses named
 MessagePack records and bulk MessagePack binary buffers, not JSON envelopes or
 per-byte integer arrays. Its binary envelope format is also 2.
 `BinaryEnvelopeCodec` encodes the full schema descriptor, typed images, sequence,
@@ -881,7 +908,7 @@ The same participant also works when the host container uses `SharedStorageGroup
 and shared QoS outputs. Its state, the container's input progress/retained output
 and the selected journal appends then commit together. The host reserves pipe
 capacity before invoking the participant. No new ABI interface or storage handle
-crosses the boundary: ABI 4.0 transaction participants use their existing
+crosses the boundary: ABI 5.0 transaction participants use their existing
 revocable mailbox. This does not give standalone native transformers output
 tracking, make separate stores atomic, or deduplicate external effects.
 
@@ -1129,8 +1156,8 @@ service. It has its own exact header, version, reserved fields and read-only
 observation callback. The SDK rejects a base table for a scheduling factory,
 an unexpected scheduling table for an ordinary factory, and malformed or
 unsupported extension versions. Transaction requests still use the same
-revocable mailbox, with no plugin commit method. Base ABI 4.0.0 layouts,
-envelope wire version 4 and the independent legacy plugin ABI are unchanged.
+revocable mailbox, with no plugin commit method. Base ABI 5.0.0 layouts,
+envelope wire version 5 and the independent legacy plugin ABI are unchanged.
 
 The stateful delayed-emission transformer in
 [`host-sdk/tests/fixtures/native_scheduling.rs`](../host-sdk/tests/fixtures/native_scheduling.rs)
@@ -1147,7 +1174,7 @@ combinations or the mixed SQLite/query/non-query CW-82 application.
 ## Optional host-owned consumer completion
 
 The independently negotiated `drasi_computation_plugin_consumer_v1` extension
-leaves base ABI 4.0 and wire 4 unchanged. Declare `Factory::consumer_mode()` as
+leaves base ABI 5.0 and wire 5 unchanged. Declare `Factory::consumer_mode()` as
 `External` or `Transactional`, with a handled, non-snapshot sink descriptor.
 Return `Component::Consumer` for a `NativeComponent + DeliveryHandler`, or
 `Component::TransactionalConsumer` for a `NativeTransactionalConsumer`. Ordinary
@@ -1198,7 +1225,7 @@ mode and actual storage guarantees. None of these services adds a graph executor
 ## Optional graph-owned source admission
 
 The export macro also supplies the separately versioned service-v1 symbol.
-Base ABI 4.0 metadata and tables are unchanged; matching-ABI binaries without the symbol
+Base ABI 5.0 metadata and tables are unchanged; matching-ABI binaries without the symbol
 remain loadable for fast mode. Declare `Factory::supports_source_admission()`
 only for a single-output source, and implement `create_with_admission`.
 Without a bound service, retain the existing `create` behavior.
@@ -1234,7 +1261,7 @@ external effects.
 
 The independent `drasi_computation_plugin_recovery_v1` symbol negotiates
 `Factory::supports_source_progress()` and `create_with_progress`. It does not
-extend service-v1, strict base metadata, ABI **4.0.0**, or wire version **4**.
+extend service-v1, strict base metadata, ABI **5.0.0**, or wire version **5**.
 Old hosts ignore the symbol; new hosts still load old binaries without granting
 this service. Missing, malformed or unsupported requested services fail explicitly.
 

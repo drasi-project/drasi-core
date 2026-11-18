@@ -1080,10 +1080,12 @@ async fn native_factory_and_direct_sources_deliver_transactions_through_graph_pi
                 })?
                 .provide_resource(
                     resource,
+                    // The query's RocksDB indexes keep its progress durable.
                     ResourceHandle::new(
                         ResourceRole::Checkpoint,
                         Arc::new(QuerySourceProgressResource(owner.clone())),
-                    ),
+                    )
+                    .with_capabilities(ResourceCapabilities::DURABLE),
                 )?;
             let graph = if let Some(bootstrap) = bootstrap {
                 let id = ResourceId::try_new("snapshot")?;

@@ -6,7 +6,7 @@
 RUSTFLAGS := -Dwarnings
 
 .PHONY: test clippy clippy-fix help build-test-plugins test-host-sdk check-native-dependencies \
-       build-native-plugins build-native-standard-plugins build-native-network-plugins build-native-mysql-plugins build-native-postgres-plugins build-native-sqlite-plugins test-native-network test-native-mysql test-native-sqlite \
+       build-native-plugins build-native-standard-plugins build-native-network-plugins build-native-mysql-plugins build-native-postgres-plugins build-native-sqlite-plugins test-native-network test-native-mysql test-native-sqlite test-native-storedproc-crash \
        build-native-mssql-plugins test-native-mssql \
        build-plugins build-plugins-release list-plugins \
        publish-plugins publish-plugins-dry-run publish-plugins-release \
@@ -24,6 +24,7 @@ help:
 	@echo "  test-native-network       - Build native network plugins and run wire/loopback tests"
 	@echo "  test-native-mysql         - Build native MySQL plugins and run isolated Podman consumer tests"
 	@echo "  test-native-mssql         - Run SQL Server tests with an explicitly configured isolated fixture"
+	@echo "  test-native-storedproc-crash - Kill a child delivering through the MySQL/PostgreSQL procedure sinks (Podman)"
 	@echo "  test-native-sqlite        - Build native SQLite plugins and run Host component tests"
 	@echo "  check-native-dependencies - Check native plugin dependency isolation"
 	@echo "  build-plugins             - Build all dynamic plugins (debug)"
@@ -98,6 +99,9 @@ test-native-network: build-test-plugins
 test-native-mysql: build-test-plugins
 	cargo test --locked $(foreach package,$(NATIVE_MYSQL_PACKAGES),-p $(package)) --lib
 	cargo test --locked -p drasi-host-sdk --test native_mysql_components -- --include-ignored --test-threads=1
+
+test-native-storedproc-crash: build-test-plugins
+	cargo test --locked -p drasi-host-sdk --test native_storedproc_crash -- --include-ignored --test-threads=1
 
 test-native-sqlite: build-test-plugins
 	cargo test --locked $(foreach package,$(NATIVE_SQLITE_PACKAGES),-p $(package)) --lib

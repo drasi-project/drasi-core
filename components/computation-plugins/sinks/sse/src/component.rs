@@ -548,6 +548,15 @@ impl NativeComponent for SseSink {
                     anyhow::Error::new(error).context("native SSE listener is still draining"),
                 ));
             }
+            // The SDK reported the panic to the graph when it happened.
+            Err(WorkerCleanupError::Join(error)) if error.is_panic() => {
+                diag!(
+                    Warn,
+                    "SSE listener had panicked before stop: component={}",
+                    self.descriptor.id()
+                );
+                Ok(())
+            }
             Err(error) => Err(anyhow::Error::new(error)
                 .context("native SSE listener task failed")
                 .into()),

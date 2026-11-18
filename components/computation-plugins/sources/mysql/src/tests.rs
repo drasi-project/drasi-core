@@ -176,6 +176,135 @@ fn factory_metadata_constructs_without_database_io() -> Result<()> {
     Ok(())
 }
 
+/// Factory identity (and `persistent` on the shared row factories) selects
+/// the declared progress contract. Every replaying factory names the
+/// progress dependency its cursors live in; a factory whose cursors must
+/// survive a restart requires it durable, so the graph refuses binding it to
+/// volatile progress at wiring time. Untracked factories keep only volatile
+/// progress (MY-36). Outputs carry source replay progress, never a producer
+/// identity.
+#[test]
+fn every_factory_declares_its_progress_durability() -> Result<()> {
+    use drasi_computation_contracts::{
+        check_dependency, DurabilityRequirement, OutputDescription, PortId, ProgressPersistence,
+        ResourceCapabilities,
+    };
+    let position = json!({"startFrom": "position", "startBinlogFile": "binlog.000001",
+        "startBinlogPosition": 4});
+    let durable = Some(DurabilityRequirement::Durable);
+    let any = Some(DurabilityRequirement::Any);
+    let cases: [(
+        &dyn Factory,
+        Value,
+        MySqlOutput,
+        ProgressPersistence,
+        Option<(&str, DurabilityRequirement)>,
+    ); 9] = [
+        (
+            &MySqlChangesFactory,
+            json!({}),
+            MySqlOutput::Changes,
+            ProgressPersistence::Volatile,
+            None,
+        ),
+        (
+            &MySqlUntrackedTransactionsFactory,
+            json!({}),
+            MySqlOutput::Transactions,
+            ProgressPersistence::Volatile,
+            None,
+        ),
+        (
+            &MySqlPositionalChangesFactory,
+            json!({"tables": ["items"], "tableKeys": [{"table": "items", "keyColumns": ["@0"]}]}),
+            MySqlOutput::Changes,
+            ProgressPersistence::Volatile,
+            None,
+        ),
+        (
+            &MySqlTransactionsFactory,
+            position.clone(),
+            MySqlOutput::Transactions,
+            ProgressPersistence::Durable,
+            durable.map(|d| ("source_progress", d)),
+        ),
+        (
+            &MySqlSharedTransactionsFactory,
+            position,
+            MySqlOutput::Transactions,
+            ProgressPersistence::Durable,
+            durable.map(|d| ("consumer_progress", d)),
+        ),
+        (
+            &MySqlSharedChangesFactory,
+            json!({"persistent": true}),
+            MySqlOutput::Changes,
+            ProgressPersistence::Durable,
+            durable.map(|d| ("consumer_progress", d)),
+        ),
+        (
+            &MySqlSharedChangesFactory,
+            json!({"persistent": false}),
+            MySqlOutput::Changes,
+            ProgressPersistence::Volatile,
+            any.map(|d| ("consumer_progress", d)),
+        ),
+        (
+            &MySqlSharedPositionalChangesFactory,
+            json!({"persistent": true, "tables": ["items"],
+                "tableKeys": [{"table": "items", "keyColumns": ["@0"]}]}),
+            MySqlOutput::Changes,
+            ProgressPersistence::Durable,
+            durable.map(|d| ("consumer_progress", d)),
+        ),
+        (
+            &MySqlSharedPositionalChangesFactory,
+            json!({"tables": ["items"],
+                "tableKeys": [{"table": "items", "keyColumns": ["@0"]}]}),
+            MySqlOutput::Changes,
+            ProgressPersistence::Volatile,
+            any.map(|d| ("consumer_progress", d)),
+        ),
+    ];
+    for (factory, extra, output, progress, dependency) in cases {
+        let name = factory.metadata().implementation.name;
+        let request = request(factory, unreachable(extra))?;
+        let descriptor = MySqlSource::describe(request.id.clone(), output)?;
+        let declared = factory.describe(&drasi_computation_plugin_sdk::wire::DescribeRequest {
+            request,
+            descriptor: descriptor.clone(),
+            dependencies: Default::default(),
+        })?;
+        assert_eq!(declared.component.progress, progress, "{name}");
+        assert_eq!(
+            declared.output(&PortId::try_new("out")?),
+            OutputDescription::UNTRACKED,
+            "{name}"
+        );
+        declared
+            .validate(&descriptor)
+            .map_err(|error| anyhow::anyhow!("{name}: {error}"))?;
+        match dependency {
+            None => assert!(declared.dependencies.is_empty(), "{name}"),
+            Some((slot, durability)) => {
+                assert_eq!(
+                    declared.dependencies.keys().collect::<Vec<_>>(),
+                    [slot],
+                    "{name}"
+                );
+                assert_eq!(declared.dependencies[slot].durability, durability, "{name}");
+                assert!(check_dependency(&declared, slot, ResourceCapabilities::DURABLE).is_ok());
+                assert_eq!(
+                    check_dependency(&declared, slot, ResourceCapabilities::VOLATILE).is_err(),
+                    durability == DurabilityRequirement::Durable,
+                    "{name} bound to volatile progress"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn configuration_round_trips_through_untracked_factories() -> Result<()> {
     for (factory, extra) in [

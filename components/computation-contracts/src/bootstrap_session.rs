@@ -93,6 +93,11 @@ impl std::fmt::Display for BootstrapSessionId {
 /// its bootstrap and is restarting: the producer restores what its saved
 /// `state` describes, such as a paired source's live handover, and completes
 /// without records. It never produces a snapshot.
+///
+/// `labels` are the labels the origin declares it reads (a query's node and
+/// relation labels). A relay forwards its origin's labels unchanged. `None`
+/// means the origin does not restrict the snapshot (for example a transformer
+/// that maps labels); providers then select every configured element.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BootstrapRequest {
@@ -108,6 +113,8 @@ pub struct BootstrapRequest {
     pub origin: Option<ComponentId>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub resume: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<BootstrapLabels>,
 }
 
 impl BootstrapRequest {
@@ -116,6 +123,9 @@ impl BootstrapRequest {
             !self.resume || (self.persistent && self.state.is_some()),
             "a resumed bootstrap session requires a persistent consumer and its saved state"
         );
+        if let Some(labels) = &self.labels {
+            labels.validate()?;
+        }
         validate_state(self.state.as_ref())
     }
 
@@ -123,6 +133,78 @@ impl BootstrapRequest {
     pub fn origin(&self) -> &ComponentId {
         self.origin.as_ref().unwrap_or(&self.consumer)
     }
+}
+
+/// Maximum number of labels of each kind a bootstrap request may carry.
+pub const MAX_BOOTSTRAP_LABELS: usize = 4096;
+
+/// Maximum UTF-8 length of one requested label.
+pub const MAX_BOOTSTRAP_LABEL_BYTES: usize = 1024;
+
+/// The element labels a bootstrapping component declares it reads.
+///
+/// A provider selects only the tables, endpoints or collections that produce
+/// one of these labels. Its own configured selection is an upper bound: it
+/// never reads more than it is configured for, and a requested label outside
+/// that selection yields no data. Empty sets are a real restriction (the
+/// origin reads no labels of that kind), not "everything".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BootstrapLabels {
+    #[serde(default)]
+    pub nodes: std::collections::BTreeSet<String>,
+    #[serde(default)]
+    pub relations: std::collections::BTreeSet<String>,
+}
+
+impl BootstrapLabels {
+    pub fn new(
+        nodes: impl IntoIterator<Item = impl Into<String>>,
+        relations: impl IntoIterator<Item = impl Into<String>>,
+    ) -> anyhow::Result<Self> {
+        let labels = Self {
+            nodes: nodes.into_iter().map(Into::into).collect(),
+            relations: relations.into_iter().map(Into::into).collect(),
+        };
+        labels.validate()?;
+        Ok(labels)
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.nodes.len() <= MAX_BOOTSTRAP_LABELS
+                && self.relations.len() <= MAX_BOOTSTRAP_LABELS,
+            "bootstrap request exceeds {MAX_BOOTSTRAP_LABELS} labels of one kind"
+        );
+        for label in self.nodes.iter().chain(&self.relations) {
+            anyhow::ensure!(
+                !label.is_empty() && label.len() <= MAX_BOOTSTRAP_LABEL_BYTES,
+                "bootstrap labels must contain 1..={MAX_BOOTSTRAP_LABEL_BYTES} bytes"
+            );
+        }
+        Ok(())
+    }
+
+    /// Whether an element with `label` is requested, as a node or relation.
+    pub fn requests(&self, label: &str) -> bool {
+        self.nodes.contains(label) || self.relations.contains(label)
+    }
+
+    /// Whether a node label is requested.
+    pub fn requests_node(&self, label: &str) -> bool {
+        self.nodes.contains(label)
+    }
+
+    /// Whether a relation label is requested.
+    pub fn requests_relation(&self, label: &str) -> bool {
+        self.relations.contains(label)
+    }
+}
+
+/// Whether `labels` (the origin's request, `None` = unrestricted) selects an
+/// element carrying `label`.
+pub fn labels_select(labels: Option<&BootstrapLabels>, label: &str) -> bool {
+    labels.is_none_or(|labels| labels.requests(label))
 }
 
 fn validate_state(state: Option<&Bytes>) -> anyhow::Result<()> {
@@ -459,6 +541,7 @@ mod tests {
             state: Some(Bytes::new()),
             origin: None,
             resume: false,
+            labels: None,
         };
         assert!(request.validate().is_err());
         let unrelated = ControlMessage::try_new("checkpoint", Bytes::new())?;
@@ -479,10 +562,35 @@ mod tests {
                 "00000000-0000-4000-8000-000000000003",
             )?),
             resume: true,
+            labels: Some(BootstrapLabels::new(["Person"], ["KNOWS"])?),
         };
         request.validate()?;
         let decoded: BootstrapRequest = serde_json::from_slice(&serde_json::to_vec(&request)?)?;
         assert_eq!(decoded, request);
+        Ok(())
+    }
+
+    #[test]
+    fn labels_restrict_selection_and_are_bounded() -> anyhow::Result<()> {
+        let labels = BootstrapLabels::new(["Person"], ["KNOWS"])?;
+        assert!(labels_select(Some(&labels), "Person"));
+        assert!(labels_select(Some(&labels), "KNOWS"));
+        assert!(!labels_select(Some(&labels), "Order"));
+        assert!(
+            labels_select(None, "Order"),
+            "no request selects everything"
+        );
+        let empty = BootstrapLabels::default();
+        assert!(
+            !labels_select(Some(&empty), "Person"),
+            "an empty request is a real restriction"
+        );
+        assert!(BootstrapLabels::new([""], Vec::<String>::new()).is_err());
+        assert!(BootstrapLabels::new(
+            ["x".repeat(MAX_BOOTSTRAP_LABEL_BYTES + 1)],
+            Vec::<String>::new()
+        )
+        .is_err());
         Ok(())
     }
 }

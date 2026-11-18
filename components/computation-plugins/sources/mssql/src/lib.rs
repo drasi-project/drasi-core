@@ -16,6 +16,7 @@
 
 mod component;
 pub mod config;
+pub mod coordinator;
 mod management;
 mod progress;
 mod worker;
@@ -48,6 +49,36 @@ pub fn plugin() -> Result<PluginDefinition> {
         vec![Arc::new(MsSqlSourceFactory)],
         vec![GraphChangeCodec::schema()],
     )
+}
+
+/// The declared description. Outputs carry only source replay progress,
+/// kept in the consumers' cursors (`consumer_progress`). The source replays
+/// from those cursors and holds a fresh origin until every member committed
+/// it, so its progress is exactly as durable as the bound consumer progress
+/// declares: durable consumers give a source that resumes after a process
+/// restart, volatile consumers one that starts again at `startPosition`.
+/// Either binding is accepted.
+pub fn description(
+    consumer_progress: Option<drasi_computation_contracts::ResourceDurability>,
+    descriptor: &drasi_computation_contracts::ComponentDescriptor,
+) -> drasi_computation_contracts::ComponentDescription {
+    use drasi_computation_contracts::{
+        ComponentDescription, DependencyRequirement, DurabilityRequirement, OutputDescription,
+        ProgressPersistence, ResourceDurability,
+    };
+    let progress = match consumer_progress {
+        Some(ResourceDurability::Durable) => ProgressPersistence::Durable,
+        Some(ResourceDurability::Volatile) => ProgressPersistence::Volatile,
+        Some(ResourceDurability::Undeclared) | None => ProgressPersistence::Undeclared,
+    };
+    ComponentDescription::new(progress)
+        .with_outputs(descriptor, OutputDescription::UNTRACKED)
+        .with_dependency(
+            "consumer_progress",
+            DependencyRequirement {
+                durability: DurabilityRequirement::Any,
+            },
+        )
 }
 
 impl MsSqlSourceFactory {
@@ -84,15 +115,17 @@ impl MsSqlSourceFactory {
 }
 
 impl Factory for MsSqlSourceFactory {
-    /// Outputs carry only source replay progress unless published through a Host admission channel.
     fn describe(
         &self,
         request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
     ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.source_description(
-            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
-            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
-        ))
+        coordinator::declare(
+            request,
+            description(
+                request.bound_durability("consumer_progress"),
+                &request.descriptor,
+            ),
+        )
     }
     fn metadata(&self) -> FactoryMetadata {
         FactoryMetadata {
@@ -140,6 +173,23 @@ impl Factory for MsSqlSourceFactory {
     }
     fn supports_consumer_progress(&self) -> bool {
         true
+    }
+    fn supports_bootstrap_coordination(&self) -> bool {
+        true
+    }
+    fn create_bootstrap_coordinator(
+        &self,
+        request: &CreateRequest,
+        progress: drasi_computation_plugin_sdk::SourceBootstrapProgress,
+    ) -> Result<Arc<dyn drasi_computation_plugin_sdk::NativeSourceBootstrapCoordinator>> {
+        self.metadata()
+            .configuration
+            .validate(&request.configuration)?;
+        Ok(Arc::new(coordinator::Coordinator::new(
+            request,
+            SourceConfig::from_value(&request.configuration)?,
+            progress,
+        )?))
     }
     fn create(&self, _: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
         anyhow::bail!("SQL Server source requires its actual consumer-progress binding")
@@ -190,6 +240,70 @@ mod tests {
             .configuration_details()
             .context("configuration details")?;
         details.validate_schema(&metadata.configuration)?;
+        Ok(())
+    }
+
+    /// The source's progress is its consumers' cursors, so it declares
+    /// exactly the durability the bound consumer progress declares and
+    /// accepts either binding; outputs carry no producer identity.
+    #[test]
+    fn description_follows_the_bound_consumer_progress_durability() -> Result<()> {
+        use drasi_computation_contracts::{
+            check_dependency, ComponentDescriptor, OutputDescription, PortId, ProgressPersistence,
+            ResourceCapabilities, ResourceDurability,
+        };
+        let id = drasi_computation_contracts::ComponentId::generate();
+        let request = drasi_computation_plugin_sdk::testing::create_request(
+            &MsSqlSourceFactory,
+            &id,
+            serde_json::json!({"stream": "s/out", "database": "d", "user": "u", "password": "p"}),
+        );
+        let descriptor = ComponentDescriptor::try_new(id, MsSqlSource::ports()?)?;
+        for (bound, expected) in [
+            (
+                Some(ResourceDurability::Durable),
+                ProgressPersistence::Durable,
+            ),
+            (
+                Some(ResourceDurability::Volatile),
+                ProgressPersistence::Volatile,
+            ),
+            (
+                Some(ResourceDurability::Undeclared),
+                ProgressPersistence::Undeclared,
+            ),
+            (None, ProgressPersistence::Undeclared),
+        ] {
+            let declared = MsSqlSourceFactory.describe(
+                &drasi_computation_plugin_sdk::wire::DescribeRequest {
+                    request: request.clone(),
+                    descriptor: descriptor.clone(),
+                    dependencies: bound
+                        .map(|durability| {
+                            (
+                                "consumer_progress".to_owned(),
+                                vec![ResourceCapabilities { durability }],
+                            )
+                        })
+                        .into_iter()
+                        .collect(),
+                },
+            )?;
+            assert_eq!(declared.component.progress, expected, "{bound:?}");
+            assert_eq!(
+                declared.output(&PortId::try_new("out")?),
+                OutputDescription::UNTRACKED
+            );
+            declared
+                .validate(&descriptor)
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            for capabilities in [
+                ResourceCapabilities::DURABLE,
+                ResourceCapabilities::VOLATILE,
+            ] {
+                assert!(check_dependency(&declared, "consumer_progress", capabilities).is_ok());
+            }
+        }
         Ok(())
     }
 

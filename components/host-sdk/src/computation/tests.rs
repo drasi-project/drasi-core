@@ -466,6 +466,7 @@ async fn statically_linked_bootstrap_uses_the_existing_native_factory_contract(
         json!({"mode": "no-snapshot", "count": 2}),
         None,
         None,
+        drasi_computation_plugin_sdk::BootstrapSession::default(),
     )?;
     drop(plugin);
     bootstrap.prepare().await?;

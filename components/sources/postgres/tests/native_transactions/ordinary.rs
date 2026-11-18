@@ -108,11 +108,13 @@ async fn row_graph(
                     == drasi_computation_bootstrap_postgres::POSTGRES_ROW_BOOTSTRAP
             })
             .context("row bootstrap factory")?;
-        query = query.with_bootstrap(factory.create_provider(
+        query = query.with_bootstrap(paired_provider(
+            factory,
             component_id(46),
-            bootstrap_flat(component_id(77).to_string(), &row_settings),
-            Some(libraries::scope(ComponentBatch::GRAPH_ID)),
-            Some(progress.clone()),
+            component_id(77).to_string(),
+            &row_settings,
+            libraries::scope(ComponentBatch::GRAPH_ID),
+            progress.clone(),
         )?);
     }
     let results = query.results();
@@ -676,13 +678,17 @@ async fn standalone_snapshot_needs_only_select_privileges_and_no_wal_or_slot() -
         let create = |settings: Value, graph: &str| {
             factory.create_provider(
                 component_id(46),
-                json!({
-                    "source": component_id(818).to_string(),
-                    "stream": "external/out",
-                    "settings": settings
-                }),
+                json!({"settings": settings}),
                 Some(libraries::scope(graph)),
                 None,
+                // The source and stream a graph relation would supply.
+                drasi_computation_plugin_sdk::BootstrapSession::new(
+                    Some(drasi_computation_plugin_sdk::ServedSource {
+                        source: component_id(818),
+                        stream: StreamId::try_new("external/out").expect("stream"),
+                    }),
+                    None,
+                ),
             )
         };
         let provider = create(settings.clone(), "standalone")?;

@@ -1,15 +1,16 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-mod snapshot;
+pub(crate) mod snapshot;
 #[cfg(test)]
 mod tests;
 
 use anyhow::{Context, Result};
 use drasi_computation_contracts::{ComponentId, GraphChangeCodec, ImplementationIdentity};
 use drasi_computation_plugin_sdk::{
-    BootstrapFactory, BootstrapFactoryMetadata, ConfigSchema, ConfigType, CreateRequest,
-    NativeBootstrapProvider, NativeSourceProgress, PluginDefinition,
+    BootstrapCompletionKind, BootstrapFactory, BootstrapFactoryMetadata,
+    BootstrapOutputDescription, BootstrapSession, ConfigSchema, ConfigType, CreateRequest,
+    ElementNamespace, NativeBootstrapProvider, NativeSourceProgress, PluginDefinition,
 };
 use std::sync::Arc;
 
@@ -41,8 +42,6 @@ impl BootstrapFactory for HttpBootstrapFactory {
                 .expect("constant implementation"),
             configuration_version: 1,
             configuration: ConfigSchema::from_fields([
-                ("source", ConfigType::ComponentId, true),
-                ("stream", ConfigType::String, true),
                 ("settings", ConfigType::Object, true),
                 ("nodeLabels", ConfigType::Array, false),
                 ("relationLabels", ConfigType::Array, false),
@@ -52,14 +51,28 @@ impl BootstrapFactory for HttpBootstrapFactory {
                 ("shutdownTimeoutMs", ConfigType::Integer, false),
             ]),
             source_progress: false,
+            pairing: None,
         }
+    }
+
+    /// A quiescent, unpaired provider in the namespace of the source it is
+    /// connected to.
+    fn describe(&self, configuration: &serde_json::Value) -> Result<BootstrapOutputDescription> {
+        self.metadata().configuration.validate(configuration)?;
+        Ok(BootstrapOutputDescription {
+            completion: BootstrapCompletionKind::Quiescent,
+            pairing: None,
+            namespace: ElementNamespace::ServedSource,
+            identity: None,
+        })
     }
 
     fn create(
         &self,
         request: &CreateRequest,
+        session: &BootstrapSession,
         progress: Option<NativeSourceProgress>,
-    ) -> Result<Arc<dyn NativeBootstrapProvider>> {
+    ) -> Result<NativeBootstrapProvider> {
         anyhow::ensure!(
             progress.is_none(),
             "HTTP bootstrap does not establish a persistent source boundary"
@@ -73,9 +86,12 @@ impl BootstrapFactory for HttpBootstrapFactory {
             .context("HTTP bootstrap requires query scope")?;
         drasi_computation_contracts::validate_identifier("instance", &scope.instance_id)?;
         drasi_computation_contracts::validate_identifier("graph", &scope.graph_id)?;
-        let mut provider =
-            HttpBootstrapProvider::new(serde_json::from_value(request.configuration.clone())?)?;
+        let mut provider = HttpBootstrapProvider::new(
+            serde_json::from_value(request.configuration.clone())?,
+            session.served()?.clone(),
+            session.labels.clone(),
+        )?;
         provider.query_scope = Some((scope, request.id.clone()));
-        Ok(Arc::new(provider))
+        Ok(NativeBootstrapProvider::Quiescent(Arc::new(provider)))
     }
 }

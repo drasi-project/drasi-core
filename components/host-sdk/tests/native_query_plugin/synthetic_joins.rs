@@ -447,7 +447,13 @@ fn file_bootstrap(database: &Path, generation: u64) -> Result<Arc<NativeBootstra
         .context("missing file bootstrap factory")?;
     let mut configuration = sqlite::provider_configuration(database);
     configuration["tables"] = json!(["orders", "customers"]);
-    factory.create_query_provider(component_id()?, configuration, scope(generation), None)
+    factory.create_query_provider(
+        component_id()?,
+        configuration,
+        scope(generation),
+        None,
+        sqlite::provider_session(sqlite::PROVIDER_SOURCE, "sqlite/out")?,
+    )
 }
 
 #[tokio::test(flavor = "current_thread")]

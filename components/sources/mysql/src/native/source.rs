@@ -6,8 +6,10 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use drasi_lib::computation::v1::*;
 use drasi_mysql_common::native::{
+    description,
     progress::ConsumerBinding,
     source::{Activation, MySqlSource as Source, SourceError as NativeSourceError},
+    MySqlProgress,
 };
 use std::sync::Arc;
 
@@ -15,6 +17,8 @@ pub struct MySqlSource {
     inner: Source,
     progress: Option<SourceProgressReader>,
     consumers: Option<Arc<ConsumerProgressSet>>,
+    /// Where replay progress is kept, which decides the declared description.
+    declared: MySqlProgress,
 }
 
 impl MySqlSource {
@@ -38,10 +42,16 @@ impl MySqlSource {
             config,
             progress.as_ref().map(SourceProgressReader::read_only),
         )?;
+        let declared = if progress.is_some() {
+            MySqlProgress::Single
+        } else {
+            MySqlProgress::None
+        };
         Ok(Self {
             inner,
             progress,
             consumers: None,
+            declared,
         })
     }
     pub fn coordinated(
@@ -83,6 +93,7 @@ impl MySqlSource {
             inner,
             progress: Some(progress),
             consumers: None,
+            declared: MySqlProgress::Single,
         })
     }
     pub fn new_with_consumer_progress(
@@ -101,6 +112,7 @@ impl MySqlSource {
             inner,
             progress: None,
             consumers: Some(consumers),
+            declared: MySqlProgress::Group { durable: true },
         })
     }
     pub fn coordinated_consumers(
@@ -154,6 +166,7 @@ impl MySqlSource {
             inner,
             progress: None,
             consumers: Some(consumers),
+            declared: MySqlProgress::Group { durable: true },
         })
     }
     pub fn describe(id: ComponentId, output: MySqlOutput) -> Result<ComponentDescriptor> {
@@ -172,17 +185,14 @@ impl MySqlSource {
             consumers.read_only(),
             &consumers.owners().keys().cloned().collect::<Vec<_>>(),
         )?;
-        let inner = Source::shared_rows(
-            id,
-            stream,
-            config,
-            binding,
-            drasi_mysql_common::native::rows::Options { persistent },
-        )?;
+        let inner = Source::shared_rows(id, stream, config, binding)?;
         Ok(Self {
             inner,
             progress: None,
             consumers: Some(consumers),
+            declared: MySqlProgress::Group {
+                durable: persistent,
+            },
         })
     }
 }
@@ -215,7 +225,7 @@ fn source_error(error: anyhow::Error) -> anyhow::Error {
 #[async_trait]
 impl ComputationComponent for MySqlSource {
     fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
-        drasi_lib::computation::v1::ComponentDescription::undeclared()
+        description(self.declared, self.inner.descriptor())
     }
     fn descriptor(&self) -> &ComponentDescriptor {
         self.inner.descriptor()

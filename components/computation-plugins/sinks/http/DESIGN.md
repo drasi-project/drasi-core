@@ -10,7 +10,7 @@ lists every setting and how to operate them.
 | `drasi.network/http-delivery` | `Component::Consumer` (`ConsumerMode::External`) | `Consumer/External` through the host `DeliveryRunner` |
 
 Both have implementation version `1`, configuration version `1` and native
-ABI 4.0, and both consume the standard `GraphChangeCodec` schema on their `in`
+ABI 5.0, and both consume the standard `GraphChangeCodec` schema on their `in`
 port from any producer: a source, a transformer or a query
 ([sink input contract](../../SINKS.md)). The HTTP sink is the plugin's first
 factory.

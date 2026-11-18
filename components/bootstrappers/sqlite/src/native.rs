@@ -7,7 +7,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_computation_bootstrap_sqlite::{
-    NativeBootstrapProvider, SqliteBootstrapProvider as NativeSqliteBootstrapProvider,
+    QuiescentBootstrapProvider, SqliteBootstrapProvider as NativeSqliteBootstrapProvider,
 };
 use drasi_lib::computation::v1::{
     ComponentId, ComputationBootstrapProvider, ComputationBootstrapSnapshot, StreamId,

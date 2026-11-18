@@ -705,11 +705,13 @@ async fn interrupted_snapshots() -> Result<()> {
                 QueryRecoveryPolicy::AutoReset,
             )
             .await?
-            .with_bootstrap(factory.create_provider(
+            .with_bootstrap(paired_provider(
+                factory,
                 component_id,
-                bootstrap_flat(id(77).to_string(), &database.config),
-                Some(libraries::scope(ComponentBatch::GRAPH_ID)),
-                Some(owner),
+                id(77).to_string(),
+                &database.config,
+                libraries::scope(ComponentBatch::GRAPH_ID),
+                owner,
             )?);
             query.start(&lifecycle_ctx::start()).await?;
             query.stop(&lifecycle_ctx::stop()).await?;
@@ -809,18 +811,19 @@ async fn actual_owner_and_persistent_mode_guards_static_and_dynamic() -> Result<
                     == drasi_computation_bootstrap_postgres::POSTGRES_SHARED_TRANSACTION_BOOTSTRAP
             })
             .context("shared transaction bootstrap")?;
-        let snapshot_configuration = bootstrap_flat(id(77).to_string(), &database.config);
         let owner = Arc::new(QuerySourceProgress::new(
             ComponentBatch::GRAPH_ID,
             named_id("fast"),
         )?);
         let mut memory_query = ordinary_query("fast", None, owner.clone())
             .await?
-            .with_bootstrap(snapshot_factory.create_provider(
+            .with_bootstrap(paired_provider(
+                snapshot_factory,
                 named_id("fast"),
-                snapshot_configuration.clone(),
-                Some(libraries::scope(ComponentBatch::GRAPH_ID)),
-                Some(owner.clone()),
+                id(77).to_string(),
+                &database.config,
+                libraries::scope(ComponentBatch::GRAPH_ID),
+                owner.clone(),
             )?);
         let error = memory_query
             .start(&lifecycle_ctx::start())
@@ -846,11 +849,13 @@ async fn actual_owner_and_persistent_mode_guards_static_and_dynamic() -> Result<
             SharedOutput::Transactions,
         )
         .await?
-        .with_bootstrap(snapshot_factory.create_provider(
+        .with_bootstrap(paired_provider(
+            snapshot_factory,
             named_id("fast"),
-            snapshot_configuration,
-            Some(libraries::scope(ComponentBatch::GRAPH_ID)),
-            Some(expected.clone()),
+            id(77).to_string(),
+            &database.config,
+            libraries::scope(ComponentBatch::GRAPH_ID),
+            expected.clone(),
         )?);
         let error = substituted
             .start(&lifecycle_ctx::start())

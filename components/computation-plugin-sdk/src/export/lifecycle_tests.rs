@@ -49,6 +49,8 @@ struct ProbeState {
     fresh_starts: Mutex<Vec<Option<bool>>>,
     /// Overrides the live instance assessment to model drift after approval.
     live_assessment: Mutex<Option<Assessment>>,
+    /// The next start registers an owned worker that panics.
+    panic_worker: AtomicBool,
 }
 
 impl ProbeState {
@@ -422,6 +424,14 @@ impl ComputationComponent for Probe {
             stop: Some(stop),
             handle: worker,
         });
+        if self.state.panic_worker.swap(false, Ordering::SeqCst) {
+            // Panics on the I/O runtime after `start` returned.
+            drasi_computation_contracts::workers::try_spawn_owned_worker(
+                &tokio::sync::RwLock::new(None),
+                async { panic!("injected worker panic") },
+            )
+            .map_err(anyhow::Error::from)?;
+        }
         Ok(self.state.call("start").await?)
     }
 
@@ -2105,6 +2115,68 @@ async fn wakeups_remain_independent_and_service_run_is_not_a_lifecycle_alias() -
         ]
     );
     Ok(())
+}
+
+async fn worker_panic_fails_the_activation() -> anyhow::Result<()> {
+    let harness = Harness::new(Options {
+        role: ComponentRole::Sink,
+        ..Default::default()
+    })?;
+    let component = harness.create()?;
+    component.run(INITIALIZE).await?;
+    // Without an activation there is no owned work to observe.
+    assert_eq!(
+        component.begin(WORKER_FAILURE, &[]).err().unwrap().code,
+        abi::status::CLOSED
+    );
+    harness.state.panic_worker.store(true, Ordering::SeqCst);
+    component.run(START).await?;
+    let failure = tokio::time::timeout(
+        Duration::from_secs(10),
+        component.begin(WORKER_FAILURE, &[])?,
+    )
+    .await?
+    .unwrap_err();
+    assert_eq!(failure.code, abi::status::FAILED, "{failure:?}");
+    assert!(failure.retryable, "{failure:?}");
+    assert!(
+        failure
+            .message
+            .contains("native worker panicked: injected worker panic"),
+        "{failure:?}"
+    );
+    // Only the activation failed: the object is not quarantined, keeps
+    // reporting the failure, and its next activation starts healthy.
+    assert_eq!(
+        component
+            .begin(WORKER_FAILURE, &[])?
+            .await
+            .unwrap_err()
+            .code,
+        abi::status::FAILED
+    );
+    component.run(STOP).await?;
+    component.run(START).await?;
+    let mut healthy = component.begin(WORKER_FAILURE, &[])?;
+    tokio::task::yield_now().await;
+    assert!(futures_util::poll!(&mut healthy).is_pending());
+    // Lifecycle work proceeds beside the independent wait, which STOP ends.
+    let mut stop = component.begin(STOP, &[])?;
+    assert!(futures_util::poll!(&mut stop).is_pending());
+    assert_eq!(healthy.await.unwrap_err().code, abi::status::CLOSED);
+    stop.await?;
+    component.run(DISPOSE).await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn worker_panic_fails_the_activation_current_thread() -> anyhow::Result<()> {
+    worker_panic_fails_the_activation().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_panic_fails_the_activation_multi_thread() -> anyhow::Result<()> {
+    worker_panic_fails_the_activation().await
 }
 
 #[tokio::test]

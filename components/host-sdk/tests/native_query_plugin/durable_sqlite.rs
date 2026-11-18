@@ -199,13 +199,11 @@ impl Graph {
             .context("missing coordinated SQLite bootstrap")?;
         let provider = bootstrap_factory.create_paired_query_provider(
             component_id()?,
-            json!({
-                "source": "0dcb43b3-f286-5c30-87dc-41c98e4c52e9",
-                "stream": "sqlite/out"
-            }),
+            json!({}),
             scope.clone(),
             progress.clone(),
             coordinator.clone(),
+            None,
         )?;
         let bound: Arc<dyn ComputationBootstrapProvider> = match gate {
             Some(gate) => Arc::new(super::lifecycle::PausedProvider {

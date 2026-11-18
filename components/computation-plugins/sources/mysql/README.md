@@ -1,7 +1,7 @@
 # Native MySQL sources
 
 `drasi-computation-source-mysql` streams MySQL row-based binary logs into a
-ComputationGraph (native ABI 4.0). Seven factories, each at implementation and
+ComputationGraph (native ABI 5.0). Seven factories, each at implementation and
 configuration version `1`:
 
 | Factory | Output |
@@ -13,6 +13,11 @@ configuration version `1`:
 | `drasi.mysql/shared-changes` | Row changes for a fixed set of queries |
 | `drasi.mysql/positional-changes` | Untracked `@N` rows (MySQL 5.7 / limited metadata) |
 | `drasi.mysql/shared-positional-changes` | Positional rows for a fixed set of queries |
+
+Each factory declares its progress contract: the replaying factories (and
+shared rows with `persistent: true`) require durable progress, which the
+graph checks when it binds the progress resource; the untracked factories
+declare volatile progress and resume at `startFrom` after a restart.
 
 ```sh
 cargo build -p drasi-computation-source-mysql --features dynamic-plugin

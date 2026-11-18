@@ -377,10 +377,6 @@ impl PluginDefinition {
                 metadata.implementation.plugin = Some(self.metadata.plugin.clone());
                 metadata.validate(&self.metadata.plugin)?;
                 anyhow::ensure!(
-                    !factory.requires_source_bootstrap() || metadata.source_progress,
-                    "paired bootstrap requires actual query progress"
-                );
-                anyhow::ensure!(
                     identities.insert((
                         metadata.implementation.name.clone(),
                         metadata.implementation.version.clone()
@@ -659,6 +655,7 @@ static PLUGIN_BOOTSTRAP: abi::bootstrap::PluginBootstrapV1 = abi::bootstrap::Plu
     version: abi::bootstrap::VERSION,
     reserved: 0,
     factories: Some(bootstrap_factories),
+    describe: Some(describe_bootstrap),
     create: Some(create_bootstrap),
 };
 
@@ -825,6 +822,45 @@ unsafe extern "C" fn bootstrap_factories(state: *mut c_void) -> Reply {
         crate::bootstrap::encode(&state.definition.bootstrap_metadata).map_err(Failure::from)
     })
 }
+/// The factory's declared output for one configuration, validated against
+/// its metadata before the host sees it.
+pub(crate) fn bootstrap_description(
+    factory: &dyn crate::BootstrapFactory,
+    metadata: &crate::BootstrapFactoryMetadata,
+    configuration: &serde_json::Value,
+) -> anyhow::Result<crate::BootstrapOutputDescription> {
+    metadata.configuration.validate(configuration)?;
+    let description = factory.describe(configuration)?;
+    metadata.validate_description(&description)?;
+    Ok(description)
+}
+
+unsafe extern "C" fn describe_bootstrap(
+    state: *mut c_void,
+    index: u32,
+    input: BorrowedBytes,
+) -> Reply {
+    transport::reply_boundary(|| {
+        let state = unsafe { state_ref::<Arc<PluginState>>(state)? };
+        let metadata = state
+            .definition
+            .bootstrap_metadata
+            .get(index as usize)
+            .ok_or_else(|| Failure::protocol("unknown native bootstrap factory"))?;
+        let configuration: serde_json::Value = crate::bootstrap::decode(unsafe {
+            transport::borrowed_bytes(input, abi::bootstrap::MAX_CONTROL_BYTES)?
+        })
+        .map_err(Failure::from)?;
+        let description = bootstrap_description(
+            state.definition.bootstrap_factories[index as usize].as_ref(),
+            metadata,
+            &configuration,
+        )
+        .map_err(Failure::from)?;
+        crate::bootstrap::encode(&description).map_err(Failure::from)
+    })
+}
+
 unsafe extern "C" fn create_bootstrap(
     state: *mut c_void,
     index: u32,
@@ -840,14 +876,25 @@ unsafe extern "C" fn create_bootstrap(
             .bootstrap_metadata
             .get(index as usize)
             .ok_or_else(|| Failure::protocol("unknown native bootstrap factory"))?;
-        let request: CreateRequest = crate::bootstrap::decode(unsafe {
+        let crate::BootstrapCreateRequest { request, session } = crate::bootstrap::decode(unsafe {
             transport::borrowed_bytes(input, abi::bootstrap::MAX_CONTROL_BYTES)?
         })
         .map_err(Failure::from)?;
         metadata.validate_request(&request).map_err(Failure::from)?;
-        if state.definition.bootstrap_factories[index as usize].requires_source_bootstrap() {
+        session.validate().map_err(Failure::from)?;
+        if metadata.pairing.is_some() {
             return Err(Failure::protocol(
                 "bootstrap factory requires its actual source pairing",
+            ));
+        }
+        let factory = state.definition.bootstrap_factories[index as usize].as_ref();
+        let description = bootstrap_description(factory, metadata, &request.configuration)
+            .map_err(Failure::from)?;
+        if description.namespace == crate::ElementNamespace::ServedSource
+            && session.served.is_none()
+        {
+            return Err(Failure::protocol(
+                "bootstrap provider serves a source's namespace but no served source was bound",
             ));
         }
         if metadata.source_progress == progress.is_null() {
@@ -870,9 +917,14 @@ unsafe extern "C" fn create_bootstrap(
             Some(progress)
         };
         let reader = progress.as_ref().map(crate::NativeSourceProgress::reader);
-        let provider = state.definition.bootstrap_factories[index as usize]
-            .create(&request, progress)
+        let provider = factory
+            .create(&request, &session, progress)
             .map_err(Failure::from)?;
+        if provider.completion() != description.completion {
+            return Err(Failure::protocol(
+                "bootstrap provider does not have its declared completion kind",
+            ));
+        }
         let declared = provider.recovery_reader();
         if !match (&reader, &declared) {
             (None, None) => true,
@@ -2038,7 +2090,7 @@ fn start_operation(
         return Err(Failure::panicked());
     }
     let allowed = match code {
-        INITIALIZE | START | STOP | DISPOSE | PAUSE | RESUME => true,
+        INITIALIZE | START | STOP | DISPOSE | PAUSE | RESUME | WORKER_FAILURE => true,
         NEXT => {
             instance.factory.role == drasi_computation_contracts::ComponentRole::Source
                 && !instance.admission
@@ -2080,7 +2132,7 @@ fn start_operation(
     } else {
         None
     };
-    let guard = if matches!(code, CONTROL | WAKE_WAIT | WAKE_PENDING) {
+    let guard = if matches!(code, CONTROL | WAKE_WAIT | WAKE_PENDING | WORKER_FAILURE) {
         None
     } else {
         instance
@@ -2098,7 +2150,7 @@ fn start_operation(
     let acknowledged = instance
         .administration
         .prepare(&instance, code, context.as_ref())?;
-    let independent = if matches!(code, CONTROL | WAKE_WAIT | WAKE_PENDING) {
+    let independent = if matches!(code, CONTROL | WAKE_WAIT | WAKE_PENDING | WORKER_FAILURE) {
         Some(
             instance
                 .administration
@@ -2132,7 +2184,9 @@ fn start_operation(
         token: token.clone(),
     };
     // Select before boxing so ordinary operations retain no consumer future.
-    let operation = if instance.consumer.is_some() {
+    // A worker-failure wait is cancelled at every processing boundary; it
+    // touches no delivery, so it must not mark the consumer interrupted.
+    let operation = if instance.consumer.is_some() && code != WORKER_FAILURE {
         transport::export_cancellable_operation(
             async move {
                 let _guard = guard;
@@ -2257,6 +2311,11 @@ async fn execute(
     if code == APPLY {
         return management::execute_apply(instance, call).await;
     }
+    if code == WORKER_FAILURE {
+        // Observation only: independent of bootstrap coordination and data.
+        let reason = instance.damaged.wait_worker_failure().await;
+        return Err(Failure::failed(reason).retryable().into());
+    }
     let input = &call.input;
     if !matches!(code, STOP | DISPOSE) {
         if let Some(coordinator) = &instance.coordinator {
@@ -2354,6 +2413,8 @@ async fn execute(
                 .and_then(|context| context.fresh_start);
             let mut context = crate::lifecycle::StartContext::new(scope.clone(), credentials)
                 .with_fresh_start(fresh_start);
+            // Workers of an earlier activation were joined by its STOP.
+            instance.damaged.clear_worker_failure();
             let started = run_hook(&scope, component.base_mut().start(&mut context)).await;
             drop(context);
             if instance.activation_credentials_bound {
@@ -2777,14 +2838,28 @@ mod definition_tests {
                 configuration_version: 1,
                 configuration: crate::ConfigSchema::default(),
                 source_progress: false,
+                pairing: None,
             }
+        }
+
+        fn describe(
+            &self,
+            _: &serde_json::Value,
+        ) -> anyhow::Result<crate::BootstrapOutputDescription> {
+            Ok(crate::BootstrapOutputDescription {
+                completion: crate::BootstrapCompletionKind::Quiescent,
+                pairing: None,
+                namespace: crate::ElementNamespace::ServedSource,
+                identity: None,
+            })
         }
 
         fn create(
             &self,
             _: &CreateRequest,
+            _: &crate::BootstrapSession,
             _: Option<crate::NativeSourceProgress>,
-        ) -> anyhow::Result<Arc<dyn crate::NativeBootstrapProvider>> {
+        ) -> anyhow::Result<crate::NativeBootstrapProvider> {
             anyhow::bail!("discovery must not construct a snapshot provider")
         }
     }

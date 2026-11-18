@@ -69,6 +69,30 @@ pub struct TableSchema {
     pub rowid_alias: Option<&'static str>,
 }
 
+/// The element-identity scheme of native SQLite sources and snapshots.
+pub const ELEMENT_IDENTITY_SCHEME: &str = "drasi.sqlite/elements-v1";
+
+/// The canonical description of the element identities `tables` and
+/// `table_keys` produce: the selected tables (empty means every ordinary
+/// table) and each keyed table's key columns in order. A source and a file
+/// snapshot with equal bindings emit equal element identities for the same
+/// rows, so the graph compares them when the snapshot is connected.
+pub fn element_identity_binding(
+    tables: &[String],
+    table_keys: &[TableKeyConfig],
+) -> Result<String> {
+    validate_selection(tables, table_keys)?;
+    let tables: BTreeSet<&str> = tables.iter().map(String::as_str).collect();
+    let keys: BTreeMap<&str, &[String]> = table_keys
+        .iter()
+        .map(|key| (key.table.as_str(), key.key_columns.as_slice()))
+        .collect();
+    Ok(serde_json::to_string(&serde_json::json!({
+        "tables": tables,
+        "tableKeys": keys,
+    }))?)
+}
+
 pub fn validate_selection(tables: &[String], table_keys: &[TableKeyConfig]) -> Result<()> {
     let valid_table = |table: &str| {
         !table.is_empty()

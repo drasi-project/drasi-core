@@ -264,13 +264,13 @@ impl NativeTransformer for Middleware {
         Ok(())
     }
 
-    async fn bootstrap_completed(&mut self, completion: BootstrapCompletion) -> Result<()> {
+    /// The middleware declares a quiescent bootstrap input: the graph refuses a
+    /// durable provider when the edge binds, and the SDK delivers a quiescent
+    /// completion without watermarks or state.
+    async fn bootstrap_completed(&mut self, _completion: BootstrapCompletion) -> Result<()> {
         anyhow::ensure!(
-            self.running
-                && !self.failed.load(Ordering::Acquire)
-                && completion.watermarks.is_empty()
-                && completion.state.is_none(),
-            "middleware quiescent initialization cannot accept durable completion"
+            self.running && !self.failed.load(Ordering::Acquire),
+            "middleware initialization completed while not running"
         );
         self.output.activate()
     }

@@ -127,6 +127,40 @@ pub fn describe(
     )
 }
 
+/// The declared description for one configuration: the progress
+/// requirements of [`describe`], the element identities every factory
+/// produces (compared with a connected file snapshot), and, for a journal
+/// factory with `coordinatedSnapshot: true`, the coordination protocol its
+/// paired providers must use. Coordination is then required: the source
+/// admits no live write before its coordinated snapshot.
+pub fn describe_configuration(
+    config: &SourceConfig,
+    descriptor: &drasi_computation_contracts::ComponentDescriptor,
+) -> Result<drasi_computation_plugin_sdk::ComponentDescription> {
+    let keys: Vec<drasi_sqlite_common::TableKeyConfig> = config
+        .settings
+        .table_keys
+        .iter()
+        .map(|key| drasi_sqlite_common::TableKeyConfig {
+            table: key.table.clone(),
+            key_columns: key.key_columns.clone(),
+        })
+        .collect();
+    let description = describe(config.mode, descriptor).with_element_identity(
+        drasi_sqlite_common::native::element_identity(&config.settings.tables, &keys)?,
+    );
+    Ok(if config.mode.journal() && config.coordinated_snapshot {
+        description.with_coordination(drasi_computation_plugin_sdk::BootstrapCoordination {
+            protocol: drasi_sqlite_common::native::coordination_protocol(
+                config.mode == Mode::Shared,
+            ),
+            required: true,
+        })
+    } else {
+        description
+    })
+}
+
 impl SqliteFactory {
     /// Parses and validates a request for this factory. No I/O.
     fn configuration(&self, request: &CreateRequest) -> Result<SourceConfig> {
@@ -159,7 +193,7 @@ impl Factory for SqliteFactory {
         &self,
         request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
     ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(describe(self.0, &request.descriptor))
+        describe_configuration(&self.configuration(&request.request)?, &request.descriptor)
     }
     fn metadata(&self) -> FactoryMetadata {
         metadata(self.0)

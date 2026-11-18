@@ -363,11 +363,13 @@ pub(super) async fn late_query_group(output: SharedOutput) -> Result<()> {
         let late = processing_query("late", path, late_owner.clone(), output)
             .await?
             .with_bootstrap(gated(
-                bootstrap_factory.create_provider(
+                paired_provider(
+                    bootstrap_factory,
                     id(450),
-                    bootstrap_flat(id(77).to_string(), &database.config),
-                    Some(libraries::scope(ComponentBatch::GRAPH_ID)),
-                    Some(late_owner.clone()),
+                    id(77).to_string(),
+                    &database.config,
+                    libraries::scope(ComponentBatch::GRAPH_ID),
+                    late_owner.clone(),
                 )?,
                 gate.clone(),
             ));

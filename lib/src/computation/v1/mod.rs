@@ -309,6 +309,11 @@ mod output_bootstrap;
 pub use output_bootstrap::OutputBootstrapProvider;
 mod output_catalogue;
 pub use drasi_computation_contracts::{
+    check_bootstrap_edge, relayed_completion, BootstrapAcceptance, BootstrapCompletionKind,
+    BootstrapCoordination, BootstrapInputDescription, BootstrapOutputDescription,
+    BootstrapProtocol, ElementIdentity, ElementNamespace, ServedNamespace,
+};
+pub use drasi_computation_contracts::{
     check_dependency, check_edge, delivery_failure_class, ComponentCapabilities,
     ComponentDescription, DeliveryFailure, DeliveryFailureClass, DependencyCapabilities,
     DependencyRequirement, DurabilityRequirement, Incompatibility, InputDelivery, InputDescription,

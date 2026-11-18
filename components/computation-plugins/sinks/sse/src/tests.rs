@@ -812,6 +812,36 @@ async fn cancelled_cleanup_retains_the_server_and_blocks_restart() -> Result<()>
     Ok(())
 }
 
+/// A panicked listener was reported when it panicked (through the SDK's
+/// owned-worker observation); stopping afterwards succeeds and the sink can
+/// start again.
+#[tokio::test(flavor = "current_thread")]
+async fn stop_after_a_listener_panic_succeeds_and_allows_restart() -> Result<()> {
+    let mut sink = direct_sink(base(0))?;
+    let activation = test_support::activation(&sink.config)?;
+    sink.running = Some(Running {
+        activation,
+        server: tokio::sync::RwLock::new(None),
+        address: "127.0.0.1:0".parse()?,
+    });
+    let (panicked, observed) = tokio::sync::oneshot::channel::<()>();
+    drasi_computation_contracts::workers::spawn_owned_worker(
+        &sink.running.as_ref().context("owner")?.server,
+        async move {
+            let _guard = panicked;
+            panic!("injected listener panic");
+        },
+    )
+    .await?;
+    // The sender drops when the listener unwinds.
+    let _ = observed.await;
+    sink.stop(&contexts::stop(StopMode::Drain)).await?;
+    assert!(sink.running.is_none());
+    sink.start(&mut contexts::start()).await?;
+    sink.stop(&contexts::stop(StopMode::Drain)).await?;
+    Ok(())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn failed_bind_starts_no_worker_and_remains_retryable() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;

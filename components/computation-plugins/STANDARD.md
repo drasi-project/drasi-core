@@ -1,7 +1,7 @@
 # Counter, middleware, view, capture and arithmetic components
 
 These five [independent component crates](README.md) supply real graph components through native ABI
-**4.0.0**, independently of the Source/Reaction/Bootstrap ABI **0.19**.
+**5.0.0**, independently of the Source/Reaction/Bootstrap ABI **0.19**.
 Earlier layouts are rejected; rebuild the host and the required libraries together.
 The package uses the workspace version; that version is not its ABI version.
 Each plugin identity is its component's package name. Implementation versions
@@ -113,7 +113,7 @@ When that host container uses `SharedStorageGroup` and participating QoS pipes,
 both steps' state and the outgoing journal entries share its actual commit.
 Journal acknowledgements still follow consumer handling separately. Existing
 participants need no additional shared-storage capability for this host-owned
-arrangement, but must be built for the host's native ABI 4.0. It does not make
+arrangement, but must be built for the host's native ABI 5.0. It does not make
 standalone arithmetic persistent.
 
 The component supports serialized state `get/put/remove`, element

@@ -36,7 +36,7 @@ credentials (username and password or token), which then replace `user` and
 | Field | Type | Default | Notes | Update |
 |---|---|---|---|---|
 | `stream` | string | required | Output stream identifier on every change. | unsupported |
-| `coordinatedSnapshot` | boolean | `false` | Start from a snapshot taken by the paired coordinated provider, which creates and hands over a managed slot. Requires managed slot ownership and no `startLsn`; row mode also requires `persistent`. | unsupported |
+| `coordinatedSnapshot` | boolean | `false` | Start from a snapshot taken by the paired coordinated provider, which creates and hands over a managed slot. The source then declares and requires its coordination protocol, and its coordinator opens the provider (which takes no configuration) from this source's settings. Requires managed slot ownership and no `startLsn`; row mode also requires `persistent`. The shared factories always offer their protocol without requiring it. | unsupported |
 | `persistent` | boolean | `false` | Rows only. Committed rows survive a process restart: the source declares that its progress resource must be durable, and the graph refuses a volatile binding. | unsupported |
 
 Transactions factories, persistent or coordinated rows, and persistent shared

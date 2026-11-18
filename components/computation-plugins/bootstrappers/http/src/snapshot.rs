@@ -5,9 +5,10 @@ use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use drasi_computation_contracts::{
     workers::{join_owned_worker_gracefully, spawn_owned_worker, WorkerCompletion},
-    ChangeEnvelope, ComponentId, ComputationBootstrapSnapshot, GraphChangeCodec, StreamId,
+    BootstrapLabels, ChangeEnvelope, ComponentId, ComputationBootstrapSnapshot, GraphChangeCodec,
 };
-use drasi_computation_plugin_sdk::{NativeBootstrapProvider, Scope};
+use drasi_computation_plugin_sdk::{QuiescentBootstrapProvider, Scope, ServedSource};
+use drasi_core_types::models::{Element, SourceChange};
 use drasi_http_common::bootstrap::{
     config::HttpBootstrapConfig as RestConfig,
     reader::{HttpSnapshotReader, SnapshotRequest},
@@ -37,11 +38,14 @@ fn shutdown_ms() -> u64 {
     5_000
 }
 
+/// The provider's configuration. The served source and stream are not
+/// configured: the graph relation (the source whose bootstrap input the
+/// provider is connected to) supplies them. `nodeLabels`/`relationLabels`
+/// are an upper bound on what the provider reads (empty means every label);
+/// each query's declared labels narrow it further.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HttpBootstrapConfig {
-    pub source: ComponentId,
-    pub stream: StreamId,
     #[serde(deserialize_with = "deserialize_settings")]
     pub settings: RestConfig,
     #[serde(default)]
@@ -258,12 +262,21 @@ impl Drop for Shared {
 
 pub struct HttpBootstrapProvider {
     config: HttpBootstrapConfig,
+    served: ServedSource,
+    labels: Option<BootstrapLabels>,
     shared: Arc<Shared>,
     pub(crate) query_scope: Option<(Scope, ComponentId)>,
 }
 
 impl HttpBootstrapProvider {
-    pub fn new(config: HttpBootstrapConfig) -> Result<Self> {
+    /// A provider emitting `served`'s namespace and stream, selecting only
+    /// elements whose labels the query declared (`labels`, `None` = all)
+    /// within the configured labels.
+    pub fn new(
+        config: HttpBootstrapConfig,
+        served: ServedSource,
+        labels: Option<BootstrapLabels>,
+    ) -> Result<Self> {
         config.validate()?;
         Ok(Self {
             shared: Arc::new(Shared {
@@ -273,8 +286,32 @@ impl HttpBootstrapProvider {
                 timeout: Duration::from_millis(config.shutdown_timeout_ms),
             }),
             config,
+            served,
+            labels,
             query_scope: None,
         })
+    }
+}
+
+/// Whether the query's declared labels select a mapped change. The configured
+/// labels already bounded what the reader produced.
+pub(crate) fn requested(labels: Option<&BootstrapLabels>, change: &SourceChange) -> bool {
+    let Some(labels) = labels else {
+        return true;
+    };
+    let element = match change {
+        SourceChange::Insert { element } | SourceChange::Update { element, .. } => element,
+        _ => return true,
+    };
+    match element {
+        Element::Node { metadata, .. } => metadata
+            .labels
+            .iter()
+            .any(|label| labels.requests_node(label)),
+        Element::Relation { metadata, .. } => metadata
+            .labels
+            .iter()
+            .any(|label| labels.requests_relation(label)),
     }
 }
 
@@ -291,7 +328,7 @@ impl Drop for Reader {
 }
 
 #[async_trait]
-impl NativeBootstrapProvider for HttpBootstrapProvider {
+impl QuiescentBootstrapProvider for HttpBootstrapProvider {
     fn validate_query_scope(
         &self,
         instance_id: &str,
@@ -323,6 +360,8 @@ impl NativeBootstrapProvider for HttpBootstrapProvider {
             .map_err(|_| anyhow::anyhow!("HTTP snapshot ownership poisoned"))? =
             Some(cancel.clone());
         let config = self.config.clone();
+        let served = self.served.clone();
+        let labels = self.labels.clone();
         let (outputs, receiver) = mpsc::channel(config.output_capacity);
         let worker_cancel = cancel.clone();
         spawn_owned_worker(&self.shared.worker, async move {
@@ -335,18 +374,26 @@ impl NativeBootstrapProvider for HttpBootstrapProvider {
                 reader
                     .read(
                         SnapshotRequest {
-                            source_id: &config.source,
+                            source_id: &served.source,
                             node_labels: &config.node_labels,
                             relation_labels: &config.relation_labels,
                         },
                         |change| {
-                            let next = sequence.checked_add(1);
-                            if let Some(next) = next {
+                            let selected = requested(labels.as_ref(), &change);
+                            let next = if selected {
+                                sequence.checked_add(1)
+                            } else {
+                                Some(sequence)
+                            };
+                            if let (true, Some(next)) = (selected, next) {
                                 sequence = next;
                             }
-                            let stream = config.stream.clone();
+                            let stream = served.stream.clone();
                             let outputs = &outputs;
                             async move {
+                                if !selected {
+                                    return Ok(());
+                                }
                                 let sequence = next.context("HTTP snapshot sequence exhausted")?;
                                 let envelope = GraphChangeCodec::encode_change(
                                     change,

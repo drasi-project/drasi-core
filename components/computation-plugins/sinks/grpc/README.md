@@ -1,7 +1,7 @@
 # Native gRPC sink
 
 `drasi-computation-sink-grpc` provides `drasi.network/grpc-sink`
-(implementation `1`, configuration version `1`, native ABI 4.0). Its `in` port
+(implementation `1`, configuration version `1`, native ABI 5.0). Its `in` port
 consumes standard graph-change envelopes from any producer (a source, a
 transformer or a query) and calls the receiver's
 `drasi.v1.ChangeService/ProcessChanges` with ordered, typed changes. The

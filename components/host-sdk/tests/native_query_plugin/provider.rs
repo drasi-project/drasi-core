@@ -28,10 +28,25 @@ pub(crate) fn create_database(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The session a file snapshot serves outside a graph: the source and
+/// stream its connection to a source's bootstrap input would supply.
+pub(crate) fn provider_session(
+    source: &str,
+    stream: &str,
+) -> Result<drasi_computation_plugin_sdk::BootstrapSession> {
+    Ok(drasi_computation_plugin_sdk::BootstrapSession::new(
+        Some(drasi_computation_plugin_sdk::ServedSource {
+            source: ComponentId::try_new(source)?,
+            stream: StreamId::try_new(stream)?,
+        }),
+        None,
+    ))
+}
+
+pub(crate) const PROVIDER_SOURCE: &str = "ba51bf8f-7ec0-52a4-a2ff-37a49d49c710";
+
 pub(crate) fn provider_configuration(path: &Path) -> serde_json::Value {
     json!({
-        "source": "ba51bf8f-7ec0-52a4-a2ff-37a49d49c710",
-        "stream": "sqlite/out",
         "path": path,
         "tables": ["items"],
         "maxTables": 4,
