@@ -388,8 +388,12 @@ impl Reaction for SqsReaction {
         }
         let shared_config = loader.load().await;
         let client = Client::new(&shared_config);
+        let telemetry = self.base.worker_telemetry().await;
 
-        drasi_lib::context::workers::spawn_owned_worker(&self.base.processing_task, async move {
+        // Bound SDK-heavy future layout without raising the crate's recursion limit.
+        let worker: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> = Box::pin(
+            async move {
+                telemetry.scope(async {
             let mut handlebars = Handlebars::new();
             Self::register_json_helper(&mut handlebars);
 
@@ -400,9 +404,9 @@ impl Reaction for SqsReaction {
                         debug!("[{reaction_id}] Received shutdown signal, exiting processing loop");
                         break;
                     }
-                    result = priority_queue.dequeue() => result,
+                    result = priority_queue.dequeue_message() => result,
                 };
-                let query_result = query_result_arc.as_ref();
+                let query_result = query_result_arc.payload.as_ref();
                 if query_result.results.is_empty() {
                     continue;
                 }
@@ -421,6 +425,17 @@ impl Reaction for SqsReaction {
                     continue;
                 };
 
+                let change_count = query_result.results.iter()
+                    .filter(|diff| Self::resolve_template_spec(query_config, diff).is_some()).count();
+                if change_count == 0 {
+                    continue;
+                }
+                let observation = telemetry.reaction(&query_result_arc.execution_context, change_count)
+                    .map_err(|e| warn!("Failed to observe SQS processing: {e}")).ok();
+                let mut work = telemetry.reaction_work_context(&query_result_arc.execution_context);
+                let process = async {
+                let mut failure = None;
+                let mut handled = 0;
                 for result in &query_result.results {
                     let Some((spec, operation)) = Self::resolve_template_spec(query_config, result)
                     else {
@@ -435,6 +450,7 @@ impl Reaction for SqsReaction {
                             error!(
                                 "[{reaction_id}] Failed rendering body for query '{query_id}' operation '{operation}': {e}"
                             );
+                            failure = Some(e);
                             continue;
                         }
                     };
@@ -449,6 +465,7 @@ impl Reaction for SqsReaction {
                             error!(
                                 "[{reaction_id}] Failed rendering message attributes for query '{query_id}' operation '{operation}': {e}"
                             );
+                            failure = Some(e);
                             continue;
                         }
                     };
@@ -472,6 +489,7 @@ impl Reaction for SqsReaction {
                                         error!(
                                         "[{reaction_id}] Failed rendering message group id template '{template}': {e}"
                                     );
+                                        failure = Some(e.into());
                                         Some(query_id.to_string())
                                     }
                                 }
@@ -497,13 +515,31 @@ impl Reaction for SqsReaction {
                         error!(
                             "[{reaction_id}] Failed to send SQS message for query '{query_id}' operation '{operation}': {e}"
                         );
+                        failure = Some(e);
+                    } else {
+                        handled += 1;
+                        work.handled(query_id.as_str(), 1, 0);
                     }
                 }
+                let input_rows = query_result.results.iter()
+                    .filter(|diff| !matches!(diff, drasi_lib::channels::ResultDiff::Noop)).count();
+                if handled == input_rows {
+                    work.handled(query_id.as_str(), 0, 1);
+                }
+                work.finish(failure.is_none());
+                failure.map_or(Ok(()), Err)
+                };
+                let _ = match observation {
+                    Some(observation) => observation.run(process).await,
+                    None => process.await,
+                };
             }
 
             info!("[{reaction_id}] SQS processing loop exited");
-        })
-        .await?;
+            }).await;
+            },
+        );
+        drasi_lib::context::workers::spawn_owned_worker(&self.base.processing_task, worker).await?;
         self.base
             .set_status(
                 ComponentStatus::Running,

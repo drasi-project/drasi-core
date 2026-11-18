@@ -279,6 +279,7 @@ impl EnvelopeSource for Fixture {
         self.processing().await?;
         self.signals.produced.fetch_add(1, Ordering::SeqCst);
         Ok(self.values.pop_front().map(|envelope| OutputEnvelope {
+            execution_context: Default::default(),
             port: port("out"),
             envelope,
         }))
@@ -306,6 +307,7 @@ impl Transformer for Fixture {
         let stream =
             StreamId::try_new(format!("{}/out", self.name)).expect("valid transform stream");
         Ok(vec![OutputEnvelope {
+            execution_context: Default::default(),
             port: port("out"),
             envelope: input.envelope.derive(
                 emission_id(&stream, self.sequence).expect("valid transform emission ID"),
@@ -400,7 +402,7 @@ async fn pipe_boundaries() {
     let mut blocked = Box::pin(sender.send(envelope(2)));
     assert!(poll!(&mut blocked).is_pending());
     drop(blocked); // Cancelling capacity wait never inserts event 2.
-    let (received, ack) = receiver
+    let (received, _, ack) = receiver
         .receive()
         .await
         .expect("receive event")

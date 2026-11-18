@@ -63,6 +63,9 @@ fn runtime_descriptor(metadata: &FactoryMetadata) -> FactoryDescriptor {
 pub(super) mod recovery_tests;
 
 pub struct NativeFactory {
+    telemetry: Option<abi::telemetry::PluginTelemetryV1>,
+    telemetry_v2: Option<abi::telemetry::PluginTelemetryV2>,
+    telemetry_v3: Option<abi::telemetry::PluginTelemetryV3>,
     pub(super) query_authoring: std::sync::Mutex<Option<std::sync::Weak<dyn ComponentFactory>>>,
     metadata: FactoryMetadata,
     configuration_details: Option<drasi_computation_plugin_sdk::ConfigDetails>,
@@ -153,6 +156,9 @@ impl NativeFactory {
             .then(|| metadata.port_catalogue())
             .transpose()?;
         Ok(Self {
+            telemetry: None,
+            telemetry_v2: None,
+            telemetry_v3: None,
             query_authoring: std::sync::Mutex::new(None),
             descriptor,
             port_formats,
@@ -179,6 +185,44 @@ impl NativeFactory {
     }
     pub fn metadata(&self) -> &FactoryMetadata {
         &self.metadata
+    }
+    pub(super) fn with_telemetry(
+        mut self,
+        extension: Option<abi::telemetry::PluginTelemetryV1>,
+    ) -> Self {
+        self.telemetry = extension;
+        self
+    }
+
+    pub fn supports_execution_context(&self) -> bool {
+        self.telemetry.is_some()
+    }
+    pub(super) fn with_telemetry_v2(
+        mut self,
+        extension: Option<abi::telemetry::PluginTelemetryV2>,
+    ) -> Self {
+        self.telemetry_v2 = extension;
+        self
+    }
+    pub(super) fn with_telemetry_v3(
+        mut self,
+        extension: Option<abi::telemetry::PluginTelemetryV3>,
+    ) -> Self {
+        self.telemetry_v3 = extension;
+        self
+    }
+
+    pub fn telemetry_capabilities(&self) -> u32 {
+        self.telemetry_v2.map_or_else(
+            || {
+                if self.telemetry.is_some() {
+                    abi::telemetry::CONTEXT
+                } else {
+                    0
+                }
+            },
+            |extension| extension.capabilities,
+        )
     }
 
     /// Ask the actual plugin factory to assess a change without constructing or
@@ -373,6 +417,10 @@ impl NativeFactory {
             "source bootstrap progress mode does not match its source factory"
         );
         self.validate_configuration(&configuration)?;
+        let telemetry = super::telemetry::NativeTelemetryBinding::capture(
+            self.telemetry_v2,
+            self.metadata.implementation.name.as_ref(),
+        )?;
         super::NativeSourceBootstrapResource::create(
             CreateRequest {
                 inputs: Vec::new(),
@@ -389,6 +437,7 @@ impl NativeFactory {
             self.raw.state,
             self._plugin.clone(),
             identity,
+            telemetry,
         )
     }
     pub(super) fn with_source_schema(
@@ -1183,6 +1232,24 @@ impl NativeFactory {
             .transpose()?;
         request.activation_credentials_bound = activation_identity.is_some();
         let bytes = wire::encode_create_request(&request)?;
+        let execution_scope = drasi_lib::observability::ExecutionScope::capture();
+        if execution_scope.transport_required() && self.telemetry.is_none() {
+            return Err(drasi_lib::observability::TelemetryError::Unsupported(
+                "native execution context transport",
+            )
+            .into());
+        }
+        let context_enabled =
+            execution_scope.has_adapter() || !execution_scope.context().is_empty();
+        let bytes = if self.telemetry.is_some() {
+            drasi_computation_plugin_sdk::telemetry_transport::encode_creation(&bytes)?
+        } else {
+            anyhow::ensure!(
+                execution_scope.context().is_empty(),
+                "native construction context transport is unsupported"
+            );
+            bytes
+        };
         let table = unsafe { &*self.raw.vtable };
         let mut component = abi::ComponentHandle::null();
         let output_snapshots = output_snapshots
@@ -1202,6 +1269,7 @@ impl NativeFactory {
             .transpose()?;
         let binding = admission.as_ref().map(|admission| {
             super::admission::AdmissionBinding::new(admission, self.codec.clone())
+                .with_context_transport(self.telemetry.is_some())
         });
         anyhow::ensure!(
             admission.is_none() || progress.is_none(),
@@ -1219,110 +1287,117 @@ impl NativeFactory {
                 })
             })
             .transpose()?;
-        unsafe {
-            if let Some(processing) = &processing {
-                anyhow::ensure!(
-                    source_bootstrap.is_none()
-                        && consumer_progress.is_none()
-                        && output_snapshots.is_none()
-                        && progress.is_none()
-                        && admission.is_none()
-                        && !consumer,
-                    "native indexed processing cannot use conflicting services"
-                );
-                take_status(processing.with_table(|table| {
-                    self.processing
+        let telemetry_binding = super::telemetry::NativeTelemetryBinding::capture(
+            self.telemetry_v2,
+            self.metadata.implementation.name.as_ref(),
+        )?;
+        super::telemetry::scope(telemetry_binding.as_ref(), || {
+            unsafe {
+                if let Some(processing) = &processing {
+                    anyhow::ensure!(
+                        source_bootstrap.is_none()
+                            && consumer_progress.is_none()
+                            && output_snapshots.is_none()
+                            && progress.is_none()
+                            && admission.is_none()
+                            && !consumer,
+                        "native indexed processing cannot use conflicting services"
+                    );
+                    take_status(processing.with_table(|table| {
+                        self.processing
+                            .expect("validated")
+                            .create
+                            .expect("validated")(
+                            self.raw.state,
+                            abi::BorrowedBytes::new(&bytes),
+                            table,
+                            &mut component,
+                        )
+                    }))?;
+                } else if let Some((coordinator, _, _)) = &source_bootstrap {
+                    anyhow::ensure!(
+                        admission.is_none() && !consumer && output_snapshots.is_none(),
+                        "source bootstrap cannot be combined with unrelated service bindings"
+                    );
+                    let extension = self.bootstrap_coordination.ok_or_else(|| {
+                        anyhow::anyhow!("source bootstrap coordinator was not negotiated")
+                    })?;
+                    coordinator.validate_factory(self.raw.state, &self._plugin)?;
+                    coordinator.validate_identity(
+                        activation_identity.as_ref().map(|(resource, _)| resource),
+                    )?;
+                    let single = progress.as_ref().map(|progress| progress.binding.table());
+                    let shared = consumer_progress
+                        .as_ref()
+                        .map(|progress| progress.binding.table());
+                    coordinator.with_source(
+                        &request,
+                        progress.as_ref().map(|progress| &progress.owner),
+                        consumer_progress.as_ref().map(|progress| &progress.owner),
+                        |coordinator| {
+                            take_status(extension.create_source.expect("validated")(
+                                self.raw.state,
+                                abi::BorrowedBytes::new(&bytes),
+                                coordinator,
+                                single.as_ref().map_or(std::ptr::null(), |table| table),
+                                shared.as_ref().map_or(std::ptr::null(), |table| table),
+                                &mut component,
+                            ))?;
+                            Ok(())
+                        },
+                    )?;
+                } else if let Some(progress) = &consumer_progress {
+                    take_status(progress.extension.create.expect("validated")(
+                        self.raw.state,
+                        abi::BorrowedBytes::new(&bytes),
+                        &progress.binding.table(),
+                        &mut component,
+                    ))?;
+                } else if let Some(binding) = &output_snapshots {
+                    take_status(self
+                        .output_snapshots
                         .expect("validated")
                         .create
                         .expect("validated")(
                         self.raw.state,
                         abi::BorrowedBytes::new(&bytes),
-                        table,
+                        &binding.table(),
                         &mut component,
-                    )
-                }))?;
-            } else if let Some((coordinator, _, _)) = &source_bootstrap {
-                anyhow::ensure!(
-                    admission.is_none() && !consumer && output_snapshots.is_none(),
-                    "source bootstrap cannot be combined with unrelated service bindings"
-                );
-                let extension = self.bootstrap_coordination.ok_or_else(|| {
-                    anyhow::anyhow!("source bootstrap coordinator was not negotiated")
-                })?;
-                coordinator.validate_factory(self.raw.state, &self._plugin)?;
-                coordinator.validate_identity(
-                    activation_identity.as_ref().map(|(resource, _)| resource),
-                )?;
-                let single = progress.as_ref().map(|progress| progress.binding.table());
-                let shared = consumer_progress
-                    .as_ref()
-                    .map(|progress| progress.binding.table());
-                coordinator.with_source(
-                    &request,
-                    progress.as_ref().map(|progress| &progress.owner),
-                    consumer_progress.as_ref().map(|progress| &progress.owner),
-                    |coordinator| {
-                        take_status(extension.create_source.expect("validated")(
-                            self.raw.state,
-                            abi::BorrowedBytes::new(&bytes),
-                            coordinator,
-                            single.as_ref().map_or(std::ptr::null(), |table| table),
-                            shared.as_ref().map_or(std::ptr::null(), |table| table),
-                            &mut component,
-                        ))?;
-                        Ok(())
-                    },
-                )?;
-            } else if let Some(progress) = &consumer_progress {
-                take_status(progress.extension.create.expect("validated")(
-                    self.raw.state,
-                    abi::BorrowedBytes::new(&bytes),
-                    &progress.binding.table(),
-                    &mut component,
-                ))?;
-            } else if let Some(binding) = &output_snapshots {
-                take_status(self
-                    .output_snapshots
-                    .expect("validated")
-                    .create
-                    .expect("validated")(
-                    self.raw.state,
-                    abi::BorrowedBytes::new(&bytes),
-                    &binding.table(),
-                    &mut component,
-                ))?;
-            } else if consumer {
-                let (_, extension) = self.consumer.expect("validated");
-                take_status(extension.create.expect("validated")(
-                    self.raw.state,
-                    abi::BorrowedBytes::new(&bytes),
-                    &mut component,
-                ))?;
-            } else if let Some(progress) = &progress {
-                take_status(progress.extension.create.expect("validated")(
-                    self.raw.state,
-                    abi::BorrowedBytes::new(&bytes),
-                    &progress.binding.table(),
-                    &mut component,
-                ))?;
-            } else if let Some(binding) = &binding {
-                let services = self.admission.ok_or_else(|| {
-                    anyhow::anyhow!("native factory has no source admission service")
-                })?;
-                take_status(services.create.expect("validated")(
-                    self.raw.state,
-                    abi::BorrowedBytes::new(&bytes),
-                    &binding.table(),
-                    &mut component,
-                ))?;
-            } else {
-                take_status(table.create.expect("validated")(
-                    self.raw.state,
-                    abi::BorrowedBytes::new(&bytes),
-                    &mut component,
-                ))?;
+                    ))?;
+                } else if consumer {
+                    let (_, extension) = self.consumer.expect("validated");
+                    take_status(extension.create.expect("validated")(
+                        self.raw.state,
+                        abi::BorrowedBytes::new(&bytes),
+                        &mut component,
+                    ))?;
+                } else if let Some(progress) = &progress {
+                    take_status(progress.extension.create.expect("validated")(
+                        self.raw.state,
+                        abi::BorrowedBytes::new(&bytes),
+                        &progress.binding.table(),
+                        &mut component,
+                    ))?;
+                } else if let Some(binding) = &binding {
+                    let services = self.admission.ok_or_else(|| {
+                        anyhow::anyhow!("native factory has no source admission service")
+                    })?;
+                    take_status(services.create.expect("validated")(
+                        self.raw.state,
+                        abi::BorrowedBytes::new(&bytes),
+                        &binding.table(),
+                        &mut component,
+                    ))?;
+                } else {
+                    take_status(table.create.expect("validated")(
+                        self.raw.state,
+                        abi::BorrowedBytes::new(&bytes),
+                        &mut component,
+                    ))?;
+                }
             }
-        };
+            Ok(())
+        })?;
         let component = unsafe {
             NativeComponentProxy::new(
                 component,
@@ -1337,7 +1412,11 @@ impl NativeFactory {
                     consumer_progress,
                     input_progress,
                 },
+                self.telemetry,
+                context_enabled && self.telemetry.is_some(),
             )?
+            .with_timing_extension(self.telemetry_v3)
+            .with_telemetry_binding(telemetry_binding)
         };
         let component = match self.batching {
             Some(extension) => component.with_batching(extension),
@@ -1560,6 +1639,13 @@ impl ComponentFactory for NativeFactory {
         &self,
         context: ConstructionContext,
     ) -> std::result::Result<ConstructedComponent, ComponentCreationError> {
+        if context.telemetry().policy().distributed_tracing_required() && self.telemetry.is_none() {
+            return Err(ComponentCreationError::terminal(
+                drasi_lib::observability::TelemetryError::Unsupported(
+                    "native execution context transport",
+                ),
+            ));
+        }
         self.validate(&context.specification)
             .map_err(ComponentCreationError::terminal)?;
         // The instance carries the declaration the graph checks: the plugin's

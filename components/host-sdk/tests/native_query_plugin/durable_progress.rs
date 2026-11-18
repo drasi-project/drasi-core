@@ -20,7 +20,7 @@ fn ordinary_input(
         logical,
     )
     .with_source_position(position.to_vec().into());
-    Ok(InputEnvelope {
+    Ok(InputEnvelope { execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_source_event(
             Arc::new(event),
@@ -237,7 +237,7 @@ fn positioned_input(
     if let Some(position) = position {
         system = system.with_source_position(position.to_vec().into());
     }
-    Ok(InputEnvelope {
+    Ok(InputEnvelope { execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: ChangeEnvelope::new(original.id().clone(), original.changes().clone(), system),
     })

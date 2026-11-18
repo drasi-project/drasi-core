@@ -588,6 +588,13 @@ impl Drop for Cursor {
 
 #[async_trait]
 impl ComputationBootstrapProvider for CompositeBootstrapProvider {
+    fn bind_bootstrap_trace(&self, trace: crate::observability::BootstrapTrace) -> Result<()> {
+        for member in &self.members {
+            member.provider.bind_bootstrap_trace(trace.clone())?;
+        }
+        Ok(())
+    }
+
     fn validate_query_scope(
         &self,
         instance: &str,

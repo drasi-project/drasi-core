@@ -15,7 +15,8 @@ use axum::{
 };
 use drasi_computation_contracts::{
     workers::{
-        join_owned_worker_gracefully, spawn_owned_worker, WorkerCleanupError, WorkerCompletion,
+        join_owned_worker_gracefully, spawn_owned_component_worker, WorkerCleanupError,
+        WorkerCompletion,
     },
     *,
 };
@@ -460,7 +461,7 @@ impl NativeComponent for SseSink {
             address,
         });
         let stopped = cancel.clone();
-        spawn_owned_worker(&running.server, async move {
+        spawn_owned_component_worker(&running.server, async move {
             let result =
                 server::serve(listener, router, stopped.clone().cancelled_owned(), options).await;
             if !stopped.is_cancelled() {

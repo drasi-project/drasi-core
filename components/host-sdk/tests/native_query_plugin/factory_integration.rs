@@ -110,7 +110,7 @@ fn source() -> Result<(
 
 async fn emit(sender: &mpsc::Sender<OutputEnvelope>, value: i64, sequence: u64) -> Result<()> {
     sender
-        .send(OutputEnvelope {
+        .send(OutputEnvelope { execution_context: Default::default(),
             port: PortId::try_new("out")?,
             envelope: input(
                 SourceChange::Replace {
@@ -443,7 +443,7 @@ async fn ordinary_native_queries_transfer_large_results_and_retained_history() -
                     })
                     .collect();
                 sender
-                    .send(OutputEnvelope {
+                    .send(OutputEnvelope { execution_context: Default::default(),
                         port: PortId::try_new("out")?,
                         envelope: GraphChangeCodec::encode_changes(
                             &changes,

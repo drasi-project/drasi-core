@@ -88,6 +88,7 @@ pub mod processing;
 pub mod recovery;
 pub mod services;
 pub mod source_schema;
+pub mod telemetry;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

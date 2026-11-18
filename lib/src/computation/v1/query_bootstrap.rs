@@ -105,6 +105,15 @@ pub trait BootstrapRetirement: Send + Sync {
 /// widening the query's single bootstrap slot or its transaction authority.
 #[async_trait]
 pub trait ComputationBootstrapProvider: Send + Sync {
+    /// Host-local lazy trace for subscription-owned snapshot initialization.
+    /// Start it only when actual snapshot work begins, never for replay alone.
+    fn bind_bootstrap_trace(
+        &self,
+        _trace: crate::observability::BootstrapTrace,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     /// Hold a positively stopped provider against reuse through configuration
     /// resolution. An opaque provider cannot infer this capability from `stop`.
     fn freeze_for_retirement(&self) -> anyhow::Result<Box<dyn BootstrapRetirement>> {

@@ -33,7 +33,7 @@ fn limits(count: usize) -> SinkBatching {
 async fn acknowledge(delivery: Delivery) -> Result<()> {
     delivery
         .into_parts()
-        .1
+        .2
         .expect("receipt")
         .complete(HandlingOutcome::Handled)
         .await?;
@@ -263,6 +263,7 @@ async fn lease_collection_flushes_on_bytes_deadline_and_control_barriers() -> Re
         );
         let mut bound = limits(3);
         bound.max_bytes = SinkBatching::input_size(&InputEnvelope {
+            execution_context: Default::default(),
             port: port("in"),
             envelope: a.clone(),
         })? + 5;

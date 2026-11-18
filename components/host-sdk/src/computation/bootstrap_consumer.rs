@@ -168,6 +168,7 @@ impl BootstrapBinding {
             let input = InputEnvelope {
                 port: self.input.clone(),
                 envelope: envelope?,
+                execution_context: drasi_lib::observability::ExecutionContext::current(),
             };
             if let Some(bindings) = bindings {
                 let mut selected = bindings.to_vec();
@@ -232,6 +233,7 @@ impl BootstrapBinding {
             .map(|envelope| InputEnvelope {
                 port: self.input.clone(),
                 envelope,
+                execution_context: drasi_lib::observability::ExecutionContext::current(),
             })
             .collect())
     }

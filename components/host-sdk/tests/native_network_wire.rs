@@ -234,6 +234,7 @@ fn input() -> Result<InputEnvelope> {
         QueryPartEvaluationContext::Noop,
     ];
     Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: QueryChangeCodec::encode_evaluation(
             None,
@@ -258,6 +259,7 @@ fn input() -> Result<InputEnvelope> {
 /// The same records and system metadata with no query annotation at all.
 fn unannotated(input: &InputEnvelope) -> InputEnvelope {
     InputEnvelope {
+        execution_context: Default::default(),
         port: input.port.clone(),
         envelope: ChangeEnvelope::new(
             input.envelope.id().clone(),
@@ -273,6 +275,7 @@ fn source_input(changes: &[SourceChange]) -> Result<InputEnvelope> {
 
 fn source_input_on(stream: &str, changes: &[SourceChange]) -> Result<InputEnvelope> {
     Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_changes(
             changes,
@@ -285,6 +288,7 @@ fn source_input_on(stream: &str, changes: &[SourceChange]) -> Result<InputEnvelo
 
 fn source_input_untimed(changes: &[SourceChange]) -> Result<InputEnvelope> {
     Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_changes(
             changes,
@@ -562,6 +566,7 @@ fn native_sse_sends_truthful_changes_for_every_producer_kind() -> Result<()> {
     wrong_port.port = PortId::try_new("wrong")?;
     assert!(drasi_computation_sink_sse::sse_payload(&wrong_port, &queries).is_err());
     let progress = InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: QueryChangeCodec::progress_envelope(
             &ResultNodeProjector::try_new("test/native-network-wire/q/out", None)?,
@@ -574,6 +579,7 @@ fn native_sse_sends_truthful_changes_for_every_producer_kind() -> Result<()> {
     };
     assert!(drasi_computation_sink_sse::sse_payload(&progress, &queries).is_err());
     let due = InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_futures_due(
             StreamId::try_new("q/out")?,

@@ -109,6 +109,7 @@ const MAX_SOURCE_IDENTITY_BYTES: usize = 4096;
 
 struct Buffered {
     envelope: ChangeEnvelope,
+    execution_context: super::ExecutionContext,
     bytes: usize,
     deadline: Instant,
 }
@@ -675,6 +676,7 @@ impl SourceTimeMergeTransformer {
             )?)?;
         }
         let output = OutputEnvelope {
+            execution_context: pending.input.execution_context.clone(),
             port: port(if pending.late { "late" } else { "out" }),
             envelope,
         };
@@ -937,6 +939,7 @@ impl Transformer for SourceTimeMergeTransformer {
         self.state.bytes += bytes.len();
         let buffered = Buffered {
             envelope,
+            execution_context: input.execution_context,
             bytes: bytes.len(),
             deadline: now + Duration::from_millis(self.definition.max_wait_ms),
         };

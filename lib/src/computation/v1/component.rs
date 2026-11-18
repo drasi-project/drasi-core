@@ -20,9 +20,11 @@ use async_trait::async_trait;
 
 use super::{ApplyError, Assessment, ComponentDescriptor, PortId};
 
+pub use drasi_computation_contracts::telemetry::ExecutionContext;
 pub use drasi_computation_contracts::{
-    ComponentUpdateData, ComponentUpdateMode, ComponentUpdatePlan, InputEnvelope, OutputEnvelope,
-    SinkBatching, SinkCompletion, SnapshotConsumer, SourceSchemaReader, WakeupSource,
+    ComponentUpdateData, ComponentUpdateMode, ComponentUpdatePlan, EnvelopeMessage, InputEnvelope,
+    OutputEnvelope, SinkBatching, SinkCompletion, SnapshotConsumer, SourceSchemaReader,
+    WakeupSource,
 };
 
 /// Owner-issued execution intent accompanying a planned reconstruction.
@@ -239,6 +241,19 @@ pub trait EnvelopeSource: ComputationComponent {
 /// A stateful transformer with declared input and output ports.
 #[async_trait]
 pub trait Transformer: ComputationComponent {
+    /// Built-in query instrumentation selects its processing boundary only once
+    /// actual input, replay or scheduled work is known. Other transformers leave
+    /// observation with the graph. The returned context also covers zero outputs.
+    #[doc(hidden)]
+    fn processing_context(&self) -> Option<super::ExecutionContext> {
+        None
+    }
+
+    #[doc(hidden)]
+    fn observes_input(&self, _input: &InputEnvelope) -> bool {
+        false
+    }
+
     /// Called after startup and before processing/replay, with the graph's actual
     /// receipt-tracked destinations. Participating producers persist these using
     /// their existing transaction and reject changes while output is unconfirmed.
@@ -296,6 +311,13 @@ pub trait Transformer: ComputationComponent {
 /// A consumer beside legacy Reaction. Its descriptor has input ports only.
 #[async_trait]
 pub trait EnvelopeSink: ComputationComponent {
+    /// Administrative/forwarding outlets can complete their local contract
+    /// without performing terminal effect work. Their success must not produce
+    /// source-to-handled latency or be mistaken for the downstream worker.
+    fn observes_handled_branch_latency(&self) -> bool {
+        true
+    }
+
     /// Read only at an operation boundary. The graph owns bounded collection,
     /// timers and delivery receipts; no success is reported merely for buffering.
     fn batching(&self) -> anyhow::Result<Option<SinkBatching>> {

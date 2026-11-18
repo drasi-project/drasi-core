@@ -365,6 +365,7 @@ impl ContinuousQueryTransformer {
         self.replay_pending
             .store(!self.pending_output.is_empty(), Ordering::Release);
         Ok(vec![OutputEnvelope {
+            execution_context: crate::observability::ExecutionContext::current(),
             port: PortId::try_new("out")?,
             envelope: delivery,
         }])

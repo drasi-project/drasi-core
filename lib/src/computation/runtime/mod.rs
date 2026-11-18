@@ -102,6 +102,7 @@ pub(crate) async fn build(
     config: Arc<RuntimeConfig>,
     declarations: OrdinaryDeclarations,
     wal: Option<Arc<dyn crate::wal::WalProvider>>,
+    observability: crate::observability::RuntimeObservability,
     query_factory: Option<Arc<dyn ComponentFactory>>,
     management: crate::management::ManagementOptions,
     #[cfg(feature = "test-support")] test_controls: BTreeMap<
@@ -118,7 +119,12 @@ pub(crate) async fn build(
         native,
         native_factories,
     } = declarations;
-    let mut core = DrasiLib::new_with_wal(config.clone(), wal);
+    let mut core = DrasiLib::new_with_observability(
+        config.clone(),
+        DrasiLib::default_middleware_registry(),
+        wal,
+        observability,
+    );
     for batch in &native {
         core.instance_graph.retain_pending(batch.clone());
     }
@@ -419,6 +425,7 @@ fn index_resource_id(name: &str) -> GraphResult<ResourceId> {
 pub(crate) struct Runtime {
     #[cfg(test)]
     source_schema_capture_test: std::sync::Mutex<Option<Arc<inspection::SourceSchemaCaptureTest>>>,
+    observability: crate::observability::RuntimeObservability,
     #[cfg(feature = "test-support")]
     test_controls: OnceLock<BTreeMap<ComponentName, crate::test_support::QueryTestControl>>,
     config: Arc<RuntimeConfig>,
@@ -479,6 +486,7 @@ impl Runtime {
         middleware: Arc<drasi_core::middleware::MiddlewareTypeRegistry>,
         logs: Arc<crate::observability::ComponentLogRegistry>,
         wal: Option<Arc<dyn crate::wal::WalProvider>>,
+        observability: crate::observability::RuntimeObservability,
     ) -> Arc<Self> {
         let services = LegacyPluginServices {
             scope: Arc::from(config.id.as_str()),
@@ -491,6 +499,7 @@ impl Runtime {
         Arc::new(Self {
             #[cfg(test)]
             source_schema_capture_test: std::sync::Mutex::new(None),
+            observability,
             #[cfg(feature = "test-support")]
             test_controls: OnceLock::new(),
             config,
@@ -522,6 +531,7 @@ impl Runtime {
         let mut builder = self.services.declare(
             ComputationGraph::builder("__drasi_lib_runtime__")
                 .feedback_shutdown(self.config.feedback_shutdown)
+                .with_observability(self.observability.clone())
                 .activation_timeout(std::time::Duration::from_secs(
                     self.config
                         .activation_timeout_secs

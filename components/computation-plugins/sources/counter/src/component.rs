@@ -247,6 +247,7 @@ impl NativeSource for Counter {
         )?)?;
         self.emitted = sequence;
         Ok(Some(OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out")?,
             envelope,
         }))

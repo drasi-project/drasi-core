@@ -149,12 +149,14 @@ impl MySqlStoredProcReaction {
         &self,
         executor: Arc<MySqlExecutor>,
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+        telemetry: drasi_lib::observability::WorkerTelemetry,
     ) -> tokio::task::JoinHandle<()> {
         let priority_queue = self.base.priority_queue.clone();
         let config = self.config.clone();
         let reaction_id = self.base.id.clone();
 
         tokio::spawn(async move {
+            telemetry.scope(async {
             let renderer = CommandRenderer::new();
             info!("[{reaction_id}] Starting processing loop");
 
@@ -166,9 +168,9 @@ impl MySqlStoredProcReaction {
                         debug!("[{reaction_id}] Shutdown signal received");
                         break;
                     }
-                    result = priority_queue.dequeue() => result,
+                    result = priority_queue.dequeue_message() => result,
                 };
-                let query_result = query_result_arc.as_ref();
+                let query_result = query_result_arc.payload.as_ref();
                 let timestamp = query_result.timestamp.to_rfc3339();
 
                 debug!(
@@ -176,6 +178,17 @@ impl MySqlStoredProcReaction {
                     reaction_id, query_result.query_id
                 );
 
+                let change_count = query_result.results.iter()
+                    .filter(|diff| !matches!(diff, ResultDiff::Noop)).count();
+                if change_count == 0 {
+                    continue;
+                }
+                let observation = telemetry.reaction(&query_result_arc.execution_context, change_count)
+                    .map_err(|e| warn!("Failed to observe MySQL processing: {e}")).ok();
+                let mut work = telemetry.reaction_work_context(&query_result_arc.execution_context);
+                let process = async {
+                let mut failure = None;
+                let mut handled = 0;
                 // Process each result item in the batch (empty batch = no-op).
                 for result_item in &query_result.results {
                     // Map the diff variant to (operation, context fields).
@@ -256,6 +269,7 @@ impl MySqlStoredProcReaction {
                             warn!(
                                 "[{reaction_id}] Failed to render command for {result_type} operation: {e}; skipping event"
                             );
+                            failure = Some(e);
                             continue;
                         }
                     };
@@ -271,18 +285,32 @@ impl MySqlStoredProcReaction {
                         .await
                     {
                         Ok(()) => {
+                            handled += 1;
+                            work.handled(query_result.query_id.as_str(), 1, 0);
                             debug!(
                                 "[{reaction_id}] Successfully executed command for {result_type} operation"
                             );
                         }
                         Err(e) => {
                             error!("[{reaction_id}] Failed to execute command: {e}");
+                            failure = Some(e);
                         }
                     }
                 }
+                if handled == change_count {
+                    work.handled(query_result.query_id.as_str(), 0, 1);
+                }
+                work.finish(failure.is_none());
+                failure.map_or(Ok(()), Err)
+                };
+                let _ = match observation {
+                    Some(observation) => observation.run(process).await,
+                    None => process.await,
+                };
             }
 
             info!("[{reaction_id}] Processing loop stopped");
+            }).await;
         })
     }
 }
@@ -384,7 +412,8 @@ impl Reaction for MySqlStoredProcReaction {
         // Spawn processing task with a shutdown channel so stop_common can
         // interrupt the loop promptly.
         let shutdown_rx = self.base.create_shutdown_channel().await;
-        let task = self.spawn_processing_task(executor, shutdown_rx);
+        let task =
+            self.spawn_processing_task(executor, shutdown_rx, self.base.worker_telemetry().await);
         self.base.set_processing_task(task).await;
 
         info!(

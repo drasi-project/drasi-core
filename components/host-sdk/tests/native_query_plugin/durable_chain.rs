@@ -144,7 +144,7 @@ async fn replay_and_gap() -> Result<()> {
             .await?;
         let output = child.output(0).await?;
         aggregate(
-            &[OutputEnvelope {
+            &[OutputEnvelope { execution_context: Default::default(),
                 port: PortId::try_new("out")?,
                 envelope: output,
             }],
@@ -164,7 +164,7 @@ async fn replay_and_gap() -> Result<()> {
             .context("downstream replay restart")?;
         let replayed = child.output(1).await?;
         aggregate(
-            &[OutputEnvelope {
+            &[OutputEnvelope { execution_context: Default::default(),
                 port: PortId::try_new("out")?,
                 envelope: replayed,
             }],
@@ -204,7 +204,7 @@ async fn replay_and_gap() -> Result<()> {
             "reset must retain the transport high-water mark"
         );
         aggregate(
-            &[OutputEnvelope {
+            &[OutputEnvelope { execution_context: Default::default(),
                 port: PortId::try_new("out")?,
                 envelope: output,
             }],

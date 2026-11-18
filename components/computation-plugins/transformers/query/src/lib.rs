@@ -620,9 +620,9 @@ impl NativeTransformer for QueryTransformer {
         self.failed = false;
         Ok(output
             .into_iter()
-            .map(|envelope| OutputEnvelope {
-                port: PortId::try_new("out").expect("constant port"),
-                envelope,
+            .map(|envelope| {
+                OutputEnvelope::new(PortId::try_new("out").expect("constant port"), envelope)
+                    .with_current_context()
             })
             .collect())
     }
@@ -735,9 +735,9 @@ impl NativeTransformer for QueryTransformer {
         }
         Ok(output
             .into_iter()
-            .map(|envelope| OutputEnvelope {
-                port: PortId::try_new("out").expect("constant port"),
-                envelope,
+            .map(|envelope| {
+                OutputEnvelope::new(PortId::try_new("out").expect("constant port"), envelope)
+                    .with_current_context()
             })
             .collect())
     }
@@ -775,9 +775,9 @@ impl NativeTransformer for QueryTransformer {
         self.failed = false;
         Ok(output
             .into_iter()
-            .map(|envelope| OutputEnvelope {
-                port: PortId::try_new("out").expect("constant port"),
-                envelope,
+            .map(|envelope| {
+                OutputEnvelope::new(PortId::try_new("out").expect("constant port"), envelope)
+                    .with_current_context()
             })
             .collect())
     }

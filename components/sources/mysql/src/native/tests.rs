@@ -777,6 +777,7 @@ async fn apply(
     use drasi_lib::computation::v1::*;
     let results = query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: output.envelope,
         })

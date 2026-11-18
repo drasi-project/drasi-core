@@ -84,6 +84,8 @@ pub use resource_observer::{ComponentResource, ComponentResourceObserver, Plugin
 /// making cloning cheap (just reference count increments).
 #[derive(Clone)]
 pub struct SourceRuntimeContext {
+    /// Host-local log destination. Never serialized or passed as a Rust pointer across FFI.
+    pub log_binding: Option<crate::observability::ComponentLogBinding>,
     /// DrasiLib instance ID (for log routing isolation)
     pub instance_id: String,
 
@@ -146,6 +148,7 @@ impl SourceRuntimeContext {
         Self {
             instance_id: instance_id.into(),
             source_id,
+            log_binding: None,
             state_store,
             update_tx: update_tx.into(),
             identity_provider,
@@ -225,6 +228,8 @@ impl std::fmt::Debug for SourceRuntimeContext {
 /// making cloning cheap (just reference count increments).
 #[derive(Clone)]
 pub struct ReactionRuntimeContext {
+    /// Host-local log destination. Never serialized or passed as a Rust pointer across FFI.
+    pub log_binding: Option<crate::observability::ComponentLogBinding>,
     /// DrasiLib instance ID (for log routing isolation)
     pub instance_id: String,
 
@@ -295,6 +300,7 @@ impl ReactionRuntimeContext {
             instance_id: instance_id.into(),
             reaction_id,
             query_ids,
+            log_binding: None,
             state_store,
             update_tx: update_tx.into(),
             identity_provider,

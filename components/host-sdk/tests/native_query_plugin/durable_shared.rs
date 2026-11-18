@@ -50,7 +50,7 @@ impl EnvelopeSource for ReleasedSource {
         }
         if self.source.envelope.is_none() {
             if let Some(envelope) = self.extra.pop_front() {
-                return Ok(Some(OutputEnvelope {
+                return Ok(Some(OutputEnvelope { execution_context: Default::default(),
                     port: PortId::try_new("out")?,
                     envelope,
                 }));
@@ -380,7 +380,7 @@ async fn backpressure() -> Result<()> {
         let rows = seen.lock().expect("shared result capture poisoned");
         assert_eq!(rows.len(), 2);
         aggregate(
-            &[OutputEnvelope {
+            &[OutputEnvelope { execution_context: Default::default(),
                 port: PortId::try_new("out")?,
                 envelope: rows[1].clone(),
             }],
@@ -437,7 +437,7 @@ async fn shared_output() -> Result<()> {
             let rows = seen.lock().expect("shared result capture poisoned");
             assert_eq!(rows.len(), 1);
             aggregate(
-                &[OutputEnvelope {
+                &[OutputEnvelope { execution_context: Default::default(),
                     port: PortId::try_new("out")?,
                     envelope: rows[0].clone(),
                 }],
@@ -532,7 +532,7 @@ async fn shared_crash(phase: &str) -> Result<()> {
             let rows = seen.lock().expect("shared result capture poisoned");
             assert_eq!(rows.len(), 1);
             aggregate(
-                &[OutputEnvelope {
+                &[OutputEnvelope { execution_context: Default::default(),
                     port: PortId::try_new("out")?,
                     envelope: rows[0].clone(),
                 }],

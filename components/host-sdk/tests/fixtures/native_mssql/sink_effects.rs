@@ -48,6 +48,7 @@ fn input(
     )?
     .context("expected query changes")?;
     Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope,
     })

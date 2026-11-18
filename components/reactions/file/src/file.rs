@@ -418,7 +418,10 @@ impl FileReaction {
         repaired_files: &Arc<Mutex<HashSet<String>>>,
         query_result: &QueryResult,
         reaction_name: &str,
-    ) {
+    ) -> Result<()> {
+        let mut work = drasi_lib::observability::WorkerTelemetry::capture().reaction_work();
+        let mut failure = None;
+        let mut handled = 0;
         for diff in &query_result.results {
             if matches!(diff, ResultDiff::Noop) {
                 continue;
@@ -446,13 +449,28 @@ impl FileReaction {
                             output_file.to_string_lossy(),
                             e
                         );
+                        failure = Some(e);
+                    } else {
+                        handled += 1;
+                        work.handled(query_result.query_id.as_str(), 1, 0);
                     }
                 }
                 Err(e) => {
                     error!("[{reaction_name}] Failed to render output: {e}");
+                    failure = Some(e);
                 }
             }
         }
+        let input_rows = query_result
+            .results
+            .iter()
+            .filter(|diff| !matches!(diff, ResultDiff::Noop))
+            .count();
+        if handled == input_rows && handled > 0 {
+            work.handled(query_result.query_id.as_str(), 0, 1);
+        }
+        work.finish(failure.is_none());
+        failure.map_or(Ok(()), Err)
     }
 }
 
@@ -700,8 +718,10 @@ impl Reaction for FileReaction {
         let file_locks = self.file_locks.clone();
         let repaired_files = self.repaired_files.clone();
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
+        let telemetry = self.base.worker_telemetry().await;
 
         drasi_lib::context::workers::spawn_owned_worker(&self.base.processing_task, async move {
+            telemetry.scope(async {
             loop {
                 let query_result_arc = tokio::select! {
                     biased;
@@ -709,19 +729,32 @@ impl Reaction for FileReaction {
                         debug!("[{reaction_name}] Received shutdown signal, exiting processing loop");
                         break;
                     }
-                    result = priority_queue.dequeue() => result,
+                    result = priority_queue.dequeue_message() => result,
                 };
 
-                Self::process_result(
+                let query_result = query_result_arc.payload.as_ref();
+                let change_count = query_result.results.iter()
+                    .filter(|diff| !matches!(diff, ResultDiff::Noop)).count();
+                if change_count == 0 {
+                    continue;
+                }
+                let observation = telemetry.reaction(&query_result_arc.execution_context, change_count)
+                    .map_err(|e| log::warn!("Failed to observe file output: {e}"))
+                    .ok();
+                let output = Self::process_result(
                     &config,
                     &handlebars,
                     &file_locks,
                     &repaired_files,
-                    query_result_arc.as_ref(),
+                    query_result,
                     reaction_name.as_str(),
-                )
-                .await;
+                );
+                let _ = match observation {
+                    Some(observation) => observation.run(output).await,
+                    None => output.await,
+                };
             }
+            }).await;
         }).await?;
         self.base
             .set_status(
@@ -1069,7 +1102,7 @@ mod tests {
             HashMap::new(),
         );
 
-        FileReaction::process_result(
+        let _ = FileReaction::process_result(
             &config,
             &handlebars,
             &file_locks,
@@ -1107,7 +1140,7 @@ mod tests {
         result.query_name =
             Some(drasi_core::ComponentName::try_new("orders").expect("fixture query name"));
 
-        FileReaction::process_result(
+        let _ = FileReaction::process_result(
             &config,
             &handlebars,
             &file_locks,
@@ -1157,7 +1190,7 @@ mod tests {
         result.query_name =
             Some(drasi_core::ComponentName::try_new("unknown-query").expect("fixture query name"));
 
-        FileReaction::process_result(
+        let _ = FileReaction::process_result(
             &config,
             &handlebars,
             &file_locks,
@@ -1216,7 +1249,7 @@ mod tests {
         result.query_name =
             Some(drasi_core::ComponentName::try_new("orders").expect("fixture query name"));
 
-        FileReaction::process_result(
+        let _ = FileReaction::process_result(
             &config,
             &handlebars,
             &file_locks,
@@ -1397,7 +1430,7 @@ mod tests {
         result.query_name =
             Some(drasi_core::ComponentName::try_new("orders").expect("fixture query name"));
 
-        FileReaction::process_result(
+        let _ = FileReaction::process_result(
             &config,
             &handlebars,
             &file_locks,
@@ -1455,7 +1488,7 @@ mod tests {
         result.query_name =
             Some(drasi_core::ComponentName::try_new("orders").expect("fixture query name"));
 
-        FileReaction::process_result(
+        let _ = FileReaction::process_result(
             &config,
             &handlebars,
             &file_locks,
@@ -1512,7 +1545,7 @@ mod tests {
         result.query_name =
             Some(drasi_core::ComponentName::try_new("stats").expect("fixture query name"));
 
-        FileReaction::process_result(
+        let _ = FileReaction::process_result(
             &config,
             &handlebars,
             &file_locks,
@@ -1581,7 +1614,7 @@ mod tests {
         result.query_name =
             Some(drasi_core::ComponentName::try_new("ns.orders").expect("fixture query name"));
 
-        FileReaction::process_result(
+        let _ = FileReaction::process_result(
             &config,
             &handlebars,
             &file_locks,

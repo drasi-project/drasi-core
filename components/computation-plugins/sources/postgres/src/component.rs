@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use drasi_computation_contracts::pause::{PauseControl, PauseGate};
 use drasi_computation_contracts::{
     workers::{
-        cancel_owned_worker, join_owned_worker, spawn_owned_worker, WorkerCleanupError,
+        cancel_owned_worker, join_owned_worker, spawn_owned_component_worker, WorkerCleanupError,
         WorkerCompletion,
     },
     ComponentDescriptor, ComponentId, ConsumerProgressSnapshot, ConsumerProgressView,
@@ -686,7 +686,7 @@ impl PostgresTransactionSource {
         self.pause.resume();
         let mut shutdown = self.shutdown.subscribe();
         let shared = self.shared.is_some();
-        spawn_owned_worker(&self.worker, async move {
+        spawn_owned_component_worker(&self.worker, async move {
             let stopped = tokio::select! {
                 biased;
                 mode = shutdown.wait_for(|mode| *mode != Shutdown::Running) => {

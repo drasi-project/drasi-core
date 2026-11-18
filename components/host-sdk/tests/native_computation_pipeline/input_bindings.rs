@@ -44,7 +44,7 @@ impl ComputationComponent for BindingSource {
 #[async_trait]
 impl EnvelopeSource for BindingSource {
     async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
-        Ok(self.receiver.recv().await.map(|envelope| OutputEnvelope {
+        Ok(self.receiver.recv().await.map(|envelope| OutputEnvelope { execution_context: Default::default(),
             port: PortId::try_new("out").expect("fixture port"),
             envelope,
         }))

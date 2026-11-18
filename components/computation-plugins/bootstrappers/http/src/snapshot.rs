@@ -4,7 +4,7 @@
 use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use drasi_computation_contracts::{
-    workers::{join_owned_worker_gracefully, spawn_owned_worker, WorkerCompletion},
+    workers::{join_owned_worker_gracefully, spawn_owned_scoped_worker, WorkerCompletion},
     ChangeEnvelope, ComponentId, ComputationBootstrapSnapshot, GraphChangeCodec, StreamId,
 };
 use drasi_computation_plugin_sdk::{NativeBootstrapProvider, Scope};
@@ -325,7 +325,7 @@ impl NativeBootstrapProvider for HttpBootstrapProvider {
         let config = self.config.clone();
         let (outputs, receiver) = mpsc::channel(config.output_capacity);
         let worker_cancel = cancel.clone();
-        spawn_owned_worker(&self.shared.worker, async move {
+        spawn_owned_scoped_worker(&self.shared.worker, async move {
             let work = async {
                 let reader = HttpSnapshotReader::bounded(
                     config.settings.clone(),

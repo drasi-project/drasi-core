@@ -296,23 +296,27 @@ impl GraphControl {
             crate::computation::instance::StartupCancellation,
         )>,
     ) -> GraphResult<ReconciliationReport> {
-        self.require_configuration_write()?;
-        let (reply, result) = oneshot::channel();
-        self.commands
-            .send(Command::Reconcile {
-                preview,
-                bindings,
-                management_access: self.management_access,
-                activation,
-                reply,
+        self.observe_control("reconcile")?
+            .run_control(async {
+                self.require_configuration_write()?;
+                let (reply, result) = oneshot::channel();
+                self.commands
+                    .send(Command::Reconcile {
+                        preview,
+                        bindings,
+                        management_access: self.management_access,
+                        activation,
+                        reply,
+                    })
+                    .await
+                    .map_err(|_| GraphError::ControllerClosed)?;
+                let report = result.await.map_err(|_| GraphError::ControllerClosed)??;
+                if report.committed {
+                    self.refresh_dependencies().await?;
+                }
+                Ok(report)
             })
             .await
-            .map_err(|_| GraphError::ControllerClosed)?;
-        let report = result.await.map_err(|_| GraphError::ControllerClosed)??;
-        if report.committed {
-            self.refresh_dependencies().await?;
-        }
-        Ok(report)
     }
 }
 

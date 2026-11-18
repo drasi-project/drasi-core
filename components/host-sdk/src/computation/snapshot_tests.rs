@@ -195,6 +195,7 @@ fn plugin(claim: Claim) -> anyhow::Result<Arc<NativePlugin>> {
 
 fn input(port: &str) -> anyhow::Result<InputEnvelope> {
     Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new(port)?,
         envelope: super::envelope(
             &ComponentId::try_new("5a04dd10-2262-5e78-902e-c05712e0e336")?,

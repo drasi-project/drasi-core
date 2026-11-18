@@ -26,6 +26,15 @@
 | `saslPassword` | no | Kafka `sasl.password` |
 | `additionalProperties` | no | Extra rdkafka properties |
 
+## Incoming trace context
+
+Kafka record headers `traceparent` and optional `tracestate` use the shared
+SDK's W3C extraction. Each record (including tombstones) retains its own trace
+ID, sender parent and sampling decision while it is dispatched. Missing context
+clears the previous record's parent; malformed metadata warns and leaves the
+record context-free without rejecting valid data. Context is not added to
+payload properties or Kafka checkpoint positions.
+
 ## Testing
 
 ```bash

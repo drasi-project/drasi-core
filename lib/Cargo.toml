@@ -42,6 +42,7 @@ computation-rocksdb-tests = ["drasi-index-rocksdb/computation"]
 
 # Per-query clocks and awaited processing frontiers for managed-query tests.
 test-support = []
+otel-context = ["drasi-computation-contracts/otel-context"]
 
 # Middleware features (passed through to drasi-middleware)
 middleware-jq = ["drasi-middleware/jq"]
@@ -85,7 +86,7 @@ name = "computation_runtime"
 
 [dependencies]
 drasi-core-types = { workspace = true }
-drasi-computation-contracts = { workspace = true }
+drasi-computation-contracts = { workspace = true, features = ["metrics-facade", "tracing-context"] }
 drasi-query-common = { workspace = true }
 drasi-reaction-common = { workspace = true }
 drasi-core = { workspace = true, features = ["computation"] }
@@ -113,6 +114,7 @@ log = { version = "0.4", features = ["std"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-log = "0.2"
+metrics = { workspace = true }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
@@ -147,3 +149,6 @@ drasi-reaction-application = { path = "../components/reactions/application" }
 
 # Additional testing dependencies
 rstest = "0.18"
+opentelemetry = { version = "=0.33.1", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "=0.33.1", default-features = false, features = ["trace", "testing"] }
+tracing-opentelemetry = { version = "=0.34.0", default-features = false }

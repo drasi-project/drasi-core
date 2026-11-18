@@ -41,6 +41,13 @@ def forbidden_dependencies(tree, package=None):
     )
 
 
+def dependency_selections(native):
+    packages = ["drasi-core-types", "drasi-computation-contracts", "drasi-computation-plugin-sdk", *native]
+    for package in packages:
+        yield package, ["dynamic-plugin"] if package in native else []
+    yield "drasi-computation-plugin-sdk", ["otel-context"]
+
+
 def main():
     metadata = json.loads(cargo("metadata", "--locked", "--no-deps", "--format-version", "1"))
     native = sorted(
@@ -50,17 +57,17 @@ def main():
     )
     if not native:
         raise RuntimeError("No native plugin declarations were found; isolation was not checked.")
-    packages = ["drasi-core-types", "drasi-computation-contracts", "drasi-computation-plugin-sdk", *native]
     failed = []
-    for package in packages:
+    for package, features in dependency_selections(native):
         arguments = ["tree", "--locked", "-p", package, "--edges", "normal,build", "--prefix", "none", "--format", "{p}"]
-        if package in native:
-            arguments += ["--features", "dynamic-plugin"]
+        if features:
+            arguments += ["--features", ",".join(features)]
+        label = f"{package} [{','.join(features)}]" if features else package
         unwanted = forbidden_dependencies(cargo(*arguments), package)
         if unwanted:
-            failed.append(f"{package}: {', '.join(sorted(unwanted))}")
+            failed.append(f"{label}: {', '.join(sorted(unwanted))}")
         else:
-            print(f"{package}: native dependency policy satisfied")
+            print(f"{label}: native dependency policy satisfied")
     if failed:
         raise RuntimeError("Native dependency isolation failed:\n" + "\n".join(failed))
 

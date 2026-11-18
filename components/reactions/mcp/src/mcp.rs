@@ -474,18 +474,23 @@ impl Reaction for McpReaction {
         let server_state = state.clone();
         let server_shutdown = self.shutdown_tx.subscribe();
         let server_status = self.base.status_handle();
+        let telemetry = self.base.worker_telemetry().await;
         spawn_owned_worker(&self.server_task, async move {
-            let result = run_server(server_state, listener, server_shutdown).await;
-            if let Err(error) = &result {
-                error!("MCP server failed: {error}");
-                server_status
-                    .set_status(
-                        ComponentStatus::Error,
-                        Some(format!("MCP server failed: {error}")),
-                    )
-                    .await;
-            }
-            result
+            telemetry
+                .scope(async {
+                    let result = run_server(server_state, listener, server_shutdown).await;
+                    if let Err(error) = &result {
+                        error!("MCP server failed: {error}");
+                        server_status
+                            .set_status(
+                                ComponentStatus::Error,
+                                Some(format!("MCP server failed: {error}")),
+                            )
+                            .await;
+                    }
+                    result
+                })
+                .await
         })
         .await?;
 
@@ -493,8 +498,10 @@ impl Reaction for McpReaction {
         let priority_queue = self.base.priority_queue.clone();
         let query_configs = self.config.routes.clone();
         let processing_state = state.clone();
+        let telemetry = self.base.worker_telemetry().await;
 
         spawn_owned_worker(&self.base.processing_task, async move {
+            telemetry.scope(async {
             let reaction_id = &processing_state.reaction_id;
             info!("[{reaction_id}] MCP result processing task started");
             let mut handlebars = Handlebars::new();
@@ -515,8 +522,10 @@ impl Reaction for McpReaction {
                         processing_state.cleanup_closed_sessions().await;
                         continue;
                     }
-                    result = priority_queue.dequeue() => result,
+                    result = priority_queue.dequeue_message() => result,
                 };
+                let query_result_context = query_result.execution_context;
+                let query_result = query_result.payload;
 
                 if query_result.results.is_empty() {
                     debug!("[{reaction_id}] Received empty result set from query, skipping");
@@ -533,7 +542,20 @@ impl Reaction for McpReaction {
                     query_result.results.len()
                 );
 
-                for diff in &query_result.results {
+                let change_count = query_result.results.iter()
+                    .filter(|diff| !matches!(diff, ResultDiff::Noop)).count();
+                let observation = if change_count == 0 {
+                    None
+                } else {
+                    telemetry.reaction(&query_result_context, change_count)
+                        .map_err(|e| warn!("Failed to observe MCP processing: {e}")).ok()
+                };
+                let processing = telemetry.reaction_input_context(query_id.as_str(), change_count, &query_result_context);
+                let mut work = (change_count > 0).then(|| telemetry.reaction_work());
+                let process = async {
+                let mut failed = false;
+                for (ordinal, diff) in query_result.results.iter()
+                    .filter(|diff| !matches!(diff, ResultDiff::Noop)).enumerate() {
                     apply_diff(&query_id, diff, &processing_state.current_results).await;
 
                     let (template, operation) = match diff {
@@ -554,7 +576,12 @@ impl Reaction for McpReaction {
 
                     let template = match template {
                         Some(t) => t,
-                        None => continue,
+                        None => {
+                            if !matches!(diff, ResultDiff::Noop) {
+                                processing.handled_rows(&[ordinal]);
+                            }
+                            continue;
+                        },
                     };
 
                     let mut context = Map::new();
@@ -594,6 +621,7 @@ impl Reaction for McpReaction {
                             warn!(
                                 "[{reaction_id}] Failed to render template for {query_id}: {err}"
                             );
+                            failed = true;
                             continue;
                         }
                     };
@@ -609,6 +637,7 @@ impl Reaction for McpReaction {
                                 "[{reaction_id}] Template output was not valid JSON for {query_id}: {err}. \
                                  Rendered output: '{rendered}'"
                             );
+                            failed = true;
                             continue;
                         }
                     };
@@ -627,6 +656,7 @@ impl Reaction for McpReaction {
                         Ok(text) => text,
                         Err(err) => {
                             warn!("[{reaction_id}] Failed to serialize notification: {err}");
+                            failed = true;
                             continue;
                         }
                     };
@@ -640,6 +670,7 @@ impl Reaction for McpReaction {
                         debug!(
                             "[{reaction_id}] No subscribers for {uri}, skipping {operation} notification"
                         );
+                        processing.handled_rows(&[ordinal]);
                         continue;
                     }
 
@@ -656,10 +687,12 @@ impl Reaction for McpReaction {
                                 match session.sender.try_send(notification_text.clone()) {
                                     Ok(_) => {}
                                     Err(mpsc::error::TrySendError::Full(_)) => {
+                                        failed = true;
                                         warn!("[{reaction_id}] Session {session_id} channel full, disconnecting");
                                         to_cleanup.push(session_id);
                                     }
                                     Err(mpsc::error::TrySendError::Closed(_)) => {
+                                        failed = true;
                                         to_cleanup.push(session_id);
                                     }
                                 }
@@ -667,11 +700,28 @@ impl Reaction for McpReaction {
                         }
                     }
 
+                    let delivered = to_cleanup.is_empty();
                     for session_id in to_cleanup {
                         processing_state.cleanup_session(&session_id).await;
                     }
+                    if delivered {
+                        processing.handled_rows(&[ordinal]);
+                    }
                 }
+                if let Some(work) = &mut work {
+                    work.finish(!failed);
+                }
+                if failed {
+                    anyhow::bail!("One or more MCP notifications failed");
+                }
+                Ok::<_, anyhow::Error>(())
+                };
+                let _ = match observation {
+                    Some(observation) => observation.run(process).await,
+                    None => process.await,
+                };
             }
+            }).await;
         }).await?;
 
         Ok(())

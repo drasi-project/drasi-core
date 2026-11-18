@@ -62,6 +62,7 @@ how to combine them.
 6. [Control flow, ordering, and memory](#6-control-flow-ordering-and-memory)
 7. [Own the runtime lifecycle](#7-own-the-runtime-lifecycle)
 8. [Observe and diagnose the application](#8-observe-and-diagnose-the-application)
+   - [Enable observability in your application](#enable-observability-in-your-application)
 
 **Part III - Make processing recoverable**
 
@@ -438,6 +439,7 @@ Finally, the application gives the batch to its runtime owner:
 ```rust
 let core = DrasiLib::builder()
     .with_allow_external_component_ids(true)
+    .with_component_logging(component_logging()?)
     .with_id("stockroom")
     .with_components(batch.build()?)
     .build()
@@ -784,6 +786,7 @@ branch is:
 if let Some(change) = self.pending.pop_front() {
     self.sequence = self.sequence.checked_add(1).context("sequence exhausted")?;
     return Ok(Some(OutputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("out")?,
         envelope: GraphChangeCodec::encode_change(
             change,
@@ -1637,6 +1640,7 @@ impl Transformer for Audit {
             ContextValue::String("stockroom".into()),
         )?)?;
         Ok(vec![OutputEnvelope {
+            execution_context: input.execution_context,
             port: PortId::try_new("out")?,
             envelope,
         }])
@@ -2709,9 +2713,13 @@ a second mutable owner of components.
 
 #### Install tracing once
 
-For a small host that lets Drasi initialize tracing, use
-`observability::get_or_init_global_registry`. If your application already
-owns the subscriber, integrate `ComponentLogLayer` into that setup instead.
+For a small host, plain library `build()` enables logging automatically.
+Use `observability::init_default_subscriber()` to initialize it earlier, such as
+before constructing components, and retain its returned shutdown handle.
+`get_or_init_global_registry()` is now a passive compatibility accessor.
+If your application owns the subscriber, create a `ComponentLogRuntime`, compose
+its `layer()`, and pass the same runtime through `with_component_logging(...)`
+on every library builder.
 An existing global subscriber cannot be retrofitted by installing another one.
 Install the host subscriber before constructing `DrasiLib`; otherwise Drasi may
 install its default, and a later infallible subscriber `.init()` can panic.
@@ -2723,8 +2731,8 @@ Its setup is:
 
 <!-- excerpt: stockroom/src/main.rs#host-tracing -->
 ```rust
-fn init_tracing() -> anyhow::Result<()> {
-    use drasi_lib::observability::{get_or_init_global_registry, ComponentLogLayer};
+async fn init_tracing() -> anyhow::Result<drasi_lib::ComponentLogRuntime> {
+    use drasi_lib::observability::{ComponentLogRuntime, LogPolicy};
     use tracing_subscriber::{prelude::*, EnvFilter};
 
     let filter = match std::env::var("RUST_LOG") {
@@ -2732,24 +2740,98 @@ fn init_tracing() -> anyhow::Result<()> {
         Err(std::env::VarError::NotPresent) => EnvFilter::new("warn"),
         Err(error) => return Err(error.into()),
     };
-    let (layer, reload) = tracing_subscriber::reload::Layer::new(None::<ComponentLogLayer>);
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(layer)
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-        .try_init()?;
-    reload.reload(Some(ComponentLogLayer::new(get_or_init_global_registry())))?;
-    Ok(())
+    let logging = ComponentLogRuntime::new(LogPolicy::new(&filter.to_string())?)?;
+    let setup: anyhow::Result<()> = (|| {
+        tracing_subscriber::registry()
+            .with(logging.layer())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .with_filter(filter),
+            )
+            .try_init()?;
+        HOST_LOGGING
+            .set(logging.clone())
+            .map_err(|_| anyhow::anyhow!("host logging is already initialized"))?;
+        Ok(())
+    })();
+    match setup {
+        Ok(()) => Ok(logging),
+        Err(error) => finish_logging(&logging, Err(error)).await,
+    }
 }
 ```
 
-Call it once, before constructing components. The reload slot lets the host install
-its subscriber before initializing the shared Drasi log worker.
+Call it once, before constructing components. Stockroom retains this runtime in
+its own `HOST_LOGGING` slot; `component_logging()` supplies the same binding to
+each builder. The CLI awaits log shutdown after application cleanup, including
+error exits. No reload workaround or implicit registry initialization is needed.
+
+Log and operation-trace filters are independent. `TelemetryProfile::Off` leaves
+ordinary logging enabled, while an explicit log `off` does not disable an
+independently configured operation-span layer. Automatic setup never installs a
+metric recorder or exporter. See the [library telemetry foundations](../../README.md#telemetry-foundations)
+for registration ownership, profiles, and supported graph, query, and reaction
+observations.
 
 Component spans carry `component_id`, `component_type`, and `instance_id`.
 Preserve that span when spawning auxiliary work, for example by instrumenting
 the future. Merely placing a component ID in an arbitrary message field does
 not establish component log routing.
+
+<a id="enable-observability-in-your-application"></a>
+
+#### Enable observability in your application
+
+Profiles enable measurements; the application host owns collection and export.
+Automatic logging or setting `RUST_LOG` alone does not export traces or metrics.
+For an end-to-end setup, follow this order:
+
+1. **Add the host dependencies.** Enable `drasi-lib`'s `otel-context` feature for
+   OpenTelemetry integration. Add a compatible tracer provider, OTLP exporter,
+   `tracing-opentelemetry`, `tracing-subscriber`, and metrics recorder. The
+   [demo manifest](../../examples/observability/Cargo.toml) lists a working set.
+   Metrics-only hosts do not need OpenTelemetry.
+2. **Initialize the host once, before building Drasi.** Create a
+   `ComponentLogRuntime` and compose its `layer()` with the OpenTelemetry layer
+   in the same subscriber. Keep `drasi::telemetry` spans enabled independently
+   of log filtering. Configure the trace exporter endpoint and service name.
+   For native internal spans, wrap a batch processor in
+   `OpenTelemetrySpanProcessor`, use its `sampler()` in the tracer provider,
+   and give a clone of the same processor to `NativeSpanCollector::new`.
+3. **Connect metrics to an endpoint.** Create one `MetricRegistrationContext`
+   for the host's recorder and share it across instances using that recorder.
+   With `metrics-exporter-prometheus`, use `PrometheusBuilder::build_recorder()`
+   and serve its handle's `render()` output at your HTTP `/metrics` endpoint;
+   merely creating the recorder does not expose an endpoint.
+4. **Bind collection to the application.** Create `TelemetryOptions` from
+   `TelemetrySettings::new(TelemetryProfile::Debug)`, attach
+   `with_context_adapter(Arc::new(OpenTelemetryContextAdapter))` and
+   `with_metric_context(...)`, plus `with_native_span_collector(...)` when
+   collecting native internal spans. Pass those options to
+   `DrasiLib::builder().with_telemetry(...)`, supply a unique `with_id(...)`,
+   and reuse the host log runtime with `with_component_logging(...)`.
+   Add your sources, queries, and reactions as usual, then build and start.
+   Use `Basic` for less trace detail; `Persistence` is Basic plus persistence,
+   not Debug. `with_tracing(false)` keeps metrics; `with_metrics(false)` keeps
+   tracing. `Off` disables both, not ordinary logging.
+5. **Verify and shut down cleanly.** Submit a change that produces a query
+   result. Check one connected trace through `source.publish`, `query.process`,
+   and `sink.handle` or an ordinary reaction's `reaction.process`, plus
+   component-labelled metrics. Supported incoming W3C context continues the
+   sender's trace; sampling can intentionally suppress export without
+   suppressing metrics. Stop inputs and await instance shutdown first, then
+   drain native spans and logs before shutting down the tracer provider.
+   Run blocking exporter shutdown off the async executor, and perform cleanup
+   on error paths too.
+
+The [working host setup](../../examples/observability/src/main.rs) demonstrates
+subscriber composition, exporter/recorder wiring, builder options, and cleanup;
+the [demo guide](../../examples/observability/README.md) provides commands to
+verify traces and metrics locally. Its environment switches are demo
+configuration, not settings automatically read by every `DrasiLib` host.
+For plugin capability requirements and legacy limits, see
+[shared native telemetry](../../README.md#shared-native-telemetry).
 
 `subscribe_computation_logs_by_name` and `subscribe_computation_logs_by_id`
 supply recent history plus a live receiver
@@ -5089,6 +5171,7 @@ The builder also exposes the services separately:
 ```rust
 let core = DrasiLib::builder()
     .with_id("stockroom-managed")
+    .with_component_logging(crate::component_logging()?)
     .with_component_factories(factories.clone())
     .with_management_resources(Arc::new(MemoryResources))
     .with_configuration_store(store)

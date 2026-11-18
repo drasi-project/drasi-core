@@ -48,6 +48,9 @@ impl NativePlugin {
                 || Some(exported.activation_credentials()),
                 || Some(exported.output_reads()),
                 || Some(exported.output_follow()),
+                || Some(exported.telemetry()),
+                || Some(exported.telemetry_v2()),
+                || Some(exported.telemetry_v3()),
                 || Some(exported.processing()),
                 || Some(exported.management()),
             )
@@ -367,6 +370,9 @@ impl NativePlugin {
                 || None,
                 || None,
                 || None,
+                || None,
+                || None,
+                || None,
             )
         }
     }
@@ -396,11 +402,27 @@ impl NativePlugin {
         >,
         output_reads: impl FnOnce() -> Option<*const abi::output_reads::PluginOutputReadsV2>,
         output_follow: impl FnOnce() -> Option<*const abi::output_follow::PluginOutputFollowV2>,
+        telemetry: impl FnOnce() -> Option<*const abi::telemetry::PluginTelemetryV1>,
+        telemetry_v2: impl FnOnce() -> Option<*const abi::telemetry::PluginTelemetryV2>,
+        telemetry_v3: impl FnOnce() -> Option<*const abi::telemetry::PluginTelemetryV3>,
         processing: impl FnOnce() -> Option<*const abi::processing::PluginProcessingV1>,
         management: impl FnOnce() -> Option<*const abi::management::PluginManagementV1>,
     ) -> anyhow::Result<Arc<Self>> {
         let manifest = unsafe { read_metadata(metadata())? };
         let management = unsafe { read_management(management(), &manifest)? };
+        let telemetry = unsafe { read_telemetry(telemetry())? };
+        let telemetry_v2 = unsafe { read_telemetry_v2(telemetry_v2())? };
+        let telemetry_v3 = unsafe { read_telemetry_v3(telemetry_v3())? };
+        let telemetry = telemetry.or_else(|| {
+            telemetry_v2.map(|extension| abi::telemetry::PluginTelemetryV1 {
+                header: abi::Header::new::<abi::telemetry::PluginTelemetryV1>(),
+                version: abi::telemetry::VERSION,
+                capabilities: abi::telemetry::CONTEXT,
+                reserved: 0,
+                begin: extension.begin,
+                begin_consumer: extension.begin_consumer,
+            })
+        });
         let output_reads = unsafe { read_output_reads(output_reads(), &manifest)? };
         let output_follow = unsafe { read_output_follow(output_follow(), &manifest)? };
         let processing = unsafe { read_processing(processing(), &manifest)? };
@@ -578,6 +600,9 @@ impl NativePlugin {
                     admission,
                     source_progress,
                 )?
+                .with_telemetry(telemetry)
+                .with_telemetry_v2(telemetry_v2)
+                .with_telemetry_v3(telemetry_v3)
                 .with_activation_credentials(activation_credentials)?
                 .with_consumer(consumer_binding)?
                 .with_consumer_progress(consumer_progress)?
@@ -635,7 +660,8 @@ impl NativePlugin {
                         plugin.clone(),
                         codec.clone(),
                     )
-                    .with_coordination(pairing)?,
+                    .with_coordination(pairing)?
+                    .with_telemetry(telemetry_v2),
                 ));
             }
         }
@@ -729,6 +755,17 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
         unsafe { library.get::<abi::output_follow::OutputFollowFn>(abi::output_follow::SYMBOL) }
             .ok()
             .map(|symbol| *symbol);
+    let telemetry = unsafe { library.get::<abi::telemetry::TelemetryFn>(abi::telemetry::SYMBOL) }
+        .ok()
+        .map(|symbol| *symbol);
+    let telemetry_v2 =
+        unsafe { library.get::<abi::telemetry::TelemetryFnV2>(abi::telemetry::SYMBOL_V2) }
+            .ok()
+            .map(|symbol| *symbol);
+    let telemetry_v3 =
+        unsafe { library.get::<abi::telemetry::TelemetryFnV3>(abi::telemetry::SYMBOL_V3) }
+            .ok()
+            .map(|symbol| *symbol);
     let processing =
         unsafe { library.get::<abi::processing::ProcessingFn>(abi::processing::SYMBOL) }
             .ok()
@@ -755,6 +792,9 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
         && activation_credentials.is_none()
         && output_reads.is_none()
         && output_follow.is_none()
+        && telemetry.is_none()
+        && telemetry_v2.is_none()
+        && telemetry_v3.is_none()
         && processing.is_none()
         && management.is_none()
     {
@@ -789,6 +829,9 @@ pub(crate) fn try_load_library(library: Arc<Library>) -> anyhow::Result<Option<A
             || activation_credentials.map(|entry| entry()),
             || output_reads.map(|entry| entry()),
             || output_follow.map(|entry| entry()),
+            || telemetry.map(|entry| entry()),
+            || telemetry_v2.map(|entry| entry()),
+            || telemetry_v3.map(|entry| entry()),
             || processing.map(|entry| entry()),
             || management.map(|entry| entry()),
         )?
@@ -808,6 +851,23 @@ unsafe fn read_metadata(metadata: *const abi::Metadata) -> anyhow::Result<Plugin
     .context("invalid native computation plugin metadata")?;
     manifest.validate()?;
     Ok(manifest)
+}
+
+unsafe fn read_telemetry_v3(
+    table: Option<*const abi::telemetry::PluginTelemetryV3>,
+) -> anyhow::Result<Option<abi::telemetry::PluginTelemetryV3>> {
+    let Some(table) = table else {
+        return Ok(None);
+    };
+    let table = unsafe { checked_table(table)? };
+    anyhow::ensure!(
+        table.version == abi::telemetry::VERSION_V3
+            && table.capabilities == (abi::telemetry::CONTEXT | abi::telemetry::HANDLED_TIMING)
+            && table.reserved == 0
+            && table.begin.is_some(),
+        "invalid telemetry V3 extension"
+    );
+    Ok(Some(*table))
 }
 
 unsafe fn read_configuration(
@@ -856,6 +916,135 @@ unsafe fn read_bootstrap(
             Ok(table)
         })
         .transpose()
+}
+
+unsafe fn read_telemetry_v2(
+    entry: Option<*const abi::telemetry::PluginTelemetryV2>,
+) -> anyhow::Result<Option<abi::telemetry::PluginTelemetryV2>> {
+    entry
+        .map(|entry| {
+            let table = *unsafe { checked_table(entry)? };
+            anyhow::ensure!(
+                table.version == abi::telemetry::VERSION_V2
+                    && table.capabilities & !abi::telemetry::ALL == 0
+                    && table.capabilities & abi::telemetry::CONTEXT != 0
+                    && table.reserved == 0
+                    && table.begin.is_some()
+                    && table.begin_consumer.is_some()
+                    && table.with_scope.is_some(),
+                "incompatible or incomplete native shared telemetry extension"
+            );
+            Ok(table)
+        })
+        .transpose()
+}
+
+unsafe fn read_telemetry(
+    entry: Option<*const abi::telemetry::PluginTelemetryV1>,
+) -> anyhow::Result<Option<abi::telemetry::PluginTelemetryV1>> {
+    entry
+        .map(|entry| {
+            let table = *unsafe { checked_table(entry)? };
+            anyhow::ensure!(
+                table.version == abi::telemetry::VERSION
+                    && table.capabilities == abi::telemetry::CONTEXT
+                    && table.reserved == 0
+                    && table.begin.is_some()
+                    && table.begin_consumer.is_some(),
+                "incompatible or incomplete native telemetry context extension"
+            );
+            Ok(table)
+        })
+        .transpose()
+}
+
+#[cfg(test)]
+mod telemetry_tests {
+    use super::*;
+
+    unsafe extern "C" fn unused(
+        _: *mut std::ffi::c_void,
+        _: u32,
+        _: abi::BorrowedBytes,
+        _: *const abi::Transaction,
+        _: *mut abi::OperationHandle,
+    ) -> abi::Status {
+        drasi_computation_plugin_sdk::transport::status_boundary(|| {
+            Err(drasi_computation_plugin_sdk::transport::Failure::protocol(
+                "validation must not invoke callbacks",
+            ))
+        })
+    }
+
+    unsafe extern "C" fn unused_scope(
+        _: *const abi::telemetry::HostTelemetryV2,
+        _: abi::BorrowedBytes,
+        _: abi::telemetry::ScopedCall,
+        _: *mut std::ffi::c_void,
+    ) -> abi::Status {
+        drasi_computation_plugin_sdk::transport::status_result(Err(
+            drasi_computation_plugin_sdk::transport::Failure::protocol(
+                "validation must not invoke scoped construction",
+            ),
+        ))
+    }
+
+    #[test]
+    fn shared_telemetry_negotiation_rejects_malformed_advertised_v2() {
+        let valid = abi::telemetry::PluginTelemetryV2 {
+            header: abi::Header::new::<abi::telemetry::PluginTelemetryV2>(),
+            version: abi::telemetry::VERSION_V2,
+            capabilities: abi::telemetry::ALL,
+            reserved: 0,
+            begin: Some(unused),
+            begin_consumer: Some(unused),
+            with_scope: Some(unused_scope),
+        };
+        assert!(unsafe { read_telemetry_v2(None) }.unwrap().is_none());
+        assert!(unsafe { read_telemetry_v2(Some(&valid)) }
+            .unwrap()
+            .is_some());
+        for fault in 0..8 {
+            let mut invalid = valid;
+            match fault {
+                0 => invalid.header.size += 1,
+                1 => invalid.version += 1,
+                2 => invalid.capabilities |= 16,
+                3 => invalid.reserved = 1,
+                4 => invalid.begin = None,
+                5 => invalid.begin_consumer = None,
+                6 => invalid.with_scope = None,
+                _ => invalid.capabilities &= !abi::telemetry::CONTEXT,
+            }
+            assert!(unsafe { read_telemetry_v2(Some(&invalid)) }.is_err());
+        }
+    }
+
+    #[test]
+    fn optional_context_extension_rejects_malformed_advertised_capabilities() {
+        let valid = abi::telemetry::PluginTelemetryV1 {
+            header: abi::Header::new::<abi::telemetry::PluginTelemetryV1>(),
+            version: abi::telemetry::VERSION,
+            capabilities: abi::telemetry::CONTEXT,
+            reserved: 0,
+            begin: Some(unused),
+            begin_consumer: Some(unused),
+        };
+        assert!(unsafe { read_telemetry(None) }.unwrap().is_none());
+        assert!(unsafe { read_telemetry(Some(&valid)) }.unwrap().is_some());
+        for fault in 0..6 {
+            let mut invalid = valid;
+            match fault {
+                0 => invalid.header.size += 1,
+                1 => invalid.version += 1,
+                2 => invalid.capabilities |= 2,
+                3 => invalid.reserved = 1,
+                4 => invalid.begin = None,
+                _ => invalid.begin_consumer = None,
+            }
+            assert!(unsafe { read_telemetry(Some(&invalid)) }.is_err());
+        }
+    }
 }
 
 unsafe fn read_batching(
@@ -1201,6 +1390,17 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
         unsafe { library.get::<abi::output_follow::OutputFollowFn>(abi::output_follow::SYMBOL) }
             .ok()
             .map(|symbol| *symbol);
+    let telemetry = unsafe { library.get::<abi::telemetry::TelemetryFn>(abi::telemetry::SYMBOL) }
+        .ok()
+        .map(|symbol| *symbol);
+    let telemetry_v2 =
+        unsafe { library.get::<abi::telemetry::TelemetryFnV2>(abi::telemetry::SYMBOL_V2) }
+            .ok()
+            .map(|symbol| *symbol);
+    let telemetry_v3 =
+        unsafe { library.get::<abi::telemetry::TelemetryFnV3>(abi::telemetry::SYMBOL_V3) }
+            .ok()
+            .map(|symbol| *symbol);
     let processing =
         unsafe { library.get::<abi::processing::ProcessingFn>(abi::processing::SYMBOL) }
             .ok()
@@ -1224,6 +1424,9 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
         && coordination.is_none()
         && output_reads.is_none()
         && output_follow.is_none()
+        && telemetry.is_none()
+        && telemetry_v2.is_none()
+        && telemetry_v3.is_none()
         && processing.is_none()
         && management.is_none()
     {
@@ -1235,6 +1438,9 @@ pub(crate) fn try_read_metadata(library: Arc<Library>) -> anyhow::Result<Option<
         metadata.ok_or_else(|| anyhow::anyhow!("native computation metadata symbol is missing"))?;
     let manifest = unsafe { read_metadata(metadata())? };
     unsafe { read_services(services.map(|entry| entry()))? };
+    unsafe { read_telemetry(telemetry.map(|entry| entry()))? };
+    unsafe { read_telemetry_v2(telemetry_v2.map(|entry| entry()))? };
+    unsafe { read_telemetry_v3(telemetry_v3.map(|entry| entry()))? };
     unsafe { read_activation_credentials(activation_credentials.map(|entry| entry()))? };
     unsafe { read_recovery(recovery.map(|entry| entry()))? };
     unsafe { read_consumer(consumer.map(|entry| entry()))? };

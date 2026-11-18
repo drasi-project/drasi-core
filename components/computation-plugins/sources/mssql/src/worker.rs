@@ -331,6 +331,7 @@ pub(crate) fn progress_envelope(
     cursor: &Cursor,
 ) -> Result<OutputEnvelope> {
     Ok(OutputEnvelope {
+        execution_context: drasi_computation_contracts::telemetry::ExecutionContext::current(),
         port: port.clone(),
         envelope: GraphChangeCodec::encode_source_progress(
             source,
@@ -393,6 +394,7 @@ pub(crate) fn envelope(
         );
     }
     Ok(OutputEnvelope {
+        execution_context: drasi_computation_contracts::telemetry::ExecutionContext::current(),
         port: port.clone(),
         envelope,
     })

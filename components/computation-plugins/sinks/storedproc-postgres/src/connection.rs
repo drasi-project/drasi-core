@@ -6,6 +6,7 @@
 use crate::config::{PostgresStoredProcConfig, SslMode};
 use anyhow::Context;
 use async_trait::async_trait;
+use drasi_computation_contracts::workers::spawn_component_worker;
 use drasi_computation_storedproc_common::driver::Connector;
 pub use drasi_postgres_common::delivery::progress::ConnectError;
 use drasi_postgres_common::delivery::progress::{Driver, PgSession};
@@ -102,7 +103,7 @@ impl PgConnector {
                     .await
                     .map_err(|_| timed_out())?
                     .map_err(ConnectError::classify)?;
-                (client, tokio::spawn(drive(connection)))
+                (client, spawn_component_worker(drive(connection)))
             }
             SslMode::Disable => {
                 settings.ssl_mode(tokio_postgres::config::SslMode::Disable);
@@ -110,7 +111,7 @@ impl PgConnector {
                     .await
                     .map_err(|_| timed_out())?
                     .map_err(ConnectError::classify)?;
-                (client, tokio::spawn(drive(connection)))
+                (client, spawn_component_worker(drive(connection)))
             }
         })
     }

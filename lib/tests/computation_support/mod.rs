@@ -166,7 +166,8 @@ pub fn edge(from: &ComponentId, to: &ComponentId) -> EdgeDefinition {
 
 pub fn descriptor(id: &ComponentId, inputs: &[&str], outputs: &[&str]) -> ComponentDescriptor {
     let mut ports = Vec::new();
-    for (names, direction) in [(inputs, PortDirection::Input), (outputs, PortDirection::Output)] {
+    let directions = [PortDirection::Input, PortDirection::Output];
+    for (names, direction) in [inputs, outputs].into_iter().zip(directions) {
         for name in names {
             ports.push(PortDescriptor::new(
                 port(name),
@@ -205,6 +206,7 @@ pub fn root(producer: &ComponentId, namespace: &str, sequence: u64, readings: &[
 
 pub fn output(envelope: Envelope) -> OutputEnvelope {
     OutputEnvelope {
+        execution_context: Default::default(),
         port: port("out"),
         envelope,
     }
@@ -440,8 +442,11 @@ struct AuditedSender {
 
 #[async_trait]
 impl EnvelopeSender for AuditedSender {
-    async fn send(&self, envelope: Envelope) -> std::result::Result<EnqueueReceipt, SendFailure> {
+    async fn send_message(
+        &self,
+        message: EnvelopeMessage,
+    ) -> std::result::Result<EnqueueReceipt, SendFailure> {
         self.sends.fetch_add(1, Ordering::SeqCst);
-        self.inner.send(envelope).await
+        self.inner.send_message(message).await
     }
 }

@@ -11,10 +11,11 @@ readme = "README.md"
 default = []
 # Conformance helpers for native component tests; never enabled by plugin libraries.
 test-support = []
+otel-context = ["drasi-computation-contracts/otel-context"]
 
 [dependencies]
 drasi-computation-plugin-abi = { workspace = true }
-drasi-computation-contracts = { workspace = true }
+drasi-computation-contracts = { workspace = true, features = ["metrics-facade", "tracing-context"] }
 drasi-core-types = { workspace = true }
 anyhow = "1"
 async-trait = "0.1"
@@ -26,10 +27,52 @@ rmp-serde = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net"] }
 futures-core = "0.3"
 futures-util = "0.3"
-log = "0.4"
+metrics = { workspace = true }
+tracing = "0.1"
+tracing-core = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+log = { version = "0.4", features = ["std"] }
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["registry"] }
+tracing-opentelemetry = { version = "=0.34.0", default-features = false }
+opentelemetry = { version = "=0.33.1", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "=0.33.1", default-features = false, features = ["trace", "testing"] }
+
+[[example]]
+name = "telemetry_fixture"
+path = "tests/fixtures/telemetry_fixture.rs"
+crate-type = ["cdylib"]
+test = false
+
+[[example]]
+name = "handled_branch_fixture"
+path = "tests/fixtures/handled_branch_fixture.rs"
+crate-type = ["cdylib"]
+test = false
+
+[[example]]
+name = "handled_branch_v2_fixture"
+path = "tests/fixtures/handled_branch_v2_fixture.rs"
+crate-type = ["cdylib"]
+test = false
+
+[[example]]
+name = "execution_context_fixture"
+path = "tests/fixtures/execution_context_fixture.rs"
+crate-type = ["cdylib"]
+required-features = ["otel-context"]
+test = false
+
+[[example]]
+name = "execution_context_base_fixture"
+path = "tests/fixtures/execution_context_base_fixture.rs"
+crate-type = ["cdylib"]
+required-features = ["otel-context"]
+test = false
 
 [lints]
 workspace = true

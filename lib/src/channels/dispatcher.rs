@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::ChangeMessage;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -187,6 +188,11 @@ where
     /// Dispatch a single change to all subscribers
     async fn dispatch_change(&self, change: Arc<T>) -> Result<()>;
 
+    /// Legacy implementations may only carry the payload.
+    async fn dispatch_message(&self, message: ChangeMessage<T>) -> Result<()> {
+        self.dispatch_change(message.payload).await
+    }
+
     /// Non-blocking dispatch. Must not wait for a subscriber to drain.
     fn try_dispatch_change(&self, change: Arc<T>) -> Result<()>;
 
@@ -210,6 +216,11 @@ where
 {
     /// Receive the next change
     async fn recv(&mut self) -> Result<Arc<T>>;
+
+    /// A legacy receiver has no portable context capability.
+    async fn recv_message(&mut self) -> Result<ChangeMessage<T>> {
+        Ok(ChangeMessage::new(self.recv().await?, Default::default()))
+    }
 }
 
 /// Broadcast-based implementation of ChangeDispatcher
@@ -217,7 +228,7 @@ pub struct BroadcastChangeDispatcher<T>
 where
     T: Clone + Send + Sync + 'static,
 {
-    tx: broadcast::Sender<Arc<T>>,
+    tx: broadcast::Sender<ChangeMessage<T>>,
     _capacity: usize,
 }
 
@@ -244,9 +255,14 @@ where
         self.try_dispatch_change(change)
     }
 
+    async fn dispatch_message(&self, message: ChangeMessage<T>) -> Result<()> {
+        let _ = self.tx.send(message);
+        Ok(())
+    }
+
     fn try_dispatch_change(&self, change: Arc<T>) -> Result<()> {
         // Ignore send errors if there are no receivers
-        let _ = self.tx.send(change);
+        let _ = self.tx.send(ChangeMessage::capture(change));
         Ok(())
     }
 
@@ -261,7 +277,7 @@ pub struct BroadcastChangeReceiver<T>
 where
     T: Clone + Send + Sync + 'static,
 {
-    rx: broadcast::Receiver<Arc<T>>,
+    rx: broadcast::Receiver<ChangeMessage<T>>,
 }
 
 #[async_trait]
@@ -270,6 +286,10 @@ where
     T: Clone + Send + Sync + 'static,
 {
     async fn recv(&mut self) -> Result<Arc<T>> {
+        Ok(self.recv_message().await?.payload)
+    }
+
+    async fn recv_message(&mut self) -> Result<ChangeMessage<T>> {
         loop {
             match self.rx.recv().await {
                 Ok(change) => return Ok(change),
@@ -290,8 +310,8 @@ pub struct ChannelChangeDispatcher<T>
 where
     T: Clone + Send + Sync + 'static,
 {
-    tx: mpsc::Sender<Arc<T>>,
-    rx: Arc<tokio::sync::Mutex<Option<mpsc::Receiver<Arc<T>>>>>,
+    tx: mpsc::Sender<ChangeMessage<T>>,
+    rx: Arc<tokio::sync::Mutex<Option<mpsc::Receiver<ChangeMessage<T>>>>>,
     _capacity: usize,
 }
 
@@ -316,22 +336,28 @@ where
     T: Clone + Send + Sync + 'static,
 {
     async fn dispatch_change(&self, change: Arc<T>) -> Result<()> {
+        self.dispatch_message(ChangeMessage::capture(change)).await
+    }
+
+    async fn dispatch_message(&self, message: ChangeMessage<T>) -> Result<()> {
         self.tx
-            .send(change)
+            .send(message)
             .await
             .map_err(|_| anyhow::anyhow!("Failed to send on channel"))?;
         Ok(())
     }
 
     fn try_dispatch_change(&self, change: Arc<T>) -> Result<()> {
-        self.tx.try_send(change).map_err(|error| match error {
-            tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                anyhow::anyhow!("channel full")
-            }
-            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-                anyhow::anyhow!("channel closed")
-            }
-        })
+        self.tx
+            .try_send(ChangeMessage::capture(change))
+            .map_err(|error| match error {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                    anyhow::anyhow!("channel full")
+                }
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                    anyhow::anyhow!("channel closed")
+                }
+            })
     }
 
     async fn create_receiver(&self) -> Result<Box<dyn ChangeReceiver<T>>> {
@@ -341,7 +367,25 @@ where
         let rx = rx_opt.take().ok_or_else(|| {
             anyhow::anyhow!("Receiver already created for this channel dispatcher")
         })?;
-        Ok(Box::new(ChannelChangeReceiver { rx }))
+        Ok(Box::new(ContextualChannelReceiver { rx }))
+    }
+}
+
+struct ContextualChannelReceiver<T> {
+    rx: mpsc::Receiver<ChangeMessage<T>>,
+}
+
+#[async_trait]
+impl<T: Clone + Send + Sync + 'static> ChangeReceiver<T> for ContextualChannelReceiver<T> {
+    async fn recv(&mut self) -> Result<Arc<T>> {
+        Ok(self.recv_message().await?.payload)
+    }
+
+    async fn recv_message(&mut self) -> Result<ChangeMessage<T>> {
+        self.rx
+            .recv()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("Channel closed"))
     }
 }
 
@@ -416,10 +460,14 @@ where
     T: Clone + Send + Sync + 'static,
 {
     async fn recv(&mut self) -> Result<Arc<T>> {
+        Ok(self.recv_message().await?.payload)
+    }
+
+    async fn recv_message(&mut self) -> Result<ChangeMessage<T>> {
         if let Some(event) = self.replay.pop_front() {
-            return Ok(event);
+            return Ok(ChangeMessage::new(event, Default::default()));
         }
-        self.live.recv().await
+        self.live.recv_message().await
     }
 }
 

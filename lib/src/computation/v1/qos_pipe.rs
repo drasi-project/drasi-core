@@ -224,8 +224,11 @@ struct Metadata {
 }
 
 struct State {
+    observations: Arc<crate::observability::QueueObservations>,
     metadata: Metadata,
     entries: BTreeMap<u64, ChangeEnvelope>,
+    contexts: BTreeMap<u64, ExecutionContext>,
+    timing_floor: Option<u64>,
     oldest: Option<u64>,
     retained: usize,
     source_position: Option<Bytes>,
@@ -234,6 +237,45 @@ struct State {
 }
 
 impl State {
+    fn pending_depth(&self) -> usize {
+        let progress = self
+            .metadata
+            .cursors
+            .values()
+            .filter(|cursor| !cursor.retired)
+            .map(|cursor| cursor.position)
+            .min();
+        progress.map_or(0, |progress| {
+            crate::observability::pending_depth(self.metadata.head, self.oldest, progress)
+        })
+    }
+
+    fn publish_metadata(&mut self, metadata: Metadata) {
+        self.metadata = metadata;
+        if let Some(floor) = self.timing_floor {
+            let completed = self
+                .metadata
+                .cursors
+                .values()
+                .filter(|cursor| !cursor.retired)
+                .map(|cursor| cursor.position)
+                .min()
+                .unwrap_or(self.metadata.head);
+            if completed >= floor {
+                for (_, context) in self.contexts.range_mut(floor..=completed) {
+                    *context = context.clone().without_handled_branch();
+                }
+                self.timing_floor = self
+                    .contexts
+                    .range((
+                        std::ops::Bound::Excluded(completed),
+                        std::ops::Bound::Unbounded,
+                    ))
+                    .find_map(|(position, context)| context.handled_branch().map(|_| *position));
+            }
+        }
+        self.observations.set_depth(self.pending_depth());
+    }
     fn prepare_append(
         &self,
         definition: &QosChannelDefinition,
@@ -299,10 +341,39 @@ impl State {
     fn append_committed(
         &mut self,
         position: u64,
-        envelope: ChangeEnvelope,
+        message: EnvelopeMessage,
         retain_from: u64,
         budget: Option<JournalAppend>,
     ) {
+        if let Some(progress) = self
+            .metadata
+            .cursors
+            .values()
+            .filter(|cursor| !cursor.retired)
+            .map(|cursor| cursor.position)
+            .min()
+        {
+            self.observations
+                .discarded(crate::observability::discarded_pending(
+                    self.oldest,
+                    retain_from,
+                    progress,
+                ));
+        }
+        let EnvelopeMessage {
+            envelope,
+            execution_context,
+        } = message;
+        self.contexts.retain(|position, _| *position >= retain_from);
+        if !execution_context.is_empty() {
+            if execution_context.handled_branch().is_some() {
+                self.timing_floor = Some(
+                    self.timing_floor
+                        .map_or(position, |floor| floor.min(position)),
+                );
+            }
+            self.contexts.insert(position, execution_context);
+        }
         self.source_position = envelope.system().source_position().cloned();
         if self.page_limits.is_some() {
             if self
@@ -382,6 +453,7 @@ impl Persistent {
 /// appends commit source metadata with the event. Completion is a separate short
 /// transaction, never a transaction held open while business code is running.
 pub struct QosChannel {
+    observations: Arc<crate::observability::QueueObservations>,
     definition: QosChannelDefinition,
     max_bytes: Option<NonZeroUsize>,
     durability: drasi_core::interface::StorageDurability,
@@ -465,11 +537,16 @@ impl QosChannel {
             return Err(backend("durable QoS requires persistent storage"));
         }
         let metadata = initial(&definition)?;
+        let observations = Arc::new(crate::observability::QueueObservations::default());
         Ok(Arc::new(Self {
+            observations: observations.clone(),
             definition,
             max_bytes,
             durability: drasi_core::interface::StorageDurability::VOLATILE,
             state: Mutex::new(State {
+                observations,
+                contexts: BTreeMap::new(),
+                timing_floor: None,
                 metadata,
                 entries: BTreeMap::new(),
                 oldest: None,
@@ -957,11 +1034,16 @@ impl QosChannel {
             .and_then(|replay| replay.identity())
             .map_or_else(OnceLock::new, OnceLock::from);
         let durability = resources.durability();
+        let observations = Arc::new(crate::observability::QueueObservations::default());
         let channel = Arc::new_cyclic(|owner| Self {
+            observations: observations.clone(),
             definition,
             max_bytes,
             durability,
             state: Mutex::new(State {
+                observations: observations.clone(),
+                contexts: BTreeMap::new(),
+                timing_floor: None,
                 metadata,
                 entries,
                 oldest,
@@ -981,6 +1063,10 @@ impl QosChannel {
                 .as_ref()
                 .map(|_| shared::SharedChannel::new(owner.clone())),
         });
+        {
+            let state = channel.state.lock().await;
+            observations.set_depth(state.pending_depth());
+        }
         if let Some(options) = replay_options {
             channel.enable_replay(options).await?;
         }
@@ -1251,21 +1337,30 @@ impl QosChannel {
     /// Commit one immutable event to every required subscriber's journal.
     /// The producer must serialize its stream and retain an event while retrying.
     pub async fn publish(&self, envelope: &ChangeEnvelope) -> Result<EnqueueReceipt, PipeError> {
-        self.publish_bound(envelope, None).await
+        self.publish_message(&envelope.clone().into()).await
+    }
+
+    pub async fn publish_message(
+        &self,
+        message: &EnvelopeMessage,
+    ) -> Result<EnqueueReceipt, PipeError> {
+        self.publish_bound(message, None).await
     }
 
     async fn publish_bound(
         &self,
-        envelope: &ChangeEnvelope,
+        message: &EnvelopeMessage,
         endpoint: Option<&Endpoint>,
     ) -> Result<EnqueueReceipt, PipeError> {
         if self.shared.is_some() {
-            return self.publish_shared(envelope, endpoint).await;
+            return self.publish_shared(message, endpoint).await;
         }
+        let envelope = &message.envelope;
         if envelope.system().stream() != &self.definition.stream {
             return Err(backend("QoS channel received an event from another stream"));
         }
         let mut replay_candidate = None;
+        let mut blocked = false;
         loop {
             let notified = self.changed.notified();
             tokio::pin!(notified);
@@ -1343,6 +1438,10 @@ impl QosChannel {
             let (retain_from, budget) = match state.prepare_append(&self.definition, envelope) {
                 Ok(prepared) => prepared,
                 Err(PipeError::CapacityExhausted) => {
+                    if !blocked {
+                        self.observations.blocked();
+                        blocked = true;
+                    }
                     drop(state);
                     notified.await;
                     continue;
@@ -1363,8 +1462,8 @@ impl QosChannel {
             let _wake = WakeOnDrop(&self.changed);
             self.persist(&metadata, Some((position, envelope, retain_from)))
                 .await?;
-            state.append_committed(position, envelope.clone(), retain_from, budget);
-            state.metadata = metadata;
+            state.append_committed(position, message.clone(), retain_from, budget);
+            state.publish_metadata(metadata);
             if endpoint.is_some_and(|endpoint| endpoint.check().is_err()) {
                 return Err(PipeError::AcceptanceUnknown {
                     source: anyhow::anyhow!("QoS endpoint revoked during acceptance"),
@@ -1403,7 +1502,7 @@ impl QosChannel {
         cursor.retired = true;
         let _wake = WakeOnDrop(&self.changed);
         self.persist(&metadata, None).await?;
-        state.metadata = metadata;
+        state.publish_metadata(metadata);
         Ok(())
     }
 
@@ -1485,10 +1584,12 @@ impl ResourceCleanup for QosChannel {
         if let Some(store) = self.storage()? {
             store.transaction.cancel_retirement()?;
         }
-        let _state = self.state.lock().await;
+        let mut state = self.state.lock().await;
         if let Some(store) = self.storage()? {
             store.transaction.shutdown().await?;
         }
+        state.contexts.clear();
+        state.timing_floor = None;
         self.persistent
             .lock()
             .map_err(|_| backend("QoS storage poisoned"))?
@@ -1514,7 +1615,8 @@ impl Endpoint {
                 endpoint: self.clone(),
                 position: *position,
             })),
-        );
+        )
+        .with_execution_context(state.contexts.get(position).cloned().unwrap_or_default());
         self.binding.pending.store(true, Ordering::Release);
         Some(delivery)
     }
@@ -1565,7 +1667,7 @@ impl Endpoint {
         cursor.position = position;
         let _wake = WakeOnDrop(&self.channel.changed);
         self.channel.persist(&metadata, None).await?;
-        state.metadata = metadata;
+        state.publish_metadata(metadata);
         self.check()
             .map_err(|error| PipeError::AcknowledgementUnknown {
                 source: error.into(),
@@ -1576,6 +1678,9 @@ impl Endpoint {
 
 #[async_trait]
 impl PipeControl for Endpoint {
+    fn observations(&self) -> Option<Arc<crate::observability::QueueObservations>> {
+        Some(self.channel.observations.clone())
+    }
     fn close(&self) {
         self.binding.closed.store(true, Ordering::Release);
         self.channel.changed.notify_waiters();
@@ -1600,9 +1705,9 @@ impl Drop for Sender {
 }
 #[async_trait]
 impl EnvelopeSender for Sender {
-    async fn send(&self, envelope: ChangeEnvelope) -> Result<EnqueueReceipt, SendFailure> {
-        let result = self.0.channel.publish_bound(&envelope, Some(&self.0)).await;
-        result.map_err(|error| SendFailure { envelope, error })
+    async fn send_message(&self, message: EnvelopeMessage) -> Result<EnqueueReceipt, SendFailure> {
+        let result = self.0.channel.publish_bound(&message, Some(&self.0)).await;
+        result.map_err(|error| SendFailure::new(message, error))
     }
 }
 
@@ -1786,9 +1891,11 @@ impl EnvelopeReceiver for Receiver {
                 .next()
                 .map(|(position, envelope)| (*position, envelope.clone()));
             if let Some((position, envelope)) = candidate {
+                let execution_context = state.contexts.get(&position).cloned().unwrap_or_default();
                 let bytes = match &self.batch {
-                    Some(batch) => batch.buffer.size(&envelope)?,
+                    Some(batch) => batch.buffer.size(&envelope, &execution_context)?,
                     None => super::SinkBatching::input_size(&super::InputEnvelope {
+                        execution_context: execution_context.clone(),
                         port: port.clone(),
                         envelope: envelope.clone(),
                     })
@@ -1816,7 +1923,8 @@ impl EnvelopeReceiver for Receiver {
                         lease: batch.lease.clone(),
                         position,
                     })),
-                );
+                )
+                .with_execution_context(execution_context);
                 batch.buffer.push(position, delivery, bytes);
                 continue;
             }
@@ -2060,7 +2168,7 @@ mod foundation_tests {
             .expect("receive")
             .expect("event")
             .into_parts()
-            .1
+            .2
             .expect("ack")
             .complete(HandlingOutcome::Handled)
             .await

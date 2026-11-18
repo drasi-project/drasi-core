@@ -235,8 +235,9 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use axum::{
     body::Bytes,
-    extract::{Path, State},
+    extract::{Path, Request, State},
     http::{header, Method, StatusCode},
+    middleware::{self, Next},
     response::IntoResponse,
     routing::{delete, get, post, put},
     Json, Router,
@@ -251,6 +252,7 @@ use tokio::time::timeout;
 use tower_http::cors::{Any, CorsLayer};
 
 use drasi_lib::channels::{ComponentType, *};
+use drasi_lib::observability::{ExecutionContext, ExecutionScope};
 use drasi_lib::schema::{NodeSchema, PropertySchema, RelationSchema, SourceSchema};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::wal::{WalError, WalProvider};
@@ -311,7 +313,10 @@ struct HttpAppState {
     /// The source ID for validation against incoming requests
     source_id: drasi_lib::ComponentId,
     /// Channel for sending events to the adaptive batcher
-    batch_tx: mpsc::Sender<SourceChangeEvent>,
+    batch_tx: mpsc::Sender<(
+        SourceChangeEvent,
+        drasi_lib::observability::ExecutionContext,
+    )>,
     /// Webhook configuration (if in webhook mode)
     webhook_config: Option<Arc<WebhookState>>,
     /// WAL provider for durable persistence (if durability is enabled)
@@ -665,7 +670,14 @@ impl HttpSource {
                         sequence,
                     };
 
-                    if let Err(e) = state.batch_tx.send(change_event).await {
+                    if let Err(e) = state
+                        .batch_tx
+                        .send((
+                            change_event,
+                            drasi_lib::observability::ExecutionContext::current(),
+                        ))
+                        .await
+                    {
                         error!(
                             "[{}] Failed to send event {} to batch channel: {}",
                             state.source_id,
@@ -918,7 +930,11 @@ impl HttpSource {
                         sequence,
                     };
 
-                    if let Err(e) = state.batch_tx.send(event).await {
+                    if let Err(e) = state
+                        .batch_tx
+                        .send((event, drasi_lib::observability::ExecutionContext::current()))
+                        .await
+                    {
                         error!("[{source_id}] Failed to send event to batcher: {e}");
                         error_count += 1;
                         last_error = Some(format!("Failed to queue event: {e}"));
@@ -966,7 +982,10 @@ impl HttpSource {
     }
 
     async fn run_adaptive_batcher(
-        batch_rx: mpsc::Receiver<SourceChangeEvent>,
+        batch_rx: mpsc::Receiver<(
+            SourceChangeEvent,
+            drasi_lib::observability::ExecutionContext,
+        )>,
         base: SourceBase,
         adaptive_config: AdaptiveBatchConfig,
         source_id: drasi_lib::ComponentId,
@@ -993,7 +1012,7 @@ impl HttpSource {
 
             let mut sent_count = 0;
             let mut failed_count = 0;
-            for (idx, event) in batch.into_iter().enumerate() {
+            for (idx, (event, context)) in batch.into_iter().enumerate() {
                 debug!(
                     "[{}] Batch #{}, dispatching event {}/{}",
                     source_id,
@@ -1018,7 +1037,11 @@ impl HttpSource {
                     wrapper.source_position = Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
                 }
 
-                if let Err(e) = base.dispatch_event(wrapper).await {
+                if let Err(e) = drasi_lib::observability::ExecutionScope::capture()
+                    .with_context(context)
+                    .scope(base.dispatch_event(wrapper))
+                    .await
+                {
                     error!(
                         "[{}] Batch #{}, failed to dispatch event {}/{} (no subscribers): {}",
                         source_id,
@@ -1193,7 +1216,7 @@ impl Source for HttpSource {
             component_id = %source_id_for_span,
             component_type = "source"
         );
-        tokio::spawn(
+        drasi_lib::context::workers::spawn_component_worker(
             async move {
                 Self::run_adaptive_batcher(batch_rx, base, adaptive_config, source_id.clone()).await
             }
@@ -1263,6 +1286,21 @@ impl Source for HttpSource {
                 .with_state(state)
         };
 
+        let receiver_scope = ExecutionScope::capture().with_context(ExecutionContext::default());
+        let app = app.layer(middleware::from_fn(move |request: Request, next: Next| {
+            let scope = receiver_scope.with_w3c_headers(
+                request
+                    .headers()
+                    .get("traceparent")
+                    .map(|value| value.as_bytes()),
+                request
+                    .headers()
+                    .get("tracestate")
+                    .map(|value| value.as_bytes()),
+            );
+            async move { scope.scope(next.run(request)).await }
+        }));
+
         // Create shutdown channel
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
@@ -1278,7 +1316,7 @@ impl Source for HttpSource {
             component_id = %source_id_for_span,
             component_type = "source"
         );
-        drasi_lib::context::workers::spawn_owned_worker(
+        drasi_lib::context::workers::spawn_owned_component_worker(
             &self.base.task_handle,
             async move {
                 let addr = format!("{host}:{port}");
@@ -1335,24 +1373,27 @@ impl Source for HttpSource {
         if let Some(wal) = wal_ref {
             let base = self.base.clone_shared();
             let source_id = self.base.id.clone();
-            drasi_lib::context::workers::spawn_owned_worker(&self.prune_task, async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(30));
-                let mut stopping = base.subscribe_wal_pruning_stop();
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = stopping.wait_for(|stopping| *stopping) => break,
-                        _ = interval.tick() => {}
-                    }
-                    match base.prune_confirmed_wal(wal.as_ref()).await {
-                        Ok(pruned) if pruned > 0 => {
-                            debug!("[{source_id}] WAL pruned: count={pruned}");
+            drasi_lib::context::workers::spawn_owned_component_worker(
+                &self.prune_task,
+                async move {
+                    let mut interval = tokio::time::interval(Duration::from_secs(30));
+                    let mut stopping = base.subscribe_wal_pruning_stop();
+                    loop {
+                        tokio::select! {
+                            biased;
+                            _ = stopping.wait_for(|stopping| *stopping) => break,
+                            _ = interval.tick() => {}
                         }
-                        Ok(_) => {}
-                        Err(error) => warn!("[{source_id}] WAL prune failed: {error}"),
+                        match base.prune_confirmed_wal(wal.as_ref()).await {
+                            Ok(pruned) if pruned > 0 => {
+                                debug!("[{source_id}] WAL pruned: count={pruned}");
+                            }
+                            Ok(_) => {}
+                            Err(error) => warn!("[{source_id}] WAL prune failed: {error}"),
+                        }
                     }
-                }
-            })
+                },
+            )
             .await
             .with_context(|| format!("HTTP source '{}' WAL pruner registration", self.base.id))?;
         }

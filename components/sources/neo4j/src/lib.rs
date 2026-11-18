@@ -164,7 +164,7 @@ impl Source for Neo4jSource {
             component_type = "source"
         );
 
-        let task = tokio::spawn(
+        let task = drasi_lib::context::workers::spawn_component_worker(
             async move {
                 let mut cursor = start_cursor;
                 let mut ticker = tokio::time::interval(poll_interval);

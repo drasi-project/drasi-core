@@ -421,7 +421,7 @@ async fn interrupted_coordinated_bootstrap() -> Result<()> {
         graph.source.start().await?;
         graph.apply(json!([{"op":"update","table":"items","id":"1","data":{"amount":14}}])).await?;
         let output = graph.output(0).await?;
-        aggregate(&[OutputEnvelope { port: PortId::try_new("out")?, envelope: output }],
+        aggregate(&[OutputEnvelope { execution_context: Default::default(), port: PortId::try_new("out")?, envelope: output }],
             Some(30.0), 34.0, 1)?;
         Ok::<_, anyhow::Error>(())
     }.await;
@@ -510,7 +510,7 @@ async fn snapshot_live_reopen() -> Result<()> {
             .await?;
         let output = graph.output(0).await?;
         aggregate(
-            &[OutputEnvelope {
+            &[OutputEnvelope { execution_context: Default::default(),
                 port: PortId::try_new("out")?,
                 envelope: output,
             }],
@@ -556,7 +556,7 @@ async fn snapshot_live_reopen() -> Result<()> {
             .await?;
         let output = graph.output(0).await?;
         aggregate(
-            &[OutputEnvelope {
+            &[OutputEnvelope { execution_context: Default::default(),
                 port: PortId::try_new("out")?,
                 envelope: output,
             }],

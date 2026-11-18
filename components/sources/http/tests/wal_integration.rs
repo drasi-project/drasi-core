@@ -81,6 +81,7 @@ async fn init_source_with_wal(
             identity_provider: None,
             wal_provider: Some(wal),
             resource_observer: None,
+            log_binding: None,
         })
         .await;
     source.initialize().await.expect("source initialization");

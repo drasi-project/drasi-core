@@ -525,7 +525,8 @@ async fn memory_rows() -> Result<()> {
                     "added":{"template":template},"updated":{"template":template},"deleted":{"template":template}
                 }
             }));
-            let input = || InputEnvelope { port:PortId::try_new("in").unwrap(), envelope:envelope.clone() };
+            let input = || InputEnvelope {
+                execution_context: Default::default(), port:PortId::try_new("in").unwrap(), envelope:envelope.clone() };
             let token = CancellationToken::new();
             let mut sink = MySqlStoredProcSink::new(numeric_id(793),config("CALL wait_effect({{param output.alias}})",5000)?,&procedure_inputs(&["left","right"]),procedure_scope(numeric_id(793)))?;
             sink.start(None, &token, None).await?;

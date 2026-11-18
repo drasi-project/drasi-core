@@ -28,6 +28,7 @@ pub struct PipeMetricsSnapshot {
 
 #[derive(Default)]
 pub(super) struct PipeMetrics {
+    pub(super) observations: std::sync::Arc<crate::observability::QueueObservations>,
     accepted: AtomicU64,
     delivered: AtomicU64,
     discarded: AtomicU64,
@@ -41,17 +42,23 @@ impl PipeMetrics {
         self.accepted.fetch_add(1, Ordering::Relaxed);
         let depth = self.queued.fetch_add(1, Ordering::Relaxed) + 1;
         self.max_queued.fetch_max(depth, Ordering::Relaxed);
+        self.observations.enqueued();
     }
     pub(super) fn delivered(&self) {
         self.delivered.fetch_add(1, Ordering::Relaxed);
         self.queued.fetch_sub(1, Ordering::Relaxed);
+        self.observations.dequeued(0);
     }
     pub(super) fn discarded(&self, count: usize) {
         self.discarded.fetch_add(count as u64, Ordering::Relaxed);
         self.queued.fetch_sub(count, Ordering::Relaxed);
+        if count > 0 {
+            self.observations.dequeued(count);
+        }
     }
     pub(super) fn blocked(&self) {
         self.blocked_sends.fetch_add(1, Ordering::Relaxed);
+        self.observations.blocked();
     }
     pub(super) fn snapshot(&self) -> PipeMetricsSnapshot {
         PipeMetricsSnapshot {

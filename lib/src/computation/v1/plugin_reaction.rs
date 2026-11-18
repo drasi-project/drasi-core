@@ -296,6 +296,8 @@ pub struct ReactionPluginHost {
     deferred_validation: bool,
     runtime_metrics: Option<RuntimeReactionMetrics>,
     resource_observer: Mutex<Option<Arc<dyn crate::context::ComponentResourceObserver>>>,
+    log_binding: Mutex<Option<crate::observability::ComponentLogBinding>>,
+    telemetry: Mutex<crate::observability::WorkerTelemetry>,
 }
 
 pub(crate) struct RuntimeReactionMetrics {
@@ -454,10 +456,27 @@ impl ReactionPluginHost {
             deferred_validation,
             runtime_metrics: None,
             resource_observer: Mutex::new(None),
+            log_binding: Mutex::new(None),
+            telemetry: Mutex::new(Default::default()),
         }))
     }
     pub fn id(&self) -> &ComponentId {
         &self.id
+    }
+
+    fn telemetry(&self) -> crate::observability::WorkerTelemetry {
+        self.telemetry
+            .lock()
+            .unwrap_or_else(|error| {
+                log::error!("Reading poisoned reaction telemetry: {error}");
+                error.into_inner()
+            })
+            .clone()
+    }
+
+    fn observe_checkpoint(&self, query: &str, checkpoint: &ReactionCheckpoint) {
+        self.telemetry()
+            .checkpoint(query, checkpoint.sequence, checkpoint.config_hash);
     }
     pub fn is_owned(&self) -> bool {
         self.owned
@@ -573,6 +592,7 @@ impl ReactionPluginHost {
                 &checkpoint,
             )
             .await?;
+            self.observe_checkpoint(query.as_str(), &checkpoint);
         }
         self.write_metadata(query, view, false).await?;
         if reset {
@@ -703,6 +723,13 @@ impl ReactionPluginHost {
                 },
             )
             .await?;
+            self.observe_checkpoint(
+                query.as_str(),
+                &ReactionCheckpoint {
+                    sequence,
+                    config_hash: view.config_hash,
+                },
+            );
         }
         Ok(())
     }
@@ -752,6 +779,16 @@ impl ReactionPluginHost {
                 None => self.catalog.query_head(query_id).await?,
             };
             Self::validate_head(query_id, &head, &query, &output_view(&query).await?)?;
+            if let Some(subscription) = self.telemetry().subscription(query_id.as_str()) {
+                query.telemetry.bind(
+                    &subscription,
+                    crate::observability::QueryEpoch {
+                        generation: head.generation,
+                        config_hash: head.config_hash,
+                        incarnation: head.incarnation,
+                    },
+                )?;
+            }
             heads.insert(query_id.clone(), head);
         }
         anyhow::ensure!(
@@ -803,6 +840,11 @@ impl ReactionPluginHost {
                 .recovery
                 .unwrap_or_else(|| reaction.default_recovery_policy());
             let needs_snapshot = checkpoint.is_none() && reaction.needs_snapshot_on_fresh_start();
+            if changed {
+                if let Some(subscription) = self.telemetry().subscription(query_id.as_str()) {
+                    subscription.recovery(policy);
+                }
+            }
             if needs_snapshot || changed && policy == ReactionRecoveryPolicy::AutoReset {
                 let reset = changed || checkpoint.is_some();
                 self.bootstrap(reaction.as_ref(), query_id, &view, checkpoint, reset)
@@ -845,7 +887,16 @@ impl ReactionPluginHost {
                 .as_ref()
                 .map(|checkpoint| checkpoint.sequence)
                 .unwrap_or(0);
+            if let Some(checkpoint) = &checkpoint {
+                self.observe_checkpoint(query_id.as_str(), checkpoint);
+            }
             let replay = outbox_response(&view, after);
+            if matches!(&replay, Err(FetchError::OutboxGap(_))) {
+                if let Some(subscription) = self.telemetry().subscription(query_id.as_str()) {
+                    subscription.gap();
+                    subscription.recovery(policy);
+                }
+            }
             if let Some(metrics) = self
                 .runtime_metrics
                 .as_ref()
@@ -884,9 +935,11 @@ impl ReactionPluginHost {
             for result in entries {
                 self.observations
                     .drive(
-                        reaction.enqueue_query_result(
-                            self.result_for_reaction(result.as_ref().clone()),
-                        ),
+                        crate::observability::ExecutionScope::capture()
+                            .with_context(Default::default())
+                            .scope(reaction.enqueue_query_result(
+                                self.result_for_reaction(result.as_ref().clone()),
+                            )),
                         false,
                     )
                     .await?;
@@ -950,6 +1003,17 @@ impl ReactionPluginHost {
         }
         self.observations.wait_running().await
     }
+    pub(crate) fn set_log_binding(
+        &self,
+        binding: crate::observability::ComponentLogBinding,
+    ) -> anyhow::Result<()> {
+        *self
+            .log_binding
+            .lock()
+            .map_err(|_| anyhow::anyhow!("reaction log binding poisoned"))? = Some(binding);
+        Ok(())
+    }
+
     pub(crate) fn set_resource_observer(
         &self,
         observer: Arc<dyn crate::context::ComponentResourceObserver>,
@@ -970,6 +1034,12 @@ impl ReactionPluginHost {
             anyhow::bail!("reaction initialization was interrupted; reconstruct it");
         }
         if !life.initialized {
+            let telemetry = crate::observability::WorkerTelemetry::capture();
+            telemetry.bind_queries(&self.query_ids)?;
+            *self
+                .telemetry
+                .lock()
+                .map_err(|_| anyhow::anyhow!("reaction telemetry poisoned"))? = telemetry;
             life.initialized = true;
             let mut context = ReactionRuntimeContext::new(
                 self.services.scope.as_ref(),
@@ -983,6 +1053,11 @@ impl ReactionPluginHost {
                 .resource_observer
                 .lock()
                 .map_err(|_| anyhow::anyhow!("reaction resource observer binding poisoned"))?
+                .clone();
+            context.log_binding = self
+                .log_binding
+                .lock()
+                .map_err(|_| anyhow::anyhow!("reaction log binding poisoned"))?
                 .clone();
             context.snapshot_fetcher = Some(Arc::new(Fetcher {
                 catalog: self.catalog.clone(),
@@ -1028,6 +1103,9 @@ impl ReactionPluginHost {
                     anyhow::bail!("obsolete query reset generation");
                 }
                 if generation == *previous_generation && result.sequence <= *sequence {
+                    if let Some(subscription) = self.telemetry().subscription(result.query_id.as_str()) {
+                        subscription.dedup();
+                    }
                     if let Some(metrics) = self
                         .runtime_metrics
                         .as_ref()
@@ -1142,6 +1220,9 @@ impl ReactionPluginHost {
             .options
             .recovery
             .unwrap_or_else(|| reaction.default_recovery_policy());
+        if let Some(subscription) = self.telemetry().subscription(query.as_str()) {
+            subscription.gap();
+        }
         let metrics = self
             .runtime_metrics
             .as_ref()
@@ -1171,9 +1252,11 @@ impl ReactionPluginHost {
                         for result in replay.results {
                             self.observations
                                 .drive(
-                                    reaction.enqueue_query_result(
-                                        self.result_for_reaction(result.as_ref().clone()),
-                                    ),
+                                    crate::observability::ExecutionScope::capture()
+                                        .with_context(Default::default())
+                                        .scope(reaction.enqueue_query_result(
+                                            self.result_for_reaction(result.as_ref().clone()),
+                                        )),
                                     false,
                                 )
                                 .await?;
@@ -1202,6 +1285,9 @@ impl ReactionPluginHost {
                     crate::metrics::RecoveryPolicyKind::AutoSkipGap
                 }
             });
+        }
+        if let Some(subscription) = self.telemetry().subscription(query.as_str()) {
+            subscription.recovery(policy);
         }
         if policy == ReactionRecoveryPolicy::Strict {
             anyhow::bail!("Strict recovery policy cannot recover a live query output gap");
@@ -1441,6 +1527,12 @@ impl ComponentFactory for ReactionPluginAdapterFactory {
             .ok_or_else(|| {
                 ComponentCreationError::terminal(anyhow::anyhow!("missing reaction host"))
             })?;
+        if host.owned {
+            if let Some(binding) = context.component_log_binding() {
+                host.set_log_binding(binding)
+                    .map_err(ComponentCreationError::terminal)?;
+            }
+        }
         let catalog = context
             .resources::<QueryResultsCatalog>("catalog")
             .map_err(ComponentCreationError::terminal)?

@@ -14,6 +14,7 @@ mod tests;
 
 struct RetainedInput {
     edge: usize,
+    queue_id: Arc<str>,
     producer: super::super::ProducerBoundary,
     input: InputEnvelope,
     acknowledgement: Option<Box<dyn Acknowledgement>>,
@@ -29,6 +30,7 @@ pub(super) struct SinkBatchState {
     deadline: Option<Instant>,
     flushing: bool,
     completed: usize,
+    completion_context: ExecutionContext,
     acknowledging: Option<BoxFuture<'static, Result<(), PipeError>>>,
     acknowledgement_failed: bool,
     /// Failed attempts of the input at the head of the batch.
@@ -59,16 +61,18 @@ impl SinkBatchState {
 
     fn push(&mut self, incoming: &mut Incoming, node: &NodeSnapshot) -> GraphResult<()> {
         let PendingInput { delivery, work } = incoming.pending.take().expect("ready input");
-        let (envelope, acknowledgement) = delivery.into_parts();
+        let (envelope, execution_context, acknowledgement) = delivery.into_parts();
         let matches_acknowledgement =
             acknowledgement.is_some() == incoming.acknowledgement_required;
         let input = InputEnvelope {
+            execution_context,
             port: incoming.port.clone(),
             envelope,
         };
         // Retain ownership before any validation that may fail.
         self.inputs.push_back(RetainedInput {
             edge: incoming.edge,
+            queue_id: incoming.queue_id.clone(),
             producer: incoming.producer,
             input,
             acknowledgement,
@@ -155,12 +159,39 @@ impl SinkBatchState {
             ));
         }
         while self.completed > 0 {
+            let completion_context = self.completion_context.clone();
             let first = self.inputs.front_mut().expect("completed input");
             if self.acknowledging.is_none() {
                 self.acknowledging = first
                     .acknowledgement
                     .take()
-                    .map(|acknowledgement| acknowledgement.complete(HandlingOutcome::Handled));
+                    .map(|acknowledgement| {
+                        let observation =
+                            crate::observability::ComponentObservations::current_or_disabled()
+                                .begin(
+                                    crate::observability::ObservedOperation::Acknowledge,
+                                    &completion_context,
+                                    crate::observability::OperationFields {
+                                        queue_id: Some(&first.queue_id),
+                                        input_port: Some(first.input.port.as_str()),
+                                        handling_outcome: Some("handled"),
+                                        ..Default::default()
+                                    },
+                                )
+                                .map_err(|error| PipeError::Backend(error.into()))?;
+                        Ok::<BoxFuture<'static, Result<(), PipeError>>, PipeError>(Box::pin(
+                            async move {
+                                observation
+                                    .run(acknowledgement.complete(HandlingOutcome::Handled))
+                                    .await
+                            },
+                        ))
+                    })
+                    .transpose()
+                    .map_err(|source| GraphError::Pipe {
+                        edge: first.edge,
+                        source,
+                    })?;
             }
             if let Some(acknowledging) = &mut self.acknowledging {
                 let result = acknowledging.await;
@@ -250,6 +281,7 @@ impl SinkBatchState {
                     .as_ref()
                     .is_none_or(|inputs| !inputs[index].duplicate)
             };
+            self.completion_context = first.input.execution_context.clone();
             let (operation, result) = if use_batch {
                 let batch: Vec<_> = self
                     .inputs
@@ -262,11 +294,80 @@ impl SinkBatchState {
                 let result = if batch.is_empty() {
                     Ok(())
                 } else {
-                    sink.handle_batch(batch).await
+                    let handling = if sink.completion() == SinkCompletion::Handled
+                        && sink.observes_handled_branch_latency()
+                    {
+                        batch
+                            .iter()
+                            .filter_map(|input| {
+                                crate::observability::ComponentObservations::current_or_disabled()
+                                    .handled_branch(&input.execution_context)
+                            })
+                            .collect::<Vec<_>>()
+                    } else {
+                        Vec::new()
+                    };
+                    let observation =
+                        crate::observability::ComponentObservations::current_or_disabled()
+                            .batch(
+                                batch.iter().map(|input| &input.execution_context),
+                                crate::observability::OperationFields {
+                                    input_port: Some(first.input.port.as_str()),
+                                    input_count: Some(batch.len()),
+                                    change_count: Some(
+                                        batch
+                                            .iter()
+                                            .map(|input| {
+                                                input.envelope.changes().operations().len()
+                                            })
+                                            .sum(),
+                                    ),
+                                    completion: Some(
+                                        if sink.completion() == SinkCompletion::Handled {
+                                            "handled"
+                                        } else {
+                                            "accepted"
+                                        },
+                                    ),
+                                    ..Default::default()
+                                },
+                            )
+                            .map_err(|error| {
+                                component_error(node, "observe batch", error.into())
+                            })?;
+                    self.completion_context = observation.context().clone();
+                    let result = observation.run(sink.handle_batch(batch)).await;
+                    if result.is_ok() {
+                        for branch in handling {
+                            branch.finish(None);
+                        }
+                    }
+                    result
                 };
                 ("handle batch", result)
             } else if is_new(0) {
-                ("handle", sink.handle(first.input.clone()).await)
+                let observation = observe(
+                    node,
+                    crate::observability::ObservedOperation::Handle,
+                    &first.input.execution_context,
+                    crate::observability::OperationFields {
+                        input_port: Some(first.input.port.as_str()),
+                        input_count: Some(1),
+                        change_count: Some(first.input.envelope.changes().operations().len()),
+                        handled_latency: sink.observes_handled_branch_latency(),
+                        completion: Some(if sink.completion() == SinkCompletion::Handled {
+                            "handled"
+                        } else {
+                            "accepted"
+                        }),
+                        ..Default::default()
+                    },
+                )?;
+                self.completion_context = observation.context().clone();
+                (
+                    "handle",
+                    observation.run(sink.handle(first.input.clone())).await,
+                )
             } else {
                 ("handle", Ok(()))
             };
@@ -294,6 +395,7 @@ impl SinkBatchState {
             }
             self.completed = count;
             self.acknowledge().await?;
+            self.completion_context = self.completion_context.clone().without_handled_branch();
         }
         self.flushing = false;
         self.deadline = None;
@@ -564,6 +666,13 @@ pub(super) async fn run(
         };
         let incoming = &mut inputs[selected];
         let candidate = InputEnvelope {
+            execution_context: incoming
+                .pending
+                .as_ref()
+                .expect("ready input")
+                .delivery
+                .execution_context()
+                .clone(),
             port: incoming.port.clone(),
             envelope: incoming
                 .pending

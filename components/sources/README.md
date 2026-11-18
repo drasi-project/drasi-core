@@ -861,6 +861,8 @@ It is provided during `bind_runtime_context(context)`, before `initialize()`, an
 - optional WAL provider
 - optional identity provider
 - runtime instance metadata used for log routing
+- optional host-local `log_binding`, containing the actual log destination/key;
+  this Rust value is not serialized across plugin FFI
 
 Use the context through `SourceBase`:
 
@@ -1014,6 +1016,42 @@ Begin ingestion. This usually means:
 
 Do not block forever inside `start()`. Spawn long-running work and return after
 startup succeeds.
+
+#### Worker execution context
+
+Long-lived workers SHOULD use
+`drasi_lib::context::workers::spawn_owned_component_worker` (or
+`spawn_owned_component_blocking_worker`): these preserve the component binding
+without making the start operation every future event's parent. Short snapshot
+workers use the corresponding `spawn_owned_scoped_worker` /
+`spawn_owned_scoped_blocking_worker` helpers to preserve the initiating context.
+Their ownership and cleanup requirements are unchanged.
+
+Worker queues MUST carry each available `ExecutionContext` separately from
+event data and restore it per unit using the receiving `ExecutionScope`.
+`SourceBase` dispatch and ordinary dispatcher `recv_message` paths preserve
+these transient sidecars; payload-only `recv` intentionally does not. Replay
+from persisted data has no historical trace context. Do not put tracing
+metadata in source positions, WAL records, payload properties or event IDs.
+An empty event context MUST clear a previous event's parent, not reuse it.
+
+Sources accepting upstream trace metadata SHOULD use the shared
+`drasi_lib::observability::ExecutionContext::from_w3c_headers` helper, or
+`ExecutionScope::with_w3c_headers`, with transport `traceparent` and optional
+`tracestate` bytes. The SDK preserves trace/parent IDs and sampling; missing
+metadata clears prior context, and malformed metadata warns and leaves the
+event context-free without rejecting business data. HTTP/gRPC event ingress,
+OTLP request metadata, Kafka record headers and Platform CloudEvents extensions
+use this shared extraction. A stream's metadata applies to every event in that
+stream. OTLP payload span/log IDs remain graph data, not ingestion parents.
+Other formats require explicit source mapping, not
+guessing a `trace_id` property in business data.
+
+Scope futures per poll and blocking closures with `in_scope`; never hold an
+entered tracing/context guard across an await. Optional fetch/decode detail
+belongs around real bounded work, not an idle listener lifetime. Legacy
+Source cdylibs without portable context support remain a documented boundary;
+this does not change their ABI or log routing.
 
 #### `stop` — **MUST override when the source owns activation resources**
 

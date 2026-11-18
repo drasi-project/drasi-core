@@ -9,7 +9,7 @@ const DASHBOARD_HTML: &str = include_str!("../static/index.html");
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
+    let _logging = drasi_lib::init_default_subscriber()?;
 
     let source = HyperliquidSource::builder("hl")
         .with_network(HyperliquidNetwork::Mainnet)

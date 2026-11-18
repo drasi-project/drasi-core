@@ -27,6 +27,28 @@ use super::*;
 use drasi_core::models::{Element, SourceChange};
 use serde_json::json;
 
+#[test]
+fn incoming_w3c_cloud_event_extensions_use_shared_sdk_context() {
+    use drasi_lib::observability::ExecutionContext;
+
+    assert!(
+        incoming_cloud_event_context(&json!({"data": [], "trace_id": "business-data"})).is_empty()
+    );
+    for parent in [
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-00",
+        "malformed",
+    ] {
+        assert_eq!(
+            incoming_cloud_event_context(&json!({
+                "traceparent": parent, "tracestate": "vendor=value", "data": [],
+            })),
+            ExecutionContext::from_w3c_headers(Some(parent.as_bytes()), Some(b"vendor=value")),
+        );
+    }
+    assert!(incoming_cloud_event_context(&json!({"traceparent": 42})).is_empty());
+}
+
 // ============================================================================
 // Construction Tests
 // ============================================================================

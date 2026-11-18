@@ -160,6 +160,7 @@ use drasi_core::middleware::MiddlewareTypeRegistry;
 /// ```
 pub struct DrasiLib {
     pub(crate) config: Arc<RuntimeConfig>,
+    observability: crate::observability::RuntimeObservability,
     pub(crate) source_manager: Arc<crate::sources::SourceManager>,
     pub(crate) query_manager: Arc<QueryManager>,
     pub(crate) reaction_manager: Arc<crate::reactions::ReactionManager>,
@@ -181,6 +182,7 @@ impl Clone for DrasiLib {
     fn clone(&self) -> Self {
         Self {
             config: Arc::clone(&self.config),
+            observability: self.observability.clone(),
             source_manager: self.source_manager.clone(),
             query_manager: self.query_manager.clone(),
             reaction_manager: self.reaction_manager.clone(),
@@ -214,13 +216,6 @@ impl DrasiLib {
     /// ComputationGraph publications.
     pub fn subscribe_all_component_events(&self) -> ComponentEventBroadcastReceiver {
         self.computation_runtime.event_sender().subscribe()
-    }
-
-    pub(crate) fn new_with_wal(
-        config: Arc<RuntimeConfig>,
-        wal: Option<Arc<dyn crate::wal::WalProvider>>,
-    ) -> Self {
-        Self::new_with_services(config, Self::default_middleware_registry(), wal)
     }
 
     /// Standard middleware factories enabled by this build, for host-owned
@@ -273,12 +268,26 @@ impl DrasiLib {
         Self::new_with_services(config, middleware_registry, None)
     }
 
+    #[cfg(test)]
     fn new_with_services(
         config: Arc<RuntimeConfig>,
         middleware_registry: Arc<MiddlewareTypeRegistry>,
         wal: Option<Arc<dyn crate::wal::WalProvider>>,
     ) -> Self {
-        let log_registry = crate::observability::get_or_init_global_registry();
+        Self::new_with_observability(config, middleware_registry, wal, Default::default())
+    }
+
+    pub(crate) fn new_with_observability(
+        config: Arc<RuntimeConfig>,
+        middleware_registry: Arc<MiddlewareTypeRegistry>,
+        wal: Option<Arc<dyn crate::wal::WalProvider>>,
+        observability: crate::observability::RuntimeObservability,
+    ) -> Self {
+        let log_registry = observability
+            .logging
+            .as_ref()
+            .map(crate::observability::ComponentLogRuntime::registry)
+            .unwrap_or_else(crate::observability::get_or_init_global_registry);
         let instance_id = config.id.clone();
         let instance_graph = Arc::new(crate::computation::instance::InstanceGraph::new(
             instance_id,
@@ -288,6 +297,7 @@ impl DrasiLib {
             middleware_registry.clone(),
             log_registry.clone(),
             wal,
+            observability.clone(),
         );
         let source_manager = Arc::new(crate::sources::SourceManager::new(
             computation_runtime.clone(),
@@ -306,6 +316,7 @@ impl DrasiLib {
 
         Self {
             config,
+            observability,
             source_manager,
             query_manager,
             reaction_manager,
@@ -319,6 +330,17 @@ impl DrasiLib {
             computation_runtime,
             management: Arc::new(std::sync::OnceLock::new()),
         }
+    }
+
+    /// Immutable telemetry policy and the actual library graph's scope.
+    pub fn telemetry(&self) -> &crate::observability::GraphTelemetry {
+        &self.observability.telemetry
+    }
+
+    /// Capture ownership for flushing or application-level shutdown.
+    /// Instance shutdown deliberately does not stop a shared logging runtime.
+    pub fn component_logging(&self) -> Option<&crate::observability::ComponentLogRuntime> {
+        self.observability.logging.as_ref()
     }
 
     /// Internal initialization - performs one-time setup

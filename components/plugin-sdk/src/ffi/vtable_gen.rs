@@ -3180,6 +3180,7 @@ fn build_source_runtime_context(
         identity_provider,
         wal_provider,
         resource_observer: None,
+        log_binding: None,
     };
     Ok((ctx, status_rx))
 }
@@ -3225,6 +3226,7 @@ fn build_reaction_runtime_context(
         identity_provider,
         snapshot_fetcher,
         resource_observer: None,
+        log_binding: None,
     };
     Ok((ctx, status_rx))
 }

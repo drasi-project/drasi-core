@@ -180,6 +180,7 @@ async fn insert(
     )?;
     let mut output = query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope,
         })
@@ -229,6 +230,7 @@ async fn consumer(
 async fn deliver(sink: &mut CheckpointedSink, output: Vec<OutputEnvelope>) -> Result<()> {
     for output in output {
         sink.handle(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: output.envelope,
         })
@@ -239,6 +241,7 @@ async fn deliver(sink: &mut CheckpointedSink, output: Vec<OutputEnvelope>) -> Re
 
 fn input(envelope: ChangeEnvelope) -> InputEnvelope {
     InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").expect("port"),
         envelope,
     }

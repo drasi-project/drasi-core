@@ -351,6 +351,7 @@ impl<T: FileRow> EnvelopeSource for FileSource<T> {
             if let Some(change) = self.pending.pop_front() {
                 self.sequence = self.sequence.checked_add(1).context("sequence exhausted")?;
                 return Ok(Some(OutputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("out")?,
                     envelope: GraphChangeCodec::encode_change(
                         change,
@@ -423,6 +424,7 @@ impl Transformer for Audit {
             ContextValue::String("stockroom".into()),
         )?)?;
         Ok(vec![OutputEnvelope {
+            execution_context: input.execution_context,
             port: PortId::try_new("out")?,
             envelope,
         }])
@@ -913,6 +915,7 @@ async fn build_application(
     // ANCHOR: instance-build
     let core = DrasiLib::builder()
         .with_allow_external_component_ids(true)
+        .with_component_logging(component_logging()?)
         .with_id("stockroom")
         .with_components(batch.build()?)
         .build()
@@ -957,9 +960,38 @@ async fn start(
     Ok((core, view))
 }
 
+static HOST_LOGGING: std::sync::OnceLock<drasi_lib::ComponentLogRuntime> =
+    std::sync::OnceLock::new();
+
+fn component_logging() -> anyhow::Result<drasi_lib::ComponentLogRuntime> {
+    match HOST_LOGGING.get() {
+        Some(logging) => Ok(logging.clone()),
+        None => Ok(drasi_lib::init_default_subscriber()?),
+    }
+}
+
+async fn finish_logging<T>(
+    logging: &drasi_lib::ComponentLogRuntime,
+    work: anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let cleanup = logging
+        .shutdown(Duration::from_secs(2))
+        .await
+        .map_err(anyhow::Error::from);
+    match (work, cleanup) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(cleanup)) => Err(drasi_lib::error::OperationFailures::new(
+            "Stockroom work and log cleanup failed",
+            vec![error, cleanup],
+        )
+        .into()),
+    }
+}
+
 // ANCHOR: host-tracing
-fn init_tracing() -> anyhow::Result<()> {
-    use drasi_lib::observability::{get_or_init_global_registry, ComponentLogLayer};
+async fn init_tracing() -> anyhow::Result<drasi_lib::ComponentLogRuntime> {
+    use drasi_lib::observability::{ComponentLogRuntime, LogPolicy};
     use tracing_subscriber::{prelude::*, EnvFilter};
 
     let filter = match std::env::var("RUST_LOG") {
@@ -967,14 +999,25 @@ fn init_tracing() -> anyhow::Result<()> {
         Err(std::env::VarError::NotPresent) => EnvFilter::new("warn"),
         Err(error) => return Err(error.into()),
     };
-    let (layer, reload) = tracing_subscriber::reload::Layer::new(None::<ComponentLogLayer>);
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(layer)
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-        .try_init()?;
-    reload.reload(Some(ComponentLogLayer::new(get_or_init_global_registry())))?;
-    Ok(())
+    let logging = ComponentLogRuntime::new(LogPolicy::new(&filter.to_string())?)?;
+    let setup: anyhow::Result<()> = (|| {
+        tracing_subscriber::registry()
+            .with(logging.layer())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .with_filter(filter),
+            )
+            .try_init()?;
+        HOST_LOGGING
+            .set(logging.clone())
+            .map_err(|_| anyhow::anyhow!("host logging is already initialized"))?;
+        Ok(())
+    })();
+    match setup {
+        Ok(()) => Ok(logging),
+        Err(error) => finish_logging(&logging, Err(error)).await,
+    }
 }
 // ANCHOR_END: host-tracing
 
@@ -992,7 +1035,12 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run_cli() -> anyhow::Result<()> {
-    init_tracing()?;
+    let logging = init_tracing().await?;
+    let result = run_cli_inner().await;
+    finish_logging(&logging, result).await
+}
+
+async fn run_cli_inner() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let mode = args.next();
     if mode.as_deref() == Some("keygen") {
@@ -1428,6 +1476,7 @@ mod tests {
                     .clone(),
             )
             .with_id("health-test")
+            .with_component_logging(component_logging()?)
             .with_components(
                 ComponentBatch::builder()
                     .service(
@@ -1507,6 +1556,7 @@ mod tests {
                     .clone(),
             )
             .with_id("missing-connection-test")
+            .with_component_logging(component_logging()?)
             .with_components(
                 ComponentBatch::builder()
                     .source(
@@ -1796,6 +1846,7 @@ mod tests {
             transformer.start(&start_context()).await?;
             let error = transformer
                 .transform(InputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("in")?,
                     envelope: GraphChangeCodec::encode_change(
                         SourceChange::Insert {

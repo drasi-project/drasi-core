@@ -15,6 +15,12 @@ pub use drasi_computation_plugin_abi as abi;
 /// The facade plugins write diagnostics and operator output through; see
 /// [`diagnostics`].
 pub use log;
+/// Shared scoped telemetry APIs for static and native components.
+pub mod telemetry {
+    pub use drasi_computation_contracts::telemetry::facade::*;
+    pub use drasi_computation_contracts::telemetry::*;
+    pub use metrics::{Counter, Gauge, Histogram, Recorder};
+}
 pub mod activation_credentials;
 pub mod admission;
 pub mod bootstrap;
@@ -35,8 +41,13 @@ mod port_formats;
 pub mod processing;
 pub mod progress;
 pub mod scheduling;
+#[doc(hidden)]
+pub mod telemetry_bridge;
+mod telemetry_capture;
+pub mod telemetry_transport;
 #[cfg(feature = "test-support")]
 pub mod testing;
+pub mod timing_transport;
 mod transaction;
 pub mod transport;
 pub mod update_planning;
@@ -126,6 +137,32 @@ macro_rules! export_computation_plugin {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match __drasi_computation_export() {
                     Ok(export) => export.services(),
+                    Err(_) => std::ptr::null(),
+                }
+            }))
+            .unwrap_or(std::ptr::null())
+        }
+        #[no_mangle]
+        pub extern "C" fn drasi_computation_plugin_telemetry_v1(
+        ) -> *const $crate::abi::telemetry::PluginTelemetryV1 {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match __drasi_computation_export() {
+                    Ok(export) => export.telemetry(),
+                    Err(_) => std::ptr::null(),
+                }
+            }))
+            .unwrap_or(std::ptr::null())
+        }
+        #[no_mangle]
+        pub extern "C" fn drasi_computation_plugin_telemetry_v2(
+        ) -> *const $crate::abi::telemetry::PluginTelemetryV2 {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if let Err(error) = $crate::telemetry_bridge::initialize_native_logging() {
+                    eprintln!("native telemetry initialization failed: {error}");
+                    return std::ptr::null();
+                }
+                match __drasi_computation_export() {
+                    Ok(export) => export.telemetry_v2(),
                     Err(_) => std::ptr::null(),
                 }
             }))
@@ -290,6 +327,17 @@ macro_rules! export_computation_plugin {
                 Ok(export) => unsafe { export.entry(out) },
                 Err(error) => Err($crate::transport::Failure::failed(error.clone())),
             })
+        }
+        #[no_mangle]
+        pub extern "C" fn drasi_computation_plugin_telemetry_v3(
+        ) -> *const $crate::abi::telemetry::PluginTelemetryV3 {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match __drasi_computation_export() {
+                    Ok(export) => export.telemetry_v3(),
+                    Err(_) => std::ptr::null(),
+                }
+            }))
+            .unwrap_or(std::ptr::null())
         }
     };
 }

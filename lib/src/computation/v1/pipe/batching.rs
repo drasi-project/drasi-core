@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use crate::computation::v1::{
-    ChangeEnvelope, Delivery, InputEnvelope, PipeError, PortId, SinkBatching,
+    ChangeEnvelope, Delivery, ExecutionContext, InputEnvelope, PipeError, PortId, SinkBatching,
 };
 use std::{collections::VecDeque, time::Duration};
 use tokio::time::Instant;
@@ -36,8 +36,13 @@ impl BatchBuffer {
         })
     }
 
-    pub fn size(&self, envelope: &ChangeEnvelope) -> Result<usize, PipeError> {
+    pub fn size(
+        &self,
+        envelope: &ChangeEnvelope,
+        context: &ExecutionContext,
+    ) -> Result<usize, PipeError> {
         SinkBatching::input_size(&InputEnvelope {
+            execution_context: context.clone(),
             port: self.port.clone(),
             envelope: envelope.clone(),
         })
@@ -59,6 +64,7 @@ impl BatchBuffer {
 
     fn is_barrier(&self, envelope: &ChangeEnvelope) -> bool {
         SinkBatching::is_barrier(&InputEnvelope {
+            execution_context: Default::default(),
             port: self.port.clone(),
             envelope: envelope.clone(),
         })

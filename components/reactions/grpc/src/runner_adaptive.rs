@@ -24,6 +24,7 @@ use tokio::sync::{mpsc, oneshot};
 use tonic::transport::Channel;
 
 use drasi_lib::channels::ComponentStatus;
+use drasi_lib::observability::ExecutionContext;
 use drasi_lib::reactions::common::{base::ReactionBase, AdaptiveBatchConfig};
 use drasi_lib::ReactionRecoveryPolicy;
 
@@ -40,7 +41,16 @@ use drasi_lib::reactions::common::{batch_checkpoint_candidates, CheckpointState,
 /// terminal (last) item of its originating `QueryResult`. The terminal flag
 /// keeps checkpoint advancement at-least-once correct when a `QueryResult` is
 /// split across batches — the sequence only advances once its terminal acks.
-type BatcherItem = (BatchKey, ProtoQueryResultItem, bool);
+struct BatcherItem {
+    key: BatchKey,
+    item: ProtoQueryResultItem,
+    is_terminal: bool,
+    execution_context: ExecutionContext,
+    // Sequence IDs can repeat on replay; this identifies the dequeued input.
+    input_id: u64,
+    processing: drasi_lib::observability::ReactionInput,
+    ordinal: usize,
+}
 
 pub(crate) struct AdaptiveRunnerParams {
     pub reaction_id: drasi_lib::ComponentId,
@@ -53,6 +63,8 @@ pub(crate) struct AdaptiveRunnerParams {
 }
 
 pub(crate) async fn run(params: AdaptiveRunnerParams) {
+    let telemetry = params.base.worker_telemetry().await;
+    telemetry.scope(async {
     let AdaptiveRunnerParams {
         reaction_id,
         adaptive,
@@ -103,6 +115,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
         .filter(|t| t.has_renderable_templates())
         .map(|_| TemplateEngine::new());
 
+    let batcher_telemetry = telemetry.clone();
     let batcher = async move {
         let mut checkpoints = checkpoints;
         let mut batcher = AdaptiveBatcher::new(batch_rx, runtime_cfg);
@@ -123,13 +136,22 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
             // See `batch_checkpoint_candidates` for the `completed` / `seen`
             // at-least-once rationale.
             let mut meta = Vec::with_capacity(batch.len());
-            let mut batches_by_key: HashMap<BatchKey, Vec<ProtoQueryResultItem>> = HashMap::new();
-            for (key, item, is_terminal) in batch {
+            let mut batches_by_key: HashMap<BatchKey, (Vec<ProtoQueryResultItem>, Vec<(drasi_lib::observability::ReactionInput, usize)>)> = HashMap::new();
+            let change_count = batch.len();
+            let mut contexts = HashMap::new();
+            for BatcherItem { key, item, is_terminal, execution_context, input_id, processing, ordinal } in batch {
+                contexts.entry(input_id).or_insert(execution_context);
                 meta.push((key.query_id.clone(), item.sequence, is_terminal));
-                batches_by_key.entry(key).or_default().push(item);
+                let (items, inputs) = batches_by_key.entry(key).or_default();
+                items.push(item);
+                inputs.push((processing, ordinal));
             }
             let (completed, seen) = batch_checkpoint_candidates(meta);
 
+            let observation = batcher_telemetry.reaction_batch(contexts.values(), contexts.len(), change_count)
+                .map_err(|e| warn!("Failed to observe adaptive gRPC batch: {e}")).ok();
+            let mut work = batcher_telemetry.reaction_batch_work();
+            let deliver = async {
             if client.is_none() {
                 match create_client_with_retry(
                     &batcher_endpoint,
@@ -142,7 +164,9 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                         info!("Successfully created gRPC client for endpoint: {batcher_endpoint}");
                         client = Some(c);
                     }
-                    Err(e) => match FailureAction::from_policy(policy) {
+                    Err(e) => {
+                    work.finish(false);
+                    match FailureAction::from_policy(policy) {
                         FailureAction::Stop => {
                             fail_stop(
                                 &batcher_base,
@@ -154,7 +178,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                                 ),
                             )
                             .await;
-                            return;
+                            return Err(true);
                         }
                         FailureAction::SkipAndContinue => {
                             failed_sends += 1;
@@ -165,8 +189,9 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                             for (q, s) in &seen {
                                 let _ = checkpoints.advance(&batcher_base, q, *s).await;
                             }
-                            continue;
+                            return Err(false);
                         }
+                    }
                     },
                 }
             }
@@ -176,7 +201,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
             let mut failed_queries: std::collections::HashSet<drasi_lib::ComponentId> =
                 std::collections::HashSet::new();
 
-            for (key, items) in batches_by_key.into_iter() {
+            for (key, (items, inputs)) in batches_by_key.into_iter() {
                 let delivered = deliver_sub_batch(
                     &mut client,
                     &items,
@@ -189,6 +214,9 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                 .await;
 
                 if delivered {
+                    for (input, ordinal) in inputs {
+                        input.handled_rows(&[ordinal]);
+                    }
                     successful_sends += 1;
                     if successful_sends.is_multiple_of(100) {
                         info!(
@@ -199,6 +227,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                     failed_sends += 1;
                     match FailureAction::from_policy(policy) {
                         FailureAction::Stop => {
+                            work.finish(false);
                             fail_stop(
                                 &batcher_base,
                                 &batcher_errored,
@@ -210,7 +239,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                                 ),
                             )
                             .await;
-                            return;
+                            return Err(true);
                         }
                         FailureAction::SkipAndContinue => {
                             warn!(
@@ -224,6 +253,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                 }
             }
 
+            work.finish(failed_queries.is_empty());
             // Advance checkpoints after acks. Fully-acked queries advance to
             // their terminal max. Queries with a dropped sub-batch (AutoSkipGap
             // only) advance to their `seen` max, accepting the loss — this can
@@ -254,8 +284,17 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                         ),
                     )
                     .await;
-                    return;
+                    return Err(true);
                 }
+            }
+            if failed_queries.is_empty() { Ok(()) } else { Err(false) }
+            };
+            let outcome = match observation {
+                Some(observation) => observation.run(deliver).await,
+                None => deliver.await,
+            };
+            if matches!(outcome, Err(true)) {
+                return;
             }
         }
 
@@ -269,6 +308,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
     let engine_for_loop = template_engine;
 
     let forward = async {
+        let mut next_input_id = 0u64;
         loop {
             let query_result = tokio::select! {
                 biased;
@@ -282,8 +322,12 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                     debug!("[{reaction_id}] Batcher exited; exiting adaptive processing loop");
                     break;
                 }
-                result = priority_queue.dequeue() => result,
+                result = priority_queue.dequeue_message() => result,
             };
+            let execution_context = query_result.execution_context;
+            let query_result = query_result.payload;
+            let input_id = next_input_id;
+            next_input_id = next_input_id.wrapping_add(1);
 
             if query_result.results.is_empty() {
                 debug!("[{reaction_id}] Received empty result set from query");
@@ -297,8 +341,9 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
 
             // Build all items first so the last one can be flagged terminal; the
             // checkpoint only advances once a result's terminal item is acked.
-            let mut built_items: Vec<(BatchKey, ProtoQueryResultItem)> = Vec::new();
-            for diff in &query_result.results {
+            let mut built_items: Vec<(BatchKey, ProtoQueryResultItem, usize)> = Vec::new();
+            for (ordinal, diff) in query_result.results.iter()
+                .filter(|diff| !matches!(diff, drasi_lib::channels::ResultDiff::Noop)).enumerate() {
                 if matches!(diff, drasi_lib::channels::ResultDiff::Noop) {
                     debug!("[{reaction_id}] Ignoring noop result");
                     continue;
@@ -310,13 +355,19 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                 };
                 let effective_metadata = merge_metadata(&base_metadata, &built.request_metadata);
                 let key = BatchKey::new(query_id.clone(), effective_metadata);
-                built_items.push((key, built.item));
+                built_items.push((key, built.item, ordinal));
             }
 
             let last_idx = built_items.len().saturating_sub(1);
-            for (i, (key, item)) in built_items.into_iter().enumerate() {
+            let input_rows = query_result.results.iter()
+                .filter(|diff| !matches!(diff, drasi_lib::channels::ResultDiff::Noop)).count();
+            let processing = telemetry.reaction_input_context(query_id.as_str(), input_rows, &execution_context);
+            for (i, (key, item, ordinal)) in built_items.into_iter().enumerate() {
                 let is_terminal = i == last_idx;
-                if batch_tx.send((key, item, is_terminal)).await.is_err() {
+                if batch_tx.send(BatcherItem {
+                    key, item, is_terminal, execution_context: execution_context.clone(), input_id,
+                    processing: processing.clone(), ordinal,
+                }).await.is_err() {
                     let msg = "failed to send item to adaptive batcher".to_string();
                     error!("[{reaction_id}] {msg}");
                     status_handle
@@ -344,6 +395,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
             Some("Adaptive gRPC reaction stopped".to_string()),
         )
         .await;
+    }).await;
 }
 
 /// Set the reaction to `Error` and record that a fail-stop occurred so the main

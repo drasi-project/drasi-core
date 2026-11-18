@@ -116,6 +116,7 @@ impl EnvelopeSource for ReadySource {
     async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
         let sequence = self.produced.fetch_add(1, Ordering::Relaxed) + 1;
         Ok(Some(OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out")?,
             envelope: event(&self.namespace, "live", sequence, false)?,
         }))
@@ -195,6 +196,7 @@ async fn responsiveness(runtime: &str) -> Result<()> {
             ensure!(
                 timers
                     .transform(InputEnvelope {
+                        execution_context: Default::default(),
                         port: PortId::try_new("in")?,
                         envelope: event("timer-input", &sequence.to_string(), sequence, true)?,
                     })

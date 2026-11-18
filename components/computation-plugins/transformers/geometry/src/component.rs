@@ -275,6 +275,10 @@ impl NativeTransformer for GeometryTransformer {
         self.state.commit(delta);
         self.sequence = sequence;
         self.output.publish(self.state.outputs(), sequence)?;
-        Ok(vec![OutputEnvelope { port, envelope }])
+        Ok(vec![OutputEnvelope {
+            execution_context: input.execution_context.clone(),
+            port,
+            envelope,
+        }])
     }
 }

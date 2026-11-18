@@ -447,6 +447,8 @@ async fn fence_and_actual_admission_work_on_multithread_runtime() {
 }
 
 async fn awaitable_admission_after_start() {
+    use drasi_lib::observability::{ExecutionContext, ExecutionScope, TraceContextV1};
+
     let mut fixture = Fixture::with_capacity(false, 1).await;
     fixture.core.start().await.expect("host start");
     fixture.admission.wait_active().await.expect("mailbox");
@@ -456,20 +458,21 @@ async fn awaitable_admission_after_start() {
         .await
         .expect("session");
     let input = input();
+    let trace = TraceContextV1::new([1; 16], [2; 8], 1, None).expect("trace context");
     assert_eq!(
-        fixture
-            .admission
-            .admit_wait(&session, 1, &input)
+        ExecutionScope::new(ExecutionContext::new(trace.clone()))
+            .scope(fixture.admission.admit_wait(&session, 1, &input))
             .await
             .expect("first input")
             .position,
         1
     );
-    fixture
+    let first = fixture
         .received
         .recv()
         .await
         .expect("first downstream input");
+    assert_eq!(first.execution_context.trace(), Some(&trace));
     {
         let waiting = fixture.admission.admit_wait(&session, 2, &input);
         tokio::pin!(waiting);
@@ -491,11 +494,12 @@ async fn awaitable_admission_after_start() {
             2
         );
     }
-    fixture
+    let second = fixture
         .received
         .recv()
         .await
         .expect("second downstream input");
+    assert!(second.execution_context.trace().is_none());
     assert_eq!(
         fixture
             .admission
