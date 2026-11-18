@@ -60,12 +60,14 @@ fn value(output: &OutputEnvelope) -> anyhow::Result<i64> {
 async fn interval_update_retains_identity_sequence_and_emitted_values() -> anyhow::Result<()> {
     let current = request(json!({"stream": "counter-stream", "count": 3, "start": 10}))?;
     let mut proposed = current.clone();
-    proposed.configuration["interval_ms"] = json!(1);
+    proposed.configuration["intervalMs"] = json!(1);
     let update = UpdateRequest {
         current: current.clone(),
         proposed,
     };
     let plan = CounterFactory
+        .update_planner()
+        .expect("factory planner")
         .assess(&update)?
         .plan()
         .ok_or_else(|| anyhow::anyhow!("counter update unsupported"))?;
@@ -137,6 +139,8 @@ fn factory_rejects_changes_outside_its_supported_update_contract() -> anyhow::Re
         proposed.configuration[field] = replacement;
         assert!(
             CounterFactory
+                .update_planner()
+                .expect("factory planner")
                 .assess(&UpdateRequest {
                     current: current.clone(),
                     proposed,
@@ -148,6 +152,8 @@ fn factory_rejects_changes_outside_its_supported_update_contract() -> anyhow::Re
     let mut proposed = current.clone();
     proposed.id = ComponentId::generate();
     assert!(CounterFactory
+        .update_planner()
+        .expect("factory planner")
         .assess(&UpdateRequest { current, proposed })
         .is_err());
     Ok(())
@@ -157,7 +163,7 @@ fn factory_rejects_changes_outside_its_supported_update_contract() -> anyhow::Re
 async fn stale_or_forged_update_does_not_change_the_counter() -> anyhow::Result<()> {
     let current = request(json!({"stream": "counter-stream"}))?;
     let mut proposed = current.clone();
-    proposed.configuration["interval_ms"] = json!(1);
+    proposed.configuration["intervalMs"] = json!(1);
     let (mut counter, _control) = Counter::new(
         CounterFactory.metadata().descriptor(current.id.clone())?,
         current.configuration.clone(),
@@ -182,5 +188,16 @@ async fn stale_or_forged_update_does_not_change_the_counter() -> anyhow::Result<
     assert_eq!(counter.configuration.count, 10);
     counter.stop(&stop_context()).await?;
     counter.dispose(&dispose_context()?).await?;
+    Ok(())
+}
+
+#[test]
+fn configuration_keys_are_camel_case() -> anyhow::Result<()> {
+    drasi_computation_plugin_sdk::testing::ensure_camel_case_configuration(
+        &configuration_definition().schema(),
+    )?;
+    let parsed = Configuration::parse(json!({"stream": "counter/out", "intervalMs": 7}))?;
+    assert_eq!(parsed.interval_ms, 7);
+    assert!(Configuration::parse(json!({"stream": "counter/out", "interval_ms": 7})).is_err());
     Ok(())
 }

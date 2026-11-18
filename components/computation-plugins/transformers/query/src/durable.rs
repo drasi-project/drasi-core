@@ -234,11 +234,11 @@ impl DurableQuery {
             recovery,
             reset_configuration: request
                 .configuration
-                .get("reset_configuration")
+                .get("resetConfiguration")
                 .map(|value| {
                     value
                         .as_bool()
-                        .context("reset_configuration must be a boolean")
+                        .context("resetConfiguration must be a boolean")
                 })
                 .transpose()?
                 .unwrap_or(false),

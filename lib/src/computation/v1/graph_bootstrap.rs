@@ -36,13 +36,70 @@ use std::{
 };
 
 pub use drasi_computation_contracts::{
-    BootstrapMarker, BootstrapRequest, BootstrapSessionEvent, BootstrapSessionId, BOOTSTRAP_BEGIN,
-    BOOTSTRAP_COMPLETE, BOOTSTRAP_FAILED, BOOTSTRAP_RECORD, BOOTSTRAP_REQUEST,
+    BootstrapLabels, BootstrapMarker, BootstrapRequest, BootstrapSessionEvent, BootstrapSessionId,
+    BOOTSTRAP_BEGIN, BOOTSTRAP_COMPLETE, BOOTSTRAP_FAILED, BOOTSTRAP_RECORD, BOOTSTRAP_REQUEST,
     MAX_BOOTSTRAP_FAILURE_REASON_BYTES, MAX_BOOTSTRAP_SESSION_WATERMARKS,
 };
 
 /// Bootstrap output port of a [`BootstrapProviderComponent`].
 pub const BOOTSTRAP_PROVIDER_OUTPUT_PORT: &str = "snapshot";
+
+/// The derivation name of a query's owned scheduled-notification helper
+/// (`ComponentId::derive_owned(query, QUERY_SCHEDULED_HELPER)`).
+pub const QUERY_SCHEDULED_HELPER: &str = "query-scheduled";
+
+/// The source whose element namespace a provider connected to `consumer`'s
+/// bootstrap input serves, and the stream its records belong to.
+///
+/// A consumer with no data input is a source relaying its consumers'
+/// sessions: the provider serves the source itself and its single output
+/// stream. Any other consumer (a query or transformer with a local provider)
+/// is served the namespace of the single producer of its data inputs (its own
+/// scheduled-notification helper aside). `None`
+/// when that is ambiguous (no single source or stream). The graph applies
+/// the same rule when it binds the provider's edge, so a provider never
+/// names the source it serves.
+pub fn served_source<'a>(
+    consumer: &ComponentId,
+    node: impl Fn(&ComponentId) -> Option<&'a NodeSnapshot>,
+    edges: impl IntoIterator<Item = &'a EdgeDefinition>,
+) -> Option<(ComponentId, StreamId)> {
+    let consumer_node = node(consumer)?;
+    let data_inputs: std::collections::BTreeSet<&PortId> = consumer_node
+        .descriptor
+        .ports()
+        .iter()
+        .filter(|port| port.direction() == PortDirection::Input && port.kind() == PortKind::Data)
+        .map(|port| port.id())
+        .collect();
+    if data_inputs.is_empty() {
+        let streams: std::collections::BTreeSet<&StreamId> =
+            consumer_node.output_streams.values().collect();
+        let mut streams = streams.into_iter();
+        return match (streams.next(), streams.next()) {
+            (Some(stream), None) => Some((consumer.clone(), stream.clone())),
+            _ => None,
+        };
+    }
+    // The consumer's own scheduled-notification helper produces no source
+    // elements, so it has no namespace to serve.
+    let scheduled = ComponentId::derive_owned(consumer, QUERY_SCHEDULED_HELPER).ok();
+    let producers: std::collections::BTreeSet<&Endpoint> = edges
+        .into_iter()
+        .filter(|edge| &edge.to.component == consumer && data_inputs.contains(&edge.to.port))
+        .map(|edge| &edge.from)
+        .filter(|endpoint| scheduled.as_ref() != Some(&endpoint.component))
+        .collect();
+    let mut producers = producers.into_iter();
+    let (Some(producer), None) = (producers.next(), producers.next()) else {
+        return None;
+    };
+    let stream = node(&producer.component)?
+        .output_streams
+        .get(&producer.port)?
+        .clone();
+    Some((producer.component.clone(), stream))
+}
 
 const REQUEST_RETRIES: usize = 200;
 const REQUEST_RETRY_DELAY: Duration = Duration::from_millis(10);
@@ -260,6 +317,7 @@ pub struct BootstrapSessionReader {
     ports: BootstrapPorts,
     edge: BootstrapInputEdge,
     session: BootstrapSessionId,
+    labels: Option<BootstrapLabels>,
     began: bool,
     done: bool,
 }
@@ -270,9 +328,17 @@ impl BootstrapSessionReader {
             ports,
             edge,
             session: BootstrapSessionId::new(),
+            labels: None,
             began: false,
             done: false,
         }
+    }
+
+    /// Ask for only the elements carrying these labels (the origin's declared
+    /// labels); `None` asks for everything the producer is configured for.
+    pub fn with_labels(mut self, labels: Option<BootstrapLabels>) -> Self {
+        self.labels = labels;
+        self
     }
 
     pub fn edge(&self) -> &BootstrapInputEdge {
@@ -324,6 +390,7 @@ impl BootstrapSessionReader {
             state,
             origin: origin.filter(|origin| origin != control.id()),
             resume,
+            labels: self.labels.clone(),
         };
         request.validate()?;
         let mut attempts = 0;
@@ -702,6 +769,7 @@ pub struct PipeBootstrapProvider {
     ports: BootstrapPorts,
     control: ComponentControl,
     progress: Option<Arc<QuerySourceProgress>>,
+    labels: Option<BootstrapLabels>,
     completed: AtomicBool,
     prepared: Mutex<Option<Prepared>>,
 }
@@ -713,6 +781,21 @@ impl PipeBootstrapProvider {
         control: ComponentControl,
         progress: Option<Arc<QuerySourceProgress>>,
     ) -> anyhow::Result<Arc<Self>> {
+        Self::new_with_labels(graph_id, ports, control, progress, None)
+    }
+
+    /// A consumer that declares the labels it reads (a query) asks every
+    /// producer for only those labels; relays forward them to their providers.
+    pub fn new_with_labels(
+        graph_id: impl Into<Arc<str>>,
+        ports: BootstrapPorts,
+        control: ComponentControl,
+        progress: Option<Arc<QuerySourceProgress>>,
+        labels: Option<BootstrapLabels>,
+    ) -> anyhow::Result<Arc<Self>> {
+        if let Some(labels) = &labels {
+            labels.validate()?;
+        }
         let graph_id = graph_id.into();
         let component = control.id().clone();
         if let Some(progress) = &progress {
@@ -727,6 +810,7 @@ impl PipeBootstrapProvider {
             ports,
             control,
             progress,
+            labels,
             completed: AtomicBool::new(false),
             prepared: Mutex::new(None),
         }))
@@ -801,8 +885,9 @@ async fn open_reader(
     persistent: bool,
     saved: &HashMap<(ComponentId, PortId), Bytes>,
     edge: BootstrapInputEdge,
+    labels: Option<BootstrapLabels>,
 ) -> anyhow::Result<BootstrapSessionReader> {
-    let reader = BootstrapSessionReader::new(ports.clone(), edge);
+    let reader = BootstrapSessionReader::new(ports.clone(), edge).with_labels(labels);
     let state = saved
         .get(&(
             reader.edge().producer.component.clone(),
@@ -902,7 +987,15 @@ impl ComputationBootstrapProvider for PipeBootstrapProvider {
         // producers serving one session at a time.
         let mut pending: std::collections::VecDeque<_> = edges.into_iter().collect();
         let first = pending.pop_front().expect("bootstrap inputs are not empty");
-        let mut reader = open_reader(&self.ports, &self.control, persistent, &saved, first).await?;
+        let mut reader = open_reader(
+            &self.ports,
+            &self.control,
+            persistent,
+            &saved,
+            first,
+            self.labels.clone(),
+        )
+        .await?;
         // Retain the first provider's state before any record is processed, so
         // a restarted session can resume or release what the provider created.
         // A later provider's state is retained when the bootstrap completes.
@@ -922,12 +1015,14 @@ impl ComputationBootstrapProvider for PipeBootstrapProvider {
         let readers: std::collections::VecDeque<_> = [(reader, Some(first))].into();
         let ports = self.ports.clone();
         let control = self.control.clone();
+        let labels = self.labels.clone();
         let changes = futures::stream::try_unfold(
             (readers, pending, collected),
             move |(mut readers, mut pending, collected)| {
                 let ports = ports.clone();
                 let control = control.clone();
                 let saved = saved.clone();
+                let labels = labels.clone();
                 async move {
                     loop {
                         if readers.is_empty() {
@@ -935,8 +1030,15 @@ impl ComputationBootstrapProvider for PipeBootstrapProvider {
                                 lock(&collected).complete = true;
                                 return Ok(None);
                             };
-                            let reader =
-                                open_reader(&ports, &control, persistent, &saved, edge).await?;
+                            let reader = open_reader(
+                                &ports,
+                                &control,
+                                persistent,
+                                &saved,
+                                edge,
+                                labels.clone(),
+                            )
+                            .await?;
                             readers.push_back((reader, None));
                         }
                         let Some((reader, first)) = readers.front_mut() else {
@@ -1166,16 +1268,45 @@ impl ControlHandler for ProviderServer {
 /// before the node starts (or while it is stopped) wait until it runs.
 pub struct BootstrapProviderComponent {
     descriptor: ComponentDescriptor,
+    description: super::ComponentDescription,
     server: Arc<ProviderServer>,
 }
 
 impl BootstrapProviderComponent {
-    /// Every provider node's description, shared with factories that build
-    /// them: the node keeps no progress of its own and its bootstrap outputs
-    /// declare no producer identity, since each serves a requesting consumer's
-    /// own session.
+    /// The default provider node description: the node keeps no progress of
+    /// its own, its bootstrap outputs declare no producer identity (each
+    /// serves a requesting consumer's own session), and its bootstrap facts
+    /// are undeclared. Providers that know their facts declare them with
+    /// [`Self::with_description`] (see [`Self::declared_description`]).
     pub fn provider_description() -> super::ComponentDescription {
         super::ComponentDescription::new(super::ProgressPersistence::Stateless)
+    }
+
+    /// A provider node's description declaring `output` on every bootstrap
+    /// output of `descriptor`.
+    pub fn declared_description(
+        descriptor: &ComponentDescriptor,
+        output: drasi_computation_contracts::BootstrapOutputDescription,
+    ) -> super::ComponentDescription {
+        descriptor
+            .ports()
+            .iter()
+            .filter(|port| {
+                port.kind() == PortKind::Bootstrap && port.direction() == PortDirection::Output
+            })
+            .fold(Self::provider_description(), |description, port| {
+                description.with_port(
+                    port.id().clone(),
+                    super::PortDescription::BootstrapOutput(output.clone()),
+                )
+            })
+    }
+
+    /// Replace the node's description, such as with its factory's declared
+    /// bootstrap facts.
+    pub fn with_description(mut self, description: super::ComponentDescription) -> Self {
+        self.description = description;
+        self
     }
 
     /// A node with a single graph-change bootstrap output,
@@ -1207,6 +1338,7 @@ impl BootstrapProviderComponent {
         );
         Ok(Self {
             descriptor,
+            description: Self::provider_description(),
             server: Arc::new(ProviderServer {
                 ports: Mutex::new(BootstrapPorts::default()),
                 factory,
@@ -1232,7 +1364,7 @@ impl ComputationComponent for BootstrapProviderComponent {
     }
 
     fn description(&self) -> super::ComponentDescription {
-        Self::provider_description()
+        self.description.clone()
     }
 
     fn bind_bootstrap(&mut self, ports: BootstrapPorts) {
@@ -1396,7 +1528,9 @@ impl BootstrapRelay {
                 }
                 return Ok(((self.handover)(request, &[])?, None));
             };
-            let mut upstream = BootstrapSessionReader::new(ports.clone(), edge);
+            // The relay forwards its origin's declared labels unchanged.
+            let mut upstream = BootstrapSessionReader::new(ports.clone(), edge)
+                .with_labels(request.labels.clone());
             match (&request.state, request.resume) {
                 (Some(state), true) => {
                     upstream

@@ -466,6 +466,13 @@ async fn two_consumers_bootstrap_through_one_source_relay_with_their_own_session
         let mut origins: Vec<_> = upstream.iter().map(|r| r.origin().clone()).collect();
         origins.sort();
         assert_eq!(origins, vec![id("left"), id("right")]);
+        // Each query asks for the labels it reads, and the source relays
+        // them to its provider unchanged.
+        let people = BootstrapLabels::new(["Person"], Vec::<String>::new()).unwrap();
+        assert!(requests
+            .iter()
+            .chain(&upstream)
+            .all(|request| request.labels.as_ref() == Some(&people)));
         let handovers = handle.handovers();
         assert_eq!(handovers.len(), 2);
         for request in &requests {

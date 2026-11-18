@@ -3,9 +3,133 @@
 
 //! Cancellation-safe joining of workers retained by their component owner.
 
-use std::time::Duration;
+use std::{
+    cell::RefCell,
+    future::Future,
+    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
+
+/// Receives the bounded message of a panic in an owned worker.
+///
+/// The owner of the work that registers a worker (for a native plugin, the SDK
+/// instance whose operation is being polled) installs it with
+/// [`observe_worker_panics`]. It runs on the panicking worker's thread after
+/// the unwind was caught and must not block.
+pub type WorkerPanicObserver = Arc<dyn Fn(&str) + Send + Sync>;
+
+thread_local! {
+    static OBSERVER: RefCell<Option<WorkerPanicObserver>> = const { RefCell::new(None) };
+}
+
+/// Restores the previously installed observer when dropped.
+#[must_use = "the observer is installed only while the scope is alive"]
+pub struct WorkerPanicScope {
+    previous: Option<WorkerPanicObserver>,
+}
+
+impl Drop for WorkerPanicScope {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        let _ = OBSERVER.try_with(|current| *current.borrow_mut() = previous);
+    }
+}
+
+/// Installs `observer` on this thread while the returned scope is alive.
+///
+/// Every worker registered through this module while the scope is active
+/// captures the observer, and so does every worker those workers register in
+/// turn. When such a worker panics, the observer receives the panic message
+/// before the unwind continues, so joining the worker still reports
+/// [`WorkerCleanupError::Join`] with a panic. Without an observer a worker
+/// panic is seen only when the worker is joined.
+pub fn observe_worker_panics(observer: WorkerPanicObserver) -> WorkerPanicScope {
+    WorkerPanicScope {
+        previous: OBSERVER
+            .try_with(|current| current.borrow_mut().replace(observer))
+            .ok()
+            .flatten(),
+    }
+}
+
+fn current_observer() -> Option<WorkerPanicObserver> {
+    OBSERVER
+        .try_with(|current| current.borrow().clone())
+        .ok()
+        .flatten()
+}
+
+fn enter(observer: &Option<WorkerPanicObserver>) -> Option<WorkerPanicScope> {
+    observer.clone().map(observe_worker_panics)
+}
+
+/// A bounded, owned description of a panic payload.
+pub fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or("non-string panic payload");
+    let mut end = message.len().min(2048);
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    message[..end].to_owned()
+}
+
+fn report(observer: &Option<WorkerPanicObserver>, payload: Box<dyn std::any::Any + Send>) -> ! {
+    if let Some(observer) = observer {
+        let message = panic_message(payload.as_ref());
+        // A failing observer must not replace the original panic.
+        let _ = catch_unwind(AssertUnwindSafe(|| observer(&message)));
+    }
+    resume_unwind(payload)
+}
+
+/// Reports a panic of the wrapped worker to the observer captured at registration.
+struct Observed<F> {
+    future: Pin<Box<F>>,
+    observer: Option<WorkerPanicObserver>,
+}
+
+impl<F: Future> Future for Observed<F> {
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let _scope = enter(&this.observer);
+        match catch_unwind(AssertUnwindSafe(|| this.future.as_mut().poll(context))) {
+            Ok(poll) => poll,
+            Err(payload) => report(&this.observer, payload),
+        }
+    }
+}
+
+fn observed<F: Future>(future: F) -> Observed<F> {
+    Observed {
+        future: Box::pin(future),
+        observer: current_observer(),
+    }
+}
+
+fn observed_blocking<F, T>(work: F) -> impl FnOnce() -> T
+where
+    F: FnOnce() -> T,
+{
+    let observer = current_observer();
+    move || {
+        let _scope = enter(&observer);
+        match catch_unwind(AssertUnwindSafe(work)) {
+            Ok(value) => value,
+            Err(payload) => report(&observer, payload),
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error("the previous worker must be joined before another worker can be started")]
@@ -20,6 +144,7 @@ where
     F: std::future::Future + Send + 'static,
     F::Output: Send + 'static,
 {
+    let future = observed(future);
     register_owned_worker(slot, || tokio::spawn(future)).await
 }
 
@@ -113,7 +238,7 @@ where
     if slot.is_some() {
         return Err(WorkerAlreadyOwned);
     }
-    *slot = Some(tokio::spawn(future));
+    *slot = Some(tokio::spawn(observed(future)));
     Ok(())
 }
 
@@ -126,6 +251,7 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
+    let work = observed_blocking(work);
     register_owned_worker(slot, || tokio::task::spawn_blocking(work)).await
 }
 
@@ -617,5 +743,100 @@ mod tests {
             .await
             .unwrap();
         assert!(tasks.is_empty());
+    }
+
+    fn recording_observer() -> (WorkerPanicObserver, Arc<std::sync::Mutex<Vec<String>>>) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observer: WorkerPanicObserver = {
+            let seen = seen.clone();
+            Arc::new(move |message: &str| seen.lock().unwrap().push(message.to_owned()))
+        };
+        (observer, seen)
+    }
+
+    async fn join_panic<T: std::fmt::Debug>(slot: &RwLock<Option<JoinHandle<T>>>) {
+        assert!(matches!(
+            join_owned_worker(&mut *slot.write().await, Duration::from_secs(5)).await,
+            Err(WorkerCleanupError::Join(error)) if error.is_panic()
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn worker_panic_reaches_the_observer_installed_at_registration() {
+        let (observer, seen) = recording_observer();
+        let slot = RwLock::new(None);
+        let (release, wait) = oneshot::channel::<()>();
+        {
+            let _scope = observe_worker_panics(observer);
+            spawn_owned_worker(&slot, async move {
+                wait.await.unwrap();
+                panic!("injected worker panic");
+            })
+            .await
+            .unwrap();
+        }
+        // The observer was captured when the worker was registered, not
+        // looked up when it panics.
+        assert!(seen.lock().unwrap().is_empty());
+        release.send(()).unwrap();
+        join_panic(&slot).await;
+        assert_eq!(*seen.lock().unwrap(), ["injected worker panic"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workers_registered_by_an_observed_worker_inherit_its_observer() {
+        let (observer, seen) = recording_observer();
+        let outer = Arc::new(RwLock::new(None));
+        let inner = Arc::new(RwLock::new(None::<JoinHandle<()>>));
+        {
+            let _scope = observe_worker_panics(observer);
+            let inner = inner.clone();
+            spawn_owned_worker(&outer, async move {
+                spawn_owned_worker(&inner, async { panic!("nested worker panic") })
+                    .await
+                    .unwrap();
+                try_spawn_owned_worker(&RwLock::new(None), async {}).unwrap();
+            })
+            .await
+            .unwrap();
+        }
+        join_owned_worker(&mut *outer.write().await, Duration::from_secs(5))
+            .await
+            .unwrap();
+        join_panic(&inner).await;
+        assert_eq!(*seen.lock().unwrap(), ["nested worker panic"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_worker_panic_reaches_the_observer() {
+        let (observer, seen) = recording_observer();
+        let slot = RwLock::new(None);
+        {
+            let _scope = observe_worker_panics(observer);
+            spawn_owned_blocking_worker::<_, ()>(&slot, || panic!("blocking worker panic"))
+                .await
+                .unwrap();
+        }
+        join_panic(&slot).await;
+        assert_eq!(*seen.lock().unwrap(), ["blocking worker panic"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn workers_registered_outside_a_scope_are_unobserved() {
+        let (observer, seen) = recording_observer();
+        drop(observe_worker_panics(observer));
+        let slot = RwLock::new(None);
+        try_spawn_owned_worker(&slot, async { panic!("unobserved worker panic") }).unwrap();
+        join_panic(&slot).await;
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn panic_messages_are_bounded_on_a_character_boundary() {
+        let long = "é".repeat(2000);
+        let message = panic_message(&long);
+        assert!(message.len() <= 2048);
+        assert!(long.starts_with(&message));
+        assert_eq!(panic_message(&7_u8), "non-string panic payload");
     }
 }

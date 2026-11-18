@@ -45,6 +45,22 @@ fn increment(counter: u32) {
 
 pub struct Factory;
 impl sdk::Factory for Factory {
+    fn configuration_details(&self) -> sdk::ConfigDetails {
+        let described = |description: &str| sdk::configuration::ConfigFieldDetails {
+            description: description.into(),
+            ..Default::default()
+        };
+        sdk::ConfigDetails {
+            fields: [
+                ("hostname".to_string(), described("Fixture field hostname.")),
+                ("port".to_string(), described("Fixture field port.")),
+                ("user".to_string(), described("Fixture field user.")),
+                ("password".to_string(), described("Fixture field password.")),
+                ("mode".to_string(), described("Fixture field mode.")),
+            ]
+            .into(),
+        }
+    }
     fn describe(
         &self,
         _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
@@ -89,15 +105,42 @@ impl sdk::Factory for Factory {
             completion: Some(SinkCompletion::Handled),
             capabilities: sdk::Capabilities {
                 erases_owned_state: true,
+                services: sdk::HostServices {
+                    activation_credentials: true,
+                    ..Default::default()
+                },
                 ..sdk::Capabilities::default()
             },
         }
     }
 
-    fn supports_activation_credentials(&self) -> bool {
-        true
+    fn create(
+        &self,
+        request: &sdk::CreateRequest,
+        _: sdk::ControlSender,
+        _services: sdk::ServiceBindings,
+    ) -> anyhow::Result<sdk::CreatedComponent> {
+        anyhow::ensure!(
+            request.activation_credentials_bound
+                || request.configuration["user"]
+                    .as_str()
+                    .is_some_and(|user| !user.is_empty()),
+            "literal authentication requires a user"
+        );
+        increment(CONSTRUCTED);
+        Ok(sdk::Component::Sink(Box::new(Sink {
+            descriptor: self.metadata().descriptor(request.id.clone())?,
+            configuration: request.configuration.clone(),
+            bound: request.activation_credentials_bound,
+        }))
+        .into())
     }
+    fn activation_credentials(&self) -> Option<&dyn sdk::ActivationCredentialEndpoint> {
+        Some(self)
+    }
+}
 
+impl sdk::ActivationCredentialEndpoint for Factory {
     fn activation_credential_context(
         &self,
         request: &sdk::CreateRequest,
@@ -116,27 +159,6 @@ impl sdk::Factory for Factory {
                 .context("activation fixture requires an unsigned port")?
                 .try_into()?,
         })
-    }
-
-    fn create(
-        &self,
-        request: &sdk::CreateRequest,
-        _: sdk::ControlSender,
-    ) -> anyhow::Result<sdk::CreatedComponent> {
-        anyhow::ensure!(
-            request.activation_credentials_bound
-                || request.configuration["user"]
-                    .as_str()
-                    .is_some_and(|user| !user.is_empty()),
-            "literal authentication requires a user"
-        );
-        increment(CONSTRUCTED);
-        Ok(sdk::Component::Sink(Box::new(Sink {
-            descriptor: self.metadata().descriptor(request.id.clone())?,
-            configuration: request.configuration.clone(),
-            bound: request.activation_credentials_bound,
-        }))
-        .into())
     }
 }
 

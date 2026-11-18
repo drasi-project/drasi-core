@@ -235,18 +235,18 @@ serve different purposes. Do not substitute one for another.
 
 | Host interface | Accepted plugin interface |
 |---|---|
-| Native computation ABI 4.0.0 | Same major (4) with an older or equal minor, matching target and wire version 4; a newer minor or another major is rejected before any callback; advertised capabilities/extensions are validated separately |
-| Ordinary ABI 0.18.x | Ordinary 0.18.x on the same target; mandatory binding and fallible lifecycle tables |
-| Ordinary ABI 0.16.x / 0.17.x component layouts | Reject before plugin initialization; rebuild with the current ordinary SDK |
+| Native computation ABI 5.0.0 | Same major (5) with an older or equal minor, matching target and wire version 5; a newer minor or another major is rejected before any callback; advertised capabilities/extensions are validated separately |
+| Ordinary ABI 0.19.x | Ordinary 0.19.x on the same target; mandatory binding and fallible lifecycle tables |
+| Ordinary 0.16.x to 0.18.x component layouts | Reject before plugin initialization; rebuild with the current ordinary SDK |
 | Missing metadata, wrong target, incompatible or unknown interface | Reject; never guess a compatible layout |
 
-Native base tables and strict metadata are checked independently of the version 4
-MessagePack payload definition. ABI 4 carries the native lifecycle contract
+Native base tables and strict metadata are checked independently of the wire version 5
+MessagePack payload definition. ABI 5 carries the native lifecycle contract
 (INITIALIZE, START, PAUSE, RESUME, STOP, DISPOSE) and the optional management
 extension for assess/apply; an advertised capability must match the implemented
 tables rather than follow from SDK presence.
 
-Ordinary ABI 0.18 separates required runtime-context binding from optional
+The ordinary ABI (since 0.18) separates required runtime-context binding from optional
 once-per-object initialization, adds disposal and temporary processing-pause
 hooks, and names destructive cleanup `delete_owned_resources`. Initialization
 and disposal return failures through the vtable instead of reporting success
@@ -269,7 +269,7 @@ built libraries. Rust memory layouts are not part of that contract.
 
 ### Serialized Payload Pattern
 
-Native metadata/configuration are JSON. Native wire version 4 carries typed
+Native metadata/configuration are JSON. Native wire version 5 carries typed
 envelopes and bulk byte buffers as named MessagePack records. The persisted
 envelope representation is a separate contract; changing transport encoding
 does not authorize rewriting saved state.
@@ -435,7 +435,7 @@ Stop; Replace disposes the old object and constructs a new one. `Refused` and
 Abort and disposed) without automatic replacement; an interrupted apply is never
 retried on the same object.
 
-Ordinary ABI **0.18 is creation-only for managed updates**: its descriptor/FFI
+Ordinary ABI **0.19 is creation-only for managed updates**: its descriptor/FFI
 tables do not export factory planning or `apply_update`. A loaded plugin or
 creation descriptor does not authorize same-UUID replacement, state loss,
 drainage, or pause-dependent updates. Managed updates require explicit
@@ -493,7 +493,7 @@ dynamic-plugin = []
 
 [package.metadata.drasi-plugin]
 abi-family = "computation"
-abi-version = "4.0.0"
+abi-version = "5.0.0"
 kind = "example-native"
 ```
 

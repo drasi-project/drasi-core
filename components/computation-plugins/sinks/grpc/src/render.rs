@@ -1,7 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! Output templates, compiled once at construction.
+//! Output templates, compiled once at construction by the shared native
+//! template engine (strict, unescaped, shared helper set).
 //!
 //! Routing matches the shared reaction protocol and its route validation: the
 //! output alias, then the alias's last dotted segment, then
@@ -12,9 +13,9 @@
 
 use anyhow::{Context, Result};
 use drasi_computation_contracts::{ChangeNotification, ChangeRoute};
+use drasi_computation_template_common::{change_context, Templates};
 use drasi_grpc_common::output::config::{GrpcQueryConfig, OutputTemplates};
 use drasi_reaction_common::TemplateSpec;
-use handlebars::{Handlebars, Helper, HelperResult, Output, RenderContext};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
@@ -22,9 +23,9 @@ type Spec = TemplateSpec<drasi_grpc_common::output::config::GrpcTemplateExtensio
 
 /// One operation's compiled body and metadata templates.
 struct Compiled {
-    /// Registered body template name; `None` for an empty body template.
+    /// Body template source; `None` for an empty body template.
     body: Option<String>,
-    /// Metadata name (as configured) and registered template name.
+    /// Metadata name (as configured) and template source.
     metadata: Vec<(String, String)>,
 }
 
@@ -53,7 +54,7 @@ pub(crate) struct Rendered {
 }
 
 pub(crate) struct Renderer {
-    handlebars: Handlebars<'static>,
+    templates: Templates,
     routes: HashMap<String, CompiledRoute>,
     default: Option<CompiledRoute>,
 }
@@ -65,20 +66,13 @@ impl Renderer {
         else {
             return Ok(None);
         };
-        let mut handlebars = Handlebars::new();
-        handlebars.set_strict_mode(true);
-        register_json_helper(&mut handlebars);
-        let mut next = 0usize;
+        let mut engine = Templates::new();
         let mut compile = |query: &GrpcQueryConfig| -> Result<CompiledRoute> {
             let mut one = |spec: &Option<Spec>| -> Result<Option<Compiled>> {
                 let Some(spec) = spec else { return Ok(None) };
                 let mut register = |template: &str| -> Result<String> {
-                    next += 1;
-                    let name = format!("t{next}");
-                    handlebars
-                        .register_template_string(&name, template)
-                        .context("invalid Handlebars template")?;
-                    Ok(name)
+                    engine.compile(template)?;
+                    Ok(template.to_owned())
                 };
                 let body = if spec.template.trim().is_empty() {
                     None
@@ -108,7 +102,7 @@ impl Renderer {
             routes.insert(key.clone(), compile(query)?);
         }
         Ok(Some(Self {
-            handlebars,
+            templates: engine,
             routes,
             default,
         }))
@@ -133,49 +127,23 @@ impl Renderer {
         else {
             return Ok(Rendered::default());
         };
-        let context = notification.to_json()?;
+        let context = change_context(notification)?;
         let body = match &compiled.body {
-            Some(name) => {
-                let text = self
-                    .handlebars
-                    .render(name, &context)
-                    .context("body template failed to render")?;
-                Some(
-                    serde_json::from_str::<Value>(&text)
-                        .context("body template did not render valid JSON")?,
-                )
-            }
+            Some(source) => Some(
+                self.templates
+                    .render_json(source, &context)
+                    .context("body template")?,
+            ),
             None => None,
         };
         let mut metadata = BTreeMap::new();
-        for (key, name) in &compiled.metadata {
+        for (key, source) in &compiled.metadata {
             let value = self
-                .handlebars
-                .render(name, &context)
+                .templates
+                .render(source, &context)
                 .with_context(|| format!("metadata template {key} failed to render"))?;
             metadata.insert(key.clone(), value);
         }
         Ok(Rendered { body, metadata })
     }
-}
-
-fn register_json_helper(handlebars: &mut Handlebars<'static>) {
-    handlebars.register_helper(
-        "json",
-        Box::new(
-            |helper: &Helper,
-             _: &Handlebars,
-             _: &handlebars::Context,
-             _: &mut RenderContext,
-             out: &mut dyn Output|
-             -> HelperResult {
-                let text = helper
-                    .param(0)
-                    .and_then(|value| serde_json::to_string(value.value()).ok())
-                    .unwrap_or_else(|| "null".into());
-                out.write(&text)?;
-                Ok(())
-            },
-        ),
-    );
 }

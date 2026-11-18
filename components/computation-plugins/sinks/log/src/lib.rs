@@ -59,16 +59,8 @@ impl Factory for LogSinkFactory {
         let config = LogSinkConfig::parse(request.request.configuration.clone())?;
         Ok(request.unkeyed_sink(config.on_permanent_failure))
     }
-    fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
-        Some(LogSinkConfig::definition().details())
-    }
-
-    fn supports_update_planning(&self) -> bool {
-        true
-    }
-
-    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
-        component::assess(request)
+    fn configuration_details(&self) -> drasi_computation_plugin_sdk::ConfigDetails {
+        LogSinkConfig::definition().details()
     }
 
     fn metadata(&self) -> FactoryMetadata {
@@ -100,6 +92,7 @@ impl Factory for LogSinkFactory {
         &self,
         request: &CreateRequest,
         _control: ControlSender,
+        _services: drasi_computation_plugin_sdk::ServiceBindings,
     ) -> anyhow::Result<CreatedComponent> {
         let config = LogSinkConfig::parse(request.configuration.clone())?;
         let outputs = SinkOutputs::from_inputs(&request.inputs, &config.outputs)?;
@@ -109,6 +102,15 @@ impl Factory for LogSinkFactory {
             outputs,
         )?))
         .into())
+    }
+    fn update_planner(&self) -> Option<&dyn drasi_computation_plugin_sdk::UpdatePlanner> {
+        Some(self)
+    }
+}
+
+impl drasi_computation_plugin_sdk::UpdatePlanner for LogSinkFactory {
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
+        component::assess(request)
     }
 }
 

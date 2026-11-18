@@ -1,7 +1,7 @@
 # Native gRPC source
 
 `drasi-computation-source-grpc` provides `drasi.network/grpc-source`
-(implementation `1`, configuration version `1`, native ABI 4.0). It serves the
+(implementation `1`, configuration version `1`, native ABI 5.0). It serves the
 published `drasi.v1.SourceService` and the durable
 `drasi.admission.v1.AdmissionService` ([`proto/admission.proto`](proto/admission.proto)),
 and emits each change on its `out` port as a `GraphChangeCodec` envelope.

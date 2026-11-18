@@ -10,7 +10,7 @@
 //! This crate registers no component factories. Each component crate owns its
 //! configuration type, factory, transport and export.
 
-#[cfg(any(feature = "http-sink", feature = "grpc-sink"))]
+#[cfg(any(feature = "http-sink", feature = "grpc-sink", feature = "ingress"))]
 pub mod batching;
 pub mod config;
 #[cfg(feature = "ingress")]

@@ -160,13 +160,15 @@ unsafe extern "C" fn extension() -> *const PluginBootstrapCoordinationV1 {
 async fn bootstrap_coordination_releases_transferred_owner_exactly_once_on_rejection(
 ) -> anyhow::Result<()> {
     let plugin = unsafe {
-        NativePlugin::from_entry_points_with_bootstrap_coordination(
+        NativePlugin::from_entry_points_with(
             metadata,
             entry,
-            Some(recovery),
-            None,
-            None,
-            Some(extension),
+            crate::computation::EntryPoints {
+                recovery: Some(recovery),
+                consumer_progress: None,
+                coordination: Some(extension),
+                ..Default::default()
+            },
         )?
     };
     let make = |table| {

@@ -16,20 +16,29 @@ The owned connection layer supports `mysql_native_password` and
 | `drasi.mysql/shared-row-bootstrap` | One actual row-query owner, including memory queries |
 | `drasi.mysql/snapshot` | Query-scoped repeatable-read snapshot without a replication or handover claim |
 
-All factories take one flat camelCase object: the same shared settings as the
-native MySQL source (see the source's
-[CONFIGURATION.md](../../sources/mysql/CONFIGURATION.md)) plus `source` (the
-paired source's component ID) and `stream`. Only `password` and
-`tlsClientKeyPem` are secret; use secret references for them. Coordinated
-factories also accept `retention` (`server` or `untilProcessed`), require
-`startFrom: snapshot` and the actual query's `sourceProgress` capability. Bind
-the provider to that query's single bootstrap slot, not to a fake owner. Use the
-same values as the live native source; the handover is bound to its selected
-tables, keys, stream and identity.
+Every factory declares its bootstrap output, which the graph checks when the
+provider's edge binds; see the
+[native bootstrap provider standard](../NATIVE-BOOTSTRAP-PROVIDER-GUIDE.md).
 
-The `snapshot` factory is the exception to the progress requirement: it takes no
-`sourceProgress`, requires an explicit `tables` allowlist and `startFrom: end`, and rejects
-`retention`, and performs no global read lock, binlog
+The coordinated factories take **no configuration**. They pair with the native
+MySQL source through its declared coordination protocol: `drasi.mysql/transactions`,
+`drasi.mysql/shared-transactions` and `drasi.mysql/shared-changes` configured
+with `startFrom: snapshot` declare (and require) one protocol each. Connect the
+provider node to that source's `bootstrap` input. The source's coordinator
+opens each query's provider from the source's own identity, stream, server id,
+tables, keys and retention, and connects with the source's current activation
+credentials; the graph refuses the provider on any other source, and refuses
+an unpaired provider on a coordinated source, when the edge binds. Each query
+loads only the selected tables whose label (the table name) it declares.
+
+The `snapshot` factory takes one flat camelCase object: the same shared
+settings as the native MySQL source (see the source's
+[CONFIGURATION.md](../../sources/mysql/CONFIGURATION.md)) plus `labels`. Only
+`password` and `tlsClientKeyPem` are secret; use secret references for them.
+The served source (whose element identities and server id it uses) and its
+stream come from the graph relation, not from configuration. It takes no
+`sourceProgress`, requires an explicit `tables` allowlist and `startFrom: end`,
+and performs no global read lock, binlog
 query or replication registration. It reuses the same owned connection, bounded
 binary cursor, key/value decoding and server-observed cleanup as coordinated
 loading. It returns no source watermark or durable handover record. This
@@ -42,7 +51,9 @@ credentials; a table or view without a primary key needs a `tableKeys` entry
 (identity is never inferred from a column name). An optional factory-level `labels` array
 restricts scanning to requested names in the configured allowlist; names outside
 that allowlist are logged and excluded, and unrequested tables are not inspected.
-An absent or empty `labels` array selects the whole allowlist. Completed volatile
+An absent or empty `labels` array selects the whole allowlist. A query's
+declared labels narrow the selection further; the configuration stays the
+upper bound. Completed volatile
 queries refresh their snapshot on restart; persistent query initialization does
 not silently discard committed state. Nontransactional tables can be scanned,
 but repeatable-read does not make their data transactionally consistent.

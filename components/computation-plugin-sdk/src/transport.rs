@@ -12,7 +12,7 @@ use std::{
     ptr,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     task::{Context, Poll, Wake as RustWake, Waker},
 };
@@ -360,9 +360,14 @@ impl Drop for ForeignWake {
 
 type Work = Pin<Box<dyn Future<Output = Result<Vec<u8>, Failure>> + Send>>;
 
+/// Per-instance unwinding state: a panic inside one of the instance's
+/// operations quarantines it; a panic inside an owned worker the instance
+/// registered fails only its current activation (see [`Self::worker_failed`]).
 pub(crate) struct PanicState {
     damaged: AtomicBool,
     changed: tokio::sync::watch::Sender<bool>,
+    worker_failure: tokio::sync::watch::Sender<Option<String>>,
+    observer: OnceLock<drasi_computation_contracts::workers::WorkerPanicObserver>,
 }
 
 impl Default for PanicState {
@@ -370,11 +375,57 @@ impl Default for PanicState {
         Self {
             damaged: AtomicBool::new(false),
             changed: tokio::sync::watch::channel(false).0,
+            worker_failure: tokio::sync::watch::channel(None).0,
+            observer: OnceLock::new(),
         }
     }
 }
 
 impl PanicState {
+    /// Records the first worker failure of the current activation.
+    pub(crate) fn worker_failed(&self, reason: &str) {
+        self.worker_failure.send_if_modified(|failure| {
+            if failure.is_some() {
+                return false;
+            }
+            *failure = Some(reason.to_owned());
+            true
+        });
+    }
+
+    /// A new activation starts without the previous activation's failure.
+    pub(crate) fn clear_worker_failure(&self) {
+        self.worker_failure.send_replace(None);
+    }
+
+    /// Completes with the first worker failure of the current activation.
+    pub(crate) async fn wait_worker_failure(&self) -> String {
+        let mut failure = self.worker_failure.subscribe();
+        let reason = failure
+            .wait_for(Option::is_some)
+            .await
+            .map(|failure| failure.clone().unwrap_or_default());
+        match reason {
+            Ok(reason) => reason,
+            // The sender lives as long as `self`.
+            Err(_) => std::future::pending().await,
+        }
+    }
+
+    /// Installs this instance as the observer of workers registered while
+    /// one of its operations is polled.
+    fn observe_workers(self: &Arc<Self>) -> drasi_computation_contracts::workers::WorkerPanicScope {
+        let observer = self.observer.get_or_init(|| {
+            let state = Arc::downgrade(self);
+            Arc::new(move |message: &str| {
+                if let Some(state) = state.upgrade() {
+                    state.worker_failed(&format!("native worker panicked: {message}"));
+                }
+            })
+        });
+        drasi_computation_contracts::workers::observe_worker_panics(observer.clone())
+    }
+
     pub(crate) fn is_damaged(&self) -> bool {
         self.damaged.load(Ordering::Acquire)
     }
@@ -543,6 +594,8 @@ unsafe extern "C" fn poll_operation(state: *mut c_void, wake: *const abi::Wake) 
         let polled = catch_unwind(AssertUnwindSafe(|| {
             let waker = Waker::from(Arc::new(unsafe { ForeignWake::from_borrowed(wake)? }));
             let _entered = operation.runtime.as_ref().map(|runtime| runtime.enter());
+            // Workers this operation registers report their panics to the instance.
+            let _workers = operation.damaged.as_ref().map(PanicState::observe_workers);
             Ok::<_, Failure>(future.as_mut().poll(&mut Context::from_waker(&waker)))
         }));
         let result = match polled {

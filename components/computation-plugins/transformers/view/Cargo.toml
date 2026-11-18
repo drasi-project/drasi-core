@@ -23,7 +23,7 @@ kind = "transformer-view"
 drasi-computation-plugin-sdk = { workspace = true }
 drasi-computation-contracts = { workspace = true }
 drasi-core-types = { workspace = true }
-drasi-middleware = { workspace = true, features = ["map", "relabel"] }
+drasi-computation-middleware-common = { workspace = true }
 anyhow = "1"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }

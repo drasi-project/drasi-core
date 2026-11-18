@@ -230,7 +230,7 @@ fn register_param_helper(handlebars: &mut Handlebars<'static>, params: Arc<Mutex
 ///
 /// The `param` helper appends to `params` as a side effect of rendering, so a
 /// fresh buffer (and therefore a fresh registry) is used for every render.
-pub(super) fn build_handlebars(params: Arc<Mutex<Vec<Value>>>) -> Handlebars<'static> {
+fn build_handlebars(params: Arc<Mutex<Vec<Value>>>) -> Handlebars<'static> {
     let mut handlebars = Handlebars::new();
     handlebars.set_strict_mode(true);
     register_json_helper(&mut handlebars);

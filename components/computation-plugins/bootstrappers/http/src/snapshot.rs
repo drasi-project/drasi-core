@@ -5,9 +5,10 @@ use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use drasi_computation_contracts::{
     workers::{join_owned_worker_gracefully, spawn_owned_scoped_worker, WorkerCompletion},
-    ChangeEnvelope, ComponentId, ComputationBootstrapSnapshot, GraphChangeCodec, StreamId,
+    BootstrapLabels, ChangeEnvelope, ComponentId, ComputationBootstrapSnapshot, GraphChangeCodec,
 };
-use drasi_computation_plugin_sdk::{NativeBootstrapProvider, Scope};
+use drasi_computation_plugin_sdk::{QuiescentBootstrapProvider, Scope, ServedSource};
+use drasi_core_types::models::{Element, SourceChange};
 use drasi_http_common::bootstrap::{
     config::HttpBootstrapConfig as RestConfig,
     reader::{HttpSnapshotReader, SnapshotRequest},
@@ -24,25 +25,59 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+/// Default `maxResponseBytes`.
+pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+/// Upper bound on `maxResponseBytes`.
+pub const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+/// Default `outputCapacity`.
+pub const DEFAULT_OUTPUT_CAPACITY: usize = 64;
+/// Upper bound on `outputCapacity`.
+pub const MAX_OUTPUT_CAPACITY: usize = 65_536;
+/// Default `maxDurationMs`.
+pub const DEFAULT_MAX_DURATION_MS: u64 = 300_000;
+/// Default `shutdownTimeoutMs`.
+pub const DEFAULT_SHUTDOWN_TIMEOUT_MS: u64 = 5_000;
+
 fn response_bytes() -> usize {
-    16 * 1024 * 1024
+    DEFAULT_MAX_RESPONSE_BYTES
 }
 fn output_capacity() -> usize {
-    64
+    DEFAULT_OUTPUT_CAPACITY
 }
 fn duration_ms() -> u64 {
-    300_000
+    DEFAULT_MAX_DURATION_MS
 }
 fn shutdown_ms() -> u64 {
-    5_000
+    DEFAULT_SHUTDOWN_TIMEOUT_MS
 }
 
+/// The published configuration: the fields of [`HttpBootstrapConfig`] with
+/// their serde defaults and the bounds `validate` enforces. `settings` is
+/// the typed `drasi_http_common` bootstrap settings object (camelCase at
+/// every level; an unknown key at any level is refused when parsed).
+pub fn definition() -> drasi_computation_plugin_sdk::ConfigDefinition {
+    use drasi_computation_plugin_sdk::{ConfigDefinition, ConfigOption as Field, ConfigType::*};
+    use serde_json::json;
+    ConfigDefinition::try_new([
+        Field::new("settings", Object, true, "HTTP endpoints to read: {endpoints: [{url, method, headers, body, auth, pagination, response}], timeoutSeconds, maxRetries, retryDelayMs, maxPages}. Every key is camelCase (auth {type: bearer, tokenEnv}, pagination {type: offset-limit, offsetParam, limitParam, pageSize, totalPath}, ...); unknown keys are refused."),
+        Field::new("nodeLabels", Array, false, "Upper bound on the node labels read; empty reads every label. Each query's labels narrow it further.").default(json!([])),
+        Field::new("relationLabels", Array, false, "Upper bound on the relation labels read; empty reads every label.").default(json!([])),
+        Field::new("maxResponseBytes", Integer, false, "Largest response body accepted, in bytes.").default(DEFAULT_MAX_RESPONSE_BYTES as u64).minimum(1).maximum(MAX_RESPONSE_BYTES as u64),
+        Field::new("outputCapacity", Integer, false, "Elements buffered between the HTTP reader and the query.").default(DEFAULT_OUTPUT_CAPACITY as u64).minimum(1).maximum(MAX_OUTPUT_CAPACITY as u64),
+        Field::new("maxDurationMs", Integer, false, "Deadline for the whole snapshot.").default(DEFAULT_MAX_DURATION_MS).minimum(1),
+        Field::new("shutdownTimeoutMs", Integer, false, "Bound on waiting for the reader to stop.").default(DEFAULT_SHUTDOWN_TIMEOUT_MS).minimum(1),
+    ])
+    .expect("constant HTTP bootstrap configuration")
+}
+
+/// The provider's configuration. The served source and stream are not
+/// configured: the graph relation (the source whose bootstrap input the
+/// provider is connected to) supplies them. `nodeLabels`/`relationLabels`
+/// are an upper bound on what the provider reads (empty means every label);
+/// each query's declared labels narrow it further.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HttpBootstrapConfig {
-    pub source: ComponentId,
-    pub stream: StreamId,
-    #[serde(deserialize_with = "deserialize_settings")]
     pub settings: RestConfig,
     #[serde(default)]
     pub node_labels: Vec<String>,
@@ -58,133 +93,22 @@ pub struct HttpBootstrapConfig {
     pub shutdown_timeout_ms: u64,
 }
 
-fn deserialize_settings<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<RestConfig, D::Error> {
-    fn fields<'a>(
-        value: &'a serde_json::Value,
-        allowed: &[&str],
-    ) -> Result<&'a serde_json::Map<String, serde_json::Value>> {
-        let object = value
-            .as_object()
-            .context("HTTP bootstrap settings must be objects")?;
-        for field in object.keys() {
-            ensure!(
-                allowed.contains(&field.as_str()),
-                "unknown HTTP bootstrap field {field}"
-            );
-        }
-        Ok(object)
-    }
-    fn validate(value: &serde_json::Value) -> Result<()> {
-        let settings = fields(
-            value,
-            &[
-                "endpoints",
-                "timeoutSeconds",
-                "maxRetries",
-                "retryDelayMs",
-                "maxPages",
-            ],
-        )?;
-        for endpoint in settings
-            .get("endpoints")
-            .and_then(serde_json::Value::as_array)
-            .context("endpoints must be an array")?
-        {
-            let endpoint = fields(
-                endpoint,
-                &[
-                    "url",
-                    "method",
-                    "headers",
-                    "body",
-                    "auth",
-                    "pagination",
-                    "response",
-                ],
-            )?;
-            if let Some(auth) = endpoint.get("auth").filter(|value| !value.is_null()) {
-                let names: &[&str] = match auth.get("type").and_then(serde_json::Value::as_str) {
-                    Some("bearer") => &["type", "token_env"],
-                    Some("api-key") => &["type", "location", "name", "value_env"],
-                    Some("basic") => &["type", "username_env", "password_env"],
-                    Some("oauth2-client-credentials") => &[
-                        "type",
-                        "token_url",
-                        "client_id_env",
-                        "client_secret_env",
-                        "scopes",
-                    ],
-                    _ => anyhow::bail!("unsupported HTTP bootstrap authentication type"),
-                };
-                fields(auth, names)?;
-            }
-            if let Some(pagination) = endpoint.get("pagination").filter(|value| !value.is_null()) {
-                let names: &[&str] =
-                    match pagination.get("type").and_then(serde_json::Value::as_str) {
-                        Some("offset-limit") => &[
-                            "type",
-                            "offset_param",
-                            "limit_param",
-                            "page_size",
-                            "total_path",
-                        ],
-                        Some("page-number") => &[
-                            "type",
-                            "page_param",
-                            "page_size_param",
-                            "page_size",
-                            "total_pages_path",
-                        ],
-                        Some("cursor") => &[
-                            "type",
-                            "cursor_param",
-                            "cursor_path",
-                            "has_more_path",
-                            "page_size_param",
-                            "page_size",
-                        ],
-                        Some("link-header") => &["type", "page_size_param", "page_size"],
-                        Some("next-url") => &["type", "next_url_path", "base_url"],
-                        _ => anyhow::bail!("unsupported HTTP bootstrap pagination type"),
-                    };
-                fields(pagination, names)?;
-            }
-            let response = fields(
-                endpoint.get("response").context("response is required")?,
-                &["itemsPath", "contentType", "mappings"],
-            )?;
-            for mapping in response
-                .get("mappings")
-                .and_then(serde_json::Value::as_array)
-                .context("mappings must be an array")?
-            {
-                let mapping = fields(mapping, &["elementType", "operation", "template"])?;
-                fields(
-                    mapping
-                        .get("template")
-                        .context("mapping template is required")?,
-                    &["id", "labels", "properties", "from", "to"],
-                )?;
-            }
-        }
-        Ok(())
-    }
-    let value = serde_json::Value::deserialize(deserializer)?;
-    validate(&value).map_err(serde::de::Error::custom)?;
-    serde_json::from_value(value).map_err(serde::de::Error::custom)
-}
-
 impl HttpBootstrapConfig {
+    /// Parses and validates a configuration; unknown keys at any level fail.
+    pub fn from_value(value: &serde_json::Value) -> Result<Self> {
+        let config: Self = serde_json::from_value(value.clone())?;
+        config.validate()?;
+        Ok(config)
+    }
+
     fn validate(&self) -> Result<()> {
         HttpSnapshotReader::validate_bounded_config(&self.settings)?;
         ensure!(
-            (1..=32 * 1024 * 1024).contains(&self.max_response_bytes),
+            (1..=MAX_RESPONSE_BYTES).contains(&self.max_response_bytes),
             "maxResponseBytes must be in 1..=33554432"
         );
         ensure!(
-            (1..=65_536).contains(&self.output_capacity),
+            (1..=MAX_OUTPUT_CAPACITY).contains(&self.output_capacity),
             "outputCapacity must be in 1..=65536"
         );
         ensure!(
@@ -258,12 +182,21 @@ impl Drop for Shared {
 
 pub struct HttpBootstrapProvider {
     config: HttpBootstrapConfig,
+    served: ServedSource,
+    labels: Option<BootstrapLabels>,
     shared: Arc<Shared>,
     pub(crate) query_scope: Option<(Scope, ComponentId)>,
 }
 
 impl HttpBootstrapProvider {
-    pub fn new(config: HttpBootstrapConfig) -> Result<Self> {
+    /// A provider emitting `served`'s namespace and stream, selecting only
+    /// elements whose labels the query declared (`labels`, `None` = all)
+    /// within the configured labels.
+    pub fn new(
+        config: HttpBootstrapConfig,
+        served: ServedSource,
+        labels: Option<BootstrapLabels>,
+    ) -> Result<Self> {
         config.validate()?;
         Ok(Self {
             shared: Arc::new(Shared {
@@ -273,8 +206,32 @@ impl HttpBootstrapProvider {
                 timeout: Duration::from_millis(config.shutdown_timeout_ms),
             }),
             config,
+            served,
+            labels,
             query_scope: None,
         })
+    }
+}
+
+/// Whether the query's declared labels select a mapped change. The configured
+/// labels already bounded what the reader produced.
+pub(crate) fn requested(labels: Option<&BootstrapLabels>, change: &SourceChange) -> bool {
+    let Some(labels) = labels else {
+        return true;
+    };
+    let element = match change {
+        SourceChange::Insert { element } | SourceChange::Update { element, .. } => element,
+        _ => return true,
+    };
+    match element {
+        Element::Node { metadata, .. } => metadata
+            .labels
+            .iter()
+            .any(|label| labels.requests_node(label)),
+        Element::Relation { metadata, .. } => metadata
+            .labels
+            .iter()
+            .any(|label| labels.requests_relation(label)),
     }
 }
 
@@ -291,7 +248,7 @@ impl Drop for Reader {
 }
 
 #[async_trait]
-impl NativeBootstrapProvider for HttpBootstrapProvider {
+impl QuiescentBootstrapProvider for HttpBootstrapProvider {
     fn validate_query_scope(
         &self,
         instance_id: &str,
@@ -323,6 +280,8 @@ impl NativeBootstrapProvider for HttpBootstrapProvider {
             .map_err(|_| anyhow::anyhow!("HTTP snapshot ownership poisoned"))? =
             Some(cancel.clone());
         let config = self.config.clone();
+        let served = self.served.clone();
+        let labels = self.labels.clone();
         let (outputs, receiver) = mpsc::channel(config.output_capacity);
         let worker_cancel = cancel.clone();
         spawn_owned_scoped_worker(&self.shared.worker, async move {
@@ -335,18 +294,26 @@ impl NativeBootstrapProvider for HttpBootstrapProvider {
                 reader
                     .read(
                         SnapshotRequest {
-                            source_id: &config.source,
+                            source_id: &served.source,
                             node_labels: &config.node_labels,
                             relation_labels: &config.relation_labels,
                         },
                         |change| {
-                            let next = sequence.checked_add(1);
-                            if let Some(next) = next {
+                            let selected = requested(labels.as_ref(), &change);
+                            let next = if selected {
+                                sequence.checked_add(1)
+                            } else {
+                                Some(sequence)
+                            };
+                            if let (true, Some(next)) = (selected, next) {
                                 sequence = next;
                             }
-                            let stream = config.stream.clone();
+                            let stream = served.stream.clone();
                             let outputs = &outputs;
                             async move {
+                                if !selected {
+                                    return Ok(());
+                                }
                                 let sequence = next.context("HTTP snapshot sequence exhausted")?;
                                 let envelope = GraphChangeCodec::encode_change(
                                     change,

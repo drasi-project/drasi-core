@@ -9,7 +9,8 @@ use drasi_computation_plugin_abi::{self as abi, bootstrap_coordination::*};
 use drasi_computation_plugin_sdk::{
     bootstrap,
     transport::{self, checked_table, take_reply, take_status, Failure, OperationFuture},
-    CreateRequest, Scope, SourceBootstrapMetadata,
+    BootstrapLabels, BootstrapProtocol, CoordinatorDescription, CreateRequest, Scope,
+    SourceBootstrapMetadata, SourceBootstrapOpen,
 };
 use drasi_lib::computation::v1::{
     ComponentId, ConsumerProgressSet, OutputCatalogue, QuerySourceProgress, ResourceCleanup,
@@ -146,6 +147,7 @@ struct Lifecycle {
 /// its session; see [`Self::registered`].
 pub struct NativeSourceBootstrapResource {
     request: CreateRequest,
+    protocol: BootstrapProtocol,
     raw: BootstrapCoordinatorHandle,
     _plugin: Arc<PluginOwner>,
     factory_state: usize,
@@ -252,8 +254,13 @@ impl NativeSourceBootstrapResource {
         // Install it before validating the rest of the producer's table.
         let owner = unsafe { CoordinatorReleaseGuard::new(raw)? };
         let table = unsafe { coordinator_table(raw)? };
+        // An early return drops the guard, which releases the handle.
+        let described: CoordinatorDescription = bootstrap::decode(&unsafe {
+            take_reply(table.describe.expect("validated")(raw.state))?
+        })?;
         let resource = Arc::new(Self {
             request,
+            protocol: described.protocol,
             raw: owner.into_raw(),
             _plugin: plugin,
             factory_state: factory_state as usize,
@@ -267,9 +274,7 @@ impl NativeSourceBootstrapResource {
             stop: tokio::sync::Mutex::new(None),
             _telemetry: telemetry,
         });
-        let description = unsafe { take_reply(table.describe.expect("validated")(raw.state))? };
-        let described: CreateRequest = bootstrap::decode(&description)?;
-        resource.validate_source_request(&described)?;
+        resource.validate_source_request(&described.source)?;
         Ok(resource)
     }
 
@@ -352,6 +357,7 @@ impl NativeSourceBootstrapResource {
         query: &ComponentId,
         scope: &Scope,
         owner: &Arc<QuerySourceProgress>,
+        labels: Option<BootstrapLabels>,
     ) -> anyhow::Result<SourceBootstrapBinding> {
         self.validate_scope(Some(scope))?;
         anyhow::ensure!(
@@ -362,23 +368,28 @@ impl NativeSourceBootstrapResource {
         anyhow::ensure!(!lifecycle.retiring, "source bootstrap resource is retired");
         Ok(SourceBootstrapBinding(Arc::new(QueryBinding {
             coordinator: self.clone(),
-            query: query.clone(),
-            metadata: bootstrap::encode(&SourceBootstrapMetadata {
-                source: self.request.clone(),
+            open: bootstrap::encode(&SourceBootstrapOpen {
                 query: query.clone(),
+                labels: labels.clone(),
+            })?,
+            metadata: bootstrap::encode(&SourceBootstrapMetadata {
+                source: self.request.id.clone(),
+                protocol: self.protocol.clone(),
+                query: query.clone(),
+                labels,
             })?,
             revoked: AtomicBool::new(false),
         })))
     }
 
-    fn open(&self, query: &ComponentId) -> anyhow::Result<abi::bootstrap::BootstrapHandle> {
+    fn open(&self, open: &[u8]) -> anyhow::Result<abi::bootstrap::BootstrapHandle> {
         let lifecycle = self.lifecycle.lock().map_err(|_| Failure::closed())?;
         anyhow::ensure!(!lifecycle.retiring, "source bootstrap resource is retired");
         let mut raw = abi::bootstrap::BootstrapHandle::null();
         unsafe {
             take_status((*self.raw.vtable).open.expect("validated")(
                 self.raw.state,
-                abi::BorrowedBytes::new(query.as_str().as_bytes()),
+                abi::BorrowedBytes::new(open),
                 &mut raw,
             ))?;
         }
@@ -443,7 +454,7 @@ impl Drop for NativeSourceBootstrapResource {
 
 struct QueryBinding {
     coordinator: Arc<NativeSourceBootstrapResource>,
-    query: ComponentId,
+    open: Vec<u8>,
     metadata: Vec<u8>,
     revoked: AtomicBool,
 }
@@ -520,7 +531,7 @@ unsafe extern "C" fn open(
         }
         let raw = binding
             .coordinator
-            .open(&binding.query)
+            .open(&binding.open)
             .map_err(Failure::from)?;
         unsafe { transport::write_out(out, raw) }
     })
@@ -628,6 +639,11 @@ impl NativeSourceBootstrapResource {
     /// The source component this coordinator belongs to.
     pub fn source(&self) -> &ComponentId {
         &self.request.id
+    }
+
+    /// The coordination protocol the source library's coordinator implements.
+    pub fn protocol(&self) -> &BootstrapProtocol {
+        &self.protocol
     }
 
     /// The actual progress owner of `consumer`, one of the source's bootstrap

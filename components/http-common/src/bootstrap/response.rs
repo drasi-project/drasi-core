@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use super::config::{ElementMappingConfig, ElementType, OperationType};
 use super::pagination;
-use super::template_engine::{TemplateContext, TemplateEngine};
+use crate::template::{BootstrapItemContext, TemplateEngine};
 
 /// Extract items array from a response body using the configured items path.
 pub fn extract_items(body: &JsonValue, items_path: &str) -> Result<Vec<JsonValue>> {
@@ -76,7 +76,7 @@ pub fn mapped_items<'a>(
     engine: &'a TemplateEngine,
 ) -> impl Iterator<Item = Result<MappedChange>> + 'a {
     items.iter().enumerate().flat_map(move |(index, item)| {
-        let context = TemplateContext {
+        let context = BootstrapItemContext {
             item: item.clone(),
             index,
             source_id: source_id.clone(),
@@ -90,7 +90,7 @@ pub fn mapped_items<'a>(
 
 /// Map a single item to a `MappedChange`.
 fn map_single_item(
-    context: &TemplateContext,
+    context: &BootstrapItemContext,
     mapping: &ElementMappingConfig,
     source_id: &drasi_core_types::ComponentId,
     engine: &TemplateEngine,

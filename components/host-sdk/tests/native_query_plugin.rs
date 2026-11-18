@@ -873,7 +873,7 @@ async fn graph_query(
                 anyhow::bail!("query was not constructed by its factory");
             };
             specification.configuration.insert(
-                Arc::from("outbox_capacity"),
+                Arc::from("outboxCapacity"),
                 ConfigurationValue::Literal(json!(4)),
             );
             let preview = control
@@ -917,4 +917,15 @@ async fn graph_query(
         _ => anyhow::bail!("unexpected graph query result: {results:?}"),
     }
     Ok(())
+}
+
+/// The native query plugin's camelCase `sourceTransactions` object.
+fn transaction_settings(
+    limits: drasi_computation_contracts::SourceTransactionLimits,
+) -> serde_json::Value {
+    json!({
+        "maxChanges": limits.max_changes,
+        "maxBytes": limits.max_bytes,
+        "maxDurationMs": limits.max_duration_ms,
+    })
 }

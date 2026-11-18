@@ -1911,7 +1911,8 @@ outputs that stop matching a filter, or re-keying outputs), that is a different,
 stateful component: the
 [view transformer](../../../components/computation-plugins/transformers/view/README.md).
 Its `drasi.standard/view` factory reconstructs complete images, applies a
-map/relabel pipeline and remembers the exact outputs to retract. Configure
+pipeline of declared stateless middleware (decoder, map, parse_json, promote,
+relabel) and remembers the exact outputs to retract. Configure
 map insert rules that produce complete projected images, rather than event
 update/delete rules. The initial profile provides memory-backed snapshots and
 volatile progress, not durable replay, input deduplication or bootstrap input.

@@ -17,13 +17,6 @@ use crate::{
     transport::{checked_table, take_reply, take_status, Failure, OperationFuture},
 };
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FactoryRecovery {
-    pub version: u32,
-    pub source_progress: bool,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstanceRecovery {

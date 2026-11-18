@@ -99,10 +99,13 @@ Templates are Handlebars SQL. The only construct that may emit a value is
 binds the value. Objects and arrays bind as JSON (use `jsonb` parameters);
 strings bind as text unless the target is numeric; integers narrow only
 without overflow. Rejected at construction: `{{after.id}}`, `{{{after.id}}}`,
-`{{json after}}` and any other helper, partials (`{{> x}}`), decorators,
-`{{param}}` without a value, and block helpers other than `if`, `unless`,
-`each` and `with` (whose bodies follow the same rule). Write procedure names
-and other SQL structure literally.
+`{{json after}}` and any other value helper, partials (`{{> x}}`), decorators,
+`{{param}}` without exactly one value, and block helpers other than `if`,
+`unless`, `each` and `with` (whose bodies follow the same rule). A `param`
+value may be a sub-expression of a standard helper (`{{param (json after)}}`
+binds the JSON text). Write procedure names and other SQL structure literally.
+The engine is the [shared native template engine](../../common/template/README.md),
+the same in every native sink.
 
 Context keys: `operation` (`ADD`, `REPLACE`, `PATCH`, `DELETE`), `output`
 (`alias`, `component`, `port`), `sequence`, `timestamp` (RFC 3339, only when

@@ -258,5 +258,5 @@ These are deliberate changes; nothing working was removed:
 - **Durability:** uses the host QoS admission service instead of a
   source-owned WAL. Standard and webhook routes remain transparently durable
   through the server-sequenced producer.
-- **Adaptive prefetch:** disabled by default.
+- **Adaptive prefetch:** disabled by default; configured with the shared nested `adaptive` object (the legacy flat `adaptive*` keys are rejected).
 - **Pause:** gates admission instead of having no effect.

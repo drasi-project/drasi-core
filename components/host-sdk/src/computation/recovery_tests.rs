@@ -182,8 +182,10 @@ async fn native_recovery_sqlite_replays_through_a_separate_binary_and_real_query
         .await?;
     let mut source = factory.construct(
         request(factory, sqlite_configuration(directory.path())),
-        None,
-        Some(progress.clone()),
+        Bindings {
+            source_progress: Some(progress.clone()),
+            ..Default::default()
+        },
     )?;
     source
         .initialize(&crate::computation::test_hooks::initialize_ctx())
@@ -246,8 +248,10 @@ async fn native_recovery_sqlite_replays_through_a_separate_binary_and_real_query
         .await?;
     let mut source = factory.construct(
         request(factory, sqlite_configuration(directory.path())),
-        None,
-        Some(progress.clone()),
+        Bindings {
+            source_progress: Some(progress.clone()),
+            ..Default::default()
+        },
     )?;
     source
         .initialize(&crate::computation::test_hooks::initialize_ctx())
@@ -327,8 +331,10 @@ async fn native_recovery_sqlite_replays_through_a_separate_binary_and_real_query
         .await?;
     let mut source = factory.construct(
         request(factory, sqlite_configuration(directory.path())),
-        None,
-        Some(progress),
+        Bindings {
+            source_progress: Some(progress),
+            ..Default::default()
+        },
     )?;
     source
         .initialize(&crate::computation::test_hooks::initialize_ctx())
@@ -413,8 +419,10 @@ async fn native_recovery_graph_requires_the_actual_host_owner_not_matching_names
         };
         let source = factory.construct(
             request(factory, sqlite_configuration(directory.path())),
-            None,
-            Some(bound),
+            Bindings {
+                source_progress: Some(bound),
+                ..Default::default()
+            },
         )?;
         let graph = ComputationGraph::builder(GRAPH)
             .source(ComponentName::try_new("source")?, Box::new(source))
@@ -466,8 +474,10 @@ async fn native_recovery_cancelled_start_retains_no_sqlite_worker_and_rejects_ab
         .is_err());
     let mut source = factory.construct(
         request(factory, sqlite_configuration(directory.path())),
-        None,
-        Some(owner()),
+        Bindings {
+            source_progress: Some(owner()),
+            ..Default::default()
+        },
     )?;
     source
         .initialize(&crate::computation::test_hooks::initialize_ctx())
@@ -487,8 +497,12 @@ fn captured() -> &'static Mutex<Option<sdk::NativeSourceProgress>> {
     static CAPTURE: OnceLock<Mutex<Option<sdk::NativeSourceProgress>>> = OnceLock::new();
     CAPTURE.get_or_init(|| Mutex::new(None))
 }
-struct ProbeFactory;
+/// A source that declares source progress when its flag is set.
+struct ProbeFactory(bool);
 impl Factory for ProbeFactory {
+    fn configuration_details(&self) -> sdk::ConfigDetails {
+        super::super::tests::consumer_progress_fixture::mode_details()
+    }
     fn describe(
         &self,
         _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
@@ -521,36 +535,31 @@ impl Factory for ProbeFactory {
             )],
             completion: None,
             capabilities: sdk::Capabilities {
+                services: sdk::HostServices {
+                    source_progress: self.0,
+                    ..Default::default()
+                },
                 ..sdk::Capabilities::default()
             },
         }
     }
-    fn supports_source_admission(&self) -> bool {
-        true
-    }
-    fn supports_source_progress(&self) -> bool {
-        true
-    }
+
     fn create(
         &self,
         request: &sdk::CreateRequest,
         _: sdk::ControlSender,
-    ) -> Result<sdk::CreatedComponent> {
-        Ok(sdk::Component::Source(Box::new(Probe {
-            descriptor: self.metadata().descriptor(request.id.clone())?,
-            reader: None,
-            mode: request.configuration["mode"].as_str().unwrap().into(),
-            started: false,
-        }))
-        .into())
-    }
-    fn create_with_progress(
-        &self,
-        request: &sdk::CreateRequest,
-        _: sdk::ControlSender,
-        progress: sdk::NativeSourceProgress,
+        services: sdk::ServiceBindings,
     ) -> Result<sdk::CreatedComponent> {
         let mode = request.configuration["mode"].as_str().unwrap().to_owned();
+        let Some(progress) = services.source_progress else {
+            return Ok(sdk::Component::Source(Box::new(Probe {
+                descriptor: self.metadata().descriptor(request.id.clone())?,
+                reader: None,
+                mode,
+                started: false,
+            }))
+            .into());
+        };
         let reader = match mode.as_str() {
             "ignored" => None,
             "substituted" => Some(drasi_computation_contracts::SourceProgressView::new(
@@ -662,7 +671,7 @@ fn export() -> &'static sdk::ExportedPlugin {
             sdk::PluginDefinition::new(
                 "fixture/progress",
                 "1",
-                vec![Arc::new(ProbeFactory)],
+                vec![Arc::new(ProbeFactory(true))],
                 vec![GraphChangeCodec::schema()],
             )
             .unwrap(),
@@ -679,16 +688,23 @@ unsafe extern "C" fn entry(out: *mut abi::PluginHandle) -> abi::Status {
 unsafe extern "C" fn recovery() -> *const abi::recovery::PluginRecoveryV1 {
     export().recovery()
 }
-unsafe extern "C" fn services() -> *const abi::services::PluginServicesV1 {
-    export().services()
-}
 fn probe_plugin(recovery_enabled: bool) -> Result<Arc<super::super::NativePlugin>> {
+    if !recovery_enabled {
+        return super::super::NativePlugin::from_definition(sdk::PluginDefinition::new(
+            "fixture/progress",
+            "1",
+            vec![Arc::new(ProbeFactory(false))],
+            vec![GraphChangeCodec::schema()],
+        )?);
+    }
     unsafe {
-        super::super::NativePlugin::from_entry_points_with_recovery(
+        super::super::NativePlugin::from_entry_points_with(
             metadata,
             entry,
-            Some(services),
-            recovery_enabled.then_some(recovery),
+            super::super::loader::EntryPoints {
+                recovery: Some(recovery),
+                ..Default::default()
+            },
         )
     }
 }
@@ -698,7 +714,18 @@ fn probe_plugin(recovery_enabled: bool) -> Result<Arc<super::super::NativePlugin
 async fn native_recovery_negotiation_rejects_forged_pairing_and_activation_changes() -> Result<()> {
     let old = probe_plugin(false)?;
     let new = probe_plugin(true)?;
-    assert_eq!(old.metadata(), new.metadata());
+    assert!(
+        !old.metadata().factories[0]
+            .capabilities
+            .services
+            .source_progress
+    );
+    assert!(
+        new.metadata().factories[0]
+            .capabilities
+            .services
+            .source_progress
+    );
     assert!(!old.factories()[0]
         .descriptor
         .dependencies
@@ -728,8 +755,10 @@ async fn native_recovery_negotiation_rejects_forged_pairing_and_activation_chang
             factory
                 .construct(
                     request(factory, serde_json::json!({"mode":mode})),
-                    None,
-                    Some(owner())
+                    Bindings {
+                        source_progress: Some(owner()),
+                        ..Default::default()
+                    },
                 )
                 .is_err(),
             "{mode}"
@@ -745,12 +774,22 @@ async fn native_recovery_negotiation_rejects_forged_pairing_and_activation_chang
     }
     let mut request = request(factory, serde_json::json!({"mode":"valid"}));
     request.scope.as_mut().unwrap().graph_id = "wrong".into();
-    assert!(factory.construct(request, None, Some(owner())).is_err());
+    assert!(factory
+        .construct(
+            request,
+            Bindings {
+                source_progress: Some(owner()),
+                ..Default::default()
+            },
+        )
+        .is_err());
     for mode in ["valid", "retentionless", "mutate"] {
         let mut source = factory.construct(
             self::request(factory, serde_json::json!({"mode":mode})),
-            None,
-            Some(owner()),
+            Bindings {
+                source_progress: Some(owner()),
+                ..Default::default()
+            },
         )?;
         source
             .initialize(&crate::computation::test_hooks::initialize_ctx())
@@ -894,11 +933,13 @@ fn native_recovery_rejects_malformed_extension_before_plugin_entry() {
     for index in 0..5 {
         CASE.store(index, Ordering::Relaxed);
         assert!(unsafe {
-            super::super::NativePlugin::from_entry_points_with_recovery(
+            super::super::NativePlugin::from_entry_points_with(
                 metadata,
                 must_not_enter,
-                None,
-                Some(malformed),
+                super::super::loader::EntryPoints {
+                    recovery: Some(malformed),
+                    ..Default::default()
+                },
             )
         }
         .is_err());

@@ -1965,8 +1965,11 @@ mod tests {
             ("drasi-index-garnet", "scenario_tests"),
             ("drasi-index-garnet", "computation_resources"),
             ("drasi-host-sdk", "native_mysql_components"),
+            ("drasi-host-sdk", "native_storedproc_crash"),
             ("drasi-host-sdk", "native_postgres_http_bootstrap"),
-            ("drasi-source-postgres", "native_transactions"),
+            ("drasi-host-sdk", "native_paired_crash"),
+            ("drasi-computation-source-postgres", "native_transactions"),
+            ("drasi-computation-source-mysql", "native_live"),
             ("lib-integration-tests", "computation_postgres_recovery"),
             ("lib-integration-tests", "computation_garnet_recovery"),
         ] {

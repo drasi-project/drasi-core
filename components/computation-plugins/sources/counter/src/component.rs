@@ -42,13 +42,13 @@ pub(super) fn configuration_definition() -> drasi_computation_plugin_sdk::Config
         Field::new("count", Integer, false, "Number of events; zero produces no events. The complete start/step range must fit signed 64-bit integers.").default(count_default()).minimum(0).maximum(u64::MAX),
         Field::new("start", Integer, false, "First counter value.").default(0).minimum(i64::MIN).maximum(i64::MAX as u64),
         Field::new("step", Integer, false, "Signed increment for each event.").default(step_default()).minimum(i64::MIN).maximum(i64::MAX as u64),
-        Field::new("interval_ms", Integer, false, "Delay between events in milliseconds; zero emits without a timer. Must be representable by the system clock.").default(0).minimum(0),
+        Field::new("intervalMs", Integer, false, "Delay between events in milliseconds; zero emits without a timer. Must be representable by the system clock.").default(0).minimum(0),
         Field::new("paused", Boolean, false, "Start paused until the component receives a resume command.").default(false),
     ]).expect("constant counter configuration")
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Configuration {
     stream: StreamId,
     #[serde(default = "count_default")]
@@ -94,7 +94,7 @@ pub(super) fn plan_update(request: &UpdateRequest) -> anyhow::Result<ComponentUp
     current.interval_ms = proposed.interval_ms;
     anyhow::ensure!(
         current == proposed,
-        "counter live updates support interval_ms only; other changes require a new component"
+        "counter live updates support intervalMs only; other changes require a new component"
     );
     Ok(ComponentUpdatePlan {
         mode: ComponentUpdateMode::InPlace,

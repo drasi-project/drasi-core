@@ -8,19 +8,8 @@ pub(super) static EXTENSION: PluginActivationCredentialsV1 = PluginActivationCre
     header: Header::new::<PluginActivationCredentialsV1>(),
     version: VERSION,
     reserved: 0,
-    factory: Some(factory),
     context: Some(context),
 };
-
-unsafe extern "C" fn factory(state: *mut c_void) -> Reply {
-    transport::reply_boundary(|| {
-        let state = unsafe { state_ref::<FactoryState>(state)? };
-        wire::encode(
-            &state.plugin.definition.factories[state.index].supports_activation_credentials(),
-        )
-        .map_err(Failure::from)
-    })
-}
 
 unsafe extern "C" fn context(state: *mut c_void, input: BorrowedBytes) -> Reply {
     transport::reply_boundary(|| {
@@ -31,6 +20,13 @@ unsafe extern "C" fn context(state: *mut c_void, input: BorrowedBytes) -> Reply 
         request.activation_credentials_bound = true;
         validate_create_request(state, &request).map_err(Failure::from)?;
         let endpoint = state.plugin.definition.factories[state.index]
+            .activation_credentials()
+            .ok_or_else(|| {
+                Failure::new(
+                    abi::status::UNSUPPORTED,
+                    "native factory does not declare activation credentials",
+                )
+            })?
             .activation_credential_context(&request)
             .map_err(|_| {
                 Failure::protocol("invalid activation credential endpoint configuration")

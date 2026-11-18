@@ -186,7 +186,7 @@ fn configuration_descriptions_match_the_loaded_network_components() -> Result<()
             assert_eq!(schema["properties"]["port"]["maximum"], 65535);
             let adaptive = factory.specification(
                 ComponentId::try_new("28e5dd97-73d7-560f-825e-f9e6ee799a3f")?,
-                json!({"stream":"metadata/out","adaptiveEnabled":true}),
+                json!({"stream":"metadata/out","adaptive":{}}),
             );
             assert_eq!(schema["properties"]["host"]["default"], "127.0.0.1");
             for secret in ["authToken", "authTokenSecondary", "tlsPrivateKeyPem"] {
@@ -196,12 +196,10 @@ fn configuration_descriptions_match_the_loaded_network_components() -> Result<()
                 );
             }
             if kind == GRPC_SOURCE {
-                assert!(schema["properties"].get("adaptiveEnabled").is_none());
+                assert!(schema["properties"].get("adaptive").is_none());
                 assert!(adaptive.is_err(), "gRPC has no adaptive ingress option");
             } else {
-                assert!(schema["properties"]["adaptiveEnabled"]
-                    .get("enum")
-                    .is_none());
+                assert_eq!(schema["properties"]["adaptive"]["type"], "object");
                 assert!(adaptive.is_ok());
             }
         }

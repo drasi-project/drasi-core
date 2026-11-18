@@ -31,9 +31,7 @@ fn defaults_are_published_and_applied() -> Result<()> {
         drasi_computation_contracts::PermanentFailurePolicy::Stall
     );
 
-    let details = MsSqlStoredProcFactory
-        .configuration_details()
-        .expect("published details");
+    let details = MsSqlStoredProcFactory.configuration_details();
     let schema = MsSqlStoredProcFactory.metadata().configuration;
     details.validate_schema(&schema)?;
     for (field, expected) in [
@@ -77,9 +75,7 @@ fn configuration_round_trips_through_construction() -> Result<()> {
     full["connectTimeoutMs"] = json!(2000);
     full["shutdownTimeoutMs"] = json!(500);
     full["onPermanentFailure"] = json!("skip");
-    let details = MsSqlStoredProcFactory
-        .configuration_details()
-        .expect("details");
+    let details = MsSqlStoredProcFactory.configuration_details();
     let schema = MsSqlStoredProcFactory.metadata().configuration;
     for configuration in [config(), full] {
         schema.validate(&configuration)?;

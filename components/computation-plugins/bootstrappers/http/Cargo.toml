@@ -37,6 +37,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 
 [dev-dependencies]
 axum = "0.7"
+drasi-computation-plugin-sdk = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

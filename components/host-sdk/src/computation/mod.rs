@@ -54,8 +54,8 @@ pub use drasi_computation_plugin_sdk::metadata::{
 };
 pub use drasi_computation_plugin_sdk::transport::Failure as NativeFailure;
 pub(crate) use factory::runtime_configuration_schema;
-pub use factory::NativeFactory;
-pub use loader::{load, try_load, NativePlugin};
+pub use factory::{NativeFactory, NativeServices};
+pub use loader::{load, try_load, EntryPoints, NativePlugin};
 pub(crate) use loader::{try_load_library, try_read_metadata};
 pub use output_snapshots::{NativeOutputSnapshotsResource, OutputSelector, OutputSnapshotsService};
 pub use processing::NativeProcessingResource;

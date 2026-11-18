@@ -355,6 +355,27 @@ impl MapFactory {
     }
 }
 
+#[async_trait]
+impl crate::stateless::StatelessMiddleware for Map {
+    async fn apply(&self, change: SourceChange) -> Result<Vec<SourceChange>, MiddlewareError> {
+        Map::apply(self, change).await
+    }
+}
+
+impl crate::stateless::StatelessMiddlewareFactory for MapFactory {
+    fn kind(&self) -> &'static str {
+        "map"
+    }
+
+    fn build_stateless(
+        &self,
+        config: &SourceMiddlewareConfig,
+    ) -> Result<Box<dyn crate::stateless::StatelessMiddleware>, MiddlewareSetupError> {
+        self.build(config)
+            .map(|value| Box::new(value) as Box<dyn crate::stateless::StatelessMiddleware>)
+    }
+}
+
 #[cfg(feature = "engine-adapter")]
 #[async_trait]
 impl SourceMiddleware for Map {

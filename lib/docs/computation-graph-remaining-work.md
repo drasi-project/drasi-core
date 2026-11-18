@@ -29,7 +29,7 @@ link to their testing obligations there rather than repeating them. The
 [testing guide](../../docs/contributing/contributing-code/contributing-code-tests/)
 describes ordinary Cargo and CI execution.
 
-The ABI 4 design is an unreleased breaking change. Converting every plugin to
+The ABI 5 design is an unreleased breaking change. Converting every plugin to
 the native SDK and retiring old adapters are not merge prerequisites, and no
 compatibility shims or automatic migration of old state are planned.
 
@@ -337,11 +337,20 @@ far.
   query adapter) derive the describer's resource capabilities from the bound
   objects; resource handles created without `with_capabilities` stay
   undeclared and satisfy no requirement.
-- Most sources declare their own progress persistence as `Undeclared`;
-  declare it where a requirement needs it. The PostgreSQL and SQLite sources
-  declare theirs and require a durable progress binding
-  (`source_progress`/`consumer_progress`) for the modes whose cursors must
-  survive a restart.
+- Bootstrap facts are declared: providers declare completion (quiescent or
+  durable), pairing protocol, element namespace and identity; sources declare
+  their coordination offer and element identity; the Host declares bootstrap
+  port facts; the graph checks bootstrap edges (`check_bootstrap_edge`), and a
+  relay's completion is resolved through its own providers.
+- Most network sources declare their own progress persistence as
+  `Undeclared`; declare it where a requirement needs it. The PostgreSQL,
+  SQLite and MySQL sources declare theirs and require a durable progress
+  binding (`source_progress`/`consumer_progress`) for the modes whose cursors
+  must survive a restart (their untracked modes declare `Volatile`); the SQL
+  Server source declares the durability of its bound consumer progress.
+- Component progress persistence is declared but not yet compared along an
+  edge: nothing refuses a `Volatile` source feeding a query with durable
+  progress (see [MY-36](#my-36)).
 - The further facts identified by the compatibility audit (recovery and
   control messages, ordering, bootstrap capabilities, archive and atomic
   publication support, credential kinds) belong in this model rather than in
@@ -1594,8 +1603,14 @@ object secret by hand.
 
 - Describe nested configuration (fields, defaults, conditional requirements)
   in published schemas and `configuration_details`, so forms can render it.
-- A shared rule and helper for `deny_unknown_fields` and a redacting `Debug`
-  on configuration types.
+- A redacting `Debug` helper on configuration types. (The rule is in place:
+  native plugin configuration keys are lowerCamelCase at every level and every
+  nested configuration type has `deny_unknown_fields`; the SDK conformance
+  kits' `configuration_round_trip` checks the published keys with
+  `testing::ensure_camel_case_configuration`. The stored-procedure sinks'
+  `routes`/`defaultTemplate` still reject unknown keys with a hand-written
+  shape check, because the shared `reaction-common` `TemplateSpec` flattens
+  its extension.)
 - Nested secret references (for example HTTP webhook secrets, HT-04 in
   [CW-100](#cw-100)) and proof that object-valued secrets resolve (NI-01 in
   [CW-101](#cw-101)).
@@ -1749,38 +1764,6 @@ be split into bounded calls, each with a timeout.
 
 **Done when:** the rule is documented and the kit checks it.
 
-<a id="sink-x-08"></a>
-
-### Share the template renderer and SQL template validator (Sink X-08)
-
-**Kind:** Improvement. **Priority:** Low (P2). **Effort:** Medium.
-
-Handlebars setup and helpers are repeated across the HTTP, gRPC and log sinks
-and several common crates, and the three stored-procedure sinks each keep
-their own parameter-binding SQL renderer (PostgreSQL a thread-local
-parameter buffer in `postgres-common/src/sql/template.rs`, MySQL a mutex
-buffer in `mysql-common/src/storedproc/render.rs`, SQL Server
-`mssql-common/src/sql/template.rs`). The SQL parameter-only rule and the
-template context (`drasi_computation_storedproc_common::OperationContext`,
-including `deliveryId`) are already shared (the legacy SQL Server reaction is
-[SMS-08](#sms-08)).
-
-**What remains:** one renderer with the standard helpers in `reaction-common`,
-used by the native sinks. This overlaps NI-03 in [CW-101](#cw-101).
-
-**Example:** a `json` helper fix in the HTTP sink does not reach the log sink.
-
-**Evidence:** `drasi-core/components/computation-plugins/sinks/http/src/render.rs`;
-`drasi-core/components/computation-plugins/sinks/grpc/src/render.rs`;
-`drasi-core/components/computation-plugins/sinks/log/src/render.rs`;
-`drasi-core/components/reaction-common/src/sql_template.rs`;
-`drasi-core/components/postgres-common/src/sql/template.rs`;
-`drasi-core/components/mysql-common/src/storedproc/render.rs`;
-`drasi-core/components/mssql-common/src/sql/template.rs`.
-
-**Done when:** native sinks use the shared renderer, with the existing
-template tests moved to it.
-
 <a id="source-x-07"></a>
 <a id="sink-x-11"></a>
 
@@ -1843,12 +1826,13 @@ plugin and cause, and the rule is enforced.
 
 **Kind:** Issue. **Priority:** Medium (P1). **Effort:** Small.
 
-The Host SDK README still states native ABI 2.0.0 and wire version 2; the real
-values are ABI 4.0.0, wire 4 and ordinary ABI 0.19.0. Only seven plugins have
+The quoted ABI versions are fixed: every native document now states ABI 5.0.0,
+wire 5 and ordinary ABI 0.19, and
+`computation-plugin-sdk/tests/documented_abi_version.rs` fails when a document
+quotes another native ABI, wire version or ordinary ABI. Only some plugins have
 `DESIGN.md` and `CONFIGURATION.md`.
 
-**What remains:** fix the Host SDK README; derive version text from the ABI
-constants or test it; require the two documents for every native plugin
+**What remains:** require the two documents for every native plugin
 (per-plugin READMEs are plugin work). Explain in the guides that native
 libraries stay loaded for the process lifetime, so a rebuild needs a restart.
 
@@ -1964,10 +1948,55 @@ documentation gaps are unknown and untracked.
   implements update planning; none of the four has `DESIGN.md` or
   `CONFIGURATION.md`.
 
+**Progress:** the providers' declarations and pairing were reworked
+(`computation-plugins/bootstrappers/NATIVE-BOOTSTRAP-PROVIDER-GUIDE.md`):
+every bootstrap factory has a pure `describe` the Host forwards unchanged;
+paired providers (PostgreSQL, MySQL, SQL Server, SQLite coordinated) are
+opened by their source's coordinator through a declared protocol checked when
+the edge binds; unpaired providers take their element namespace and stream
+from the graph relation instead of `source`/`stream` keys; the SQLite file
+snapshot declares its element identities and is refused on a source with
+other tables or keys; quiescent-versus-durable completion is checked at
+binding; queries pass their labels and providers select tables and endpoints
+by them; `NativeBootstrapProvider` is split into required
+`QuiescentBootstrapProvider` and `DurableBootstrapProvider` hooks.
+
+The transformers now have a standard
+(`computation-plugins/transformers/NATIVE-TRANSFORMER-GUIDE.md`: ports, declared
+descriptions and keyed inputs, lifecycle, durable output with
+`delivery_completed`/`resume_delivery`, bootstrap relay and status,
+transactions, management). The middleware and view transformers share one
+implementation (`computation-plugins/common/middleware`: pipeline,
+configuration options and a constant kind list) instead of two copies, and
+declare their kinds (`decoder`, `map`, `parse_json`, `promote`, `relabel`; the
+first, third and fourth were previously missing from the native path) as a
+constraint on `middleware[].kind` in the published configuration schema,
+checked when the graph binds the component. The view adds its insert-only map
+restriction to the same schema. The query transformer publishes its middleware
+registry's kinds the same way (`ConfigurationConstraint::middleware_declarations`).
+The middleware transformer has unit tests for declared kinds, duplicate and
+undeclared pipeline names, fan-out and failure latching.
+
 **What remains:** review each plugin against the native sink and source
 standards (lifecycle hooks, erase, update planning, configuration and secrets,
 retries, tests, documentation) and record the findings as per-plugin entries
-here, as the source and sink sections do.
+here, as the source and sink sections do. Port the container suites that
+still construct coordinated providers outside the graph
+(`components/computation-plugins/sources/postgres/tests/native_transactions`,
+`host-sdk/tests/native_mysql_components.rs`,
+`host-sdk/tests/fixtures/native_mysql`, `host-sdk/tests/fixtures/native_mssql`)
+to the paired path: create the source's coordinator
+(`NativeFactory::create_source_bootstrap`) and open providers with
+`create_paired_query_provider`, or wire the provider node into the graph.
+
+Done for configuration: the standalone PostgreSQL snapshot is flat camelCase
+with published defaults (PGA-10); the SQL Server, MySQL and PostgreSQL
+bootstrap schemas are built from the same option lists as their sources
+(`drasi_{mssql,mysql,postgres}_common::…::definition::options`; MSA-6,
+MYA-10); the HTTP provider's hand-written key allow-list is gone and the
+`drasi_http_common` bootstrap types are camelCase with `deny_unknown_fields`
+at every level, refused at `describe` (HTA-12). The query transformer's keys
+are camelCase (`outboxCapacity`, `sourceTransactions`, `resetConfiguration`).
 
 **Example:** whether a SQLite initial-data provider stopped mid-snapshot
 releases its read transaction within the stop deadline is not known.
@@ -1993,20 +2022,9 @@ Each source has its own section. Work shared by every plugin is under
 
 #### Pair the source and its initial-data providers through the coordinator (PG-13)
 
-**Kind:** Improvement. **Priority:** High. **Effort:** Medium.
+**Kind:** Improvement. **Priority:** High. **Effort:** Medium. **Status:** Resolved.
 
-The source and its coordinated and shared bootstrap providers share one configuration shape and derived slot identity, but are configured and validated separately. An operator can give them different databases or publications, and the host cannot check that they belong together. The coupling is hidden state: a provider whose `source` names another source's ID creates slots in that source's managed namespace, which that source's erase then drops (or which pin WAL until it does), and no edge or declaration lets the graph refuse it. PostgreSQL is the only coordinated native source that does not use the ABI 5 pairing.
-
-**What remains:**
-
-- Implement `supports_bootstrap_coordination` and `create_bootstrap_coordinator` for the coordinated and shared factories, as the SQLite source does.
-- Validate that the provider's request matches the source's configuration and scope; keep element-ID and type mapping in `postgres-common`.
-
-**Example:** a `drasi.postgres/shared-transactions` source with `publicationName: orders_pub` and a coordinated provider configured with `publicationName: order_pub` start independently; the coordinator would reject the mismatch at creation.
-
-**Evidence:** no coordinator in `drasi-core/components/computation-plugins/sources/postgres/src/lib.rs`; SQLite reference `drasi-core/components/computation-plugins/sources/sqlite/src/lib.rs:157-177`; SDK hooks `drasi-core/components/computation-plugin-sdk/src/export.rs:86-93`.
-
-**Done when:** coordinated and shared PostgreSQL sources create their providers through the coordinator, and a mismatched provider is refused in a test.
+The PostgreSQL source now declares `HostServices::bootstrap_coordination` and implements `SourceBootstrapCoordination::create_bootstrap_coordinator` for every mode and declares its coordination protocol (`drasi_postgres_common::replication::coordination`): required by `drasi/postgres-transactions` and `drasi.postgres/changes` with `coordinatedSnapshot: true`, optional for the shared modes. The coordinator opens each query's provider (`PostgresSnapshot`/`PostgresSharedSnapshot`, now in the source crate) from the source's own identity, stream, settings and activation credentials, so managed slots are always named under that source's prefix. The coordinated and shared bootstrap factories take no configuration (`PairedBootstrapFactory`), and the graph refuses a provider on a source that does not declare the same protocol when the edge binds (`lib/tests/computation_bootstrap_binding.rs`). The PostgreSQL container suites under `components/computation-plugins/sources/postgres/tests` still construct coordinated providers outside the graph and need porting to the paired path (see [CW-103](#cw-103)).
 
 <a id="pg-truncate-reset"></a>
 
@@ -2057,9 +2075,9 @@ The live suite runs against both the static plugin and the built library, but se
 - Live tests: activation credentials through the built library; the refusal of PostgreSQL 12; a fault injected mid-transaction with reconnect in rows and shared modes; SQLSTATE 55006 classification.
 - Add the rows and shared modes to the [CW-14](#cw-14) crash matrix.
 
-**Example:** `cargo test -p drasi-source-postgres --test native_transactions -- --ignored` should include a case that kills the walsender between `BEGIN` and `COMMIT` of a rows-mode source and checks that no change is lost or duplicated.
+**Example:** `cargo test -p drasi-computation-source-postgres --test native_transactions -- --ignored` should include a case that kills the walsender between `BEGIN` and `COMMIT` of a rows-mode source and checks that no change is lost or duplicated.
 
-**Evidence:** conformance kit used only by `drasi-core/components/computation-plugins/sources/{http,grpc}/src/tests.rs`; live suite `drasi-core/components/sources/postgres/tests/native_transactions/` has no activation-credential or version-refusal case.
+**Evidence:** conformance kit used only by `drasi-core/components/computation-plugins/sources/{http,grpc}/src/tests.rs`; live suite `drasi-core/components/computation-plugins/sources/postgres/tests/native_transactions/` has no activation-credential or version-refusal case.
 
 **Done when:** the kit and the listed live tests pass in a named CI job ([CW-85](#cw-85)).
 
@@ -2099,7 +2117,7 @@ A `Mode` enum drives configuration and planning, but the component still holds `
 
 ### MySQL source
 
-`drasi-core/components/computation-plugins/sources/mysql` (engine in `drasi-core/components/mysql-common/src/native`; in-process wrapper in `drasi-core/components/sources/mysql/src/native`). Production-ready: reconnection with a dead-peer watchdog, a DDL policy that ignores unrelated statements, real Pause, Drain/Abort stop within the host deadline, erase, managed updates, flat configuration with only `password` and the TLS client key secret, activation credentials, extended types and typed failures are implemented; behaviour is in its [DESIGN.md](../../components/computation-plugins/sources/mysql/DESIGN.md) and [CONFIGURATION.md](../../components/computation-plugins/sources/mysql/CONFIGURATION.md). The items below remain.
+`drasi-core/components/computation-plugins/sources/mysql` (engine in `drasi-core/components/mysql-common/src/native`; live suite in `drasi-core/components/computation-plugins/sources/mysql/tests/native_live`). Production-ready: reconnection with a dead-peer watchdog, a DDL policy that ignores unrelated statements, real Pause, Drain/Abort stop within the host deadline, erase, managed updates, flat configuration with only `password` and the TLS client key secret, activation credentials, extended types and typed failures are implemented; behaviour is in its [DESIGN.md](../../components/computation-plugins/sources/mysql/DESIGN.md) and [CONFIGURATION.md](../../components/computation-plugins/sources/mysql/CONFIGURATION.md). The items below remain.
 
 <a id="my-14"></a>
 
@@ -2133,9 +2151,11 @@ GTIDs are used only for the initial start position; checkpoints store file/offse
 
 #### Pair the MySQL source and bootstrapper through the coordinator (MY-16)
 
-**Kind:** Issue. **Priority:** High. **Effort:** Medium.
+**Kind:** Issue. **Priority:** High. **Effort:** Medium. **Status:** Resolved: the transactions, shared-transactions and shared-changes sources with `startFrom: snapshot` declare and implement a coordination protocol (`drasi_mysql_common::native::coordination`); their coordinator opens `MySqlSnapshot` from the source's own settings, binding and activation credentials, and the paired factories take no configuration. A provider on the wrong source is refused when the edge binds. SQL Server has the same pairing (`drasi.mssql/coordinated-changes`, offered by a source that owns a `barrierTable`).
 
-The source and `drasi-core/components/computation-plugins/bootstrappers/mysql` take the same flat settings and share committed progress, but are not paired through the SDK bootstrap coordinator. The provider names its source in a free `source` field and repeats the source's `stream`, `tables`, `tableKeys` and connection settings; nothing checks the pairing at wiring. A provider with `tables: [a, b]` beside a source with `[a]` loads both tables and only then the source refuses to start (binding differs); a wrong `source` records the watermark under another ID and the real source fails forever with "no complete consumer-owned boundary". Compatibility is thus discovered at start, after expensive work. Use `supports_bootstrap_coordination`/`create_bootstrap_coordinator` as SQLite does, so the provider receives the source's settings and binding and mismatches are refused when the edge is bound. The SQL Server source and provider have the same gap (their `barrierTable`, `tables` and `source` are duplicated too).
+Original problem:
+
+The source and `drasi-core/components/computation-plugins/bootstrappers/mysql` take the same flat settings and share committed progress, but are not paired through the SDK bootstrap coordinator. The provider names its source in a free `source` field and repeats the source's `stream`, `tables`, `tableKeys` and connection settings; nothing checks the pairing at wiring. A provider with `tables: [a, b]` beside a source with `[a]` loads both tables and only then the source refuses to start (binding differs); a wrong `source` records the watermark under another ID and the real source fails forever with "no complete consumer-owned boundary". Compatibility is thus discovered at start, after expensive work. Declare `HostServices::bootstrap_coordination` and implement `SourceBootstrapCoordination` as SQLite does, so the provider receives the source's settings and binding and mismatches are refused when the edge is bound. The SQL Server source and provider have the same gap (their `barrierTable`, `tables` and `source` are duplicated too).
 
 **Evidence:** `drasi-core/components/computation-plugins/sources/mysql/DESIGN.md:277-279`.
 
@@ -2149,7 +2169,7 @@ The source and `drasi-core/components/computation-plugins/bootstrappers/mysql` t
 
 The MySQL source can take its login from activation credentials, but the bootstrap providers connect with their literal `user` and `password` only. A source that uses an identity provider therefore cannot be paired with a password-less provider. This is the MySQL counterpart of [MS-22](#ms-22) and needs the same SDK and Host change.
 
-**What remains:** pass activation credentials to bootstrap providers, or document that MySQL initial loading needs a literal login even when the source uses an identity provider. The SDK and Host already pass freshly resolved activation credentials to an erasing dispose (`DisposeContext::credentials`); any MySQL source or provider erase that connects should use them, as the PostgreSQL source does.
+**What remains:** the coordinated providers now connect with the paired source's current activation credentials (the source's coordinator shares them, [MY-16](#pair-the-mysql-source-and-bootstrapper-through-the-coordinator-my-16)). The standalone `drasi.mysql/snapshot` still connects with its literal login; pass it activation credentials or document that standalone initial loading needs a literal login. (The MySQL source's erase connects to nothing, since it owns no server-side state, so unlike the PostgreSQL and SQL Server sources it needs no `DisposeContext::credentials`.)
 
 **Evidence:** `drasi-core/components/computation-plugins/bootstrappers/mysql/src/config.rs` (`user`, `password`; no credential context).
 
@@ -2181,7 +2201,9 @@ An untracked (volatile) MySQL factory keeps no position: after a restart it star
 
 The live test that covers it was changed to expect this: with the untracked factory the offline update is asserted to be missing after restart, while the coordinated (tracked) factory replays it.
 
-**What remains:** an owner decision: either document the behaviour as intended for untracked factories (in the MySQL CONFIGURATION.md and the native source guide), or refuse, at configuration time, an untracked source feeding a query with persistent progress, as the graph already refuses volatile producers for exactly-once consumers.
+The untracked factories now declare `ProgressPersistence::Volatile` (and the tracked ones durable progress requirements), so the fact is declared. The graph does not act on it: query inputs are unkeyed and no edge check compares a producer's progress persistence with the consuming query's, so the pairing is still accepted.
+
+**What remains:** an owner decision: either document the behaviour as intended for untracked factories (the MySQL DESIGN.md describes it), or add the edge rule (CW-106): a query whose progress is durable declares that its inputs need a producer whose progress is not `Volatile`, and the graph refuses the edge at binding. The rule would apply to every volatile source (HTTP, gRPC, SQLite `changes`, PostgreSQL volatile rows), not only MySQL.
 
 **Example:** stop a graph whose `drasi.mysql/changes` source feeds a RocksDB-backed query, run `UPDATE items SET value='offline' WHERE code=3`, start again: the query still shows the old value, and only a later update reaches it.
 
@@ -2206,7 +2228,7 @@ Live tests through the in-process wrapper now cover erase twice, a pause longer 
 - Fault injection not yet covered: a proxy kill and a half-open connection detected by the dead-peer watchdog.
 - Credential rotation through activation credentials across a restart; a duplicate `serverId`; one live test per decoded type (spatial, `VECTOR`, non-UTF-8 character sets beyond latin1).
 
-**Evidence:** `drasi-core/components/computation-plugins/sources/mysql/src/tests.rs`; `drasi-core/components/sources/mysql/src/native/tests/production.rs`.
+**Evidence:** `drasi-core/components/computation-plugins/sources/mysql/src/tests.rs`; `drasi-core/components/computation-plugins/sources/mysql/tests/native_live/production.rs`.
 
 **Done when:** these pass and run in a named CI job ([CW-85](#cw-85)).
 
@@ -2270,7 +2292,7 @@ The engine sits behind a database seam with typed failures, but readiness, recon
 
 The source can take its login from activation credentials, including a Microsoft Entra ID token, but bootstrap factories receive no activation credentials. The paired providers therefore always need a literal `user` and `password` (a secret reference), and a provider configured without them is refused.
 
-**What remains:** pass activation credentials to bootstrap providers (an SDK and Host change shared with the other database bootstrappers, including the PostgreSQL providers), or document that bootstrap needs a SQL login even when the source uses an identity provider. The SDK and Host already pass freshly resolved activation credentials to an erasing dispose (`DisposeContext::credentials`); the SQL Server source's erase should connect with them, as the PostgreSQL source does.
+**What remains:** the coordinated `drasi.mssql/bootstrap` provider is now opened by the source's coordinator and authenticates with the source's current activation credentials, including an Entra ID token. The standalone `drasi.mssql/snapshot` still needs a literal SQL login. (The source's own erase already connects with the freshly resolved credentials of the erasing dispose, `DisposeContext::credentials`, so a source rebuilt after a restart erases its markers without starting.)
 
 **Example:** an Azure SQL database with SQL authentication disabled can stream changes through the source with an Entra ID token, but its initial data cannot be loaded.
 
@@ -2411,14 +2433,14 @@ Request size is capped (`maxMessageBytes`, Content-Length pre-check, 413), but n
 
 **What remains:**
 
-- XML webhook bodies: add a depth limit to the explicit-stack parser in `http-common`; it currently pushes one frame per element with no bound.
+- XML webhook bodies and HTTP bootstrap responses: add a depth limit to the shared explicit-stack parser (`http-common/src/content.rs`); it currently pushes one frame per element with no bound.
 - JSON and YAML webhook bodies and standard HTTP routes: set and document an explicit depth limit instead of relying on library defaults.
 - gRPC: nested protobuf `Struct`/`ListValue` properties are converted to JSON text by a recursive function with no depth check; bound it explicitly instead of relying on `prost`'s decode limit.
 - Reject over-deep input with a 400/`INVALID_ARGUMENT` for that request only, and test each format.
 
 **Example:** a 1 MiB XML webhook body of about 150,000 nested `<a>` elements is under a `maxMessageBytes` of 2 MiB, parses without error, then recurses once per level while being converted and dropped.
 
-**Evidence:** `drasi-core/components/http-common/src/webhook/content_parser.rs:123-200`; `drasi-core/components/computation-plugins/common/network/src/wire.rs:196-222`. Unverified: the effective JSON/YAML (`serde_json`/`serde_yaml`, 128) and protobuf (`prost`, 100) defaults. The general decoder audit (contracts, codecs, MessagePack, safe drop) stays in [CW-19](#cw-19).
+**Evidence:** `drasi-core/components/http-common/src/content.rs` (`xml_to_json`); `drasi-core/components/computation-plugins/common/network/src/wire.rs:196-222`. Unverified: the effective JSON/YAML (`serde_json`/`serde_yaml`, 128) and protobuf (`prost`, 100) defaults. The general decoder audit (contracts, codecs, MessagePack, safe drop) stays in [CW-19](#cw-19).
 
 **Done when:** each HTTP and gRPC input format has a documented depth limit, and a test per format shows over-deep input fails that request without affecting the source.
 
@@ -2603,7 +2625,7 @@ Malformed, oversize and deeply nested `Struct` input is not tested, and the mapp
 
 The bridge source and `common/bridge` depend on `drasi-lib`, which breaks the native dependency rule, and the source cannot be built as a loadable plugin. Drasi Server therefore cannot load it, and it has no real-library test coverage. The alternative (record static-only hosting as a supported profile) has not been chosen; porting is recommended.
 
-**What remains:** implement `NativeComponent`/`NativeSource` with `create_with_admission`; take TLS from configuration via `TlsResourceRecipe`; expose seal/drain through control or management; remove the `drasi-lib` dependency; add `export_computation_plugin!` and plugin metadata so `make check-native-dependencies` covers it. Coordinate with the bridge sink port (BS-10).
+**What remains:** implement `NativeComponent`/`NativeSource`, declaring `HostServices::source_admission` and taking `ServiceBindings::admission` in `create`; take TLS from configuration via `TlsResourceRecipe`; expose seal/drain through control or management; remove the `drasi-lib` dependency; add `export_computation_plugin!` and plugin metadata so `make check-native-dependencies` covers it. Coordinate with the bridge sink port (BS-10).
 
 **Example:** a Server configuration selecting `drasi.bridge/source` fails because no plugin library exports that factory.
 
@@ -2820,10 +2842,10 @@ Plugin authors copy counter's management code, so its bugs spread. `apply` refus
 **What remains:**
 
 - Allow `apply` on a stopped object; return `ApplyError::Refused` for plan, identity or configuration mismatch.
-- Replace the `Instant::now()` check with a fixed `interval_ms` maximum published in the schema.
+- Replace the `Instant::now()` check with a fixed `intervalMs` maximum published in the schema.
 - Make `count` increases and `paused` InPlace updates; turn control kinds and the annotation key into `pub const`s; remove `expect` from metadata; add rustdoc.
 
-**Example:** applying an `interval_ms` change to a counter after `stop` fails with "counter update requires an activated instance".
+**Example:** applying an `intervalMs` change to a counter after `stop` fails with "counter update requires an activated instance".
 
 **Evidence:** `drasi-core/components/computation-plugins/sources/counter/src/component.rs:75-80,94-97,182-196,245,266-267`; `drasi-core/components/computation-plugins/sources/counter/src/lib.rs:48,53`.
 
@@ -2840,7 +2862,7 @@ Each `next()` sleeps the full interval after any time spent waiting, so emission
 
 **What remains:** use `tokio::time::interval` with `MissedTickBehavior::Delay`; document both pause concepts; handle a dropped control channel while paused; optionally set `effective_from` to wall-clock milliseconds instead of the sequence number. Unverified: whether a long interval delays host Pause or Stop.
 
-**Example:** with `interval_ms: 1000` and a slow consumer, events arrive more than one second apart and the gap accumulates.
+**Example:** with `intervalMs: 1000` and a slow consumer, events arrive more than one second apart and the gap accumulates.
 
 **Evidence:** `drasi-core/components/computation-plugins/sources/counter/src/component.rs:209-214,234`.
 
@@ -2953,38 +2975,28 @@ headers.
 
 <a id="ni-03"></a>
 
-#### Share the pause gate, exposure check and template helpers (NI-03)
+#### Share the pause gate and exposure check (NI-03)
 
 **Kind:** Improvement. **Priority:** Medium. **Effort:** Small to medium.
 
 Each network and log sink carries its own copy of the same behaviour, so a
 fix to one copy does not reach the others. The SSE sink has its own pause
-flag, non-loopback exposure rule and bearer check. The HTTP, gRPC, SSE and log
-sinks each register the `json` helper and the allowed helper list separately.
+flag, non-loopback exposure rule and bearer check. (Templates are shared: every
+templating sink renders through `drasi-computation-template-common`, with one
+helper set, strict rendering, no escaping and one context.)
 
 **What remains:**
 
 - Make `common/network` expose a public pause gate and a token check that the
   SSE sink can call, and use its `validate_exposure` from SSE.
-- Provide one helper set and helper-name validator in `reaction-common`, used
-  by the HTTP, SSE and log sinks. The gRPC sink keeps its strict renderer but
-  takes the helper set from the same place. The stored-procedure SQL
-  validators and the shared renderer as a whole are in
-  [Sink X-08](#sink-x-08).
 
-**Example:** adding a helper such as `lowercase` today means editing
-`HELPERS` in the HTTP renderer, the helper list in the log renderer, the gRPC
-list and `reaction-common::sse`. Missing one makes the same template valid for
-one sink and rejected by another.
+**Example:** a fix to the bearer-token comparison in `common/network` does not
+reach the SSE sink's own check.
 
 **Evidence:** `drasi-core/components/computation-plugins/sinks/sse/src/component.rs:278-291,482,796-803`,
 `drasi-core/components/computation-plugins/sinks/sse/src/config.rs:196-200`,
 `drasi-core/components/computation-plugins/common/network/src/config.rs:240-248`,
-`drasi-core/components/computation-plugins/common/network/src/security.rs:20-40`,
-`drasi-core/components/computation-plugins/sinks/http/src/render.rs:9-17`,
-`drasi-core/components/computation-plugins/sinks/log/src/render.rs:25,89,299`,
-`drasi-core/components/computation-plugins/sinks/grpc/src/render.rs:164`,
-`drasi-core/components/reaction-common/src/sse.rs:38`.
+`drasi-core/components/computation-plugins/common/network/src/security.rs:20-40`.
 
 **Done when:** SSE uses the `common/network` gate, exposure check and token
 check, and HTTP, gRPC, SSE and log take their helper set from one
@@ -3048,27 +3060,6 @@ loader, which the kit never exercises.
 **Done when:** the kit passes for all four sinks through their loaded
 libraries on both runtime flavours in a named CI job, with no skipped case
 counted as a pass.
-
-<a id="ns-05"></a>
-
-#### Deduplicate adaptive batching validation (NS-05)
-
-**Kind:** Improvement. **Priority:** Low. **Effort:** Small.
-
-The sink adaptive policy and the source ingress each validate
-`AdaptiveBatchConfig` with their own nearly identical bounds, so a change to
-one limit can silently diverge.
-
-**What remains:** one shared validator with the sink and source differences
-(`max_batch_size` limit) as parameters.
-
-**Example:** raising the maximum wait from 60 s must today be changed in two
-places.
-
-**Evidence:** `drasi-core/components/computation-plugins/common/network/src/batching.rs:15-26`,
-`drasi-core/components/computation-plugins/common/network/src/ingress.rs:836-849`.
-
-**Done when:** both call one validator.
 
 <a id="plugin-sink-http"></a>
 
@@ -3304,7 +3295,7 @@ route and supports `append`, `overwrite` and `perChange` write modes and a
 `filenameTemplate`; capture writes only raw envelopes to one path.
 
 **What remains:** add these to capture or as a new `drasi.standard/file` sink
-on the shared renderer ([NI-03](#ni-03)), with documentation of each mode's
+on the shared template engine (`computation-plugins/common/template`), with documentation of each mode's
 duplicate behaviour on replay.
 
 **Example:** `{"outputPath":"/data","writeMode":"perChange","filenameTemplate":"{{after.id}}.json"}`
@@ -3559,7 +3550,7 @@ transaction as the cursor advance; `deliveryId` in every template context;
 `host`, `port`, `database` and `progressTable` unsupported in place; and
 secure-by-default TLS (MySQL now refuses remote plaintext like PostgreSQL).
 They share one parameter-only template rule
-(`drasi_reaction_common::sql_template`), keep one connection per activation,
+(`drasi_computation_template_common::ParameterTemplate`), keep one connection per activation,
 honour deadlines and Drain/Abort, plan updates field by field, and publish
 flat configuration with only credentials secret. Behaviour is in each sink's `DESIGN.md` and
 `CONFIGURATION.md`. Decisions Sink D-3 (consumer plus destination cursor),
@@ -3574,15 +3565,23 @@ sink versions and the legacy reactions.
 
 **Kind:** Issue. **Area:** Host SDK. **Priority:** High. **Effort:** Medium.
 
-The Host SDK never passes activation credentials to a consumer. The factory
-proxy accepts an `identity` dependency only when the component is not a
-consumer, and every consumer creation request is sent with
-`activation_credentials_bound: false`. All three stored-procedure sinks now
-declare `supports_activation_credentials`, map username/password and token
+**Update (unified Host services):** a factory now declares every Host service
+once (`Capabilities::services`) and the Host binds any declared combination
+through one construction path, so a consumer declaring
+`activation_credentials` receives its `identity` resource like any sink:
+creation is sent with `activation_credentials_bound: true` and the consumer
+proxy's start resolves credentials through the wrapped component. What remains
+below is end-to-end coverage and refresh semantics.
+
+Before that change the Host SDK never passed activation credentials to a consumer. The factory
+proxy accepted an `identity` dependency only when the component was not a
+consumer, and every consumer creation request was sent with
+`activation_credentials_bound: false`. All three stored-procedure sinks
+declare `HostServices::activation_credentials`, map username/password and token
 credentials, and keep the last activation's credentials in memory so erase can
 run after Stop (SQL Server maps a token to Tiberius `AuthMethod::aad_token`).
-None of that is reachable. Only a configured `password` (a secret reference)
-works.
+None of that was reachable; only a configured `password` (a secret reference)
+worked.
 
 This is a regression: the legacy reactions used identity providers
 (PostgreSQL password, token and certificate; MySQL; SQL Server password), and
@@ -3592,10 +3591,9 @@ affects the HTTP `drasi.network/http-delivery` consumer.
 
 **What remains:**
 
-- Let consumer factories declare an `identity` dependency and bind a
-  `NativeIdentityResource`, as plain sinks do.
-- Resolve credentials for each activation and pass them through the consumer
-  proxy's start, with `activation_credentials_bound` set on creation.
+- Done: consumer factories declare activation credentials and bind a
+  `NativeIdentityResource`, as plain sinks do; the consumer proxy's start
+  resolves them. Add an end-to-end test through a stored-procedure sink.
 - Refresh credentials on restart; decide whether a running consumer reconnects
   with refreshed credentials.
 - Restore the credential-rotation live tests: the MySQL identity scenario was
@@ -3605,9 +3603,9 @@ affects the HTTP `drasi.network/http-delivery` consumer.
 **Example:** an Azure SQL database with SQL authentication disabled, or a MySQL
 server whose password an identity provider rotates, cannot be targeted today.
 
-**Evidence:** `drasi-core/components/host-sdk/src/computation/factory.rs:1385-1387`
-(`"identity" => … && self.consumer.is_none()`) and `:569-581`
-(`create_consumer_with_inputs` sends `activation_credentials_bound: false`);
+**Evidence (before the change):** the Host factory's `identity` binding
+excluded consumers and `create_consumer_with_inputs` sent
+`activation_credentials_bound: false`;
 `drasi-core/components/host-sdk/tests/fixtures/native_mssql/credentials.rs`;
 `drasi-core/components/host-sdk/tests/fixtures/native_mysql/identity.rs`.
 
@@ -3771,7 +3769,7 @@ Podman, and no CI job runs them.
 
 **What remains:**
 
-- Run `drasi-source-postgres --test native_transactions` (the `storedproc`
+- Run `drasi-computation-source-postgres --test native_transactions` (the `storedproc`
   module), `drasi-host-sdk --test native_mysql_components`
   (`native_mysql_storedproc_*`) and
   `drasi-computation-sink-storedproc-{postgres,mysql} --test live` in named CI
@@ -3784,7 +3782,7 @@ Podman, and no CI job runs them.
 **Example:** restart the MySQL container during a 5,000-change input; the sink
 should finish without Stop/Start and without repeating committed operations.
 
-**Evidence:** `drasi-core/components/sources/postgres/tests/native_transactions/storedproc.rs`;
+**Evidence:** `drasi-core/components/computation-plugins/sources/postgres/tests/native_transactions/storedproc.rs`;
 `drasi-core/components/host-sdk/tests/fixtures/native_mysql/storedproc.rs`.
 
 **Done when:** both suites run in CI with the added scenarios.
@@ -3948,7 +3946,7 @@ The legacy `drasi-reaction-storedproc-mssql` still accepts inline
 `{{json …}}` (and the other value helpers), which writes unescaped change data
 into the command: the SQL injection that SMS-01 fixed in the native sink.
 
-**What remains:** either apply `drasi_reaction_common::sql_template` to the
+**What remains:** either apply `drasi_computation_template_common::validate_parameter_only` to the
 legacy reaction (a deliberate breaking tightening, with a migration note), or
 retire the reaction with [CW-63](#cw-63) and document the risk until then.
 
@@ -5109,6 +5107,9 @@ admission path are not yet covered by a real process-kill test.
 | `drasi-core/components/host-sdk/tests/native_network/durable.rs:352-626` | Native HTTP and gRPC sources recover accepted input after process exit when the client never received its receipt. |
 | `drasi-core/components/host-sdk/tests/native_query_plugin/durable_shared.rs:487-561`, `durable_bootstrap_crash.rs:54-152` | Loaded query plugin: shared-journal exit before/after commit; SQLite bootstrap exit while partial and after completion. |
 | `drasi-core/components/sources/{http,grpc}/tests/wal_integration.rs` | Ordinary HTTP/gRPC source WAL crash/replay. WAL pruning waits for the initial subscriptions (`drasi-core/lib/src/sources/base.rs:589-640`). |
+| `drasi-core/components/host-sdk/tests/native_storedproc_crash.rs` (RCA-5, Podman, `make test-native-storedproc-crash`) | Loaded MySQL and PostgreSQL stored-procedure consumers: a child process exits after the destination committed an operation but before the host recorded its progress, and after the last progress commit but before acknowledgement, for `exactlyOnce` (rows == inputs; empty cursor epoch) and `atLeastOnce` (inputs plus at most the one in-flight batch for a restarted in-memory producer under a new epoch; a persistent producer keeps its epoch and repeats nothing). SQL Server needs its explicit fixture and is not in this matrix. |
+| `drasi-core/components/host-sdk/tests/native_paired_crash.rs` (RCA-4, RCA-6, Podman for PostgreSQL/MySQL, `make test-native-paired-crash`) | Loaded native PostgreSQL (`drasi/postgres-transactions`, coordinated), MySQL (`drasi.mysql/transactions`, `startFrom: snapshot`) and SQLite (`replay-transactions`, coordinated) sources with their paired provider node connected to the source's bootstrap input, a durable reference query (RocksDB, `auto_reset`) and a capture sink. A child exits (a) mid-snapshot with another provider page ready, (b) after every snapshot row before the completion commit, (c) right after the completion commit before any change-stream commit, and (d) after the query applied 2 of the 4 changes of one upstream transaction, before it commits it. Concurrent writes after the first snapshot page (PostgreSQL, MySQL) and a write while no process runs must arrive exactly once: replaying the delivered result envelopes over the completed initialization never adds a present row or touches an absent one and ends at the database's rows; (a)/(b) redo the initialization once (`reset_generation` 1), (c)/(d) do not; the transaction arrives as one 4-operation envelope and nothing else carries it; PostgreSQL slots never confirm past the WAL position preceding the uncommitted changes. With `strict` recovery a restart after (a)/(b) stops with `IncompleteBootstrap` for an operator reset instead (observed, not asserted). SQL Server needs its explicit fixture and is not in this matrix. |
+| `drasi-core/components/host-sdk/src/computation/consumer_handoff_tests.rs` (`native_consumer_storage_failure_is_retryable_and_resumes_without_loss`, RCA-7) | Loaded native consumer (external and transactional) in a graph whose consumer-progress storage fails from the first completion commit (applied or refused) until it recovers: the node shows a retryable `Processing` failure and does not acknowledge its input; after recovery the graph's in-place retry reopens the fenced ledger and resumes in the same generation without loss or a second effect. Operator Retry (replacement) while storage is still down is not qualified: replacement waits on the sink's drain. |
 
 **What remains:**
 
@@ -5119,9 +5120,10 @@ admission path are not yet covered by a real process-kill test.
    through the loaded plugin (coordinate with [CW-77](#cw-77) and
    [CW-78](#cw-78)).
 2. Add process-kill cases for the remaining durable connectors and initial-load
-   paths, starting with the native PostgreSQL source and the ordinary sources
-   that advertise durable input. Unverified: no process-kill test was found for
-   the native PostgreSQL source.
+   paths: the shared and row modes of the native database sources (the
+   paired-handover matrix covers the single-owner transaction modes), SQL
+   Server once its fixture runs in CI, and the ordinary sources that advertise
+   durable input.
 
 **Example gap:** A producer admits 100 events through lossless QoS into a loaded
 query plugin; the query has committed 60 when the process is SIGKILLed and the
@@ -5423,6 +5425,17 @@ components in the graph keep running.
 **Done when:** Each audited callback has a test or a documented reason it is
 safe; failures produce useful diagnostics, damaged objects are not reused, and
 unrelated healthy work continues.
+
+**Resolved (RCA-8): panics in owned workers.** A panic inside a worker
+registered with `workers::spawn_owned_worker` (or its `try_`/blocking variants)
+from a native operation is reported to the SDK instance when it happens; the
+Host waits on the independent `WORKER_FAILURE` operation through
+`ComputationComponent::worker_failures` while the node processes, so the node
+fails within a bounded time as a retryable `Processing` failure, withdraws its
+readiness, and Retry starts it cleanly
+(`drasi-core/components/host-sdk/tests/native_worker_failure.rs`, loaded on both
+Tokio flavours; `drasi-core/lib/tests/computation_worker_failures.rs`). Workers
+started with plain `tokio::spawn` remain unobserved until joined.
 
 <a id="cw-21"></a>
 

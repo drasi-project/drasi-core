@@ -91,17 +91,8 @@ impl Factory for HttpSinkFactory {
         let config = HttpSinkConfig::parse(request.request.configuration.clone())?;
         Ok(request.unkeyed_sink(config.on_permanent_failure))
     }
-    fn supports_sink_batching(&self) -> bool {
-        true
-    }
-    fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
-        Some(HttpSinkConfig::definition().details())
-    }
-    fn supports_update_planning(&self) -> bool {
-        true
-    }
-    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
-        component::assess(request)
+    fn configuration_details(&self) -> drasi_computation_plugin_sdk::ConfigDetails {
+        HttpSinkConfig::definition().details()
     }
 
     fn metadata(&self) -> FactoryMetadata {
@@ -116,6 +107,10 @@ impl Factory for HttpSinkFactory {
             completion: Some(SinkCompletion::Handled),
             capabilities: Capabilities {
                 binds_inputs: true,
+                services: drasi_computation_plugin_sdk::HostServices {
+                    sink_batching: true,
+                    ..Default::default()
+                },
                 ..managed()
             },
         }
@@ -125,6 +120,7 @@ impl Factory for HttpSinkFactory {
         &self,
         request: &CreateRequest,
         _control: ControlSender,
+        _services: drasi_computation_plugin_sdk::ServiceBindings,
     ) -> anyhow::Result<CreatedComponent> {
         let config = HttpSinkConfig::parse(request.configuration.clone())?;
         let outputs = SinkOutputs::from_inputs(&request.inputs, &config.outputs)?;
@@ -134,6 +130,15 @@ impl Factory for HttpSinkFactory {
             outputs,
         )?))
         .into())
+    }
+    fn update_planner(&self) -> Option<&dyn drasi_computation_plugin_sdk::UpdatePlanner> {
+        Some(self)
+    }
+}
+
+impl drasi_computation_plugin_sdk::UpdatePlanner for HttpSinkFactory {
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
+        component::assess(request)
     }
 }
 
@@ -149,17 +154,8 @@ impl Factory for HttpDeliveryFactory {
             config.on_permanent_failure,
         ))
     }
-    fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
-        Some(HttpDeliveryConfig::definition().details())
-    }
-    fn supports_update_planning(&self) -> bool {
-        true
-    }
-    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
-        consumer::assess(request)
-    }
-    fn consumer_mode(&self) -> Option<ConsumerMode> {
-        Some(ConsumerMode::External)
+    fn configuration_details(&self) -> drasi_computation_plugin_sdk::ConfigDetails {
+        HttpDeliveryConfig::definition().details()
     }
 
     fn metadata(&self) -> FactoryMetadata {
@@ -172,7 +168,13 @@ impl Factory for HttpDeliveryFactory {
             configuration: HttpDeliveryConfig::definition().schema(),
             ports: vec![input_port()],
             completion: Some(SinkCompletion::Handled),
-            capabilities: Capabilities { ..managed() },
+            capabilities: Capabilities {
+                services: drasi_computation_plugin_sdk::HostServices {
+                    consumer: Some(ConsumerMode::External),
+                    ..Default::default()
+                },
+                ..managed()
+            },
         }
     }
 
@@ -180,12 +182,22 @@ impl Factory for HttpDeliveryFactory {
         &self,
         request: &CreateRequest,
         _control: ControlSender,
+        _services: drasi_computation_plugin_sdk::ServiceBindings,
     ) -> anyhow::Result<CreatedComponent> {
         Ok(Component::Consumer(Box::new(HttpDeliveryConsumer::new(
             self.metadata().descriptor(request.id.clone())?,
             HttpDeliveryConfig::parse(request.configuration.clone())?,
         )?))
         .into())
+    }
+    fn update_planner(&self) -> Option<&dyn drasi_computation_plugin_sdk::UpdatePlanner> {
+        Some(self)
+    }
+}
+
+impl drasi_computation_plugin_sdk::UpdatePlanner for HttpDeliveryFactory {
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
+        consumer::assess(request)
     }
 }
 

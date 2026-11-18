@@ -97,17 +97,15 @@ impl Harness {
         let mut results = Vec::new();
         let mut builder = ComponentBatch::builder();
         for (index, name) in ["a", "b"].into_iter().enumerate() {
-            let provider = bootstrap.create_provider(
+            let provider = crate::bootstrap_provider(
+                bootstrap,
                 id(name),
-                crate::provider_config(
-                    &settings,
-                    json!({"source":id("items").as_str(),"stream":stream("items")}),
-                ),
-                Some(drasi_computation_plugin_sdk::Scope {
+                crate::provider_config(&settings, json!({})),
+                drasi_computation_plugin_sdk::Scope {
                     instance_id: "mssql-coverage".into(),
                     graph_id: ComponentBatch::GRAPH_ID.into(),
                     generation: 1,
-                }),
+                },
                 Some(owners[index].clone()),
             )?;
             let label = if companion && name == "b" {

@@ -88,10 +88,10 @@ There is no second certificate parser or plaintext fallback. For example:
   "kind": "bridgeTls",
   "version": 1,
   "role": "client",
-  "trust_roots": ["certs/root.der"],
-  "certificate_chain": ["certs/client.der"],
-  "private_key": "certs/client.pk8",
-  "peer_certificate_sha256": "<64 lowercase hexadecimal characters>"
+  "trustRoots": ["certs/root.der"],
+  "certificateChain": ["certs/client.der"],
+  "privateKey": "certs/client.pk8",
+  "peerCertificateSha256": "<64 lowercase hexadecimal characters>"
 }
 ```
 

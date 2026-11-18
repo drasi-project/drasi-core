@@ -28,7 +28,10 @@ fn assess(
     );
     request.current.inputs = inputs();
     request.proposed.inputs = proposed_inputs;
-    MsSqlStoredProcFactory.assess(&request)
+    MsSqlStoredProcFactory
+        .update_planner()
+        .expect("factory planner")
+        .assess(&request)
 }
 
 fn boundary(assessment: Assessment) -> Option<UpdateBoundary> {

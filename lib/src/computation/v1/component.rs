@@ -134,6 +134,15 @@ pub trait ComputationComponent: Send + Sync {
     fn control_handler(&self) -> Option<std::sync::Arc<dyn super::ControlHandler>> {
         None
     }
+    /// Failures of work the activation owns outside its operations (owned
+    /// workers such as a listener or replication task). While the component
+    /// processes, the graph waits on it alongside the processing loop, so a
+    /// failed worker fails the node promptly as a retryable `Processing`
+    /// failure even when no operation is in flight. `None` (the default)
+    /// means such failures surface only through the component's operations.
+    fn worker_failures(&self) -> Option<std::sync::Arc<dyn WorkerFailures>> {
+        None
+    }
     /// Nested/legacy hosts may finish their start hook before their underlying
     /// component is ready. Such hosts explicitly report `control.ready()`.
     fn requires_readiness_confirmation(&self) -> bool {
@@ -352,6 +361,20 @@ pub trait EnvelopeSink: ComputationComponent {
     /// It does not automatically acknowledge a Delivery or establish
     /// durability/atomicity of external effects.
     async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()>;
+}
+
+/// Asynchronous failures of work an activation owns outside its operations.
+///
+/// See [`ComputationComponent::worker_failures`]. The graph waits on it only
+/// while the component processes and drops the wait at every operation
+/// boundary, so an implementation must be cancellation-safe and must report a
+/// failure that happened while nobody was waiting on the next wait.
+#[async_trait]
+pub trait WorkerFailures: Send + Sync {
+    /// Completes with the failure once owned work of the current activation
+    /// has failed. Stays pending while that work is healthy; never reports a
+    /// failure of an earlier activation.
+    async fn wait(&self) -> anyhow::Error;
 }
 
 /// Live observers of a sink's deliveries (for example query-result

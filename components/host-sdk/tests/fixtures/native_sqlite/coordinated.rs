@@ -173,6 +173,7 @@ impl ComponentFactory for PairedProviderNode {
         let running = context.output_catalogue().clone();
         let sessions: BootstrapProviderFactory = Arc::new(move |request| {
             let origin = request.origin().clone();
+            let labels = request.labels.clone();
             let source = NativeSourceBootstrapResource::registered(
                 &scope.instance_id,
                 &scope.graph_id,
@@ -190,6 +191,7 @@ impl ComponentFactory for PairedProviderNode {
                     scope.clone(),
                     owner.clone(),
                     source.clone(),
+                    labels.clone(),
                 )?;
                 // A provider that never prepared stops without native work.
                 futures_util::FutureExt::now_or_never(previous.stop())
@@ -205,17 +207,23 @@ impl ComponentFactory for PairedProviderNode {
                 scope.clone(),
                 owner,
                 source,
+                labels,
             )?;
             Ok(Arc::new(GatedProvider {
                 inner,
                 gate: gates.get(&origin).cloned(),
             }) as Arc<dyn ComputationBootstrapProvider>)
         });
+        let description = self
+            .node
+            .describe(&context)
+            .map_err(ComponentCreationError::terminal)?;
         let component = BootstrapProviderComponent::with_descriptor(
             context.specification.descriptor.clone(),
             sessions,
         )
-        .map_err(ComponentCreationError::terminal)?;
+        .map_err(ComponentCreationError::terminal)?
+        .with_description(description);
         Ok(ConstructedComponent::bootstrap_provider(Box::new(
             component,
         )))
@@ -369,10 +377,7 @@ async fn graph_with_options(
         supersede_stopped: options.supersede_stopped,
         superseded: superseded.clone(),
     });
-    let provider_spec = provider.specification_from_config(
-        id("provider"),
-        json!({"source":id("source"),"stream":"sqlite/out"}),
-    )?;
+    let provider_spec = provider.specification_from_config(id("provider"), json!({}))?;
     builder = builder
         .component(
             drasi_lib::computation::v1::ComponentName::try_new("provider")
@@ -771,9 +776,10 @@ async fn binding_identity_and_retirement() -> Result<()> {
                 bootstrap
                     .create_provider(
                         id("first"),
-                        json!({"source":id("source"),"stream":"sqlite/out"}),
+                        json!({}),
                         Some(scope()),
-                        Some(owner.clone())
+                        Some(owner.clone()),
+                        drasi_computation_plugin_sdk::BootstrapSession::default()
                     )
                     .is_err(),
                 "paired factory accepted no coordinator"
@@ -786,10 +792,11 @@ async fn binding_identity_and_retirement() -> Result<()> {
                 bootstrap
                     .create_paired_query_provider(
                         id("first"),
-                        json!({"source":id("source"),"stream":"sqlite/out"}),
+                        json!({}),
                         scope(),
                         substitute,
-                        coordinator.clone()
+                        coordinator.clone(),
+                        None
                     )
                     .is_err(),
                 "same-name query substituted for actual owner"
@@ -805,27 +812,30 @@ async fn binding_identity_and_retirement() -> Result<()> {
                             configuration,
                             scope(),
                             owner.clone(),
-                            coordinator.clone()
+                            coordinator.clone(),
+                            None
                         )
                         .is_err(),
-                    "paired identity mismatch was accepted"
+                    "a paired provider takes no source or stream configuration"
                 );
             }
             let provider = bootstrap.create_paired_query_provider(
                 id("first"),
-                json!({"source":id("source"),"stream":"sqlite/out"}),
+                json!({}),
                 scope(),
                 owner.clone(),
                 coordinator.clone(),
+                None,
             )?;
             anyhow::ensure!(
                 bootstrap
                     .create_paired_query_provider(
                         id("first"),
-                        json!({"source":id("source"),"stream":"sqlite/out"}),
+                        json!({}),
                         scope(),
                         owner.clone(),
-                        coordinator.clone()
+                        coordinator.clone(),
+                        None
                     )
                     .is_err(),
                 "duplicate paired provider acquired the same member"
@@ -920,10 +930,11 @@ async fn binding_identity_and_retirement() -> Result<()> {
                 bootstrap
                     .create_paired_query_provider(
                         id("first"),
-                        json!({"source":id("source"),"stream":"sqlite/out"}),
+                        json!({}),
                         scope(),
                         owner.clone(),
                         coordinator.clone(),
+                        None,
                     )
                     .is_err(),
                 "dropping an unstopped provider erased its cleanup obligation"
@@ -946,10 +957,11 @@ async fn binding_identity_and_retirement() -> Result<()> {
                 bootstrap
                     .create_paired_query_provider(
                         id("first"),
-                        json!({"source":id("source"),"stream":"sqlite/out"}),
+                        json!({}),
                         scope(),
                         owner,
-                        coordinator.clone()
+                        coordinator.clone(),
+                        None
                     )
                     .is_err(),
                 "retired coordinator accepted a new provider"

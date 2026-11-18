@@ -192,7 +192,7 @@ async fn loaded_query_complete_transaction_mode_requires_framed_input() -> Resul
     };
     let mut query = factory()?.create_component_with_processing(
         component_id()?,
-        json!({"query": QUERY, "source_transactions": limits}),
+        json!({"query": QUERY, "sourceTransactions": crate::transaction_settings(limits)}),
         scope(1),
         provider(directory.path())?,
     )?;

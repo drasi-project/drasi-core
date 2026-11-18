@@ -538,6 +538,9 @@ mod tests {
         fn descriptor(&self) -> &drasi_computation_contracts::ComponentDescriptor {
             &self.0
         }
+        fn configuration(&self) -> anyhow::Result<serde_json::Value> {
+            Ok(serde_json::json!({}))
+        }
         crate::passive_lifecycle!();
     }
 

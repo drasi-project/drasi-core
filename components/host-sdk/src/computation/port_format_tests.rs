@@ -45,6 +45,23 @@ impl RecordValidator for NoRecords {
 struct FormatFactory;
 
 impl sdk::Factory for FormatFactory {
+    /// Every field described (fixture).
+    fn configuration_details(&self) -> sdk::ConfigDetails {
+        sdk::ConfigDetails {
+            fields: sdk::Factory::metadata(self)
+                .configuration
+                .fields
+                .into_keys()
+                .map(|name| {
+                    let details = sdk::configuration::ConfigFieldDetails {
+                        description: format!("Fixture field {name}."),
+                        ..Default::default()
+                    };
+                    (name, details)
+                })
+                .collect(),
+        }
+    }
     fn describe(
         &self,
         _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
@@ -72,6 +89,7 @@ impl sdk::Factory for FormatFactory {
         &self,
         request: &sdk::CreateRequest,
         _: sdk::ControlSender,
+        _services: sdk::ServiceBindings,
     ) -> anyhow::Result<sdk::CreatedComponent> {
         let metadata = sdk::Factory::metadata(self).for_configuration(&request.configuration)?;
         Ok(sdk::CreatedComponent {
@@ -188,6 +206,23 @@ fn unsupported_selection_is_rejected_before_construction() -> anyhow::Result<()>
 struct InvalidPrimary;
 
 impl sdk::Factory for InvalidPrimary {
+    /// Every field described (fixture).
+    fn configuration_details(&self) -> sdk::ConfigDetails {
+        sdk::ConfigDetails {
+            fields: sdk::Factory::metadata(self)
+                .configuration
+                .fields
+                .into_keys()
+                .map(|name| {
+                    let details = sdk::configuration::ConfigFieldDetails {
+                        description: format!("Fixture field {name}."),
+                        ..Default::default()
+                    };
+                    (name, details)
+                })
+                .collect(),
+        }
+    }
     fn describe(
         &self,
         _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
@@ -205,8 +240,9 @@ impl sdk::Factory for InvalidPrimary {
         &self,
         request: &sdk::CreateRequest,
         control: sdk::ControlSender,
+        services: sdk::ServiceBindings,
     ) -> anyhow::Result<sdk::CreatedComponent> {
-        sdk::Factory::create(&FormatFactory, request, control)
+        sdk::Factory::create(&FormatFactory, request, control, services)
     }
 }
 

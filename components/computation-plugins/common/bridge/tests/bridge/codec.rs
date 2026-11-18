@@ -1294,8 +1294,8 @@ fn retired_query_change_selector_and_query_prefixes_reject() -> Result<()> {
     }
     assert!(serde_json::from_value::<Namespace>(serde_json::json!({
         "version": 1,
-        "source_prefixes": ["plant/"],
-        "query_prefixes": ["plant/"],
+        "sourcePrefixes": ["plant/"],
+        "queryPrefixes": ["plant/"],
     }))
     .is_err());
 
@@ -1317,7 +1317,27 @@ fn retired_query_change_selector_and_query_prefixes_reject() -> Result<()> {
     let mut selector = value.clone();
     selector["delivery"] = serde_json::json!("graph-change");
     assert!(serde_json::from_value::<BridgeConfig>(selector).is_err());
-    value["namespace"]["query_prefixes"] = serde_json::json!(["plant/"]);
+    let object = value.as_object().expect("configuration object");
+    assert!(object.contains_key("linkId") && object.contains_key("peerStream"));
+    assert!(value["transport"].get("dataPath").is_some());
+    for (path, key) in [
+        (None, "link_id"),
+        (Some("namespace"), "source_prefixes"),
+        (Some("transport"), "data_path"),
+        (Some("limits"), "max_envelope_bytes"),
+        (Some("limits"), "unknown"),
+    ] {
+        let mut unknown = value.clone();
+        match path {
+            None => unknown[key] = serde_json::json!("x"),
+            Some(nested) => unknown[nested][key] = serde_json::json!(1),
+        }
+        assert!(
+            serde_json::from_value::<BridgeConfig>(unknown).is_err(),
+            "{path:?}.{key} must be refused"
+        );
+    }
+    value["namespace"]["queryPrefixes"] = serde_json::json!(["plant/"]);
     assert!(serde_json::from_value::<BridgeConfig>(value).is_err());
     Ok(())
 }

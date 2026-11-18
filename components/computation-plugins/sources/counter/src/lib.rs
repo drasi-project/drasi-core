@@ -41,16 +41,9 @@ impl Factory for CounterFactory {
             drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
         ))
     }
-    fn supports_update_planning(&self) -> bool {
-        true
-    }
 
-    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
-        component::plan_update(request).map(Assessment::from)
-    }
-
-    fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
-        Some(component::configuration_definition().details())
+    fn configuration_details(&self) -> drasi_computation_plugin_sdk::ConfigDetails {
+        component::configuration_definition().details()
     }
 
     fn metadata(&self) -> FactoryMetadata {
@@ -81,6 +74,7 @@ impl Factory for CounterFactory {
         &self,
         request: &CreateRequest,
         _control: ControlSender,
+        _services: drasi_computation_plugin_sdk::ServiceBindings,
     ) -> anyhow::Result<CreatedComponent> {
         let (counter, handler) = component::Counter::new(
             self.metadata().descriptor(request.id.clone())?,
@@ -90,5 +84,14 @@ impl Factory for CounterFactory {
             component: Component::Source(Box::new(counter)),
             control_handler: Some(Arc::new(handler)),
         })
+    }
+    fn update_planner(&self) -> Option<&dyn drasi_computation_plugin_sdk::UpdatePlanner> {
+        Some(self)
+    }
+}
+
+impl drasi_computation_plugin_sdk::UpdatePlanner for CounterFactory {
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
+        component::plan_update(request).map(Assessment::from)
     }
 }

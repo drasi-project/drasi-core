@@ -106,9 +106,12 @@ acknowledgement and not delivery to anyone.
 | Host replay after a failed `handle` | Frames may be sent twice to subscribers that were connected both times. |
 | `handle` fails (path bound, invalid rendered path, decode error) | No frame of that input is sent; the host may retry. |
 
-Template render failures are not failures: a body falls back to the default
-per-change frame and a path falls back to the configured path, with a warning
-log. A rendered path that is invalid (relative after resolution, contains `?`,
+Templates are compiled once (construction or an in-place update) by the shared
+native template engine (`drasi-computation-template-common`) and checked
+statically in every branch. A template that fails to render (strict: a field
+the change does not carry) is a permanent failure of the input, so
+`onPermanentFailure` applies; no frame of that input is sent and nothing falls
+back to the default frame or to the unrendered path (D-5). A rendered path that is invalid (relative after resolution, contains `?`,
 `#` or control characters, or is under `/snapshot`) fails the input.
 
 ## Snapshot handover
@@ -189,7 +192,7 @@ lifecycle path relies on it: Stop always joins.
 
 ## Management
 
-The factory plans updates (`supports_update_planning`, `Factory::assess`) and
+The factory plans updates (`Factory::update_planner`, `UpdatePlanner::assess`) and
 the instance exports `NativeManagement`. Capabilities declare `management`
 and update modes `InPlace`, `Restart` and `Recreate`.
 
@@ -237,7 +240,7 @@ proxy.
 ## Observability
 
 Logs use the shared `diag!` facade with target `drasi.network`: listener start
-(Info), unexpected listener exit (Error), render fallbacks, snapshot failures
+(Info), unexpected listener exit (Error), snapshot failures
 and lagging subscribers (Warn), pruning (Debug). In a dynamically loaded
 library without a host logger, warnings and errors go to standard error. There
 are no metrics yet.
@@ -263,4 +266,5 @@ are no metrics yet.
 | Heartbeat frame | Kept, suspended while paused |
 | `/snapshot/:query_id` via a query snapshot fetcher | `/snapshot/:alias` via output snapshots of any output |
 | Template context with `query_id`, `query_name`, `data` | Truthful change notification context (`output`, `sequence`, `operation`, `identity`, images) |
+| Render failure falls back to the default payload or the configured path; templates trial-rendered against `{}`; HTML escaping | Render failure is permanent under `onPermanentFailure`; templates compiled once and checked statically by the shared native template engine; strict, no escaping |
 | Pause not applicable | Real pause gate |

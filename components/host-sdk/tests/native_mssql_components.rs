@@ -102,6 +102,54 @@ fn sink_settings(db: &Database, extra: Value) -> Value {
 
 /// A bootstrap provider's flat configuration: the shared source settings
 /// beside the provider's own `source`, `stream` and `labels`.
+/// A provider as the graph creates it. A paired factory's provider is opened
+/// by the in-process SQL Server source factory's coordinator for `items`
+/// (stream `items/out`) from the source fields of `configuration`, bound to
+/// `owner`. The read-only snapshot serves `items` from the session.
+fn bootstrap_provider(
+    bootstrap: &computation::NativeBootstrapFactory,
+    query: ComponentId,
+    configuration: Value,
+    scope: drasi_computation_plugin_sdk::Scope,
+    owner: Option<Arc<QuerySourceProgress>>,
+) -> Result<Arc<computation::NativeBootstrapProxy>> {
+    if !bootstrap.requires_source_bootstrap() {
+        return bootstrap.create_provider(
+            query,
+            configuration,
+            Some(scope),
+            owner,
+            drasi_computation_plugin_sdk::BootstrapSession::new(
+                Some(drasi_computation_plugin_sdk::ServedSource {
+                    source: id("items"),
+                    stream: stream("items"),
+                }),
+                None,
+            ),
+        );
+    }
+    let owner = owner.context("a paired SQL Server provider requires its query's owner")?;
+    let mut source = configuration;
+    if let Some(object) = source.as_object_mut() {
+        object.remove("stopTimeoutMs");
+        object.remove("labels");
+        object.insert("stream".into(), json!(stream("items")));
+    }
+    let plugin =
+        computation::NativePlugin::from_definition(drasi_computation_source_mssql::plugin()?)?;
+    let coordinator = plugin.factories()[0].create_source_bootstrap(
+        id("items"),
+        source,
+        scope.clone(),
+        computation::NativeSourceBootstrapProgress::Shared(Arc::new(ConsumerProgressSet::new(
+            ComponentBatch::GRAPH_ID,
+            id("items"),
+            [owner.clone()],
+        )?)),
+    )?;
+    bootstrap.create_paired_query_provider(query, json!({}), scope, owner, coordinator, None)
+}
+
 fn provider_config(settings: &Value, own: Value) -> Value {
     let mut config = settings.clone();
     if let (Some(config), Some(own)) = (config.as_object_mut(), own.as_object()) {
@@ -235,17 +283,15 @@ async fn exercise(dynamic: bool) -> Result<()> {
     let mut queries = Vec::new();
     let mut results = Vec::new();
     for (index, name) in ["all", "high"].into_iter().enumerate() {
-        let bootstrap = bootstrap_factory.create_provider(
+        let bootstrap = crate::bootstrap_provider(
+            bootstrap_factory,
             id(name),
-            provider_config(
-                &db.settings(),
-                json!({"source":id("items").as_str(),"stream":stream("items"),"labels":["Items"]}),
-            ),
-            Some(drasi_computation_plugin_sdk::Scope {
+            provider_config(&db.settings(), json!({"labels":["Items"]})),
+            drasi_computation_plugin_sdk::Scope {
                 instance_id: "native-mssql".into(),
                 graph_id: ComponentBatch::GRAPH_ID.into(),
                 generation: 1,
-            }),
+            },
             Some(owners[index].clone()),
         )?;
         let query = ContinuousQueryTransformer::new_configured(
@@ -465,10 +511,17 @@ fn flat_configuration(dynamic: bool) -> Result<()> {
     );
     for bootstrap in plugins[1].bootstrap_factories() {
         let fields = &bootstrap.metadata().configuration.fields;
+        if bootstrap.requires_source_bootstrap() {
+            // The paired provider takes no configuration: the source owns
+            // its settings and barrier table.
+            ensure!(fields.is_empty(), "the paired provider takes no settings");
+            continue;
+        }
         ensure!(
             fields.iter().filter(|(_, field)| field.secret).count() == 1
                 && fields["password"].secret
-                && fields.contains_key("barrierTable"),
+                && !fields.contains_key("source")
+                && !fields.contains_key("stream"),
             "bootstrap settings are flat"
         );
     }

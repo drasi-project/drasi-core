@@ -242,7 +242,7 @@ fn metadata_is_valid() -> Result<()> {
 
 #[test]
 fn published_defaults_match_the_parsed_defaults() -> Result<()> {
-    let details = LogSinkFactory.configuration_details().context("details")?;
+    let details = LogSinkFactory.configuration_details();
     details.validate_schema(&LogSinkFactory.metadata().configuration)?;
     let defaults = serde_json::to_value(LogSinkConfig::default())?;
     for (name, field) in &details.fields {
@@ -438,7 +438,11 @@ fn changed_input_bindings_require_replacement() -> Result<()> {
     );
     request.current.inputs = inputs();
     request.proposed.inputs = two_inputs();
-    match LogSinkFactory.assess(&request)? {
+    match LogSinkFactory
+        .update_planner()
+        .expect("factory planner")
+        .assess(&request)?
+    {
         Assessment::Supported { boundary, .. } => assert_eq!(boundary, UpdateBoundary::Replace),
         other => anyhow::bail!("unexpected {other:?}"),
     }
@@ -618,7 +622,7 @@ fn complex_json_templates_render_valid_json() -> Result<()> {
         "items",
         json!({"defaultTemplate": templates(
             r#"{"event": "added", "id": "{{after.id}}", "data": {{json after}}}"#,
-            r#"{"event": "updated", "before": {{json before}}, "after": {{json after}}}"#,
+            r#"{"event": "updated", "before": {{#if before}}{{json before}}{{else}}null{{/if}}, "after": {{json after}}}"#,
             r#"{"event": "deleted", "id": "{{identity.id}}"}"#,
         )}),
     );
@@ -677,15 +681,22 @@ fn configuration_serialization_round_trips() -> Result<()> {
 // ------------------------------------------------------------ helpers (LG-01)
 
 #[test]
-fn json_helper_renders_compact_json_and_null_for_missing() -> Result<()> {
+fn json_helper_renders_compact_json_and_a_missing_value_fails() -> Result<()> {
     let config = aliased(
         "items",
-        json!({"defaultTemplate": {"added": {"template": "{{json after}}|{{json before}}|{{json (lookup after \"name\")}}"}}}),
+        json!({"defaultTemplate": {"added": {"template": "{{json after}}|{{json (lookup after \"name\")}}"}}}),
     );
     assert_eq!(
         messages(&sink(config)?, &insert(1)?)?,
-        [r#"{"id":"one","name":"Alice"}|null|"Alice""#]
+        [r#"{"id":"one","name":"Alice"}|"Alice""#]
     );
+    // Strict, as in every native sink: an absent image is a render failure,
+    // not `null`; under `strict` the failure is permanent.
+    let config = aliased(
+        "items",
+        json!({"defaultTemplate": {"added": {"template": "{{json before}}"}}, "renderFailurePolicy": "strict"}),
+    );
+    assert!(messages(&sink(config)?, &insert(1)?).is_err());
     Ok(())
 }
 

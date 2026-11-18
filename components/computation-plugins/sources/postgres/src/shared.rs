@@ -132,6 +132,15 @@ impl SharedBinding {
         Self::with_mode(source, reader, consumers, SharedMode::Rows)
     }
 
+    /// Whole commits whose consumer progress the bootstrap coordinator retains.
+    pub fn transactions_view(
+        source: &ComponentId,
+        reader: ConsumerProgressView,
+        consumers: &[ComponentId],
+    ) -> Result<Self> {
+        Self::with_mode(source, reader, consumers, SharedMode::Transactions)
+    }
+
     pub fn transactions(source: &ComponentId, progress: NativeConsumerProgress) -> Result<Self> {
         let mut binding = Self::with_mode(
             source,

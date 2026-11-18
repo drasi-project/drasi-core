@@ -16,9 +16,19 @@ what is different for sinks.
 | `start` | Observe `ctx.cancellation()` and `ctx.deadline()` across every connect, retry and readiness wait. A connection loop must not outlive the start budget. Prefer lazy connection: a destination that is down is a delivery failure, not a start failure, unless the configuration explicitly requires a connection at start. A cancelled start leaves nothing running and the object startable. |
 | `pause` | **Host-driven sinks** (no worker of their own: HTTP, gRPC, log) may succeed and need no gate. The host calls no `handle` while paused and lets the in-flight one settle before Pause returns. **Sinks with workers** (the SSE server, a profiler reporter, driver keepalives) must gate them with the SDK's `ActivationScope` and `PauseGate` (see the source guide), or return `lifecycle::unsupported(...)`. Never return success while a worker keeps serving or reporting. |
 | `resume` | Reopen exactly what Pause closed. |
-| `stop` | `Drain`: let the in-flight delivery or connection finish within `ctx.deadline()`, then close. `Abort`: cancel promptly. On expiry, return a retryable error and keep ownership (`join_owned_worker_gracefully` for servers). Never report an earlier delivery failure as a Stop failure. |
+| `stop` | `Drain`: let the in-flight delivery or connection finish within `ctx.deadline()`, then close. `Abort`: cancel promptly. On expiry, return a retryable error and keep ownership (`join_owned_worker_gracefully` for servers). Never report an earlier delivery failure, or a worker panic already reported through the SDK, as a Stop failure. |
 | `dispose` | Implement both intents. Under `Erase`, remove exactly the destination-side state the sink owns (cursor rows, sender ledgers), idempotently. A sink that owns nothing declares `erases_owned_state` with a documented no-op. |
 | `handle` / `handle_batch` | Return `Ok` only when the declared completion is met (see below). A failure must leave the sink able to retry the same input without Stop and Start; never latch an "interrupted" flag. A handler holds no state outside its future, because the host cancels an in-flight handle by dropping it. |
+
+## Declared services
+
+A sink declares its Host services once, in `Capabilities::services`:
+`consumer` (the `Consumer/External` or transactional profile below),
+`sink_batching` (Host-collected batches), `output_snapshot_reads` and
+`activation_credentials` (with `Factory::activation_credentials`). Every bound
+service reaches `Factory::create` together in `ServiceBindings`. A consumer
+cannot also declare Host-owned batching; any other combination may be
+declared and bound together.
 
 ## Delivery profile
 
@@ -102,6 +112,13 @@ unsettled permanent failure of an operation under `skip` (for example a
 destination cursor rejection), fails the node instead. A transactional
 consumer supports only `stall`.
 
+If the runner's own storage fails a commit (its outcome then unknown), the
+runner is fenced and the delivery fails transiently, so the graph keeps the
+input and retries it. Before that retry the host reopens the runner from
+storage, which reloads the committed ledger and resolves the uncertainty; the
+retry resumes at the completed prefix once storage works again, in the same
+activation. A delivery cancelled mid-batch still needs a restart.
+
 **Retries inside a sink.** A sink may make bounded fast retries of one request
 before it returns (`drasi_computation_network_common::retry`: exponential
 backoff with full jitter, `Retry-After`, a total budget `retryBudgetMs` that
@@ -114,6 +131,14 @@ producer's logical sequence and change ordinal, so retries, in-place retries
 and replays carry the same identity and a receiver can deduplicate. It
 contains no transport or configuration identity. A template that fails to
 render never falls back silently to another body.
+
+**Templates.** A sink that renders templates uses
+`drasi-computation-template-common` ([semantics](../common/template/README.md)),
+never its own Handlebars registry: `Templates` for text and
+`ParameterTemplate` for parameter-bound SQL, compiled in `initialize` or at
+construction, with the shared helper set, strict rendering, no escaping and the
+`change_context` of the change. Only routing and the response to a render
+failure belong to the sink.
 
 ## Operator output and diagnostics
 
@@ -139,6 +164,12 @@ security settings:
 - a connection cap, a subscriber cap and a header-read timeout;
 - optional TLS and mutual TLS;
 - a real pause gate.
+
+## Configuration
+
+As for sources: lowerCamelCase keys at every level, `deny_unknown_fields` on
+every nested type, published defaults equal to serde defaults, a schema
+generated from the parsed types, and top-level secrets.
 
 ## Management
 

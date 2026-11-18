@@ -226,7 +226,8 @@ mod models;
 mod time;
 
 // Webhook support modules
-pub use drasi_http_common::webhook::{auth, content_parser, route_matcher, template_engine};
+pub use drasi_http_common::webhook::{auth, route_matcher};
+pub use drasi_http_common::{content, template};
 
 // Export HTTP source models and conversion
 pub use models::{convert_http_to_source_change, HttpElement, HttpSourceChange};
@@ -262,9 +263,9 @@ use tracing::Instrument;
 use crate::adaptive_batcher::{AdaptiveBatchConfig, AdaptiveBatcher};
 use crate::auth::{verify_auth, AuthResult};
 use crate::config::{CorsConfig, ErrorBehavior, WebhookConfig};
-use crate::content_parser::{parse_content, ContentType};
+use crate::content::{parse_content, ContentType};
 use crate::route_matcher::{convert_method, find_matching_mappings, headers_to_map, RouteMatcher};
-use crate::template_engine::{TemplateContext, TemplateEngine};
+use crate::template::{TemplateEngine, WebhookContext};
 
 /// Response for event submission
 #[derive(Debug, Serialize, Deserialize)]
@@ -850,7 +851,7 @@ impl HttpSource {
         let headers_map = headers_to_map(&headers);
         let query_map = parse_query_string(uri.query());
 
-        let context = TemplateContext {
+        let context = WebhookContext {
             payload: payload.clone(),
             route: route_match.path_params,
             query: query_map,

@@ -27,6 +27,7 @@ use drasi_computation_storedproc_common::{
     driver::{Delivery, ErrorClass, Session},
     OperationContext, Position,
 };
+use drasi_computation_template_common::{BoundCommand, TemplateError};
 use drasi_postgres_common::delivery::progress::PgSession;
 use drasi_reaction_common::OperationType;
 use std::fmt;
@@ -36,7 +37,7 @@ use std::fmt;
 pub struct RenderError {
     alias: String,
     operation: OperationType,
-    source: anyhow::Error,
+    source: TemplateError,
 }
 
 impl RenderError {
@@ -45,7 +46,7 @@ impl RenderError {
         Self {
             alias: "people".into(),
             operation: OperationType::Add,
-            source: anyhow::anyhow!("missing field"),
+            source: TemplateError::Render("missing field".into()),
         }
     }
 }
@@ -54,7 +55,7 @@ impl fmt::Display for RenderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "the {:?} command template for output '{}' failed to render: {:#}",
+            "the {:?} command template for output '{}' failed to render: {}",
             self.operation, self.alias, self.source
         )
     }
@@ -62,7 +63,7 @@ impl fmt::Display for RenderError {
 
 impl std::error::Error for RenderError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.source.as_ref())
+        Some(&self.source)
     }
 }
 
@@ -82,7 +83,10 @@ fn render(
         );
         return Ok(None);
     };
-    let (command, parameters) = template
+    let BoundCommand {
+        sql: command,
+        parameters,
+    } = template
         .render(&input.context)
         .map_err(|source| RenderError {
             alias: input.alias.clone(),

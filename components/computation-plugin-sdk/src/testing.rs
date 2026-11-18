@@ -31,13 +31,27 @@ use crate::{
         ResumeContext, StartContext, StateIntent, StopContext, StopMode, UpdateBoundary,
     },
     ApplyUpdateRequest, Component, ConfigDetails, ControlSender, CreateRequest, Factory,
-    FactoryMetadata, NativeComponent, NativeSink, NativeSource, UpdateRequest,
+    FactoryMetadata, NativeComponent, NativeSink, NativeSource, ServiceBindings, UpdateRequest,
 };
 use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use drasi_computation_contracts::{ComponentId, InputBinding, InputEnvelope};
 use serde_json::Value;
 use std::time::Duration;
+
+/// Every published top-level configuration key is lowerCamelCase
+/// (`intervalMs`, `host`), the one key convention of native plugins.
+pub fn ensure_camel_case_configuration(schema: &crate::ConfigSchema) -> Result<()> {
+    for name in schema.fields.keys() {
+        let mut chars = name.chars();
+        ensure!(
+            chars.next().is_some_and(|first| first.is_ascii_lowercase())
+                && chars.all(|c| c.is_ascii_alphanumeric()),
+            "configuration key `{name}` is not lowerCamelCase"
+        );
+    }
+    Ok(())
+}
 
 /// Bound for each awaited step, so a hung component fails instead of hanging.
 pub const STEP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -148,13 +162,13 @@ impl ConformanceTarget for LinkedTarget<'_> {
         self.0.metadata()
     }
     fn configuration_details(&self) -> Option<ConfigDetails> {
-        self.0.configuration_details()
+        Some(self.0.configuration_details())
     }
     fn supports_update_planning(&self) -> bool {
-        self.0.supports_update_planning()
+        self.0.update_planner().is_some()
     }
     fn assess(&self, request: &UpdateRequest) -> Option<UpdateBoundary> {
-        match self.0.assess(request) {
+        match self.0.update_planner()?.assess(request) {
             Ok(Assessment::Supported { boundary, .. }) => Some(boundary),
             Ok(Assessment::Unsupported { .. }) | Err(_) => None,
         }
@@ -337,6 +351,7 @@ pub fn create_source(
         .create(
             &create_request(factory, id, configuration),
             ControlSender::default(),
+            ServiceBindings::none(),
         )?
         .component
     {
@@ -645,6 +660,7 @@ impl<'a, T: ConformanceTarget> SourceConformance<'a, T> {
             .configuration_details()
             .context("production sources publish configuration details")?;
         details.validate_schema(&metadata.configuration)?;
+        ensure_camel_case_configuration(&metadata.configuration)?;
         for configuration in configurations {
             let exposed = self.create(configuration.clone())?.configuration()?;
             ensure!(
@@ -727,9 +743,7 @@ impl<'a, T: ConformanceTarget> SourceConformance<'a, T> {
             UpdateBoundary::Replace => anyhow::bail!("Replace is not a retained-object update"),
         }
         let metadata = factory.metadata();
-        let details = factory
-            .configuration_details()
-            .context("configuration details")?;
+        let details = factory.configuration_details();
         let exposed = source.configuration()?;
         ensure!(
             details.equivalent_with_defaults(&metadata.configuration, &proposed, &exposed)?,
@@ -769,7 +783,7 @@ pub fn create_sink(
     let mut request = create_request(factory, id, configuration);
     request.inputs = inputs.to_vec();
     match factory
-        .create(&request, ControlSender::default())?
+        .create(&request, ControlSender::default(), ServiceBindings::none())?
         .component
     {
         Component::Sink(sink) => Ok(sink),
@@ -1073,6 +1087,7 @@ impl<'a, T: ConformanceTarget> SinkConformance<'a, T> {
             .configuration_details()
             .context("production sinks publish configuration details")?;
         details.validate_schema(&metadata.configuration)?;
+        ensure_camel_case_configuration(&metadata.configuration)?;
         for configuration in configurations {
             let exposed = self.create(configuration.clone())?.configuration()?;
             ensure!(
@@ -1156,9 +1171,7 @@ impl<'a, T: ConformanceTarget> SinkConformance<'a, T> {
             UpdateBoundary::Replace => anyhow::bail!("Replace is not a retained-object update"),
         }
         let metadata = factory.metadata();
-        let details = factory
-            .configuration_details()
-            .context("configuration details")?;
+        let details = factory.configuration_details();
         let exposed = sink.configuration()?;
         ensure!(
             details.equivalent_with_defaults(&metadata.configuration, &proposed, &exposed)?,
@@ -1167,5 +1180,25 @@ impl<'a, T: ConformanceTarget> SinkConformance<'a, T> {
         self.deliver(&mut sink, probe, 2, 2).await?;
         sink.stop(contexts::scope("stop"), StopMode::Drain).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod camel_case_tests {
+    use super::ensure_camel_case_configuration;
+    use crate::{ConfigSchema, ConfigType};
+
+    #[test]
+    fn only_lower_camel_case_keys_pass() {
+        let good = ConfigSchema::from_fields([
+            ("host", ConfigType::String, true),
+            ("intervalMs", ConfigType::Integer, false),
+            ("tlsCaPem", ConfigType::String, false),
+        ]);
+        assert!(ensure_camel_case_configuration(&good).is_ok());
+        for bad in ["interval_ms", "IntervalMs", "on-failure", "2fa"] {
+            let schema = ConfigSchema::from_fields([(bad, ConfigType::String, false)]);
+            assert!(ensure_camel_case_configuration(&schema).is_err(), "{bad}");
+        }
     }
 }

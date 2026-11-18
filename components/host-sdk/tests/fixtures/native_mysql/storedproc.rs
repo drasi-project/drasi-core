@@ -500,7 +500,11 @@ async fn plugin_retry_without_restart(database: &Database) -> Result<()> {
         update_directive: None,
     };
     let Component::Consumer(mut sink) = factory
-        .create(&request, ControlSender::default())?
+        .create(
+            &request,
+            ControlSender::default(),
+            drasi_computation_plugin_sdk::ServiceBindings::none(),
+        )?
         .component
     else {
         anyhow::bail!("expected the consumer");

@@ -11,7 +11,8 @@ use bytes::Bytes;
 use drasi_computation_plugin_abi::{self as abi, bootstrap::*};
 use drasi_computation_plugin_sdk::{
     bootstrap::{self as wire, BootstrapFactoryMetadata, StateBytes},
-    transport::{checked_table, take_status, OperationFuture, ReceivedBytes},
+    transport::{checked_table, take_reply, take_status, OperationFuture, ReceivedBytes},
+    BootstrapCreateRequest, BootstrapLabels, BootstrapOutputDescription, BootstrapSession,
     CreateRequest, Scope,
 };
 use drasi_lib::computation::v1::{
@@ -72,15 +73,17 @@ impl NativeBootstrapFactory {
     pub fn metadata(&self) -> &BootstrapFactoryMetadata {
         &self.metadata
     }
+    /// A paired factory's library must export source coordination, and only
+    /// a paired factory is created through it.
     pub(super) fn with_coordination(
         mut self,
         extension: Option<abi::bootstrap_coordination::PluginBootstrapCoordinationV1>,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
-            extension.is_none() || self.metadata.source_progress,
-            "paired native bootstrap must declare query source progress"
+            self.metadata.pairing.is_none() || extension.is_some(),
+            "paired native bootstrap factory requires its library's source coordination"
         );
-        self.coordination = extension;
+        self.coordination = extension.filter(|_| self.metadata.pairing.is_some());
         Ok(self)
     }
     pub(super) fn with_telemetry(
@@ -91,17 +94,47 @@ impl NativeBootstrapFactory {
         self
     }
 
+    /// Whether the factory's providers are opened from a paired source's
+    /// coordinator (declared by `BootstrapFactoryMetadata::pairing`).
     pub fn requires_source_bootstrap(&self) -> bool {
-        self.coordination.is_some()
+        self.metadata.pairing.is_some()
     }
+    /// The plugin's pure declaration of the provider's bootstrap output for
+    /// one configuration, forwarded unchanged to the graph.
+    pub fn describe(
+        &self,
+        configuration: &serde_json::Value,
+    ) -> anyhow::Result<BootstrapOutputDescription> {
+        self.metadata.configuration.validate(configuration)?;
+        let bytes = wire::encode(configuration)?;
+        let describe = self
+            .extension
+            .describe
+            .ok_or_else(|| anyhow::anyhow!("native bootstrap factory has no describer"))?;
+        let reply = unsafe {
+            take_reply(describe(
+                self.plugin.state(),
+                self.index,
+                abi::BorrowedBytes::new(&bytes),
+            ))?
+        };
+        let description: BootstrapOutputDescription = wire::decode(&reply)?;
+        self.metadata.validate_description(&description)?;
+        Ok(description)
+    }
+    /// Construct an unpaired provider outside the graph. `session` states
+    /// what the graph relation would: the served source and stream for a
+    /// provider declaring the served-source namespace, and the requesting
+    /// query's labels.
     pub fn create_provider(
         &self,
         id: ComponentId,
         configuration: serde_json::Value,
         scope: Option<Scope>,
         progress: Option<Arc<QuerySourceProgress>>,
+        session: BootstrapSession,
     ) -> anyhow::Result<Arc<NativeBootstrapProxy>> {
-        self.create_bound_provider(id, configuration, scope, progress, None, None)
+        self.create_bound_provider(id, configuration, scope, progress, None, None, session)
     }
     /// Construct a provider bound to the named component's actual host scope.
     pub fn create_query_provider(
@@ -110,10 +143,21 @@ impl NativeBootstrapFactory {
         configuration: serde_json::Value,
         scope: Scope,
         progress: Option<Arc<QuerySourceProgress>>,
+        session: BootstrapSession,
     ) -> anyhow::Result<Arc<NativeBootstrapProxy>> {
         let query_scope = Some((scope.clone(), id.clone()));
-        self.create_bound_provider(id, configuration, Some(scope), progress, query_scope, None)
+        self.create_bound_provider(
+            id,
+            configuration,
+            Some(scope),
+            progress,
+            query_scope,
+            None,
+            session,
+        )
     }
+    /// Construct a paired provider, opened from `source`'s coordinator, for
+    /// the query `id` reading `labels`.
     pub fn create_paired_query_provider(
         &self,
         id: ComponentId,
@@ -121,6 +165,7 @@ impl NativeBootstrapFactory {
         scope: Scope,
         progress: Arc<QuerySourceProgress>,
         source: Arc<super::NativeSourceBootstrapResource>,
+        labels: Option<BootstrapLabels>,
     ) -> anyhow::Result<Arc<NativeBootstrapProxy>> {
         let query_scope = Some((scope.clone(), id.clone()));
         self.create_bound_provider(
@@ -130,6 +175,7 @@ impl NativeBootstrapFactory {
             Some(progress),
             query_scope,
             Some(source),
+            BootstrapSession::new(None, labels),
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -141,7 +187,9 @@ impl NativeBootstrapFactory {
         progress: Option<Arc<QuerySourceProgress>>,
         query_scope: Option<(Scope, ComponentId)>,
         source: Option<Arc<super::NativeSourceBootstrapResource>>,
+        session: BootstrapSession,
     ) -> anyhow::Result<Arc<NativeBootstrapProxy>> {
+        session.validate()?;
         let request = CreateRequest {
             inputs: Vec::new(),
             activation_credentials_bound: false,
@@ -154,9 +202,17 @@ impl NativeBootstrapFactory {
         };
         self.metadata.validate_request(&request)?;
         anyhow::ensure!(
-            source.is_some() == self.coordination.is_some(),
+            source.is_some() == self.requires_source_bootstrap(),
             "native bootstrap source coordinator binding mismatch"
         );
+        if let (Some(source), Some(pairing)) = (&source, &self.metadata.pairing) {
+            anyhow::ensure!(
+                source.protocol() == pairing,
+                "paired bootstrap requires source coordination {pairing}, but source '{}' coordinates {}",
+                source.source(),
+                source.protocol()
+            );
+        }
         anyhow::ensure!(
             self.metadata.source_progress == progress.is_some(),
             "native bootstrap source progress binding mismatch"
@@ -176,7 +232,11 @@ impl NativeBootstrapFactory {
             .filter(|_| source.is_none())
             .map(ProgressBinding::new);
         let table = binding.as_ref().map(ProgressBinding::table);
-        let bytes = wire::encode(&request)?;
+        let labels = session.labels.clone();
+        let bytes = wire::encode(&BootstrapCreateRequest {
+            request: request.clone(),
+            session,
+        })?;
         let mut raw = BootstrapHandle::null();
         let pairing = source
             .as_ref()
@@ -185,6 +245,7 @@ impl NativeBootstrapFactory {
                     &request.id,
                     request.scope.as_ref().expect("paired scope"),
                     progress.as_ref().expect("paired progress"),
+                    labels.clone(),
                 )
             })
             .transpose()?;

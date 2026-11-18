@@ -3125,6 +3125,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "drasi-computation-middleware-common"
+version = "0.11.3"
+dependencies = [
+ "anyhow",
+ "drasi-computation-contracts",
+ "drasi-computation-plugin-sdk",
+ "drasi-core-types",
+ "drasi-middleware",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "drasi-computation-network-common"
 version = "0.11.3"
 dependencies = [
@@ -3149,6 +3162,7 @@ dependencies = [
  "serde",
  "serde_json",
  "subtle",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-rustls",
  "tokio-util",
@@ -3227,12 +3241,13 @@ dependencies = [
  "drasi-computation-contracts",
  "drasi-computation-network-common",
  "drasi-computation-plugin-sdk",
+ "drasi-computation-template-common",
  "drasi-core-types",
  "drasi-grpc-common",
  "drasi-reaction-common",
- "handlebars 5.1.2",
  "rcgen",
  "reqwest 0.12.28",
+ "rustls",
  "serde",
  "serde_json",
  "tokio",
@@ -3251,11 +3266,11 @@ dependencies = [
  "drasi-computation-contracts",
  "drasi-computation-network-common",
  "drasi-computation-plugin-sdk",
+ "drasi-computation-template-common",
  "drasi-core-types",
  "drasi-http-common",
  "drasi-lib",
  "futures-util",
- "handlebars 5.1.2",
  "rcgen",
  "reqwest 0.12.28",
  "serde",
@@ -3273,8 +3288,8 @@ dependencies = [
  "async-trait",
  "drasi-computation-contracts",
  "drasi-computation-plugin-sdk",
+ "drasi-computation-template-common",
  "drasi-core-types",
- "handlebars 5.1.2",
  "log",
  "serde",
  "serde_json",
@@ -3309,6 +3324,7 @@ dependencies = [
  "drasi-computation-contracts",
  "drasi-computation-network-common",
  "drasi-computation-plugin-sdk",
+ "drasi-computation-template-common",
  "drasi-core-types",
  "drasi-reaction-common",
  "futures-util",
@@ -3370,6 +3386,7 @@ dependencies = [
  "drasi-computation-contracts",
  "drasi-computation-plugin-sdk",
  "drasi-computation-storedproc-common",
+ "drasi-computation-template-common",
  "drasi-postgres-common",
  "drasi-reaction-common",
  "log",
@@ -3461,6 +3478,7 @@ version = "0.11.3"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bytes",
  "chrono",
  "drasi-computation-contracts",
  "drasi-computation-plugin-sdk",
@@ -3478,13 +3496,26 @@ version = "0.11.3"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bytes",
+ "drasi-computation-bootstrap-mysql",
  "drasi-computation-contracts",
  "drasi-computation-plugin-sdk",
+ "drasi-core",
  "drasi-core-types",
+ "drasi-host-sdk",
+ "drasi-index-rocksdb",
+ "drasi-lib",
  "drasi-mysql-common",
+ "drasi-reaction-application",
+ "futures-util",
  "log",
+ "mysql_common",
  "serde",
  "serde_json",
+ "shared-tests",
+ "tempfile",
+ "testcontainers",
+ "testcontainers-modules",
  "tokio",
 ]
 
@@ -3524,14 +3555,28 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
+ "drasi-computation-bootstrap-postgres",
  "drasi-computation-contracts",
  "drasi-computation-plugin-sdk",
+ "drasi-computation-sink-storedproc-postgres",
+ "drasi-core",
  "drasi-core-types",
+ "drasi-host-sdk",
+ "drasi-index-rocksdb",
+ "drasi-lib",
  "drasi-postgres-common",
+ "drasi-reaction-application",
+ "futures",
  "log",
+ "native-tls",
+ "rcgen",
  "serde",
  "serde_json",
+ "tempfile",
+ "testcontainers",
  "tokio",
+ "tokio-postgres",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -3574,6 +3619,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "drasi-computation-template-common"
+version = "0.11.3"
+dependencies = [
+ "drasi-computation-contracts",
+ "handlebars 5.1.2",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "drasi-computation-transformer-arithmetic"
 version = "0.11.3"
 dependencies = [
@@ -3608,12 +3663,13 @@ dependencies = [
  "anyhow",
  "async-trait",
  "drasi-computation-contracts",
+ "drasi-computation-middleware-common",
  "drasi-computation-plugin-sdk",
  "drasi-core-types",
- "drasi-middleware",
  "imbl",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -3675,9 +3731,9 @@ dependencies = [
  "async-trait",
  "chrono",
  "drasi-computation-contracts",
+ "drasi-computation-middleware-common",
  "drasi-computation-plugin-sdk",
  "drasi-core-types",
- "drasi-middleware",
  "imbl",
  "serde",
  "serde_json",
@@ -3896,7 +3952,6 @@ dependencies = [
  "drasi-reaction-common",
  "drasi-source-mapping",
  "handlebars 5.1.2",
- "handlebars 6.4.4",
  "hex",
  "hmac 0.12.1",
  "log",
@@ -3910,6 +3965,7 @@ dependencies = [
  "sha1",
  "sha2 0.10.9",
  "subtle",
+ "thiserror 2.0.20",
  "tokio",
  "tower-http 0.5.2",
  "url",
@@ -4161,6 +4217,8 @@ dependencies = [
  "bytes",
  "chrono",
  "drasi-computation-contracts",
+ "drasi-computation-plugin-sdk",
+ "drasi-computation-template-common",
  "drasi-core-types",
  "drasi-reaction-common",
  "futures-util",
@@ -4188,7 +4246,9 @@ dependencies = [
  "bytes",
  "chrono",
  "drasi-computation-contracts",
+ "drasi-computation-plugin-sdk",
  "drasi-computation-storedproc-common",
+ "drasi-computation-template-common",
  "drasi-core-types",
  "drasi-reaction-common",
  "encoding_rs",
@@ -4286,6 +4346,7 @@ dependencies = [
  "bytes",
  "chrono",
  "drasi-computation-contracts",
+ "drasi-computation-plugin-sdk",
  "drasi-computation-storedproc-common",
  "drasi-core-types",
  "drasi-reaction-common",
@@ -5505,12 +5566,7 @@ dependencies = [
  "bytes",
  "chrono",
  "drasi-bootstrap-postgres",
- "drasi-computation-bootstrap-postgres",
- "drasi-computation-plugin-sdk",
- "drasi-computation-sink-storedproc-postgres",
- "drasi-computation-source-postgres",
  "drasi-core",
- "drasi-host-sdk",
  "drasi-index-rocksdb",
  "drasi-lib",
  "drasi-plugin-sdk",
@@ -5529,7 +5585,6 @@ dependencies = [
  "postgres-types",
  "prost-types 0.12.6",
  "rand 0.8.8",
- "rcgen",
  "rust_decimal",
  "serde",
  "serde_json",

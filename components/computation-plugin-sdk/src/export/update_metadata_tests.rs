@@ -177,6 +177,18 @@ impl QueryViewProvider for QueryReader {
 struct QueryFactory(Mutation);
 
 impl Factory for QueryFactory {
+    fn configuration_details(&self) -> crate::ConfigDetails {
+        crate::ConfigDetails {
+            fields: [(
+                "outbox_capacity".to_string(),
+                crate::configuration::ConfigFieldDetails {
+                    description: "Retained output capacity.".into(),
+                    ..Default::default()
+                },
+            )]
+            .into(),
+        }
+    }
     fn describe(
         &self,
         _request: &crate::wire::DescribeRequest,
@@ -216,16 +228,12 @@ impl Factory for QueryFactory {
             },
         }
     }
-    fn supports_update_planning(&self) -> bool {
-        true
-    }
-    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
-        assess_capacity(request)
-    }
+
     fn create(
         &self,
         request: &CreateRequest,
         _: ControlSender,
+        _services: ServiceBindings,
     ) -> anyhow::Result<CreatedComponent> {
         Ok(Component::Transformer(Box::new(QueryComponent {
             descriptor: self.metadata().descriptor(request.id.clone())?,
@@ -234,6 +242,15 @@ impl Factory for QueryFactory {
             mutation: self.0,
         }))
         .into())
+    }
+    fn update_planner(&self) -> Option<&dyn crate::UpdatePlanner> {
+        Some(self)
+    }
+}
+
+impl crate::UpdatePlanner for QueryFactory {
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
+        assess_capacity(request)
     }
 }
 
@@ -370,6 +387,7 @@ impl Fixture {
             transport::take_status((*factory.vtable).create.unwrap()(
                 factory.state,
                 BorrowedBytes::new(&bytes),
+                &abi::services::ServiceBindingsV1::none(),
                 &mut component,
             ))?;
         }

@@ -77,7 +77,11 @@ fn metadata_is_valid() -> Result<()> {
     }
     let consumer = HttpDeliveryFactory.metadata();
     assert_eq!(
-        HttpDeliveryFactory.consumer_mode(),
+        HttpDeliveryFactory
+            .metadata()
+            .capabilities
+            .services
+            .consumer,
         Some(ConsumerMode::External)
     );
     ConsumerMode::External.validate_factory(&consumer)?;
@@ -174,8 +178,8 @@ fn configuration_round_trips() -> Result<()> {
             "headers": {"x-tenant": "t"}, "successStatusCodes": [200, 202],
             "retryBudgetMs": 1000, "maxRetries": 0, "onPermanentFailure": "skip"}),
         json!({"baseUrl": "http://127.0.0.1:9", "batchEndpoint": "/batch",
-            "adaptive": {"adaptiveMinBatchSize": 1, "adaptiveMaxBatchSize": 10,
-                "adaptiveWindowSize": 10, "adaptiveBatchTimeoutMs": 50}}),
+            "adaptive": {"minBatchSize": 1, "maxBatchSize": 10, "minWaitMs": 1,
+                "maxWaitMs": 50, "windowMs": 1000}}),
         json!({"baseUrl": "http://127.0.0.1:9", "outputs": {"q": {"component": OUTPUT_ID, "port": "out"}},
             "outputTemplates": {"routes": {"q": {"added": {"method": "PUT", "url": "/rooms/{{identity.id}}",
                 "template": "{{json after}}", "headers": {"x-op": "{{operation}}"}}}}}}),
@@ -191,7 +195,7 @@ fn assessment_matrix() -> Result<()> {
     let current = json!({"url": "http://127.0.0.1:9/events"});
     let case = |extra: Value| with(current.clone(), extra);
     let adaptive = json!({"baseUrl": "http://127.0.0.1:9", "batchEndpoint": "/batch",
-        "adaptive": {"adaptiveMaxBatchSize": 10}});
+        "adaptive": {"maxBatchSize": 10}});
     conformance().assess_matrix(
         &current,
         &[
@@ -204,6 +208,7 @@ fn assessment_matrix() -> Result<()> {
             (case(json!({"retryBudgetMs": 10})), Some(UpdateBoundary::Pause)),
             (case(json!({"onPermanentFailure": "skip"})), Some(UpdateBoundary::Replace)),
             (case(json!({"successStatusCodes": [202]})), Some(UpdateBoundary::Pause)),
+            (case(json!({"unroutedChanges": "ignore"})), Some(UpdateBoundary::Pause)),
             (case(json!({"maxRequestBytes": 10})), Some(UpdateBoundary::Pause)),
             (
                 case(json!({"outputTemplates": {"defaultTemplate": {"added": {"template": "{{json after}}"}}}})),
@@ -214,8 +219,8 @@ fn assessment_matrix() -> Result<()> {
             (case(json!({"tlsCaPem": ca.0.pem()})), Some(UpdateBoundary::Stop)),
             (case(json!({"connectTimeoutMs": 5})), Some(UpdateBoundary::Stop)),
             (case(json!({"poolMaxIdlePerHost": 1})), Some(UpdateBoundary::Stop)),
-            (case(json!({"maxBatchBytes": 1024})), Some(UpdateBoundary::Stop)),
-            (adaptive, Some(UpdateBoundary::Stop)),
+            (case(json!({"maxBatchBytes": 1024})), Some(UpdateBoundary::Pause)),
+            (adaptive.clone(), Some(UpdateBoundary::Stop)),
             (
                 case(json!({"outputs": {"q": {"component": OUTPUT_ID}}})),
                 Some(UpdateBoundary::Replace),
@@ -224,6 +229,26 @@ fn assessment_matrix() -> Result<()> {
             (case(json!({"headers": {"x-drasi-port": "x"}})), None),
             (
                 case(json!({"outputs": {"q": {"component": SINK_ID}}})),
+                None,
+            ),
+        ],
+    )?;
+    // Adaptive bounds are read by the host before every collection.
+    let batched = |extra: Value| with(adaptive.clone(), extra);
+    conformance().assess_matrix(
+        &adaptive,
+        &[
+            (
+                batched(json!({"adaptive": {"maxBatchSize": 20, "maxWaitMs": 5}})),
+                Some(UpdateBoundary::Pause),
+            ),
+            (
+                batched(json!({"maxBatchBytes": 2048})),
+                Some(UpdateBoundary::Pause),
+            ),
+            (batched(json!({"adaptive": {"maxBatchSize": 70000}})), None),
+            (
+                batched(json!({"adaptive": {"adaptiveMaxBatchSize": 5}})),
                 None,
             ),
         ],
@@ -239,7 +264,10 @@ fn changed_input_bindings_replace_the_sink() -> Result<()> {
     let mut moved = inputs();
     moved[0].stream = StreamId::try_new("q/other")?;
     request.proposed.inputs = moved;
-    let assessment = HttpSinkFactory.assess(&request)?;
+    let assessment = HttpSinkFactory
+        .update_planner()
+        .expect("factory planner")
+        .assess(&request)?;
     assert_eq!(
         assessment
             .plan()
@@ -549,6 +577,34 @@ async fn render_failures_follow_on_permanent_failure() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn unrouted_changes_are_sent_by_default_or_ignored() -> Result<()> {
+    let server = Server::start().await?;
+    let templates = json!({"defaultTemplate": {"added": {"url": "/added"}}});
+    let changes = [insert("r1", "one"), delete("r1")];
+    let mut send =
+        started(json!({"baseUrl": server.url(""), "outputTemplates": templates})).await?;
+    send.handle(envelope(1, &changes)?).await?;
+    let requests = server.state.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].path, "/added");
+    assert!(
+        requests[1].path.starts_with("/changes/"),
+        "{}",
+        requests[1].path
+    );
+    let mut ignore = started(
+        json!({"baseUrl": server.url(""), "outputTemplates": templates,
+        "unroutedChanges": "ignore"}),
+    )
+    .await?;
+    ignore.handle(envelope(2, &changes)?).await?;
+    let requests = server.state.requests();
+    assert_eq!(requests.len(), 3, "only the add was delivered");
+    assert_eq!(requests[2].path, "/added");
+    Ok(())
+}
+
 fn permanent(error: &anyhow::Error) -> bool {
     drasi_computation_contracts::delivery_failure_class(error)
         .is_some_and(|class| class.is_permanent())
@@ -557,7 +613,7 @@ fn permanent(error: &anyhow::Error) -> bool {
 fn batch_config(server: &Server, extra: Value) -> Value {
     with(
         json!({"baseUrl": server.url(""), "batchEndpoint": "/batch",
-            "adaptive": {"adaptiveMinBatchSize": 1, "adaptiveMaxBatchSize": 100, "adaptiveBatchTimeoutMs": 10}}),
+            "adaptive": {"minBatchSize": 1, "maxBatchSize": 100, "maxWaitMs": 10}}),
         extra,
     )
 }

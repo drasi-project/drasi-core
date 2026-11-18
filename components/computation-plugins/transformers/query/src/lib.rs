@@ -30,9 +30,11 @@ use drasi_computation_plugin_sdk::{
         nothing_to_do, ApplyContext, ApplyError, Assessment, DisposeContext, InitializeContext,
         LifecycleResult, PauseContext, ResumeContext, StartContext, StopContext,
     },
-    ApplyUpdateRequest, Capabilities, Component, ConfigSchema, ConfigType, ControlSender,
-    CreateRequest, CreatedComponent, Factory, FactoryMetadata, NativeComponent, NativeManagement,
-    NativeOutputSnapshots, NativeProcessing, NativeTransformer, PluginDefinition, UpdateRequest,
+    ApplyUpdateRequest, BootstrapInput, Capabilities, Component, ConfigDetails, ConfigSchema,
+    ConfigType, ControlSender, CreateRequest, CreatedComponent, Factory, FactoryMetadata,
+    NativeBootstrapInput, NativeComponent, NativeDurableBootstrapInput, NativeDurableOutput,
+    NativeInputBindings, NativeManagement, NativeOutputSnapshots, NativeProcessing,
+    NativeTransformer, PluginDefinition, ServiceBindings, UpdateRequest,
 };
 use drasi_core::{
     computation::QueryInputBatch, middleware::MiddlewareTypeRegistry, query::QueryEvaluator,
@@ -70,8 +72,11 @@ pub fn plugin_with_middleware_registry(
 #[cfg(feature = "dynamic-plugin")]
 drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
 
+/// The `middleware` field declares the registry's kinds, so the graph rejects a
+/// definition naming an unregistered kind when it binds the query.
 fn query_configuration_schema(
     fields: impl IntoIterator<Item = (&'static str, ConfigType, bool)>,
+    middleware: &MiddlewareTypeRegistry,
 ) -> ConfigSchema {
     let mut schema = ConfigSchema::from_fields(fields);
     schema
@@ -81,6 +86,35 @@ fn query_configuration_schema(
         )
         .expect("query schema declares inputs");
     schema
+        .constrain(
+            "middleware",
+            drasi_computation_contracts::ConfigurationConstraint::middleware_declarations(
+                &middleware.kinds(),
+            )
+            .expect("middleware kinds are valid schema values"),
+        )
+        .expect("query schema declares middleware");
+    schema
+}
+
+/// `sourceTransactions`: the camelCase form of the shared
+/// [`drasi_computation_contracts::SourceTransactionLimits`].
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SourceTransactionSettings {
+    max_changes: NonZeroUsize,
+    max_bytes: NonZeroUsize,
+    max_duration_ms: std::num::NonZeroU64,
+}
+
+impl From<SourceTransactionSettings> for drasi_computation_contracts::SourceTransactionLimits {
+    fn from(settings: SourceTransactionSettings) -> Self {
+        Self {
+            max_changes: settings.max_changes,
+            max_bytes: settings.max_bytes,
+            max_duration_ms: settings.max_duration_ms,
+        }
+    }
 }
 
 pub struct IndexedQueryFactory {
@@ -99,11 +133,62 @@ impl Default for IndexedQueryFactory {
     }
 }
 
+/// Descriptions of every indexed-query configuration field.
+fn query_configuration_details() -> ConfigDetails {
+    let describe =
+        |description: &str| drasi_computation_plugin_sdk::configuration::ConfigFieldDetails {
+            description: description.into(),
+            ..Default::default()
+        };
+    ConfigDetails {
+        fields: [
+            ("query", describe("The continuous query text.")),
+            (
+                "volatile",
+                describe("Use the explicitly volatile processing profile (in-memory providers)."),
+            ),
+            (
+                "publication",
+                describe("Output publication: atomic (default) or explicit non-atomic."),
+            ),
+            ("language", describe("Query language: cypher (default) or gql.")),
+            ("joins", describe("Synthetic joins between input labels.")),
+            ("inputs", describe("The query's declared inputs and their labels.")),
+            ("middleware", describe("Input-local middleware applied before evaluation.")),
+            ("result", describe("Result dataset settings, such as its label.")),
+            ("stream", describe("Output stream; defaults to <component>/out.")),
+            (
+                "outboxCapacity",
+                describe("Retained output capacity; a positive count, one by default."),
+            ),
+            (
+                "bootstrap",
+                describe("Initialize from the provider bound on the bootstrap input."),
+            ),
+            (
+                "sourceTransactions",
+                describe("Limits for complete source transactions (maxChanges, maxBytes, maxDurationMs)."),
+            ),
+            ("recovery", describe("Recovery policy: strict (default) or auto_reset.")),
+            (
+                "resetConfiguration",
+                describe("Request a reset of retained state for a changed configuration."),
+            ),
+        ]
+        .into_iter()
+        .map(|(name, details)| (name.to_string(), details))
+        .collect(),
+    }
+}
+
 impl Factory for IndexedQueryFactory {
     fn supports_query_instrumentation(&self) -> bool {
         true
     }
 
+    fn configuration_details(&self) -> ConfigDetails {
+        query_configuration_details()
+    }
     /// Outputs follow the durability the Host's bound processing provider declares.
     fn describe(
         &self,
@@ -133,22 +218,25 @@ impl Factory for IndexedQueryFactory {
                 .expect("constant implementation"),
             role: ComponentRole::Transformer,
             configuration_version: 1,
-            configuration: query_configuration_schema([
-                ("query", ConfigType::String, true),
-                ("volatile", ConfigType::Boolean, false),
-                ("publication", ConfigType::String, false),
-                ("language", ConfigType::String, false),
-                ("joins", ConfigType::Array, false),
-                ("inputs", ConfigType::Array, false),
-                ("middleware", ConfigType::Array, false),
-                ("result", ConfigType::Object, false),
-                ("stream", ConfigType::String, false),
-                ("outbox_capacity", ConfigType::Integer, false),
-                ("bootstrap", ConfigType::Boolean, false),
-                ("source_transactions", ConfigType::Object, false),
-                ("recovery", ConfigType::String, false),
-                ("reset_configuration", ConfigType::Boolean, false),
-            ]),
+            configuration: query_configuration_schema(
+                [
+                    ("query", ConfigType::String, true),
+                    ("volatile", ConfigType::Boolean, false),
+                    ("publication", ConfigType::String, false),
+                    ("language", ConfigType::String, false),
+                    ("joins", ConfigType::Array, false),
+                    ("inputs", ConfigType::Array, false),
+                    ("middleware", ConfigType::Array, false),
+                    ("result", ConfigType::Object, false),
+                    ("stream", ConfigType::String, false),
+                    ("outboxCapacity", ConfigType::Integer, false),
+                    ("bootstrap", ConfigType::Boolean, false),
+                    ("sourceTransactions", ConfigType::Object, false),
+                    ("recovery", ConfigType::String, false),
+                    ("resetConfiguration", ConfigType::Boolean, false),
+                ],
+                &self.middleware,
+            ),
             ports: [("in", PortDirection::Input), ("out", PortDirection::Output)]
                 .into_iter()
                 .map(|(name, direction)| {
@@ -188,30 +276,29 @@ impl Factory for IndexedQueryFactory {
         }
     }
 
-    fn supports_update_planning(&self) -> bool {
-        true
-    }
-
-    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
-        update::plan(request, &self.middleware, &self.metadata()).map(Assessment::from)
-    }
-
-    fn create(&self, _: &CreateRequest, _: ControlSender) -> anyhow::Result<CreatedComponent> {
-        anyhow::bail!("indexed query requires host-owned indexed processing")
-    }
-
-    fn create_with_processing(
+    fn create(
         &self,
         request: &CreateRequest,
         _: ControlSender,
-        processing: NativeProcessing,
+        services: ServiceBindings,
     ) -> anyhow::Result<CreatedComponent> {
         create_query(
             request,
             self.metadata(),
-            processing,
+            services.processing.ok_or_else(|| {
+                anyhow::anyhow!("indexed query requires host-owned indexed processing")
+            })?,
             self.middleware.clone(),
         )
+    }
+    fn update_planner(&self) -> Option<&dyn drasi_computation_plugin_sdk::UpdatePlanner> {
+        Some(self)
+    }
+}
+
+impl drasi_computation_plugin_sdk::UpdatePlanner for IndexedQueryFactory {
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
+        update::plan(request, &self.middleware, &self.metadata()).map(Assessment::from)
     }
 }
 
@@ -228,25 +315,26 @@ fn query_configuration(
         Some(serde_json::Value::String(language)) if language == "gql" => QueryLanguage::Gql,
         Some(_) => anyhow::bail!("query language must be 'cypher' or 'gql'"),
     };
-    let execution: QueryExecutionSettings = serde_json::from_value(serde_json::Value::Object(
-        [
-            "joins",
-            "result",
-            "source_transactions",
-            "inputs",
-            "middleware",
-        ]
-        .into_iter()
-        .filter_map(|name| {
-            request
-                .configuration
-                .get(name)
-                .cloned()
-                .map(|value| (name.into(), value))
-        })
-        .collect(),
+    let mut execution: QueryExecutionSettings = serde_json::from_value(serde_json::Value::Object(
+        ["joins", "result", "inputs", "middleware"]
+            .into_iter()
+            .filter_map(|name| {
+                request
+                    .configuration
+                    .get(name)
+                    .cloned()
+                    .map(|value| (name.into(), value))
+            })
+            .collect(),
     ))
     .context("invalid query execution settings")?;
+    execution.source_transactions = request
+        .configuration
+        .get("sourceTransactions")
+        .map(|value| serde_json::from_value::<SourceTransactionSettings>(value.clone()))
+        .transpose()
+        .context("invalid sourceTransactions")?
+        .map(Into::into);
     execution.validate(Some(middleware))?;
     let id = request.id.clone();
     let stream = match request.configuration.get("stream") {
@@ -255,7 +343,7 @@ fn query_configuration(
     };
     let capacity = request
         .configuration
-        .get("outbox_capacity")
+        .get("outboxCapacity")
         .map(|value| serde_json::from_value::<NonZeroUsize>(value.clone()))
         .transpose()
         .context("invalid query output retention capacity")?
@@ -415,28 +503,6 @@ impl NativeComponent for QueryTransformer {
         Some(self)
     }
 
-    fn supports_input_binding_updates(&self) -> bool {
-        true
-    }
-
-    async fn bind_inputs(&mut self, bindings: &[InputBinding]) -> anyhow::Result<()> {
-        self.input_scopes = if self
-            .execution
-            .inputs
-            .iter()
-            .any(|input| !input.pipeline.is_empty())
-        {
-            Some(drasi_query_common::query_input_scopes(
-                &self.definition.id,
-                &self.execution.inputs,
-                bindings,
-            )?)
-        } else {
-            None
-        };
-        Ok(())
-    }
-
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -492,6 +558,9 @@ impl NativeComponent for QueryTransformer {
             self.erase_owned_state().await?;
         }
         Ok(())
+    }
+    fn input_bindings(&mut self) -> Option<&mut dyn NativeInputBindings> {
+        Some(self)
     }
 }
 
@@ -626,14 +695,6 @@ impl QueryTransformer {
 
 #[async_trait]
 impl NativeTransformer for QueryTransformer {
-    fn resume_delivery(&mut self) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            self.started && !self.failed,
-            "query is not ready for delivery resumption"
-        );
-        self.durable.resume_delivery();
-        Ok(())
-    }
     fn has_pending_emissions(&self) -> bool {
         self.draining_futures || self.durable.has_pending_emissions()
     }
@@ -674,117 +735,6 @@ impl NativeTransformer for QueryTransformer {
                     .with_execution_context(self.processing_context.clone())
             })
             .collect())
-    }
-
-    async fn delivery_completed(&mut self, outputs: &[OutputEnvelope]) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            self.started && !self.failed,
-            "query is not ready for confirmation"
-        );
-        self.failed = true;
-        self.telemetry
-            .transaction(
-                QueryObservationPhase::Steady,
-                self.durable.delivery_completed(&self.processing, outputs),
-            )
-            .await?;
-        self.failed = false;
-        Ok(())
-    }
-
-    fn durable_bootstrap_input(&self) -> Option<PortId> {
-        Some(PortId::try_new("in").expect("constant port"))
-    }
-
-    fn bootstrap_status(&self) -> anyhow::Result<BootstrapStatus> {
-        Ok(self.durable.bootstrap_status())
-    }
-
-    async fn reset_bootstrap(&mut self) -> anyhow::Result<()> {
-        anyhow::ensure!(!self.failed, "query initialization is fenced");
-        self.failed = true;
-        self.durable
-            .start(
-                &self.processing,
-                self.definition.clone(),
-                self.execution.clone(),
-                self.middleware.clone(),
-                true,
-            )
-            .await?;
-        self.failed = false;
-        Ok(())
-    }
-
-    async fn bootstrap(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
-        let telemetry = self.telemetry.clone();
-        let run = self
-            .bootstrap_run
-            .get_or_insert_with(|| telemetry.run(QueryObservationPhase::Bootstrap))
-            .clone();
-        run.start(QueryObservationKind::Bootstrap)?;
-        let result = run
-            .scope(async {
-                anyhow::ensure!(!self.failed, "query initialization is fenced");
-                anyhow::ensure!(input.port.as_str() == "in", "invalid query bootstrap input");
-                let scope = self.input_scopes.as_ref().and_then(|scopes| {
-                    scopes
-                        .get(&(input.port.clone(), input.envelope.system().stream().clone()))
-                        .cloned()
-                });
-                self.failed = true;
-                self.durable
-                    .bootstrap(
-                        &self.processing,
-                        self.definition.clone(),
-                        self.projector.clone(),
-                        input,
-                        scope,
-                    )
-                    .await?;
-                self.failed = false;
-                Ok(())
-            })
-            .await;
-        if result.is_err() {
-            run.finish(QueryObservationOutcome::Error, None)?;
-            self.bootstrap_run.take();
-        }
-        result
-    }
-
-    async fn bootstrap_completed(&mut self, completion: BootstrapCompletion) -> anyhow::Result<()> {
-        let telemetry = self.telemetry.clone();
-        let needs_initialization = !self.durable.bootstrap_status().complete;
-        let run = self
-            .bootstrap_run
-            .get_or_insert_with(|| telemetry.run(QueryObservationPhase::Bootstrap))
-            .clone();
-        if needs_initialization {
-            run.start(QueryObservationKind::Bootstrap)?;
-        }
-        let result = run
-            .scope(async {
-                anyhow::ensure!(!self.failed, "query initialization is fenced");
-                self.failed = true;
-                self.durable
-                    .complete_bootstrap(&self.processing, completion)
-                    .await?;
-                self.started = true;
-                self.failed = false;
-                Ok(())
-            })
-            .await;
-        run.finish(
-            if result.is_ok() {
-                QueryObservationOutcome::Success
-            } else {
-                QueryObservationOutcome::Error
-            },
-            None,
-        )?;
-        self.bootstrap_run.take();
-        result
     }
 
     async fn transform(&mut self, input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
@@ -902,5 +852,193 @@ impl NativeTransformer for QueryTransformer {
             .into_iter()
             .map(|output| output.with_execution_context(self.processing_context.clone()))
             .collect())
+    }
+    fn bootstrap_input(&mut self) -> Option<BootstrapInput<'_>> {
+        Some(BootstrapInput::Durable(self))
+    }
+
+    fn durable_output(&mut self) -> Option<&mut dyn NativeDurableOutput> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl NativeInputBindings for QueryTransformer {
+    async fn bind_inputs(&mut self, bindings: &[InputBinding]) -> anyhow::Result<()> {
+        self.input_scopes = if self
+            .execution
+            .inputs
+            .iter()
+            .any(|input| !input.pipeline.is_empty())
+        {
+            Some(drasi_query_common::query_input_scopes(
+                &self.definition.id,
+                &self.execution.inputs,
+                bindings,
+            )?)
+        } else {
+            None
+        };
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl NativeDurableOutput for QueryTransformer {
+    async fn delivery_completed(&mut self, outputs: &[OutputEnvelope]) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.started && !self.failed,
+            "query is not ready for confirmation"
+        );
+        self.failed = true;
+        self.telemetry
+            .transaction(
+                QueryObservationPhase::Steady,
+                self.durable.delivery_completed(&self.processing, outputs),
+            )
+            .await?;
+        self.failed = false;
+        Ok(())
+    }
+
+    fn resume_delivery(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.started && !self.failed,
+            "query is not ready for delivery resumption"
+        );
+        self.durable.resume_delivery();
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl NativeBootstrapInput for QueryTransformer {
+    fn bootstrap_status(&self) -> anyhow::Result<BootstrapStatus> {
+        Ok(self.durable.bootstrap_status())
+    }
+
+    async fn bootstrap(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
+        let telemetry = self.telemetry.clone();
+        let run = self
+            .bootstrap_run
+            .get_or_insert_with(|| telemetry.run(QueryObservationPhase::Bootstrap))
+            .clone();
+        run.start(QueryObservationKind::Bootstrap)?;
+        let result = run
+            .scope(async {
+                anyhow::ensure!(!self.failed, "query initialization is fenced");
+                anyhow::ensure!(input.port.as_str() == "in", "invalid query bootstrap input");
+                let scope = self.input_scopes.as_ref().and_then(|scopes| {
+                    scopes
+                        .get(&(input.port.clone(), input.envelope.system().stream().clone()))
+                        .cloned()
+                });
+                self.failed = true;
+                self.durable
+                    .bootstrap(
+                        &self.processing,
+                        self.definition.clone(),
+                        self.projector.clone(),
+                        input,
+                        scope,
+                    )
+                    .await?;
+                self.failed = false;
+                Ok(())
+            })
+            .await;
+        if result.is_err() {
+            run.finish(QueryObservationOutcome::Error, None)?;
+            self.bootstrap_run.take();
+        }
+        result
+    }
+
+    async fn bootstrap_completed(&mut self, completion: BootstrapCompletion) -> anyhow::Result<()> {
+        let telemetry = self.telemetry.clone();
+        let needs_initialization = !self.durable.bootstrap_status().complete;
+        let run = self
+            .bootstrap_run
+            .get_or_insert_with(|| telemetry.run(QueryObservationPhase::Bootstrap))
+            .clone();
+        if needs_initialization {
+            run.start(QueryObservationKind::Bootstrap)?;
+        }
+        let result = run
+            .scope(async {
+                anyhow::ensure!(!self.failed, "query initialization is fenced");
+                self.failed = true;
+                self.durable
+                    .complete_bootstrap(&self.processing, completion)
+                    .await?;
+                self.started = true;
+                self.failed = false;
+                Ok(())
+            })
+            .await;
+        run.finish(
+            if result.is_ok() {
+                QueryObservationOutcome::Success
+            } else {
+                QueryObservationOutcome::Error
+            },
+            None,
+        )?;
+        self.bootstrap_run.take();
+        result
+    }
+}
+
+#[async_trait]
+impl NativeDurableBootstrapInput for QueryTransformer {
+    async fn reset_bootstrap(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.failed, "query initialization is fenced");
+        self.failed = true;
+        self.durable
+            .start(
+                &self.processing,
+                self.definition.clone(),
+                self.execution.clone(),
+                self.middleware.clone(),
+                true,
+            )
+            .await?;
+        self.failed = false;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod declared_middleware_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn configuration(kind: &str) -> serde_json::Value {
+        json!({"query": "MATCH (n) RETURN n",
+               "middleware": [{"name": "m", "kind": kind, "config": {}}]})
+    }
+
+    #[test]
+    fn the_factory_declares_exactly_the_registered_middleware_kinds() {
+        let factory = IndexedQueryFactory::default();
+        let schema = factory.metadata().configuration;
+        for kind in default_middleware_registry().kinds() {
+            assert!(schema.validate(&configuration(kind)).is_ok(), "{kind}");
+        }
+        assert!(schema.validate(&configuration("unregistered")).is_err());
+        assert!(schema
+            .validate(&json!({"query": "MATCH (n) RETURN n",
+                              "middleware": [{"name": "m", "kind": "map"}]}))
+            .is_err());
+
+        let mut registry = MiddlewareTypeRegistry::new();
+        registry.register(Arc::new(
+            drasi_middleware::relabel::RelabelMiddlewareFactory::new(),
+        ));
+        let narrowed = IndexedQueryFactory::new(Arc::new(registry))
+            .metadata()
+            .configuration;
+        assert!(narrowed.validate(&configuration("relabel")).is_ok());
+        assert!(narrowed.validate(&configuration("map")).is_err());
     }
 }

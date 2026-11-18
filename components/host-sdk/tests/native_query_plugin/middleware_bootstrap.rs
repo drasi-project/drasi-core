@@ -57,8 +57,7 @@ async fn transformed_bootstrap() -> Result<()> {
         generation: 1,
     };
     let bootstrap_plugin = computation::load(bootstrap_library())?;
-    let mut bootstrap_configuration = provider_configuration(&database);
-    bootstrap_configuration["source"] = json!("a112a85e-ae22-5dd7-a624-6080d73fbb5e");
+    let bootstrap_configuration = provider_configuration(&database);
     let bootstrap = bootstrap_plugin
         .bootstrap_factories()
         .iter()
@@ -71,6 +70,7 @@ async fn transformed_bootstrap() -> Result<()> {
             bootstrap_configuration,
             scope.clone(),
             None,
+            provider_session("a112a85e-ae22-5dd7-a624-6080d73fbb5e", "sqlite/out")?,
         )?;
     let middleware_plugin = computation::load(library().with_file_name(format!(
         "{}drasi_computation_transformer_middleware{}",

@@ -10,9 +10,10 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use drasi_computation_contracts::{
     workers::{join_owned_worker_gracefully, spawn_owned_scoped_blocking_worker, WorkerCompletion},
-    ChangeEnvelope, ComponentId, ComputationBootstrapSnapshot, GraphChangeCodec, StreamId,
+    BootstrapLabels, ChangeEnvelope, ComponentId, ComputationBootstrapSnapshot, GraphChangeCodec,
+    StreamId,
 };
-use drasi_computation_plugin_sdk::{NativeBootstrapProvider, Scope};
+use drasi_computation_plugin_sdk::{QuiescentBootstrapProvider, Scope};
 use drasi_core_types::models::SourceChange;
 use drasi_sqlite_common::{read_table, read_table_schemas, validate_selection, TableKeyConfig};
 use rusqlite::{limits::Limit, Connection, ErrorCode, OpenFlags};
@@ -159,6 +160,7 @@ pub struct SqliteBootstrapProvider {
     source: ComponentId,
     stream: StreamId,
     config: SqliteBootstrapConfig,
+    labels: Option<BootstrapLabels>,
     shared: Arc<Shared>,
     pub(super) query_scope: Option<(Scope, ComponentId)>,
 }
@@ -175,6 +177,7 @@ impl SqliteBootstrapProvider {
             source,
             stream,
             config,
+            labels: None,
             query_scope: None,
             shared: Arc::new(Shared {
                 worker: RwLock::new(None),
@@ -183,6 +186,13 @@ impl SqliteBootstrapProvider {
                 timeout,
             }),
         })
+    }
+
+    /// Read only the configured tables whose label (the table name) the query
+    /// declares; `None` reads every configured table.
+    pub fn with_labels(mut self, labels: Option<BootstrapLabels>) -> Self {
+        self.labels = labels;
+        self
     }
 }
 
@@ -199,7 +209,7 @@ impl Drop for Reader {
 }
 
 #[async_trait]
-impl NativeBootstrapProvider for SqliteBootstrapProvider {
+impl QuiescentBootstrapProvider for SqliteBootstrapProvider {
     fn validate_query_scope(
         &self,
         instance_id: &str,
@@ -236,6 +246,7 @@ impl NativeBootstrapProvider for SqliteBootstrapProvider {
             source: self.source.clone(),
             stream: self.stream.clone(),
             config: self.config.clone(),
+            labels: self.labels.clone(),
             deadline: Instant::now()
                 .checked_add(self.config.duration())
                 .context("SQLite snapshot deadline is not representable")?,
@@ -289,6 +300,7 @@ struct SnapshotWork {
     source: ComponentId,
     stream: StreamId,
     config: SqliteBootstrapConfig,
+    labels: Option<BootstrapLabels>,
     deadline: Instant,
     outputs: mpsc::Sender<ChangeEnvelope>,
     shutdown: watch::Receiver<bool>,
@@ -362,7 +374,13 @@ impl SnapshotWork {
         let mut ordinal = 0u64;
         let runtime = tokio::runtime::Handle::current();
         let source = self.source.clone();
-        for (name, table) in tables {
+        // A row's label is its table's name: the query's labels select tables
+        // within the configured selection, which stays the upper bound.
+        let labels = self.labels.clone();
+        for (name, table) in tables
+            .into_iter()
+            .filter(|(name, _)| drasi_sqlite_common::native::table_selected(labels.as_ref(), name))
+        {
             let outcome = read_table(
                 &connection,
                 source.as_str(),

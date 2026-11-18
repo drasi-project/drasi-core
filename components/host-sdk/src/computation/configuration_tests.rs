@@ -15,27 +15,26 @@ impl sdk::Factory for ConfigurationFactory {
     fn metadata(&self) -> FactoryMetadata {
         sdk::Factory::metadata(&self.0)
     }
-    fn configuration_details(&self) -> Option<sdk::ConfigDetails> {
-        Some(
-            sdk::ConfigDefinition::try_new([sdk::ConfigOption::new(
-                "count",
-                ConfigType::Integer,
-                false,
-                "Number of events.",
-            )
-            .default(2)
-            .minimum(0)
-            .maximum(4)])
-            .expect("fixed declaration")
-            .details(),
+    fn configuration_details(&self) -> sdk::ConfigDetails {
+        sdk::ConfigDefinition::try_new([sdk::ConfigOption::new(
+            "count",
+            ConfigType::Integer,
+            false,
+            "Number of events.",
         )
+        .default(2)
+        .minimum(0)
+        .maximum(4)])
+        .expect("fixed declaration")
+        .details()
     }
     fn create(
         &self,
         request: &sdk::CreateRequest,
         control: sdk::ControlSender,
+        services: sdk::ServiceBindings,
     ) -> anyhow::Result<sdk::CreatedComponent> {
-        sdk::Factory::create(&self.0, request, control)
+        sdk::Factory::create(&self.0, request, control, services)
     }
 }
 
@@ -83,14 +82,13 @@ unsafe extern "C" fn incompatible_configuration(
 fn configuration_extension_enriches_discovery_and_validates_before_construction(
 ) -> anyhow::Result<()> {
     let plugin = unsafe {
-        NativePlugin::from_entry_points_with_configuration(
+        NativePlugin::from_entry_points_with(
             metadata,
             entry,
-            None,
-            None,
-            None,
-            None,
-            Some(configuration),
+            crate::computation::EntryPoints {
+                configuration: Some(configuration),
+                ..Default::default()
+            },
         )?
     };
     let factory = &plugin.factories()[0];
@@ -146,14 +144,13 @@ fn old_entry_points_keep_the_original_metadata_contract() -> anyhow::Result<()> 
 #[test]
 fn malformed_optional_configuration_is_not_ignored() {
     let result = unsafe {
-        NativePlugin::from_entry_points_with_configuration(
+        NativePlugin::from_entry_points_with(
             metadata,
             entry,
-            None,
-            None,
-            None,
-            None,
-            Some(incompatible_configuration),
+            crate::computation::EntryPoints {
+                configuration: Some(incompatible_configuration),
+                ..Default::default()
+            },
         )
     };
     let error = result.err().expect("invalid extension rejected");

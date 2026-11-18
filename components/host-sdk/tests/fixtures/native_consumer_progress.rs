@@ -28,6 +28,9 @@ pub fn factories() -> Vec<Arc<dyn sdk::Factory>> {
 pub struct Factory(pub ComponentRole, pub bool);
 
 impl sdk::Factory for Factory {
+    fn configuration_details(&self) -> sdk::ConfigDetails {
+        mode_details()
+    }
     fn describe(
         &self,
         _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
@@ -81,29 +84,27 @@ impl sdk::Factory for Factory {
             completion: (self.0 == ComponentRole::Sink).then_some(SinkCompletion::Handled),
             capabilities: sdk::Capabilities {
                 control: true,
+                // The flag also declares single-owner progress: a
+                // contradiction refused when the plugin is defined.
+                services: sdk::HostServices {
+                    source_progress: self.1,
+                    consumer_progress: true,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         }
     }
-    fn supports_source_progress(&self) -> bool {
-        self.1
-    }
-    fn supports_consumer_progress(&self) -> bool {
-        true
-    }
+
     fn create(
-        &self,
-        _: &sdk::CreateRequest,
-        _: sdk::ControlSender,
-    ) -> Result<sdk::CreatedComponent> {
-        anyhow::bail!("fixture requires consumer_progress")
-    }
-    fn create_with_consumer_progress(
         &self,
         request: &sdk::CreateRequest,
         _: sdk::ControlSender,
-        progress: sdk::NativeConsumerProgress,
+        services: sdk::ServiceBindings,
     ) -> Result<sdk::CreatedComponent> {
+        let progress = services.consumer_progress.ok_or_else(|| {
+            anyhow::anyhow!("fixture requires its declared consumer_progress binding")
+        })?;
         let mode = request.configuration["mode"]
             .as_str()
             .context("missing fixture mode")?
@@ -468,6 +469,23 @@ impl sdk::NativeControlHandler for Commands {
 pub struct SinkFactory(pub SinkCompletion);
 
 impl sdk::Factory for SinkFactory {
+    /// Every field described (fixture).
+    fn configuration_details(&self) -> sdk::ConfigDetails {
+        sdk::ConfigDetails {
+            fields: sdk::Factory::metadata(self)
+                .configuration
+                .fields
+                .into_keys()
+                .map(|name| {
+                    let details = sdk::configuration::ConfigFieldDetails {
+                        description: format!("Fixture field {name}."),
+                        ..Default::default()
+                    };
+                    (name, details)
+                })
+                .collect(),
+        }
+    }
     fn describe(
         &self,
         _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
@@ -476,6 +494,8 @@ impl sdk::Factory for SinkFactory {
     }
     fn metadata(&self) -> sdk::FactoryMetadata {
         let mut metadata = sdk::Factory::metadata(&Factory(ComponentRole::Sink, false));
+        // A downstream sink reads no progress of its own.
+        metadata.capabilities.services = sdk::HostServices::default();
         metadata.implementation = ImplementationIdentity::try_new(
             match self.0 {
                 SinkCompletion::Handled => "fixture/input-progress-handled",
@@ -492,6 +512,7 @@ impl sdk::Factory for SinkFactory {
         &self,
         request: &sdk::CreateRequest,
         _: sdk::ControlSender,
+        _services: sdk::ServiceBindings,
     ) -> Result<sdk::CreatedComponent> {
         anyhow::ensure!(
             request.configuration["mode"] == "fanout",
@@ -653,5 +674,19 @@ impl sdk::NativeSink for HandledSink {
             "operation": operation, "value": value, "sequence": sequence,
         }));
         Ok(())
+    }
+}
+
+/// The fixture's one configuration field, described.
+pub fn mode_details() -> sdk::ConfigDetails {
+    sdk::ConfigDetails {
+        fields: [(
+            "mode".to_string(),
+            sdk::configuration::ConfigFieldDetails {
+                description: "Fixture behavior.".into(),
+                ..Default::default()
+            },
+        )]
+        .into(),
     }
 }

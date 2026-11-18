@@ -889,7 +889,7 @@ async fn cancelled_staging_keeps_the_previous_snapshot_and_input_base() -> Resul
     assert_eq!(rows(&before)?, rows(&during)?);
     drop(pending);
     assert_eq!(view.sequence, 1);
-    view.mapper = Box::new(Pipeline::new(&[], &[])?);
+    view.mapper = Box::new(Pipeline::new(Mode::Images, &[], &[])?);
     assert_rows(&view, &[initial]).await?;
     emit(
         &mut view,
@@ -1101,7 +1101,11 @@ async fn metadata_and_factory_advertise_only_implemented_capabilities() -> Resul
         activation_credentials_bound: false,
         update_directive: None,
     };
-    let created = ViewFactory.create(&request, ControlSender::default())?;
+    let created = ViewFactory.create(
+        &request,
+        ControlSender::default(),
+        drasi_computation_plugin_sdk::ServiceBindings::none(),
+    )?;
     let Component::Transformer(mut transformer) = created.component else {
         anyhow::bail!("view factory returned a different role")
     };
@@ -1109,7 +1113,10 @@ async fn metadata_and_factory_advertise_only_implemented_capabilities() -> Resul
     let readers = transformer.output_readers();
     readers.validate(transformer.descriptor())?;
     assert!(readers.ports()[&PortId::try_new("out")?].replay().is_none());
-    assert!(transformer.resume_delivery().is_err());
+    assert!(
+        transformer.durable_output().is_none(),
+        "a view without durable output has no delivery handler"
+    );
     transformer.start(&mut lifecycle_ctx::start()).await?;
     transformer.stop(&lifecycle_ctx::stop()).await?;
     transformer.dispose(&lifecycle_ctx::erase()).await?;
@@ -1143,50 +1150,6 @@ fn invalid_or_event_oriented_mapping_configuration_fails_at_construction() -> Re
         .context("middleware array")?
         .push(repeated);
     assert!(create(duplicate).is_err());
-    Ok(())
-}
-
-#[tokio::test]
-async fn existing_map_remains_a_stateless_event_mapper() -> Result<()> {
-    let rule = json!({
-        "condition": "$[?(@.active == true)]",
-        "id": "$.key", "label": "Projected", "properties": {"value": "$.value"}
-    });
-    let config: SourceMiddlewareConfig = serde_json::from_value(json!({
-        "name": "existing", "kind": "map",
-        "config": {"Input": {"insert": [rule.clone()], "update": [rule]}}
-    }))?;
-    let mapper = drasi_middleware::map::MapFactory::new().build(&config)?;
-    assert_eq!(
-        mapper
-            .apply(SourceChange::Insert {
-                element: row(
-                    "input",
-                    1,
-                    json!({"active": true, "key": "old", "value": 1})
-                ),
-            })
-            .await?
-            .len(),
-        1
-    );
-    assert!(mapper
-        .apply(SourceChange::update(row(
-            "input",
-            2,
-            json!({
-                "active": false, "key": "old"
-            })
-        )))
-        .await?
-        .is_empty());
-    assert!(mapper
-        .apply(SourceChange::Update {
-            element: row("input", 3, json!({"active": true, "key": "new"})),
-            removed_properties: ["value".into()].into(),
-        })
-        .await?
-        .is_empty());
     Ok(())
 }
 

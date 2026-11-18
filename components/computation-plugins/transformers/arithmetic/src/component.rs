@@ -35,7 +35,7 @@ pub(super) fn configuration_definition() -> drasi_computation_plugin_sdk::Config
             "field",
             String,
             false,
-            "Nonempty integer property to transform; must differ from counter_property.",
+            "Nonempty integer property to transform; must differ from counterProperty.",
         )
         .default(value_field()),
         Field::new(
@@ -57,7 +57,7 @@ pub(super) fn configuration_definition() -> drasi_computation_plugin_sdk::Config
         .minimum(i64::MIN)
         .maximum(i64::MAX as u64),
         Field::new(
-            "counter_property",
+            "counterProperty",
             String,
             false,
             "Nonempty output property for the batch count; must differ from field.",
@@ -68,7 +68,7 @@ pub(super) fn configuration_definition() -> drasi_computation_plugin_sdk::Config
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Configuration {
     stream: StreamId,
     #[serde(default = "value_field")]
@@ -378,5 +378,21 @@ mod tests {
         assert_eq!(removed, BTreeSet::from(["value".to_string()]));
         assert!(!element.get_properties().contains_key("batch_count"));
         assert!(!element.get_properties().contains_key("value"));
+    }
+
+    #[test]
+    fn configuration_keys_are_camel_case() -> anyhow::Result<()> {
+        drasi_computation_plugin_sdk::testing::ensure_camel_case_configuration(
+            &configuration_definition().schema(),
+        )?;
+        let parsed: Configuration = serde_json::from_value(
+            serde_json::json!({"stream": "out/arithmetic", "counterProperty": "n"}),
+        )?;
+        assert_eq!(parsed.counter_property, "n");
+        assert!(serde_json::from_value::<Configuration>(
+            serde_json::json!({"stream": "out/arithmetic", "counter_property": "n"})
+        )
+        .is_err());
+        Ok(())
     }
 }

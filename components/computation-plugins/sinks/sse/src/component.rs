@@ -4,6 +4,7 @@
 //! The SSE sink component: factory, lifecycle, management and HTTP routes.
 
 use crate::config::{self, valid_path, SseSinkConfig};
+use crate::render::{default_changes_payload, SseRenderer};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use axum::{
@@ -35,7 +36,6 @@ use drasi_computation_plugin_sdk::{
     Factory, FactoryMetadata, NativeComponent, NativeManagement, NativeOutputSnapshot,
     NativeOutputSnapshots, NativeSink, UpdateRequest,
 };
-use drasi_reaction_common::sse::{default_changes_payload, SseRenderer};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -71,17 +71,8 @@ impl Factory for SseFactory {
         let config = SseSinkConfig::parse(request.request.configuration.clone())?;
         Ok(request.unkeyed_sink(config.on_permanent_failure))
     }
-    fn supports_output_snapshots(&self) -> bool {
-        true
-    }
-    fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
-        Some(SseSinkConfig::definition().details())
-    }
-    fn supports_update_planning(&self) -> bool {
-        true
-    }
-    fn assess(&self, request: &UpdateRequest) -> Result<Assessment> {
-        config::assess(request)
+    fn configuration_details(&self) -> drasi_computation_plugin_sdk::ConfigDetails {
+        SseSinkConfig::definition().details()
     }
 
     fn metadata(&self) -> FactoryMetadata {
@@ -108,19 +99,21 @@ impl Factory for SseFactory {
                     ComponentUpdateMode::Recreate,
                 ],
                 erases_owned_state: true,
+                services: drasi_computation_plugin_sdk::HostServices {
+                    output_snapshot_reads: true,
+                    ..Default::default()
+                },
                 ..Capabilities::default()
             },
         }
     }
-    fn create(&self, request: &CreateRequest, control: ControlSender) -> Result<CreatedComponent> {
-        self.create_with_output_snapshots(request, control, None)
-    }
-    fn create_with_output_snapshots(
+    fn create(
         &self,
         request: &CreateRequest,
         _: ControlSender,
-        snapshots: Option<NativeOutputSnapshots>,
+        services: drasi_computation_plugin_sdk::ServiceBindings,
     ) -> Result<CreatedComponent> {
+        let snapshots = services.output_snapshots;
         let config = SseSinkConfig::parse(request.configuration.clone())?;
         let outputs = SinkOutputs::from_inputs(&request.inputs, &config.outputs)?;
         config.validate_outputs(&outputs)?;
@@ -131,6 +124,15 @@ impl Factory for SseFactory {
             snapshots,
         )?))
         .into())
+    }
+    fn update_planner(&self) -> Option<&dyn drasi_computation_plugin_sdk::UpdatePlanner> {
+        Some(self)
+    }
+}
+
+impl drasi_computation_plugin_sdk::UpdatePlanner for SseFactory {
+    fn assess(&self, request: &UpdateRequest) -> Result<Assessment> {
+        config::assess(request)
     }
 }
 
@@ -356,7 +358,7 @@ impl SseSink {
     ) -> Result<Self> {
         Ok(Self {
             descriptor,
-            renderer: config.renderer(),
+            renderer: config.renderer()?,
             settings: Arc::new(Live::new(Settings::from_config(&config)?)),
             config,
             outputs,
@@ -549,6 +551,15 @@ impl NativeComponent for SseSink {
                     anyhow::Error::new(error).context("native SSE listener is still draining"),
                 ));
             }
+            // The SDK reported the panic to the graph when it happened.
+            Err(WorkerCleanupError::Join(error)) if error.is_panic() => {
+                diag!(
+                    Warn,
+                    "SSE listener had panicked before stop: component={}",
+                    self.descriptor.id()
+                );
+                Ok(())
+            }
             Err(error) => Err(anyhow::Error::new(error)
                 .context("native SSE listener task failed")
                 .into()),
@@ -597,7 +608,7 @@ impl NativeManagement for SseSink {
         let proposed =
             SseSinkConfig::parse(update.request.proposed.configuration.clone()).map_err(refused)?;
         let settings = Settings::from_config(&proposed).map_err(refused)?;
-        let renderer = proposed.renderer();
+        let renderer = proposed.renderer().map_err(refused)?;
         match ctx.boundary() {
             UpdateBoundary::Pause => {
                 if let Some(running) = &self.running {
@@ -644,11 +655,9 @@ impl NativeSink for SseSink {
         );
         let notifications = notifications(&input, &self.outputs)?;
         let component = self.descriptor.id();
-        let events = self.renderer.render_changes(
-            &notifications,
-            chrono::Utc::now().timestamp_millis(),
-            |message| diag!(Warn, "SSE render fallback: component={component} {message}"),
-        )?;
+        let events = self
+            .renderer
+            .render_changes(&notifications, chrono::Utc::now().timestamp_millis())?;
         anyhow::ensure!(
             events.iter().all(|event| valid_path(&event.path)),
             "rendered SSE path must be absolute without query, fragment or control characters and outside /snapshot"

@@ -22,13 +22,6 @@ use crate::{
     transport::{checked_table, take_reply, take_status, Failure, OperationFuture},
 };
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FactoryProgress {
-    pub version: u32,
-    pub consumer_progress: bool,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstanceProgress {

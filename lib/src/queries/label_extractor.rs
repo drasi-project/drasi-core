@@ -77,6 +77,26 @@ impl LabelExtractor {
         })
     }
 
+    /// Whether the query matches any node or relation without a label: such
+    /// a pattern reads elements of every label, so its labels do not bound
+    /// what it reads.
+    pub fn matches_unlabeled(query_str: &str, query_language: &QueryLanguage) -> Result<bool> {
+        let config = Arc::new(DefaultQueryConfig);
+        let parser: Arc<dyn QueryParser> = match query_language {
+            QueryLanguage::Cypher => Arc::new(CypherParser::new(config)),
+            QueryLanguage::GQL => Arc::new(GQLParser::new(config)),
+        };
+        let parsed_query = parser.parse(query_str)?;
+        Ok(parsed_query.parts.iter().any(|part| {
+            part.match_clauses.iter().any(|clause| {
+                clause.start.labels.is_empty()
+                    || clause.path.iter().any(|(relation, node)| {
+                        relation.labels.is_empty() || node.labels.is_empty()
+                    })
+            })
+        }))
+    }
+
     fn extract_from_query_part(
         query_part: &QueryPart,
         node_labels: &mut HashSet<String>,
@@ -123,6 +143,23 @@ pub struct QueryLabels {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unlabeled_patterns_are_detected() {
+        for (query, unlabeled) in [
+            ("MATCH (n:Person) RETURN n", false),
+            ("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, b", false),
+            ("MATCH (n) RETURN n", true),
+            ("MATCH (a:Person)-[r]->(b:Person) RETURN a, b", true),
+            ("MATCH (a:Person)-[:KNOWS]->(b) RETURN a, b", true),
+        ] {
+            assert_eq!(
+                LabelExtractor::matches_unlabeled(query, &QueryLanguage::Cypher).unwrap(),
+                unlabeled,
+                "{query}"
+            );
+        }
+    }
 
     #[test]
     fn test_extract_simple_node_labels() {

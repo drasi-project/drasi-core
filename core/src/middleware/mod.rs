@@ -46,6 +46,18 @@ impl MiddlewareTypeRegistry {
     pub fn get(&self, name: &str) -> Option<Arc<dyn SourceMiddlewareFactory>> {
         self.source_middleware_types.get(name).cloned()
     }
+
+    /// The registered middleware kinds, sorted, for hosts that publish the
+    /// kinds they accept in their configuration schema.
+    pub fn kinds(&self) -> Vec<&str> {
+        let mut kinds: Vec<_> = self
+            .source_middleware_types
+            .keys()
+            .map(String::as_str)
+            .collect();
+        kinds.sort_unstable();
+        kinds
+    }
 }
 
 pub struct MiddlewareContainer {

@@ -27,8 +27,6 @@ fn plugin() -> Result<Arc<NativePlugin>> {
 
 fn configuration(path: &Path) -> Value {
     json!({
-        "source": id("source"),
-        "stream": "source/out",
         "path": path,
         "tables": ["items"],
         "tableKeys": [{"table":"items","keyColumns":["code"]}],
@@ -38,6 +36,17 @@ fn configuration(path: &Path) -> Value {
         "outputCapacity": 1,
         "shutdownTimeoutMs": 5000
     })
+}
+
+/// What connecting the snapshot to the source's bootstrap input supplies.
+fn session() -> drasi_computation_plugin_sdk::BootstrapSession {
+    drasi_computation_plugin_sdk::BootstrapSession::new(
+        Some(drasi_computation_plugin_sdk::ServedSource {
+            source: id("source"),
+            stream: StreamId::try_new("source/out").expect("stream"),
+        }),
+        None,
+    )
 }
 
 fn provider(plugin: &NativePlugin, path: &Path) -> Result<Arc<NativeBootstrapProxy>> {
@@ -50,6 +59,7 @@ fn provider(plugin: &NativePlugin, path: &Path) -> Result<Arc<NativeBootstrapPro
             generation: 1,
         }),
         None,
+        session(),
     )
 }
 
@@ -147,7 +157,8 @@ fn sqlite_bootstrap_only_catalogue_is_discovered_and_empty_base_without_extensio
                 id("query"),
                 configuration(Path::new("not-opened.db")),
                 None,
-                None
+                None,
+                session()
             )
             .is_err(),
         "factory construction requires explicit query scope"

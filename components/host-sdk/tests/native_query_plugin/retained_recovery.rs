@@ -195,7 +195,7 @@ fn create_profile(path: &Path, profile: &str) -> Result<NativeComponentProxy> {
     factory()?.create_component_with_processing_publication(
         component_id()?,
         json!({
-            "query": QUERY, "outbox_capacity": 2, "volatile": profile == "memory",
+            "query": QUERY, "outboxCapacity": 2, "volatile": profile == "memory",
             "publication": if profile == "non_atomic" { "non_atomic" } else { "atomic" },
         }),
         scope(1),

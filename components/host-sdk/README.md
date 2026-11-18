@@ -54,8 +54,8 @@ reset acknowledgement still need a graph-owned protocol; see
 
 Externally supplied objects without an update-capable recipe use explicit graph
 changes and remove/add instead. Their normal stop/disposal hooks still run.
-The ordinary Source/Reaction ABI **0.18.0** exposes lifecycle hooks but does not
-advertise factory-managed updates. Native ABI **3.0.0** carries factory plans and
+The ordinary Source/Reaction ABI **0.19.0** exposes lifecycle hooks but does not
+advertise factory-managed updates. Native ABI **5.0.0** carries factory plans and
 retained-object updates; earlier native ABI layouts are rejected. The generic
 native adapter rejects update assessment requiring unresolved configuration
 references or construction-time input bindings rather than inventing values.
@@ -594,9 +594,9 @@ The result is that the rest of the server code works with normal Rust trait obje
 Plugin-side `NativeComponent` interfaces and shared messages no longer depend on
 the runtime. This host package is where those operations become graph-owned
 components, runtime configuration schemas and actual storage/progress bindings.
-The current native ABI is **2.0.0**, with wire version **2**. Rebuild native
-libraries against the matching SDK; ABI-1 binaries do not provide the required
-lifecycle/update contract and are rejected.
+The current native ABI is **5.0.0**, with wire version **5**. Rebuild native
+libraries against the matching SDK; binaries built for another ABI major are
+rejected before any plugin callback.
 
 Optional recovery-v1 source progress binds only an actual
 `QuerySourceProgressResource` under `source_progress`; it is mutually exclusive
@@ -644,7 +644,7 @@ that selection with `register_query_factory`. Missing or ambiguous selection is
 an error, never a linked-reference fallback. See the
 [query plugin guide](../computation-plugins/transformers/query/README.md).
 
-Native ABI 2.0 uses wire version 2: bounded MessagePack and bulk binary envelope
+Native ABI 5.0 uses wire version 5: bounded MessagePack and bulk binary envelope
 buffers. Build native libraries and the host from matching sources; unknown
 wire versions are rejected before plugin entry. Native response buffers remain
 producer-owned while being decoded, then are released through their callback;

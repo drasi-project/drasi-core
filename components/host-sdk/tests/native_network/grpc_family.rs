@@ -293,7 +293,7 @@ async fn native_grpc_batches_preserve_templates_metadata_boundaries_and_typed_ro
             NETWORK_SINK_ID,
             json!({
                 "outputs":{"a":{"component":A_QUERY_ID,"port":"out"},"b":{"component":B_QUERY_ID,"port":"out"}},"endpoint":format!("grpc://{}",receiver.address),
-                "batching":{"mode":"fixed","batchSize":3,"batchFlushTimeoutMs":30},
+                "batchSize":3,"batchFlushTimeoutMs":30,
                 "outputTemplates":{"defaultTemplate":{"added":{
                     "template":"{\"alias\":\"{{output.alias}}\",\"port\":\"{{output.port}}\",\"sequence\":{{sequence}},\"key\":\"{{identity.id}}\"}",
                     "metadata":{"x-route":"{{after.route}}"}
@@ -512,8 +512,7 @@ async fn native_grpc_adaptive_and_request_byte_limits_split_without_losing_items
             NETWORK_SINK_ID,
             json!({
                 "outputs":{"q":{"component":RESULT_QUERY_ID,"port":"out"}},"endpoint":format!("grpc://{}",receiver.address),
-                "batching":{"mode":"adaptive","adaptiveMinBatchSize":10,"adaptiveMaxBatchSize":10,
-                    "adaptiveWindowSize":10,"adaptiveBatchTimeoutMs":40},
+                "adaptive":{"minBatchSize":10,"maxBatchSize":10,"minWaitMs":40,"maxWaitMs":40,"windowMs":1000},
                 "maxRequestBytes":1800,"maxRetries":0,
             }),
             linked,

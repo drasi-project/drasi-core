@@ -118,6 +118,28 @@ impl ConfigurationConstraint {
             .expect("constant query input schema")
     }
 
+    /// One `{name, kind, config}` middleware declaration whose `kind` is one of
+    /// `kinds`: the shape every middleware-hosting transformer publishes for
+    /// its `middleware` field, so a definition naming an unsupported kind is
+    /// rejected when the graph binds the component.
+    pub fn middleware_declaration(kinds: &[&str]) -> Value {
+        json!({
+            "type": "object",
+            "required": ["name", "kind", "config"],
+            "properties": {
+                "name": {"type": "string", "minLength": 1, "pattern": crate::ComponentName::JSON_SCHEMA_PATTERN},
+                "kind": {"enum": kinds},
+                "config": {"type": "object"},
+            },
+            "additionalProperties": false,
+        })
+    }
+
+    /// An array of [`Self::middleware_declaration`]s.
+    pub fn middleware_declarations(kinds: &[&str]) -> Result<Self> {
+        Self::try_new(json!({"type": "array", "items": Self::middleware_declaration(kinds)}))
+    }
+
     /// Snapshot opening requires the exact component UUID and output port.
     pub fn snapshot_inputs() -> Self {
         Self::try_new(json!({"type": "array", "items": Self::endpoint(true)}))

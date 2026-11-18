@@ -16,8 +16,8 @@ use drasi_computation_contracts::{
     PortDescriptor, PortDirection, PortId,
 };
 use drasi_computation_plugin_sdk::{
-    Capabilities, Component, ConfigDefinition, ConfigOption, ConfigType, ControlSender,
-    CreateRequest, CreatedComponent, Factory, FactoryMetadata, PluginDefinition,
+    Capabilities, Component, ConfigDefinition, ControlSender, CreateRequest, CreatedComponent,
+    Factory, FactoryMetadata, PluginDefinition,
 };
 use std::sync::Arc;
 
@@ -30,27 +30,8 @@ pub const VIEW: &str = "drasi.standard/view";
 pub struct ViewFactory;
 
 fn configuration_definition() -> ConfigDefinition {
-    ConfigDefinition::try_new([
-        ConfigOption::new(
-            "stream",
-            ConfigType::String,
-            true,
-            "Nonempty stream identifier for this view's own volatile output.",
-        ),
-        ConfigOption::new(
-            "middleware",
-            ConfigType::Array,
-            true,
-            "Named map/relabel configurations. Map insert rules project complete input images; update/delete rules and patch/delete outputs are not supported.",
-        ),
-        ConfigOption::new(
-            "pipeline",
-            ConfigType::Array,
-            true,
-            "Ordered middleware names. An empty pipeline is an identity view.",
-        ),
-    ])
-    .expect("constant view configuration")
+    ConfigDefinition::try_new(drasi_computation_middleware_common::Mode::Images.options())
+        .expect("constant view configuration")
 }
 
 /// The plugin definition, suitable for static registration or native export.
@@ -77,8 +58,8 @@ impl Factory for ViewFactory {
     ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
         Ok(request.volatile_transformer())
     }
-    fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
-        Some(configuration_definition().details())
+    fn configuration_details(&self) -> drasi_computation_plugin_sdk::ConfigDetails {
+        configuration_definition().details()
     }
 
     fn metadata(&self) -> FactoryMetadata {
@@ -113,6 +94,7 @@ impl Factory for ViewFactory {
         &self,
         request: &CreateRequest,
         _control: ControlSender,
+        _services: drasi_computation_plugin_sdk::ServiceBindings,
     ) -> anyhow::Result<CreatedComponent> {
         Ok(Component::Transformer(Box::new(component::View::new(
             self.metadata().descriptor(request.id.clone())?,

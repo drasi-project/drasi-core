@@ -10,6 +10,8 @@
 use anyhow::{ensure, Context, Result};
 pub use drasi_computation_contracts::PermanentFailurePolicy;
 use drasi_computation_contracts::{OutputAliases, SinkOutputs};
+pub use drasi_computation_network_common::batching::AdaptiveBatchSettings;
+use drasi_computation_network_common::batching::BatchLimit;
 use drasi_computation_network_common::config::{
     duration, normalized_headers, timeout_ms, ClientTls, SecretString, MAX_RETRIES,
     RESERVED_HEADERS,
@@ -23,7 +25,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 /// Largest fixed or adaptive batch, in changes.
-pub const MAX_BATCH_SIZE: usize = 65_536;
+pub const MAX_BATCH_SIZE: usize = drasi_computation_network_common::batching::MAX_BATCH_SIZE;
 /// Largest host collection delay, in milliseconds.
 pub const MAX_FLUSH_TIMEOUT_MS: u64 = 60_000;
 /// Largest host collection byte bound.
@@ -126,8 +128,10 @@ pub struct GrpcSinkConfig {
     pub batch_size: usize,
     #[serde(default = "flush_timeout")]
     pub batch_flush_timeout_ms: u64,
+    /// The shared adaptive batching object; replaces the fixed
+    /// `batchSize`/`batchFlushTimeoutMs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub batching: Option<BatchingConfig>,
+    pub adaptive: Option<AdaptiveBatchSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_templates: Option<OutputTemplates>,
     #[serde(default = "batch_bytes")]
@@ -171,9 +175,9 @@ impl GrpcSinkConfig {
             Field::new("keepaliveIntervalMs", Integer, false, "HTTP/2 PING interval while a call is open, in milliseconds; 0 disables keepalive.").default(keepalive_interval()).minimum(0).maximum(MAX_KEEPALIVE_MS),
             Field::new("keepaliveTimeoutMs", Integer, false, "Time to wait for a keepalive PING acknowledgement before closing the connection, in milliseconds.").default(keepalive_timeout()).minimum(1).maximum(MAX_KEEPALIVE_MS),
             Field::new("compression", String, false, "Request compression: none or gzip.").default(json!(Compression::default())).allowed([json!(Compression::None), json!(Compression::Gzip)]),
-            Field::new("batchSize", Integer, false, "Fixed batch item target; may not be combined with batching.").default(batch_size()).minimum(1).maximum(MAX_BATCH_SIZE as u64),
+            Field::new("batchSize", Integer, false, "Fixed batch item target; may not be combined with adaptive.").default(batch_size()).minimum(1).maximum(MAX_BATCH_SIZE as u64),
             Field::new("batchFlushTimeoutMs", Integer, false, "Host collection deadline in fixed mode; sparse batches flush without acknowledging early.").default(flush_timeout()).minimum(1).maximum(MAX_FLUSH_TIMEOUT_MS),
-            Field::new("batching", Object, false, "Fixed or adaptive batching configuration; mutually exclusive with flat batchSize/batchFlushTimeoutMs."),
+            Field::new("adaptive", Object, false, &AdaptiveBatchSettings::field_description("Adaptive host batching; mutually exclusive with batchSize/batchFlushTimeoutMs.", "65536")),
             Field::new("outputTemplates", Object, false, "Per-output-alias and default body and request-metadata templates. Templates replace only the payload; typed images, identity and operation are never rewritten."),
             Field::new("maxBatchBytes", Integer, false, "Host collection byte bound; larger individual inputs use direct handling.").default(batch_bytes()).minimum(1).maximum(MAX_BATCH_BYTES as u64),
             Field::new("maxRequestBytes", Integer, false, "Maximum encoded protobuf request; compatible changes split before this limit and a larger single change fails under failurePolicy.").default(request_bytes()).minimum(1).maximum(MAX_REQUEST_BYTES as u64),
@@ -182,12 +186,12 @@ impl GrpcSinkConfig {
         .unwrap_or_else(|error| unreachable!("constant gRPC sink configuration: {error}"))
     }
 
-    /// The exposed configuration. With a `batching` object the flat
+    /// The exposed configuration. With an `adaptive` object the fixed
     /// `batchSize`/`batchFlushTimeoutMs` fields are omitted, so the value can
     /// be parsed again.
     pub fn to_value(&self) -> Result<Value> {
         let mut value = serde_json::to_value(self)?;
-        if self.batching.is_some() {
+        if self.adaptive.is_some() {
             if let Some(object) = value.as_object_mut() {
                 object.remove("batchSize");
                 object.remove("batchFlushTimeoutMs");
@@ -199,9 +203,9 @@ impl GrpcSinkConfig {
     pub fn parse(value: Value) -> Result<Self> {
         drasi_computation_network_common::config::validate_output_templates(&value, &["metadata"])?;
         ensure!(
-            value.get("batching").is_none()
+            value.get("adaptive").is_none()
                 || (value.get("batchSize").is_none() && value.get("batchFlushTimeoutMs").is_none()),
-            "batching cannot be combined with flat batch settings"
+            "adaptive cannot be combined with batchSize or batchFlushTimeoutMs"
         );
         let config: Self = serde_json::from_value(value)?;
         config.validate()?;
@@ -272,25 +276,8 @@ impl GrpcSinkConfig {
             .flat_map(|templates| templates.routes.keys().cloned())
             .collect();
         reaction.validate(&routes)?;
-        match reaction.batching {
-            BatchingConfig::Fixed {
-                batch_size,
-                batch_flush_timeout_ms,
-            } => ensure!(
-                batch_size <= MAX_BATCH_SIZE && batch_flush_timeout_ms <= MAX_FLUSH_TIMEOUT_MS,
-                "fixed batching bounds exceeded"
-            ),
-            BatchingConfig::Adaptive {
-                adaptive_max_batch_size,
-                adaptive_window_size,
-                adaptive_batch_timeout_ms,
-                ..
-            } => ensure!(
-                adaptive_max_batch_size <= MAX_BATCH_SIZE
-                    && adaptive_window_size <= 255
-                    && adaptive_batch_timeout_ms <= MAX_FLUSH_TIMEOUT_MS,
-                "adaptive batching bounds exceeded"
-            ),
+        if let Some(adaptive) = &self.adaptive {
+            adaptive.validate(BatchLimit::SINK)?;
         }
         Ok(())
     }
@@ -418,11 +405,14 @@ impl GrpcSinkConfig {
         }
     }
 
+    /// The shared reaction-protocol batching view. Native batching is the
+    /// host's (see `component`); the shared protocol only sees the fixed
+    /// bounds, which `validate` has already checked.
     pub fn batching_config(&self) -> BatchingConfig {
-        self.batching.clone().unwrap_or(BatchingConfig::Fixed {
+        BatchingConfig::Fixed {
             batch_size: self.batch_size,
             batch_flush_timeout_ms: self.batch_flush_timeout_ms,
-        })
+        }
     }
 }
 
@@ -558,7 +548,10 @@ mod tests {
             json!({"connectionRetryAttempts":1}),
             json!({"initialConnectionTimeoutMs":1}),
             json!({"unknown":true}),
-            json!({"batching":{"mode":"fixed"},"batchSize":2}),
+            json!({"adaptive":{},"batchSize":2}),
+            json!({"batching":{"mode":"fixed"}}),
+            json!({"adaptive":{"adaptiveMaxBatchSize":2}}),
+            json!({"adaptive":{"maxBatchSize":65537}}),
             json!({"outputTemplates":{"defaultTemplate":{"added":{"templat":"bad"}}}}),
             json!({"outputTemplates":{"routes":{"q":{"added":{"url":"not-a-grpc-option"}}}}}),
             json!({"outputTemplates":{"defaultTemplate":{"added":{"template":"{{#if}}"}}}}),

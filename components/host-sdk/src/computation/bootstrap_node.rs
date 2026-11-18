@@ -9,23 +9,33 @@
 //! source's bootstrap input (the source relays its consumers' sessions) or
 //! directly to a transformer or query as its exclusive local provider.
 //!
+//! The node's description is the plugin's pure declaration of the provider's
+//! bootstrap output (completion, pairing protocol, element namespace and
+//! identity), forwarded unchanged; the graph checks the provider's edge
+//! against it when the edge binds. The Host reads none of the provider's
+//! configuration.
+//!
 //! Each session creates its own native provider for the requesting
-//! component, `BootstrapRequest::origin`. A paired factory serves the source
-//! that relays its sessions, `BootstrapRequest::consumer`: the source owns its
-//! library's coordinator and its consumers' progress, so the node binds that
-//! source's coordinator and the origin's actual progress owner when each
-//! session opens. Any other factory declaring source progress receives the
+//! component, `BootstrapRequest::origin`, with that request's declared labels.
+//! A provider serving a source's namespace serves the source that relays its
+//! sessions (`BootstrapRequest::consumer`), or, connected to a query, the
+//! single source that query reads, with that source's output stream: the
+//! graph relation, never a configuration key. A paired factory's provider
+//! is opened from that source's coordinator, bound to the origin's actual
+//! progress owner. Any other factory declaring source progress receives the
 //! origin's progress from the node's `source_progress` dependency, which lists
 //! one progress resource per bootstrapping query.
 
 use super::{NativeBootstrapFactory, NativeSourceBootstrapResource};
 use async_trait::async_trait;
+use drasi_computation_plugin_sdk::{BootstrapSession, ElementNamespace, ServedSource};
+use drasi_lib::computation::v1::served_source;
 use drasi_lib::computation::v1::{
     BootstrapProviderComponent, BootstrapProviderFactory, ComponentCreationError,
     ComponentDescriptor, ComponentFactory, ComponentId, ComponentRole, ComponentSpecification,
     ConfigurationValue, ConstructedComponent, ConstructionContext, FactoryDescriptor,
-    GraphChangeCodec, PipeRequirements, PortDescriptor, PortDirection, PortId, QuerySourceProgress,
-    QuerySourceProgressResource, ResourceRequirement, ResourceRole, StreamId,
+    GraphChangeCodec, OutputCatalogue, PipeRequirements, PortDescriptor, PortDirection, PortId,
+    QuerySourceProgress, QuerySourceProgressResource, ResourceRequirement, ResourceRole,
     BOOTSTRAP_PROVIDER_OUTPUT_PORT,
 };
 use std::{any::TypeId, collections::BTreeMap, sync::Arc};
@@ -90,11 +100,17 @@ impl ComponentFactory for NativeBootstrapNodeFactory {
         &self.descriptor
     }
 
+    /// The plugin's own declaration for this configuration, on the node's
+    /// bootstrap output.
     fn describe(
         &self,
-        _context: &drasi_lib::computation::v1::ConstructionContext,
+        context: &drasi_lib::computation::v1::ConstructionContext,
     ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
-        Ok(BootstrapProviderComponent::provider_description())
+        let configuration = serde_json::to_value(context.configuration())?;
+        Ok(BootstrapProviderComponent::declared_description(
+            &context.specification.descriptor,
+            self.factory.describe(&configuration)?,
+        ))
     }
 
     fn specification_from_config(
@@ -183,9 +199,15 @@ impl ComponentFactory for NativeBootstrapNodeFactory {
                 BTreeMap::new()
             };
         let paired = self.factory.requires_source_bootstrap();
-        if paired {
-            validate_paired_wiring(&context).map_err(ComponentCreationError::terminal)?;
-        }
+        let description =
+            ComponentFactory::describe(self, &context).map_err(ComponentCreationError::terminal)?;
+        let serves_source =
+            description
+                .bootstrap_output(&PortId::try_new(BOOTSTRAP_PROVIDER_OUTPUT_PORT).map_err(
+                    |error| ComponentCreationError::terminal(anyhow::Error::from(error)),
+                )?)
+                .namespace
+                == ElementNamespace::ServedSource;
         let configuration = serde_json::to_value(context.configuration())
             .map_err(ComponentCreationError::terminal)?;
         let scope = drasi_computation_plugin_sdk::Scope {
@@ -198,6 +220,7 @@ impl ComponentFactory for NativeBootstrapNodeFactory {
         let requires_progress = self.factory.metadata().source_progress;
         let sessions: BootstrapProviderFactory = Arc::new(move |request| {
             let origin = request.origin().clone();
+            let labels = request.labels.clone();
             if paired {
                 let source = NativeSourceBootstrapResource::registered(
                     &scope.instance_id,
@@ -224,6 +247,7 @@ impl ComponentFactory for NativeBootstrapNodeFactory {
                     scope.clone(),
                     owner,
                     source,
+                    labels,
                 )?;
                 return Ok(
                     provider as Arc<dyn drasi_lib::computation::v1::ComputationBootstrapProvider>
@@ -238,11 +262,19 @@ impl ComponentFactory for NativeBootstrapNodeFactory {
             } else {
                 None
             };
+            // The source the consumer relays for, or the single source it
+            // reads: the rule the graph applied when it bound this edge.
+            let served = if serves_source {
+                Some(served(&running, &request.consumer)?)
+            } else {
+                None
+            };
             let provider = factory.create_query_provider(
                 origin,
                 configuration.clone(),
                 scope.clone(),
                 progress,
+                BootstrapSession::new(served, labels),
             )?;
             Ok(provider as Arc<dyn drasi_lib::computation::v1::ComputationBootstrapProvider>)
         });
@@ -250,94 +282,28 @@ impl ComponentFactory for NativeBootstrapNodeFactory {
             context.specification.descriptor.clone(),
             sessions,
         )
-        .map_err(ComponentCreationError::terminal)?;
+        .map_err(ComponentCreationError::terminal)?
+        .with_description(description);
         Ok(ConstructedComponent::bootstrap_provider(Box::new(
             component,
         )))
     }
 }
 
-/// A paired provider serves the source on its bootstrap output: its configured
-/// `source` and `stream` must name that source and one of its output streams.
-/// Only the wiring already in the desired graph is checked; sessions resolve
-/// the actual source coordinator when they arrive.
-fn validate_paired_wiring(context: &ConstructionContext) -> anyhow::Result<()> {
-    let configured = |name: &str| {
-        context
-            .configuration()
-            .get(name)
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-    };
-    let graph = context.output_catalogue().desired_graph();
-    let targets = graph
-        .edges
-        .iter()
-        .filter(|edge| edge.definition.from.component == context.component_id)
-        .filter_map(|edge| {
-            let target = &edge.definition.to.component;
-            graph
-                .nodes
-                .iter()
-                .find(|node| node.descriptor.id() == target)
-                .map(|node| (target, &node.output_streams))
-        });
-    check_paired_wiring(
-        &context.component_id,
-        configured("source").as_deref(),
-        configured("stream").as_deref(),
-        targets,
+/// The source whose namespace a provider connected to `consumer` serves, and
+/// its stream, from the running graph's declared relations.
+fn served(running: &OutputCatalogue, consumer: &ComponentId) -> anyhow::Result<ServedSource> {
+    let graph = running.desired_graph();
+    let (source, stream) = served_source(
+        consumer,
+        |id| graph.nodes.iter().find(|node| node.descriptor.id() == id),
+        graph.edges.iter().map(|edge| &edge.definition),
     )
-}
-
-fn check_paired_wiring<'a>(
-    provider: &ComponentId,
-    source: Option<&str>,
-    stream: Option<&str>,
-    targets: impl IntoIterator<Item = (&'a ComponentId, &'a BTreeMap<PortId, StreamId>)>,
-) -> anyhow::Result<()> {
-    for (target, streams) in targets {
-        if let Some(source) = source {
-            anyhow::ensure!(
-                source == target.as_str(),
-                "paired bootstrap provider '{provider}' is configured for source '{source}' but is \
-                 connected to '{target}'"
-            );
-        }
-        if let Some(stream) = stream {
-            anyhow::ensure!(
-                streams.values().any(|bound| bound.as_str() == stream),
-                "paired bootstrap provider '{provider}' is configured for stream '{stream}', which \
-                 source '{target}' does not publish"
-            );
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn paired_wiring_must_match_the_connected_source_and_its_stream() {
-        let (provider, source) = (ComponentId::generate(), ComponentId::generate());
-        let streams = BTreeMap::from([(
-            PortId::try_new("out").unwrap(),
-            StreamId::try_new("sqlite/out").unwrap(),
-        )]);
-        let name = source.to_string();
-        let check = |configured_source: Option<&str>, stream: Option<&str>| {
-            check_paired_wiring(&provider, configured_source, stream, [(&source, &streams)])
-        };
-        check(Some(&name), Some("sqlite/out")).unwrap();
-        check(None, None).unwrap();
-        let error = check(Some(&name), Some("other/out"))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("does not publish"), "{error}");
-        let other = ComponentId::generate().to_string();
-        let error = check(Some(&other), None).unwrap_err().to_string();
-        assert!(error.contains("but is connected to"), "{error}");
-    }
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "bootstrap consumer '{consumer}' neither relays for a source nor reads a single \
+             source stream"
+        )
+    })?;
+    Ok(ServedSource { source, stream })
 }

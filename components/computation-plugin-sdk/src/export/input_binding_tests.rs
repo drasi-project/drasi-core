@@ -17,6 +17,9 @@ struct TestFactory {
 }
 
 impl Factory for TestFactory {
+    fn configuration_details(&self) -> crate::ConfigDetails {
+        Default::default()
+    }
     fn describe(
         &self,
         _request: &crate::wire::DescribeRequest,
@@ -52,6 +55,7 @@ impl Factory for TestFactory {
         &self,
         request: &CreateRequest,
         _: ControlSender,
+        _services: ServiceBindings,
     ) -> anyhow::Result<CreatedComponent> {
         Ok(Component::Transformer(Box::new(TestTransformer {
             descriptor: self.metadata().descriptor(request.id.clone())?,
@@ -78,10 +82,16 @@ impl ComputationComponent for TestTransformer {
         Ok(serde_json::json!({}))
     }
 
-    fn supports_input_binding_updates(&self) -> bool {
+    fn input_bindings(&mut self) -> Option<&mut dyn crate::NativeInputBindings> {
         self.implemented
+            .then_some(self as &mut dyn crate::NativeInputBindings)
     }
 
+    crate::passive_lifecycle!();
+}
+
+#[async_trait]
+impl crate::NativeInputBindings for TestTransformer {
     async fn bind_inputs(&mut self, bindings: &[InputBinding]) -> anyhow::Result<()> {
         anyhow::ensure!(
             !bindings
@@ -92,8 +102,6 @@ impl ComputationComponent for TestTransformer {
         self.seen.lock().unwrap().push(bindings.to_vec());
         Ok(())
     }
-
-    crate::passive_lifecycle!();
 }
 
 #[async_trait]
@@ -178,6 +186,7 @@ fn raw_component(factory: TestFactory) -> anyhow::Result<RawComponent> {
         let status = (*factory.vtable).create.expect("create")(
             factory.state,
             BorrowedBytes::new(&request),
+            &abi::services::ServiceBindingsV1::none(),
             &mut component,
         );
         (*factory.vtable).release.expect("factory release")(factory.state);
@@ -289,7 +298,7 @@ fn input_binding_updates_require_matching_capability_and_supported_role() -> any
         .expect("mismatched capability must fail construction");
         assert!(error
             .to_string()
-            .contains("input-binding update capability mismatch"));
+            .contains("input-binding handler does not match its declared capability"));
     }
     let mut metadata = TestFactory {
         advertised: true,

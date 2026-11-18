@@ -101,8 +101,8 @@ fn tls_validation_does_not_read_keys_and_in_place_recipe_changes_are_rejected() 
         spec.id.clone(),
         serde_json::json!({
             "kind":"bridgeTls", "version":1, "role":"server",
-            "trust_roots":["not-opened.der"], "certificate_chain":["not-opened.der"],
-            "private_key":"not-opened.pk8", "peer_certificate_sha256":"0".repeat(64)
+            "trustRoots":["not-opened.der"], "certificateChain":["not-opened.der"],
+            "privateKey":"not-opened.pk8", "peerCertificateSha256":"0".repeat(64)
         }),
     );
     resources.validate_transition(&topology, &topology)?;

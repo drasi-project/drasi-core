@@ -621,8 +621,10 @@ async fn uncertain_progress_commits_reconstruct_without_skipping_unfinished_effe
             arm_commit: Some(armed),
             ..Default::default()
         };
+        assert!(!delivery.recovery_required());
         assert!(delivery.deliver(&batch, &mut handler).await.is_err());
         assert_eq!(handler.effects.len(), 1);
+        assert!(delivery.recovery_required(), "the owner reports its fence");
         assert!(
             delivery.progress().await.is_err(),
             "uncertain writes fence cached progress"
@@ -642,6 +644,10 @@ async fn uncertain_progress_commits_reconstruct_without_skipping_unfinished_effe
         drop(delivery);
         handler.arm_commit = None;
         let mut delivery = runner(directory.path()).await;
+        assert!(
+            !delivery.recovery_required(),
+            "a reopened owner is not fenced"
+        );
         assert_eq!(
             delivery.progress().await?[0].completed_operations,
             usize::from(after)

@@ -67,8 +67,11 @@ before the input completes; a write error fails the input.
 
 ## Template reference
 
-Templates use [Handlebars](https://handlebarsjs.com/) syntax, rendered without
-HTML escaping. A missing value renders as an empty string.
+Templates use [Handlebars](https://handlebarsjs.com/) syntax through the
+[shared native template engine](../../common/template/README.md), the same in every native sink: rendered without
+HTML escaping and strictly. Reading a value the change does not carry (for
+example `before` on an insert) is a render failure handled by
+`renderFailurePolicy`; guard optional parts with `{{#if before}}…{{/if}}`.
 
 ### Context
 

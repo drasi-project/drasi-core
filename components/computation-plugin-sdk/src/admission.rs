@@ -15,13 +15,6 @@ use crate::{
     wire,
 };
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FactoryServices {
-    pub version: u32,
-    pub source_admission: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AdmissionErrorKind {
     NotEnabled,

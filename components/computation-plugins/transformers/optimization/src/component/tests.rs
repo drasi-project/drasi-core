@@ -6,6 +6,7 @@ use drasi_computation_contracts::{
     ComponentId, ComponentRole, ComponentUpdateMode, OutputProgress, OutputReadError,
     SnapshotProvider, StreamId,
 };
+use drasi_computation_plugin_sdk::UpdatePlanner;
 use drasi_computation_plugin_sdk::{
     lifecycle::{DisposeReason, StateIntent, StopMode},
     testing::{self, contexts},
@@ -484,9 +485,7 @@ fn metadata_is_valid() -> Result<()> {
         capabilities.update_modes,
         [ComponentUpdateMode::InPlace, ComponentUpdateMode::Recreate]
     );
-    let details = OptimizationFactory
-        .configuration_details()
-        .context("details")?;
+    let details = OptimizationFactory.configuration_details();
     details.validate_schema(&metadata.configuration)?;
     metadata.configuration.validate(&knapsack(10.0))?;
     Ok(())
@@ -498,6 +497,7 @@ fn factory_creates_and_round_trips_configuration() -> Result<()> {
     let created = OptimizationFactory.create(
         &testing::create_request(&OptimizationFactory, &id, knapsack(10.0)),
         drasi_computation_plugin_sdk::ControlSender::default(),
+        drasi_computation_plugin_sdk::ServiceBindings::none(),
     );
     let drasi_computation_plugin_sdk::Component::Transformer(transformer) = created?.component
     else {
@@ -508,6 +508,7 @@ fn factory_creates_and_round_trips_configuration() -> Result<()> {
         .create(
             &testing::create_request(&OptimizationFactory, &id, json!({"stream": "s"})),
             drasi_computation_plugin_sdk::ControlSender::default(),
+            drasi_computation_plugin_sdk::ServiceBindings::none(),
         )
         .is_err());
     let optimization = create(knapsack(10.0))?;

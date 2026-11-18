@@ -30,6 +30,7 @@ workspace = true
 [dependencies]
 drasi-core-types.workspace = true
 drasi-computation-contracts = { workspace = true, optional = true }
+drasi-computation-plugin-sdk = { workspace = true, optional = true }
 drasi-reaction-common = { workspace = true, optional = true }
 drasi-computation-storedproc-common = { workspace = true, optional = true }
 anyhow = "1.0"
@@ -60,7 +61,7 @@ tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_j
 [features]
 default = []
 replication = [
-    "dep:drasi-computation-contracts", "dep:bytes", "dep:byteorder",
+    "dep:drasi-computation-contracts", "dep:drasi-computation-plugin-sdk", "dep:bytes", "dep:byteorder",
     "dep:hmac", "dep:md5", "dep:native-tls", "dep:pbkdf2",
     "dep:postgres-native-tls", "dep:postgres-types", "dep:rand",
     "dep:serde", "dep:sha2", "dep:tokio", "dep:tokio-postgres",
@@ -68,7 +69,7 @@ replication = [
 ]
 storedproc = [
     "dep:drasi-computation-contracts", "dep:drasi-reaction-common",
-    "drasi-reaction-common/sql", "dep:drasi-computation-storedproc-common",
+    "dep:drasi-computation-storedproc-common",
     "dep:async-trait", "dep:bytes", "dep:handlebars",
     "dep:postgres-types", "dep:sha2", "dep:thiserror", "dep:tokio",
     "dep:tokio-postgres", "rust_decimal/db-tokio-postgres",

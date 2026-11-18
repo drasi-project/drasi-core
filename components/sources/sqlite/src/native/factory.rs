@@ -120,7 +120,7 @@ impl ComponentFactory for SqliteSourceFactory {
                 .get(name)
                 .is_some_and(|ids| !ids.is_empty())
         };
-        Ok(drasi_sqlite_common::native::description(
+        let description = drasi_sqlite_common::native::description(
             if bound("source_progress") {
                 SqliteProgress::Single
             } else if bound("consumer_progress") {
@@ -129,7 +129,21 @@ impl ComponentFactory for SqliteSourceFactory {
                 SqliteProgress::None
             },
             &context.specification.descriptor,
-        ))
+        );
+        // The element identities the constructed source declares.
+        let config: SqliteConfig = serde_json::from_value(
+            context
+                .configuration()
+                .get("settings")
+                .context("missing native SQLite settings")?
+                .clone(),
+        )?;
+        Ok(
+            description.with_element_identity(drasi_sqlite_common::native::element_identity(
+                &config.tables,
+                &config.table_keys,
+            )?),
+        )
     }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor

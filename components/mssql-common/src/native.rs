@@ -8,6 +8,7 @@
 
 pub mod catalog;
 mod cursor;
+pub mod definition;
 mod engine;
 pub mod error;
 pub mod identifiers;
@@ -15,6 +16,7 @@ pub mod markers;
 #[cfg(any(test, feature = "test-support"))]
 pub mod memory;
 pub mod paging;
+pub mod provider;
 pub mod session;
 pub mod settings;
 mod snapshot;
@@ -29,6 +31,22 @@ pub use identifiers::{quoted, TableName};
 pub use paging::{PageLimits, Poller};
 pub use session::{CdcConnector, CdcSession};
 pub use settings::{NativeSettings, StartPosition, TableKey};
-pub use snapshot::{start_snapshot, SnapshotRows, SnapshotRun};
+pub use snapshot::{start_snapshot, table_selected, SnapshotRows, SnapshotRun};
 pub use sql_session::{TiberiusConnector, TiberiusSession};
 pub use work::Work;
+
+/// Source/bootstrap coordination protocol shared by the native SQL Server
+/// source (which declares and implements it when it owns a barrier table)
+/// and the bootstrap library (whose paired factory requires it).
+pub mod coordination {
+    use drasi_computation_contracts::BootstrapProtocol;
+
+    /// `drasi.mssql/changes` with `barrierTable` and `drasi.mssql/bootstrap`.
+    pub const COORDINATED_CHANGES: &str = "drasi.mssql/coordinated-changes";
+    /// Version of the protocol.
+    pub const VERSION: u32 = 1;
+
+    pub fn protocol() -> BootstrapProtocol {
+        BootstrapProtocol::new(COORDINATED_CHANGES, VERSION)
+    }
+}

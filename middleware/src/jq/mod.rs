@@ -16,6 +16,7 @@ use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 use jq_rs::{self, JqProgram};
 
+use crate::stateless::{StatelessMiddleware, StatelessMiddlewareFactory};
 use async_trait::async_trait;
 use drasi_core_types::{
     interface::{
@@ -96,6 +97,16 @@ impl SourceMiddleware for JQ {
         &self,
         source_change: SourceChange,
         _element_index: &dyn ElementIndex,
+    ) -> Result<Vec<SourceChange>, MiddlewareError> {
+        StatelessMiddleware::apply(self, source_change).await
+    }
+}
+
+#[async_trait]
+impl StatelessMiddleware for JQ {
+    async fn apply(
+        &self,
+        source_change: SourceChange,
     ) -> Result<Vec<SourceChange>, MiddlewareError> {
         source_change
             .validate()
@@ -362,6 +373,28 @@ impl SourceMiddlewareFactory for JQFactory {
         &self,
         config: &SourceMiddlewareConfig,
     ) -> Result<Arc<dyn SourceMiddleware>, MiddlewareSetupError> {
+        self.build(config)
+            .map(|middleware| Arc::new(middleware) as Arc<dyn SourceMiddleware>)
+    }
+}
+
+impl StatelessMiddlewareFactory for JQFactory {
+    fn kind(&self) -> &'static str {
+        "jq"
+    }
+
+    fn build_stateless(
+        &self,
+        config: &SourceMiddlewareConfig,
+    ) -> Result<Box<dyn StatelessMiddleware>, MiddlewareSetupError> {
+        self.build(config)
+            .map(|middleware| Box::new(middleware) as Box<dyn StatelessMiddleware>)
+    }
+}
+
+impl JQFactory {
+    /// Builds the middleware from its declaration.
+    pub fn build(&self, config: &SourceMiddlewareConfig) -> Result<JQ, MiddlewareSetupError> {
         let cfg = Value::Object(config.config.clone());
         let mappings = match serde_json::from_value(cfg) {
             Ok(mappings) => mappings,
@@ -378,7 +411,7 @@ impl SourceMiddlewareFactory for JQFactory {
             mappings
         );
 
-        Ok(Arc::new(JQ::new(mappings)) as Arc<dyn SourceMiddleware>)
+        Ok(JQ::new(mappings))
     }
 }
 

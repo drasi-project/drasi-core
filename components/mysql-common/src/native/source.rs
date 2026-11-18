@@ -223,7 +223,8 @@ pub struct MySqlSource {
     snapshot: Option<Arc<super::MySqlSnapshot>>,
     consumer_snapshots: BTreeMap<ComponentId, Arc<super::MySqlSnapshot>>,
     published_snapshot: bool,
-    rows: Option<rows::Options>,
+    /// Shared row mode (row cursors) rather than whole transactions.
+    rows: bool,
     schema: Arc<super::schema::Publication>,
     positional: bool,
     disposed: bool,
@@ -264,7 +265,7 @@ impl MySqlSource {
             matches!(config.start, MySqlStartPosition::Snapshot { .. }),
             "published MySQL bootstrap requires explicit snapshot mode"
         );
-        let mut source = Self::build(id, stream, config, progress, None, consumers, None)?;
+        let mut source = Self::build(id, stream, config, progress, None, consumers, false)?;
         source.published_snapshot = true;
         Ok(source)
     }
@@ -288,7 +289,7 @@ impl MySqlSource {
             !matches!(config.start, MySqlStartPosition::Snapshot { .. }),
             "MySQL snapshot mode requires its paired bootstrap provider"
         );
-        Self::build(id, stream, config, progress, None, None, None)
+        Self::build(id, stream, config, progress, None, None, false)
     }
 
     pub fn coordinated(
@@ -322,7 +323,7 @@ impl MySqlSource {
             Some(progress),
             Some(snapshot),
             None,
-            None,
+            false,
         )
     }
 
@@ -336,7 +337,7 @@ impl MySqlSource {
             !matches!(config.start, MySqlStartPosition::Snapshot { .. }),
             "MySQL snapshot mode requires its actual consumer bootstrap providers"
         );
-        Self::build(id, stream, config, None, None, Some(consumers), None)
+        Self::build(id, stream, config, None, None, Some(consumers), false)
     }
 
     pub fn with_consumer_snapshots(
@@ -364,7 +365,7 @@ impl MySqlSource {
             providers.keys().eq(consumers.members.iter()),
             "MySQL snapshots must cover every actual consumer exactly once"
         );
-        let mut source = Self::build(id, stream, config, None, None, Some(consumers), None)?;
+        let mut source = Self::build(id, stream, config, None, None, Some(consumers), false)?;
         source.consumer_snapshots = providers;
         Ok(source)
     }
@@ -374,18 +375,9 @@ impl MySqlSource {
         stream: StreamId,
         config: MySqlConfig,
         consumers: ConsumerBinding,
-        options: rows::Options,
     ) -> Result<Self> {
         let snapshot = matches!(config.start, MySqlStartPosition::Snapshot { .. });
-        let mut source = Self::build(
-            id,
-            stream,
-            config,
-            None,
-            None,
-            Some(consumers),
-            Some(options),
-        )?;
+        let mut source = Self::build(id, stream, config, None, None, Some(consumers), true)?;
         source.published_snapshot = snapshot;
         Ok(source)
     }
@@ -397,9 +389,9 @@ impl MySqlSource {
         progress: Option<SourceProgressView>,
         snapshot: Option<Arc<super::MySqlSnapshot>>,
         consumers: Option<ConsumerBinding>,
-        rows: Option<rows::Options>,
+        rows: bool,
     ) -> Result<Self> {
-        if rows.is_some() {
+        if rows {
             config.validate_rows()?;
         } else {
             config.validate()?;
@@ -420,7 +412,7 @@ impl MySqlSource {
             .map(|_| {
                 InputPositionPolicy::new(
                     SourceProgressKey::Source(id.clone()),
-                    if rows.is_some() {
+                    if rows {
                         Arc::new(rows::Positions)
                             as Arc<dyn drasi_computation_contracts::InputPositionComparator>
                     } else {
@@ -485,9 +477,9 @@ impl MySqlSource {
     }
 
     fn scope(&self) -> Scope {
-        match (&self.consumers, &self.rows, &self.progress) {
-            (Some(consumers), Some(_), _) => Scope::Rows(consumers.graph_id().to_owned()),
-            (Some(consumers), None, _) => Scope::Shared(consumers.graph_id().to_owned()),
+        match (&self.consumers, self.rows, &self.progress) {
+            (Some(consumers), true, _) => Scope::Rows(consumers.graph_id().to_owned()),
+            (Some(consumers), false, _) => Scope::Shared(consumers.graph_id().to_owned()),
             (None, _, progress) => Scope::Single(progress.as_ref().map(|owner| {
                 (
                     owner.graph_id().to_owned(),
@@ -529,7 +521,7 @@ impl MySqlSource {
                 .prepare_connection(&config, &mut connection, &snapshot)
                 .await?;
             let consumer_progress = match (&self.consumers, &snapshot) {
-                (Some(consumers), Starting::Consumers(snapshot)) if self.rows.is_none() => {
+                (Some(consumers), Starting::Consumers(snapshot)) if !self.rows => {
                     Some(ConsumerUpdates::new(
                         consumers,
                         snapshot,
@@ -540,14 +532,13 @@ impl MySqlSource {
                 (None, _) | (Some(_), Starting::Consumers(_)) => None,
                 _ => anyhow::bail!("MySQL consumer progress initialization is missing"),
             };
-            let row_progress = match (&self.consumers, &snapshot, self.rows) {
-                (Some(consumers), Starting::Consumers(snapshot), Some(options)) => {
+            let row_progress = match (&self.consumers, &snapshot) {
+                (Some(consumers), Starting::Consumers(snapshot)) if self.rows => {
                     Some(rows::Updates::new(
                         consumers,
                         snapshot,
                         self.descriptor.id(),
                         prepared.binding,
-                        options,
                     )?)
                 }
                 _ => None,
@@ -558,7 +549,7 @@ impl MySqlSource {
         match prepared {
             Ok((prepared, consumer_progress, row_progress)) => {
                 let mut decoder_config = config.clone();
-                if self.rows.is_some() {
+                if self.rows {
                     decoder_config.output = MySqlOutput::Transactions;
                 }
                 Ok(Worker {
@@ -630,11 +621,12 @@ impl MySqlSource {
             &self.stream,
             self.positional,
         )?;
-        let snapshot = match self.rows {
-            Some(options) => rows::minimum(starting, self.descriptor.id(), binding, options)?,
-            None => starting.minimum(self.descriptor.id(), binding)?,
+        let snapshot = if self.rows {
+            rows::minimum(starting, self.descriptor.id(), binding)?
+        } else {
+            starting.minimum(self.descriptor.id(), binding)?
         };
-        let row_anchor = if self.rows.is_some() {
+        let row_anchor = if self.rows {
             snapshot
                 .map(|snapshot| rows::checkpoint(snapshot, self.descriptor.id(), binding))
                 .transpose()?
@@ -645,14 +637,14 @@ impl MySqlSource {
         // A group mixing fresh and resumed members resumes at its minimum:
         // fresh members join there. Only a group with no cursor at all needs
         // an origin, which is committed before any row is published.
-        let fresh = self.rows.is_some() && {
+        let fresh = self.rows && {
             let mut fresh = true;
             for state in starting.states() {
                 fresh &= rows::checkpoint(state, self.descriptor.id(), binding)?.is_none();
             }
             fresh
         };
-        let anchor = if self.rows.is_some() {
+        let anchor = if self.rows {
             row_anchor.as_ref().map(|row| row.position.clone())
         } else {
             snapshot
@@ -678,7 +670,7 @@ impl MySqlSource {
             for progress in starting.states() {
                 anyhow::ensure!(
                     progress.bootstrap_complete
-                        && if self.rows.is_some() {
+                        && if self.rows {
                             rows::checkpoint(progress, self.descriptor.id(), binding)?.is_some()
                         } else {
                             checkpoint(progress, self.descriptor.id(), binding)?.is_some()
@@ -709,7 +701,7 @@ impl MySqlSource {
                 .unwrap_or(0),
             Ordering::Relaxed,
         );
-        if self.rows.is_some() {
+        if self.rows {
             for state in starting.states() {
                 if let Some(position) = rows::checkpoint(state, self.descriptor.id(), binding)? {
                     self.sequence
@@ -814,11 +806,11 @@ impl MySqlSource {
                 offset,
                 anchor: anchor
                     .clone()
-                    .filter(|position| position.version == 1 && self.rows.is_none()),
+                    .filter(|position| position.version == 1 && !self.rows),
             },
         };
         let mut decoder_config = config.clone();
-        if self.rows.is_some() {
+        if self.rows {
             decoder_config.output = MySqlOutput::Transactions;
         }
         let decoder = open_decoder_with(
@@ -969,7 +961,7 @@ impl MySqlSource {
     ) -> Result<()> {
         let mut positions = BTreeMap::new();
         for snapshot in group.consumers.values() {
-            let position = if self.rows.is_some() {
+            let position = if self.rows {
                 rows::checkpoint(snapshot, self.descriptor.id(), binding)?.map(|row| row.position)
             } else {
                 checkpoint(snapshot, self.descriptor.id(), binding)?
@@ -1034,7 +1026,7 @@ impl MySqlSource {
                         sequence: Arc::new(AtomicU64::new(0)),
                         skipped: Default::default(),
                     })?;
-                    if self.rows.is_some() {
+                    if self.rows {
                         decoder = decoder.with_row_semantics();
                     }
                     if self.positional {
@@ -1328,7 +1320,7 @@ impl MySqlSource {
                 && current.replay == config.replay,
             "MySQL reconfiguration cannot change fields bound to the committed cursor"
         );
-        if self.rows.is_some() {
+        if self.rows {
             config.validate_rows()?;
         } else {
             config.validate()?;
@@ -1386,9 +1378,9 @@ impl MySqlSource {
                         "MySQL required consumer membership changed before initialization"
                     );
                 }
-                if let Some(options) = self.rows {
+                if self.rows {
                     for state in snapshot.states() {
-                        rows::validate(state, options)?;
+                        rows::validate(state)?;
                     }
                 } else {
                     snapshot.validate()?;
@@ -1786,9 +1778,8 @@ impl Worker {
                 && snapshot.ready
                 && snapshot.recovered
                 && snapshot.admitting
-                && snapshot.reset_generation == self.generation
-                && snapshot.persistent,
-            "MySQL consumer progress was fenced, reset or lost persistence"
+                && snapshot.reset_generation == self.generation,
+            "MySQL consumer progress was fenced or reset"
         );
         if let Some(position) = checkpoint(&snapshot, &self.source, self.binding)? {
             let sequence = position.sequence()?;

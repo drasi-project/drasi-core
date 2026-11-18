@@ -232,6 +232,36 @@ impl PostgresTransactionSource {
         Ok(source)
     }
 
+    /// Whole commits with a fixed consumer set whose progress the bootstrap
+    /// coordinator retains (`drasi.postgres/shared-transactions` paired with
+    /// its shared provider).
+    pub(crate) fn shared_transactions_coordinated(
+        id: ComponentId,
+        stream: StreamId,
+        config: PostgresTransactionConfig,
+        progress: ConsumerProgressView,
+        consumers: &[ComponentId],
+    ) -> Result<Self> {
+        let graph = progress.graph_id().to_owned();
+        let mut source = Self::build(
+            id.clone(),
+            Mode::SharedTransactions,
+            stream,
+            config,
+            &graph,
+            false,
+            true,
+        )?;
+        source.shared = Some(SharedBinding::transactions_view(&id, progress, consumers)?);
+        Ok(source)
+    }
+
+    /// The source's activation settings, shared with its paired bootstrap
+    /// providers so they connect with the same activation credentials.
+    pub(crate) fn activation_handle(&self) -> Arc<std::sync::RwLock<PostgresTransactionConfig>> {
+        self.activation.clone()
+    }
+
     pub(crate) fn row_ports() -> Result<Vec<PortDescriptor>> {
         Ok(vec![PortDescriptor::new(
             PortId::try_new("out")?,
@@ -746,6 +776,10 @@ impl PostgresTransactionSource {
                 return Err(anyhow::Error::new(error)
                     .context("PostgreSQL replication did not stop within its deadline"))
             }
+            // The SDK reported the panic to the graph when it happened.
+            Err(WorkerCleanupError::Join(error)) if error.is_panic() => {
+                log::debug!("PostgreSQL worker had already panicked: {error}");
+            }
             Err(error) => return Err(error.into()),
         }
         self.receiver = None;
@@ -996,9 +1030,18 @@ impl NativeSource for PostgresTransactionSource {
         if let Some(envelope) = receiver.recv().await {
             return Ok(Some(envelope));
         }
-        match join_owned_worker(self.worker.get_mut(), self.config.timeout()).await? {
-            WorkerCompletion::Completed(Err(error)) => Err(error),
-            _ => anyhow::bail!("PostgreSQL replication ended; stop and restart the source"),
+        match join_owned_worker(self.worker.get_mut(), self.config.timeout()).await {
+            Ok(WorkerCompletion::Completed(Err(error))) => Err(error),
+            // The same retryable activation failure the SDK reports for the
+            // panic, whichever the graph observes first.
+            Err(WorkerCleanupError::Join(error)) if error.is_panic() => Err(
+                drasi_computation_plugin_sdk::lifecycle::LifecycleError::retryable(
+                    anyhow::anyhow!("PostgreSQL replication worker panicked: {error}"),
+                )
+                .into(),
+            ),
+            Err(error) => Err(error.into()),
+            Ok(_) => anyhow::bail!("PostgreSQL replication ended; stop and restart the source"),
         }
     }
 }

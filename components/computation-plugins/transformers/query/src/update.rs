@@ -69,7 +69,7 @@ pub(super) fn plan(
         "publication",
         "bootstrap",
         "recovery",
-        "reset_configuration",
+        "resetConfiguration",
     ] {
         anyhow::ensure!(
             request.current.configuration.get(field) == request.proposed.configuration.get(field),
@@ -84,7 +84,7 @@ pub(super) fn plan(
                 .as_object()
                 .context("query configuration must be an object")?
                 .clone();
-            fields.remove("outbox_capacity");
+            fields.remove("outboxCapacity");
             Ok(fields)
         };
         anyhow::ensure!(

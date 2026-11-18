@@ -1,7 +1,7 @@
 # Native MySQL source: design
 
 `drasi-computation-source-mysql` streams MySQL row-based binary logs into a
-ComputationGraph. It is a native plugin (ABI 4.0) with seven factories, each at
+ComputationGraph. It is a native plugin (ABI 5.0) with seven factories, each at
 implementation and configuration version `1`. The replication engine lives in
 `drasi-mysql-common` (`native` feature): the owned MySQL protocol and
 authentication (`mysql_native_password`, `caching_sha2_password`), TLS
@@ -29,6 +29,27 @@ Field reference, prerequisites and runbook: [CONFIGURATION.md](CONFIGURATION.md)
 Factory identity selects the contract. Mode fields (`retention`,
 `persistent`) are accepted only by the factories they apply to; every other
 field is the shared flat configuration also used by the bootstrap providers.
+
+### Declared description
+
+Outputs carry only source replay progress (`untracked` identity, no replay
+of their own). The progress resource is a declared dependency:
+`source_progress` for `transactions`, `consumer_progress` for the shared
+factories. `transactions`, `shared-transactions` and the shared row
+factories with `persistent: true` declare durable progress and require that
+resource to declare durability, so the graph refuses wiring them to volatile
+(or undeclared) progress as an `Incompatible` binding failure on the source
+node, before the source starts. Shared row factories without `persistent`
+declare volatile progress and accept any resource. The untracked factories
+(`changes`, `untracked-transactions`, `positional-changes`) keep no progress
+and declare volatile progress: after a restart they begin again at
+`startFrom`, so a persistent query they feed keeps its restored rows and
+misses changes made while the graph was stopped. The graph does not yet
+compare a producer's progress persistence with a consuming query's (MY-36
+in the remaining-work list), so that pairing is accepted. The source
+does not check durability itself at start or while running. The in-process
+wrapper in `drasi-source-mysql` declares the same description
+(`drasi_mysql_common::native::description`).
 
 ## Capture
 
@@ -133,7 +154,15 @@ with the typed `SourceFailure::SchemaChanged`.
 
 `startFrom: snapshot` pairs the source with a coordinated bootstrap provider
 (`drasi.mysql/coordinated-bootstrap`, `shared-transaction-bootstrap` or
-`shared-row-bootstrap`). The provider samples the server clock, takes
+`shared-row-bootstrap`). The source declares the matching coordination
+protocol (`drasi_mysql_common::native::coordination`) and requires it; the
+graph refuses any other provider on its `bootstrap` input when the edge binds.
+The source's coordinator (`coordinator.rs`) constructs the source and opens
+each query's provider from the same request, so the provider uses the
+source's identity, stream, server id, tables, keys, retention and current
+activation credentials, and takes no configuration of its own. Each query
+snapshots only the selected tables whose label it declares. The provider
+samples the server clock, takes
 `FLUSH TABLES WITH READ LOCK` (bounded by `snapshotLockTimeoutMs`) on one
 session, starts `START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY` on
 another, pins the selected tables' metadata locks, reads the binlog position
@@ -190,8 +219,8 @@ their stricter catalog fence.
 ## Worker
 
 One worker task owns the replication connection. It validates the host's
-committed progress on every change (failed, reset, unready or non-persistent
-owners fence the source), decodes events, queues decoded envelopes and
+committed progress on every change (failed, reset or unready owners fence
+the source; durability is declared and checked at binding), decodes events, queues decoded envelopes and
 admits them through a bounded channel (capacity one), expanding tracked rows
 lazily.
 
@@ -252,7 +281,10 @@ outlives its connection (a replica registration ends with the connection).
 Query progress and consumer progress are host-owned. The factories declare
 `erases_owned_state`, and Dispose with `StateIntent::Erase` is an idempotent
 no-op beyond retiring the schema reader (the HTTP and gRPC sources follow the
-same rule). Binlog files are never purged.
+same rule). Because erase connects to nothing, it needs no activation
+credentials and works on a source that never started in this process (the
+SQL Server equivalent of MS-22 has no MySQL counterpart). Binlog files are
+never purged.
 
 ## Management
 
@@ -299,9 +331,7 @@ SDK has no metric facility yet (Source X-07).
 - Statement-based or mixed binlogs, partial row images, partial JSON updates
   (`binlog_row_value_options=PARTIAL_JSON`), binlog encryption on the wire,
   compressed transaction payloads (`binlog_transaction_compression`).
-- Coordinating the source and its bootstrap providers through the SDK
-  bootstrap coordinator (MY-16): the pair shares configuration and committed
-  progress instead.
+
 - Inferring identity from a column name: a keyless table needs `tableKeys`.
 
 ## Differences from the legacy source
