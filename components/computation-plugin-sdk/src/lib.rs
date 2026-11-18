@@ -40,6 +40,7 @@ pub mod testing;
 mod transaction;
 pub mod transport;
 pub mod update_planning;
+pub mod upstream_snapshots;
 pub mod wire;
 
 pub use activation_credentials::{ActivationCredentialContext, ActivationCredentials};
@@ -70,6 +71,7 @@ pub use processing::{NativeProcessing, NativeProcessingContext};
 pub use progress::NativeSourceProgress;
 pub use scheduling::NativeScheduling;
 pub use transaction::{NativeTransactionContext, TransactionalComponent};
+pub use upstream_snapshots::{SnapshotBatch, SnapshotSource, UpstreamSnapshots};
 pub use wire::{
     ApplyUpdateRequest, CreateRequest, DisposeRequest, LifecycleRequest, Scope, UpdateDirective,
     UpdateRequest,

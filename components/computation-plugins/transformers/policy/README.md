@@ -196,6 +196,28 @@ current decisions while running. Before start or while stopped it returns
 `NotReady`, and after erase it returns `Retired`. Pause refuses input until
 resume. Stop then start on the same object preserves state. Disposal with erase
 (only while stopped) clears state and permanently fences the instance.
-Reconstruction starts empty with a new volatile epoch; rebuild it from full
-upstream inputs. There is no durable storage, replay, snapshot-follow or
-bootstrap capability.
+Reconstruction starts empty with a new volatile epoch. There is no durable
+storage, replay or snapshot-follow capability.
+
+### Initializing from upstream snapshots
+
+A continuous query does not send its bootstrap results downstream, so a policy
+fed by a query sees only rows that change after it starts. To start from the
+current rows, bind the factory's `output_snapshots` dependency (a
+`nativeOutputSnapshots` resource listing the outputs connected to `in`). The
+factory declares `binds_inputs` and supports `output-snapshots-v1`. With the
+dependency bound:
+
+- At its first start the transformer reads each incoming edge's snapshot.
+  It then queues a decision for every current input as continuation output.
+- A live envelope that the snapshot already covers is skipped: same producer
+  epoch, sequence at or below the snapshot's. It still produces its (empty)
+  output envelope.
+- An upstream that restarts (a new producer epoch) is read again. Elements it
+  no longer has are deleted, so their decisions are retracted.
+- Stop then start keeps the positions and reads nothing again.
+
+Envelopes without producer progress, or from a producer that is not a bound
+edge, are applied as they are. Without the dependency nothing is read, and
+the transformer behaves as described above. The SDK's
+`UpstreamSnapshots` helper implements this for any volatile transformer.

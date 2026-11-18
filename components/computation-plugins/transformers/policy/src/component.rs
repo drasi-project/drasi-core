@@ -8,8 +8,8 @@ use anyhow::{bail, ensure, Context, Result};
 use async_trait::async_trait;
 use drasi_computation_contracts::{
     ChangeEnvelope, ComponentDescriptor, ElementImage, ElementPatch, GraphChangeCodec,
-    GraphProducerIdentity, GraphProducerProgress, InputEnvelope, OutputEnvelope, OutputReaders,
-    PortId, SystemMetadata,
+    GraphProducerIdentity, GraphProducerProgress, InputBinding, InputEnvelope, OutputEnvelope,
+    OutputReaders, PortId, SystemMetadata,
 };
 use drasi_computation_plugin_sdk::{
     lifecycle::{
@@ -17,7 +17,8 @@ use drasi_computation_plugin_sdk::{
         LifecycleResult, PauseContext, ResumeContext, StartContext, StopContext, UpdateBoundary,
     },
     update_planning::{ensure_same_component, inputs_changed},
-    ApplyUpdateRequest, NativeComponent, NativeManagement, NativeTransformer, Scope, UpdateRequest,
+    ApplyUpdateRequest, NativeComponent, NativeManagement, NativeTransformer, Scope,
+    SnapshotSource, UpdateRequest, UpstreamSnapshots,
 };
 use drasi_core_types::models::{Element, ElementReference, SourceChange};
 use std::{
@@ -109,6 +110,11 @@ pub(crate) struct PolicyTransformer {
     /// Latest input effective time; re-evaluated decisions carry it.
     high_water: u64,
     last_system: Option<Arc<SystemMetadata>>,
+    /// Upstream snapshot reads, when the host bound `output_snapshots`.
+    snapshots: Option<Arc<dyn SnapshotSource>>,
+    upstreams: UpstreamSnapshots,
+    /// Whether the upstream snapshots have been loaded.
+    loaded: bool,
     started: bool,
     paused: bool,
     retired: bool,
@@ -119,6 +125,8 @@ impl PolicyTransformer {
         descriptor: ComponentDescriptor,
         configuration: serde_json::Value,
         scope: Option<&Scope>,
+        inputs: &[InputBinding],
+        snapshots: Option<Arc<dyn SnapshotSource>>,
     ) -> Result<Self> {
         let live = Live::new(PolicyConfig::parse(configuration)?)?;
         let identity = GraphProducerIdentity::volatile(
@@ -143,6 +151,9 @@ impl PolicyTransformer {
             pending: BTreeMap::new(),
             high_water: 0,
             last_system: None,
+            upstreams: UpstreamSnapshots::new(inputs, &PortId::try_new("in")?),
+            snapshots,
+            loaded: false,
             started: false,
             paused: false,
             retired: false,
@@ -267,6 +278,36 @@ impl PolicyTransformer {
         Ok((touched, staged))
     }
 
+    /// Adopts the upstream snapshots' elements and queues every decision that
+    /// differs from the published one as a continuation.
+    fn initialize_from(&mut self, changes: Vec<SourceChange>) -> Result<()> {
+        let (touched, mut staged) = self.stage(changes)?;
+        let mut decided = Vec::with_capacity(touched.len());
+        for (reference, effective_from) in &touched {
+            let desired = match staged.get(reference).and_then(Option::as_ref) {
+                Some(element) => Some(self.live.decide(element, *effective_from)?),
+                None => None,
+            };
+            decided.push((reference.clone(), desired));
+        }
+        for (reference, desired) in decided {
+            if row_change(self.published.get(&reference), desired.as_ref(), 0).is_some() {
+                self.pending
+                    .insert(key(&reference), (reference.clone(), desired));
+            } else {
+                self.pending.remove(&key(&reference));
+            }
+        }
+        for (reference, effective_from) in touched {
+            self.high_water = self.high_water.max(effective_from);
+            match staged.remove(&reference).flatten() {
+                Some(element) => self.inputs.insert(reference, element),
+                None => self.inputs.remove(&reference),
+            };
+        }
+        Ok(())
+    }
+
     /// Re-evaluates every retained input under `live` and returns every row
     /// whose desired decision differs from the published one.
     async fn reevaluate(
@@ -345,6 +386,15 @@ impl NativeComponent for PolicyTransformer {
         }
         if self.started {
             return Err(anyhow::anyhow!("policy transformer already started").into());
+        }
+        if let (Some(source), false) = (self.snapshots.clone(), self.loaded) {
+            let mut batch = self
+                .upstreams
+                .load_all(source.as_ref(), self.high_water)
+                .await?;
+            self.initialize_from(std::mem::take(&mut batch.changes))?;
+            self.upstreams.commit(batch);
+            self.loaded = true;
         }
         self.output.set_running(true)?;
         self.started = true;
@@ -517,8 +567,23 @@ impl NativeTransformer for PolicyTransformer {
             "policy transforms accept graph data, not scheduling or recovery controls"
         );
         let sequence = self.next_sequence()?;
-        let (touched, mut staged) =
-            self.stage(GraphChangeCodec::decode_changes(&input.envelope)?)?;
+        let decoded = GraphChangeCodec::decode_changes(&input.envelope)?;
+        let (changes, batch) = match self.snapshots.clone() {
+            Some(source) => {
+                let mut batch = self
+                    .upstreams
+                    .admit(source.as_ref(), &input.envelope, self.high_water)
+                    .await?;
+                let mut changes = std::mem::take(&mut batch.changes);
+                if batch.apply_envelope {
+                    batch.include(&decoded);
+                    changes.extend(decoded);
+                }
+                (changes, Some(batch))
+            }
+            None => (decoded, None),
+        };
+        let (touched, mut staged) = self.stage(changes)?;
         let mut changes = Vec::new();
         let mut rows = Vec::new();
         for (reference, effective_from) in &touched {
@@ -549,6 +614,9 @@ impl NativeTransformer for PolicyTransformer {
                 Some(element) => self.inputs.insert(reference, element),
                 None => self.inputs.remove(&reference),
             };
+        }
+        if let Some(batch) = batch {
+            self.upstreams.commit(batch);
         }
         self.last_system = Some(input.envelope.system().clone());
         Ok(vec![output])
