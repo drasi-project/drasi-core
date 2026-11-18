@@ -85,6 +85,8 @@ impl Factory for PolicyFactory {
             completion: None,
             capabilities: Capabilities {
                 continuations: true,
+                // Decisions for the upstream snapshots are queued at start.
+                startup_continuation: true,
                 output_snapshots: vec![PortId::try_new("out").expect("constant port")],
                 output_progress: Some(OutputProgress::Origin),
                 erases_owned_state: true,

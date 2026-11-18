@@ -209,7 +209,9 @@ factory declares `binds_inputs` and supports `output-snapshots-v1`. With the
 dependency bound:
 
 - At its first start the transformer reads each incoming edge's snapshot.
-  It then queues a decision for every current input as continuation output.
+  It then queues a decision for every current input. The host emits them
+  through the startup continuation (`startup_continuation`) before admitting
+  input.
 - A live envelope that the snapshot already covers is skipped: same producer
   epoch, sequence at or below the snapshot's. It still produces its (empty)
   output envelope.
