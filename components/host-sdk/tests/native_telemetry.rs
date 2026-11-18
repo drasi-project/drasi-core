@@ -37,8 +37,8 @@ async fn real_library_spans_preserve_context_and_share_host_processing() -> anyh
     )?;
     let bound = binding(&graph, "native-spans", 1, logging.clone())?;
     let mut component = create(&plugin, &bound, 5)?;
-    component.initialize().await?;
-    component.start().await?;
+    component.initialize(&hooks::initialize_ctx()).await?;
+    component.start(&hooks::start_ctx()).await?;
     let dispatch = tracing::Dispatch::new(
         tracing_subscriber::registry()
             .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("host-test"))),
@@ -110,8 +110,8 @@ async fn real_library_spans_preserve_context_and_share_host_processing() -> anyh
         metrics.histogram("drasi.plugin.test-telemetry.decode.duration", &[]),
         vec![0.25, 0.25]
     );
-    component.stop().await?;
-    component.dispose().await?;
+    component.stop(&hooks::stop_ctx()).await?;
+    component.dispose(&hooks::dispose_ctx()).await?;
     drop(component);
     clear()?;
     drop(graph);
@@ -197,8 +197,8 @@ async fn real_library_span_overflow_never_drops_metrics_logs_or_propagated_conte
     )?;
     let bound = binding(&graph, "saturation", 1, logging.clone())?;
     let mut component = create(&plugin, &bound, 5)?;
-    component.initialize().await?;
-    component.start().await?;
+    component.initialize(&hooks::initialize_ctx()).await?;
+    component.start(&hooks::start_ctx()).await?;
     for _ in 0..8 {
         run(&mut component, Default::default()).await?;
     }
@@ -227,7 +227,7 @@ async fn real_library_span_overflow_never_drops_metrics_logs_or_propagated_conte
         .get_history_by_key(&ComponentLogKey::new(
             "saturation",
             ComponentLogType::Service,
-            PROBE_ID,
+            ComponentId::try_new(PROBE_ID)?,
         ))
         .await;
     assert_eq!(
@@ -237,8 +237,8 @@ async fn real_library_span_overflow_never_drops_metrics_logs_or_propagated_conte
             .count(),
         8
     );
-    component.stop().await?;
-    component.dispose().await?;
+    component.stop(&hooks::stop_ctx()).await?;
+    component.dispose(&hooks::dispose_ctx()).await?;
     drop(component);
     assert!(matches!(
         collector.shutdown(Duration::from_millis(10)).await,

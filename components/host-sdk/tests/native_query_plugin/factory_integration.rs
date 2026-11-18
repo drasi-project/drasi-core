@@ -640,6 +640,7 @@ async fn ordinary_clock(volatile: bool) -> Result<()> {
             .send(OutputEnvelope {
                 port: PortId::try_new("out")?,
                 envelope: super::scheduling::scheduled_input(1000, 2000)?.envelope,
+                execution_context: Default::default(),
             })
             .await?;
         tokio::time::timeout(Duration::from_secs(5), subscription.next())

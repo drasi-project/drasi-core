@@ -24,10 +24,23 @@ use std::{
 
 #[allow(dead_code)]
 mod computation_support;
-use computation_support::{component, edge, endpoint, name, port, stream};
+use computation_support::{component, edge, endpoint, port, stream};
 #[path = "computation_support/metrics.rs"]
 mod recording;
 use recording::RecordingMetrics;
+
+fn id(name: &str) -> ComponentId {
+    component(match name {
+        "source" => 1,
+        "query" => 2,
+        "sink" => 3,
+        other => panic!("missing explicit fixture component ID for {other}"),
+    })
+}
+
+fn name(value: &str) -> drasi_lib::ComponentName {
+    drasi_lib::ComponentName::try_new(value).expect("component name")
+}
 
 struct Source {
     descriptor: ComponentDescriptor,
@@ -36,15 +49,13 @@ struct Source {
 
 #[async_trait]
 impl ComputationComponent for Source {
+    fn description(&self) -> ComponentDescription {
+        ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -66,15 +77,13 @@ struct Sink {
 
 #[async_trait]
 impl ComputationComponent for Sink {
+    fn description(&self) -> ComponentDescription {
+        ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -131,7 +140,7 @@ async fn run(
     let mut query = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: "query-metrics".into(),
-            id: component("query"),
+            id: id("query"),
             query: "MATCH (n:Person) RETURN n.name AS name".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: stream("query"),
@@ -163,7 +172,7 @@ async fn run(
             name("source"),
             Box::new(Source {
                 descriptor: ComponentDescriptor::try_new(
-                    component("source"),
+                    id("source"),
                     vec![PortDescriptor::new(
                         port("out"),
                         PortDirection::Output,
@@ -180,7 +189,7 @@ async fn run(
             name("sink"),
             Box::new(Sink {
                 descriptor: ComponentDescriptor::try_new(
-                    component("sink"),
+                    id("sink"),
                     vec![PortDescriptor::new(
                         port("in"),
                         PortDirection::Input,
@@ -194,14 +203,14 @@ async fn run(
                 done: done.clone(),
             }),
         )
-        .bind_stream(endpoint("source", "out"), stream("source"))
-        .bind_stream(endpoint("query", "out"), stream("query"))
+        .bind_stream(endpoint(&id("source"), "out"), stream("source"))
+        .bind_stream(endpoint(&id("query"), "out"), stream("query"))
         .connect(
-            edge("source", "query"),
+            edge(&id("source"), &id("query")),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .connect(
-            edge("query", "sink"),
+            edge(&id("query"), &id("sink")),
             Box::new(BoundedPipeConfig { capacity: 1 }),
         )
         .build()
@@ -215,7 +224,7 @@ async fn run(
                 .wait_for(|graph| {
                     graph
                         .components
-                        .get(&component("query"))
+                        .get(&id("query"))
                         .is_some_and(|query| query.lifecycle == ComponentLifecycle::Running)
                 })
                 .await

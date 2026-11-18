@@ -13,7 +13,8 @@ use drasi_lib::{
     },
     reactions::common::base::{ReactionBase, ReactionBaseParams},
     state_store::{StateStoreError, StateStoreProvider, StateStoreResult},
-    ComponentStatus, DrasiLib, MemoryStateStoreProvider, Query, Reaction, ReactionRuntimeContext,
+    ComponentId, ComponentName, ComponentStatus, DrasiLib, MemoryStateStoreProvider, Query,
+    Reaction, ReactionRuntimeContext, StorePartition,
 };
 use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, PropertyMapBuilder};
 use std::{
@@ -30,6 +31,18 @@ use tokio::sync::{Notify, Semaphore};
 mod recording;
 use recording::RecordingMetrics;
 
+const SOURCE_ID: &str = "00000000-0000-0000-0000-0000000005a1";
+const QUERY_ID: &str = "00000000-0000-0000-0000-0000000005a2";
+const REACTION_ID: &str = "00000000-0000-0000-0000-0000000005a3";
+
+fn component_id(id: &str) -> ComponentId {
+    ComponentId::try_new(id).expect("fixture UUID")
+}
+
+fn component_name(name: &str) -> ComponentName {
+    ComponentName::try_new(name).expect("fixture component name")
+}
+
 struct ControlledReaction {
     base: ReactionBase,
     entered: Arc<Notify>,
@@ -39,8 +52,8 @@ struct ControlledReaction {
 
 #[async_trait]
 impl Reaction for ControlledReaction {
-    fn id(&self) -> &str {
-        &self.base.id
+    fn id(&self) -> &ComponentId {
+        self.base.get_id()
     }
     fn type_name(&self) -> &str {
         "controlled-metrics"
@@ -48,8 +61,8 @@ impl Reaction for ControlledReaction {
     fn properties(&self) -> HashMap<String, serde_json::Value> {
         HashMap::new()
     }
-    fn query_ids(&self) -> Vec<String> {
-        self.base.queries.clone()
+    fn query_inputs(&self) -> Vec<drasi_lib::config::ComponentReference> {
+        self.base.query_inputs().to_vec()
     }
     fn auto_start(&self) -> bool {
         true
@@ -57,8 +70,8 @@ impl Reaction for ControlledReaction {
     fn needs_snapshot_on_fresh_start(&self) -> bool {
         false
     }
-    async fn initialize(&self, context: ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
     async fn start(&self) -> Result<()> {
         let base = self.base.clone_shared();
@@ -104,6 +117,7 @@ impl Reaction for ControlledReaction {
 }
 
 async fn ready(drasi: &DrasiLib, status: ComponentStatus) {
+    let reaction = component_id(REACTION_ID);
     tokio::time::timeout(Duration::from_secs(10), async {
         let mut events = drasi.subscribe_all_component_events();
         loop {
@@ -113,12 +127,16 @@ async fn ready(drasi: &DrasiLib, status: ComponentStatus) {
                 .unwrap()
                 .nodes
                 .iter()
-                .any(|node| node.id == "reaction" && node.status == status)
+                .any(|node| {
+                    node.id
+                        == drasi_lib::computation::v1::GraphEntityId::Component(reaction.clone())
+                        && node.status == status
+                })
             {
                 return;
             }
             let event = events.recv().await.unwrap();
-            if event.component_id == "reaction" && event.status == status {
+            if event.component_id == reaction && event.status == status {
                 return;
             }
         }
@@ -139,7 +157,7 @@ async fn blocked_worker_with_timing(
 ) {
     let metrics = RecordingMetrics::default();
     let (source, input) = ApplicationSource::new(
-        "source",
+        component_id(SOURCE_ID),
         ApplicationSourceConfig {
             properties: Default::default(),
             durability: None,
@@ -158,27 +176,37 @@ async fn blocked_worker_with_timing(
     if timing {
         settings = settings.with_handled_branch_latency(Default::default());
     }
-    let drasi = DrasiLib::builder()
+    let drasi = lib_integration_tests::query_builder()
         .with_id(instance)
         .with_telemetry(TelemetryOptions::new(settings).with_metric_context(
             MetricRegistrationContext::new(Arc::new(metrics.clone()), Default::default()).unwrap(),
         ))
         .with_state_store_provider(store.clone())
-        .with_source(source)
+        .with_source(component_name("source"), source)
         .with_query(
-            Query::cypher("query")
+            Query::cypher(component_name("query"))
+                .with_id(component_id(QUERY_ID))
                 .query("MATCH (n:Item) RETURN n.name AS name")
-                .from_input("source")
+                .from_input_by_name(component_name("source"))
                 .enable_bootstrap(false)
                 .auto_start(true)
-                .build(),
+                .build()
+                .unwrap(),
         )
-        .with_reaction(ControlledReaction {
-            base: ReactionBase::new(ReactionBaseParams::new("reaction", vec!["query".into()])),
-            entered: entered.clone(),
-            permits: permits.clone(),
-            fail_effect,
-        })
+        .with_reaction(
+            component_name("reaction"),
+            ControlledReaction {
+                base: ReactionBase::new(ReactionBaseParams::new(
+                    component_id(REACTION_ID),
+                    vec![drasi_lib::config::ComponentReference::by_name(
+                        component_name("query"),
+                    )],
+                )),
+                entered: entered.clone(),
+                permits: permits.clone(),
+                fail_effect,
+            },
+        )
         .build()
         .await
         .unwrap();
@@ -200,7 +228,7 @@ async fn blocked_worker_with_timing(
         .unwrap();
     metrics
         .wait_for(|| {
-            metrics.count("drasi.query.events_processed", &[("query_id", "query")]) == inputs as u64
+            metrics.count("drasi.query.events_processed", &[("query_id", QUERY_ID)]) == inputs as u64
         })
         .await;
     assert_eq!(metrics.count("drasi.reaction.results_processed", &[]), 0);
@@ -237,11 +265,14 @@ async fn blocked_worker_with_timing(
             Some(&1.0)
         );
         assert_eq!(
-            metrics.count("drasi.errors", &[("component_id", "reaction")]),
+            metrics.count("drasi.errors", &[("component_id", REACTION_ID)]),
             1
         );
         let checkpoint = store
-            .get("reaction", "checkpoint:query")
+            .get(
+                &StorePartition::component(component_id(REACTION_ID)),
+                &format!("checkpoint:{QUERY_ID}"),
+            )
             .await
             .unwrap()
             .unwrap();
@@ -262,7 +293,7 @@ async fn blocked_worker_with_timing(
     assert_eq!(
         metrics.count(
             "drasi.component.inputs_processed",
-            &[("component_id", "reaction"), ("completion", "handled")]
+            &[("component_id", REACTION_ID), ("completion", "handled")]
         ),
         2
     );
@@ -271,7 +302,7 @@ async fn blocked_worker_with_timing(
             .histogram(
                 "drasi.component.operation.duration",
                 &[
-                    ("component_id", "reaction"),
+                    ("component_id", REACTION_ID),
                     ("operation", "reaction"),
                     ("outcome", "success")
                 ]
@@ -323,47 +354,47 @@ struct CheckpointStore {
 
 #[async_trait]
 impl StateStoreProvider for CheckpointStore {
-    async fn get(&self, store: &str, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
-        self.inner.get(store, key).await
+    async fn get(&self, partition: &StorePartition, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
+        self.inner.get(partition, key).await
     }
-    async fn set(&self, store: &str, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
+    async fn set(&self, partition: &StorePartition, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
         if key.starts_with("checkpoint:") && self.fail.load(Ordering::Acquire) {
             return Err(StateStoreError::StorageError(
                 "controlled checkpoint failure".into(),
             ));
         }
-        self.inner.set(store, key, value).await
+        self.inner.set(partition, key, value).await
     }
-    async fn delete(&self, store: &str, key: &str) -> StateStoreResult<bool> {
-        self.inner.delete(store, key).await
+    async fn delete(&self, partition: &StorePartition, key: &str) -> StateStoreResult<bool> {
+        self.inner.delete(partition, key).await
     }
-    async fn contains_key(&self, store: &str, key: &str) -> StateStoreResult<bool> {
-        self.inner.contains_key(store, key).await
+    async fn contains_key(&self, partition: &StorePartition, key: &str) -> StateStoreResult<bool> {
+        self.inner.contains_key(partition, key).await
     }
     async fn get_many(
         &self,
-        store: &str,
+        partition: &StorePartition,
         keys: &[&str],
     ) -> StateStoreResult<HashMap<String, Vec<u8>>> {
-        self.inner.get_many(store, keys).await
+        self.inner.get_many(partition, keys).await
     }
-    async fn set_many(&self, store: &str, entries: &[(&str, &[u8])]) -> StateStoreResult<()> {
-        self.inner.set_many(store, entries).await
+    async fn set_many(&self, partition: &StorePartition, entries: &[(&str, &[u8])]) -> StateStoreResult<()> {
+        self.inner.set_many(partition, entries).await
     }
-    async fn delete_many(&self, store: &str, keys: &[&str]) -> StateStoreResult<usize> {
-        self.inner.delete_many(store, keys).await
+    async fn delete_many(&self, partition: &StorePartition, keys: &[&str]) -> StateStoreResult<usize> {
+        self.inner.delete_many(partition, keys).await
     }
-    async fn clear_store(&self, store: &str) -> StateStoreResult<usize> {
-        self.inner.clear_store(store).await
+    async fn clear_store(&self, partition: &StorePartition) -> StateStoreResult<usize> {
+        self.inner.clear_store(partition).await
     }
-    async fn list_keys(&self, store: &str) -> StateStoreResult<Vec<String>> {
-        self.inner.list_keys(store).await
+    async fn list_keys(&self, partition: &StorePartition) -> StateStoreResult<Vec<String>> {
+        self.inner.list_keys(partition).await
     }
-    async fn store_exists(&self, store: &str) -> StateStoreResult<bool> {
-        self.inner.store_exists(store).await
+    async fn store_exists(&self, partition: &StorePartition) -> StateStoreResult<bool> {
+        self.inner.store_exists(partition).await
     }
-    async fn key_count(&self, store: &str) -> StateStoreResult<usize> {
-        self.inner.key_count(store).await
+    async fn key_count(&self, partition: &StorePartition) -> StateStoreResult<usize> {
+        self.inner.key_count(partition).await
     }
 }
 

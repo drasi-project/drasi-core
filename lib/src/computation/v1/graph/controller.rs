@@ -5504,6 +5504,10 @@ impl Operations {
                 })?,
             }
         };
+        // The observation, execution-scope, tracing and abort wrappers below
+        // move their inner future by value; boxing keeps those moves to one
+        // pointer so unoptimized builds do not overflow 2 MiB worker stacks.
+        let future = Box::pin(future);
         let (abort, registration) = AbortHandle::new_pair();
         let joined = graph
             .tasks

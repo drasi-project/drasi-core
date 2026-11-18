@@ -10,6 +10,8 @@ use drasi_host_sdk::computation::{self, NativeComponentProxy, NativePlugin};
 use drasi_lib::{computation::v1::*, observability::*};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
+#[path = "common/hooks.rs"]
+mod hooks;
 #[path = "../../../lib/tests/computation_support/metrics.rs"]
 mod recording;
 use recording::RecordingMetrics;
@@ -166,8 +168,8 @@ async fn counts_and_idle_work(instance: &str, profile: TelemetryProfile) -> Resu
         Arc::new(InMemoryComputationProvider),
         true,
     )?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&hooks::initialize_ctx()).await?;
+    query.start(&hooks::start_ctx()).await?;
     assert!(query.on_wakeup().await?.is_empty());
     assert_eq!(metrics.count("drasi.query.events_processed", &[]), 0);
     assert!(metrics
@@ -231,8 +233,8 @@ async fn counts_and_idle_work(instance: &str, profile: TelemetryProfile) -> Resu
         metrics.histogram("drasi.query.engine.duration", &[]).len(),
         2 * usize::from(enabled)
     );
-    query.stop().await?;
-    query.dispose().await?;
+    query.stop(&hooks::stop_ctx()).await?;
+    query.dispose(&hooks::dispose_ctx()).await?;
     if !enabled {
         assert!(metrics.is_empty());
     }
@@ -287,8 +289,8 @@ async fn standalone_volatile_evaluation_does_not_invent_storage_commit() -> Resu
         serde_json::json!({"query": "MATCH (n:Item) RETURN n.value AS value", "volatile": true}),
     )
     })?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&hooks::initialize_ctx()).await?;
+    query.start(&hooks::start_ctx()).await?;
     let output = execution
         .scope(query.transform(input(1, &["Item"], 1)?))
         .await?;
@@ -302,8 +304,8 @@ async fn standalone_volatile_evaluation_does_not_invent_storage_commit() -> Resu
         .histogram("drasi.query.commit.duration", &[])
         .is_empty());
     query.delivery_completed(&output).await?;
-    query.stop().await?;
-    query.dispose().await?;
+    query.stop(&hooks::stop_ctx()).await?;
+    query.dispose(&hooks::dispose_ctx()).await?;
     Ok(())
 }
 
@@ -340,11 +342,11 @@ async fn bootstrap_metrics(instance: &str) -> Result<()> {
         Arc::new(InMemoryComputationProvider),
     ))?;
     let bootstrap = Arc::new(Bootstrap(std::sync::atomic::AtomicUsize::new(0)));
-    query.bind_bootstrap(Arc::new(computation::NativeBootstrapResource(
+    query.bind_bootstrap_provider(Arc::new(computation::NativeBootstrapResource(
         bootstrap.clone(),
     )))?;
-    query.initialize().await?;
-    execution.scope(query.start()).await?;
+    query.initialize(&hooks::initialize_ctx()).await?;
+    execution.scope(query.start(&hooks::start_ctx())).await?;
     assert_eq!(
         metrics.count("drasi.query.events_processed", &[("phase", "bootstrap")]),
         3
@@ -360,8 +362,8 @@ async fn bootstrap_metrics(instance: &str) -> Result<()> {
         3
     );
     assert_eq!(metrics.count("drasi.query.results_emitted", &[]), 0);
-    query.stop().await?;
-    execution.scope(query.start()).await?;
+    query.stop(&hooks::stop_ctx()).await?;
+    execution.scope(query.start(&hooks::start_ctx())).await?;
     assert_eq!(
         bootstrap.0.load(std::sync::atomic::Ordering::SeqCst),
         1,
@@ -381,8 +383,8 @@ async fn bootstrap_metrics(instance: &str) -> Result<()> {
     );
     assert_eq!(metrics.count("drasi.query.results_emitted", &[]), 1);
     query.delivery_completed(&output).await?;
-    query.stop().await?;
-    query.dispose().await?;
+    query.stop(&hooks::stop_ctx()).await?;
+    query.dispose(&hooks::dispose_ctx()).await?;
     Ok(())
 }
 
@@ -413,8 +415,8 @@ async fn real_scheduled_work(instance: &str) -> Result<()> {
         &plugin, &execution, instance, Arc::new(InMemoryComputationProvider), true,
         "MATCH (n:Item) WHERE drasi.trueFor(n.ready, duration({seconds: 1})) RETURN n.value AS value",
     )?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&hooks::initialize_ctx()).await?;
+    query.start(&hooks::start_ctx()).await?;
     assert!(query.on_wakeup().await?.is_empty());
     let change = SourceChange::Insert {
         element: Element::Node {
@@ -460,8 +462,8 @@ async fn real_scheduled_work(instance: &str) -> Result<()> {
         metrics.histogram("drasi.query.commit.duration", &[]).len(),
         commits
     );
-    query.stop().await?;
-    query.dispose().await?;
+    query.stop(&hooks::stop_ctx()).await?;
+    query.dispose(&hooks::dispose_ctx()).await?;
     Ok(())
 }
 
@@ -501,14 +503,14 @@ async fn replay_does_not_evaluate(instance: &str) -> Result<()> {
     let graph = graph(&metrics, instance, TelemetryProfile::Debug)?;
     let execution = binding(&graph, instance)?;
     let mut query = create(&plugin, &execution, instance, provider, false)?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&hooks::initialize_ctx()).await?;
+    query.start(&hooks::start_ctx()).await?;
     let original = execution
         .scope(query.transform(input(1, &["Item"], 1)?))
         .await?;
     assert_eq!(original.len(), 1);
-    query.stop().await?;
-    query.start().await?;
+    query.stop(&hooks::stop_ctx()).await?;
+    query.start(&hooks::start_ctx()).await?;
     let evaluations = metrics.histogram("drasi.query.engine.duration", &[]).len();
     let inputs = metrics.count("drasi.query.events_processed", &[]);
     let results = metrics.count("drasi.query.results_emitted", &[]);
@@ -528,8 +530,8 @@ async fn replay_does_not_evaluate(instance: &str) -> Result<()> {
     assert_eq!(metrics.count("drasi.query.results_emitted", &[]), results);
     assert_eq!(inputs, 1);
     assert_eq!(results, 1);
-    query.stop().await?;
-    query.dispose().await?;
+    query.stop(&hooks::stop_ctx()).await?;
+    query.dispose(&hooks::dispose_ctx()).await?;
     Ok(())
 }
 
@@ -582,8 +584,8 @@ async fn non_atomic_evaluation_and_publication_keep_one_input_and_result_count()
         drasi_computation_plugin_sdk::Scope { instance_id: "non-atomic".into(), graph_id: "query-observations".into(), generation: 1 },
         provider, None, QueryPublicationMode::NonAtomic,
     ))?;
-    query.initialize().await?;
-    query.start().await?;
+    query.initialize(&hooks::initialize_ctx()).await?;
+    query.start(&hooks::start_ctx()).await?;
     let original = input(1, &["Item"], 2)?;
     let output = execution.scope(query.transform(original.clone())).await?;
     assert_eq!(output.len(), 1);
@@ -610,8 +612,8 @@ async fn non_atomic_evaluation_and_publication_keep_one_input_and_result_count()
         metrics.histogram("drasi.query.commit.duration", &[]).len(),
         commits
     );
-    query.stop().await?;
-    query.dispose().await?;
+    query.stop(&hooks::stop_ctx()).await?;
+    query.dispose(&hooks::dispose_ctx()).await?;
     Ok(())
 }
 
@@ -621,15 +623,13 @@ struct ChannelSource(
 );
 #[async_trait::async_trait]
 impl ComputationComponent for ChannelSource {
+    fn description(&self) -> ComponentDescription {
+        ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.0
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 #[async_trait::async_trait]
 impl EnvelopeSource for ChannelSource {
@@ -644,6 +644,9 @@ struct ChannelSourceFactory {
 }
 #[async_trait::async_trait]
 impl ComponentFactory for ChannelSourceFactory {
+    fn describe(&self, _: &ConstructionContext) -> Result<ComponentDescription> {
+        Ok(ComponentDescription::undeclared())
+    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
     }
@@ -751,9 +754,9 @@ async fn ordinary_query_processes_sequential_inputs(instance: &str) -> Result<()
         )
         .with_query_factory(native)
         .with_query(
-            drasi_lib::Query::cypher(NAME)
+            drasi_lib::Query::cypher(ComponentName::try_new(NAME)?)
                 .query("MATCH (n:Item) RETURN n.value AS value")
-                .from_input("source")
+                .from_input_by_name(ComponentName::try_new("source")?)
                 .enable_bootstrap(false)
                 .build()?,
         )
@@ -762,7 +765,8 @@ async fn ordinary_query_processes_sequential_inputs(instance: &str) -> Result<()
         .await?;
     let run = async {
         core.start().await?;
-        let mut results = core.subscribe_query_results(NAME).await?.stream;
+        let name = ComponentName::try_new(NAME)?;
+        let mut results = core.subscribe_query_results_by_name(&name).await?.stream;
         for sequence in 1..=INPUTS {
             sender
                 .send(OutputEnvelope::new(
@@ -776,7 +780,7 @@ async fn ordinary_query_processes_sequential_inputs(instance: &str) -> Result<()
                 .context("query result stream closed")??;
         }
         anyhow::ensure!(
-            core.get_query_results(NAME).await?.len() == INPUTS as usize,
+            core.get_query_results_by_name(&name).await?.len() == INPUTS as usize,
             "native query lost sequential results"
         );
         Ok::<_, anyhow::Error>(())
@@ -840,13 +844,13 @@ mod traces {
                 drasi_computation_plugin_sdk::Scope { instance_id: "bootstrap-traces".into(), graph_id: "query-observations".into(), generation: 1 },
                 Arc::new(InMemoryComputationProvider),
             ))?;
-            query.bind_bootstrap(Arc::new(computation::NativeBootstrapResource(Arc::new(
+            query.bind_bootstrap_provider(Arc::new(computation::NativeBootstrapResource(Arc::new(
                 Bootstrap(std::sync::atomic::AtomicUsize::new(0)),
             ))))?;
-            query.initialize().await?;
-            execution.scope(query.start()).await?;
-            query.stop().await?;
-            query.dispose().await?;
+            query.initialize(&hooks::initialize_ctx()).await?;
+            execution.scope(query.start(&hooks::start_ctx())).await?;
+            query.stop(&hooks::stop_ctx()).await?;
+            query.dispose(&hooks::dispose_ctx()).await?;
             Ok::<_, anyhow::Error>(())
         }.with_subscriber(subscriber).await?;
         provider.force_flush()?;
@@ -897,15 +901,13 @@ mod traces {
     struct InputSource(ComponentDescriptor, Option<OutputEnvelope>);
     #[async_trait::async_trait]
     impl ComputationComponent for InputSource {
+        fn description(&self) -> ComponentDescription {
+            ComponentDescription::undeclared()
+        }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.0
         }
-        async fn start(&mut self) -> Result<()> {
-            Ok(())
-        }
-        async fn stop(&mut self) -> Result<()> {
-            Ok(())
-        }
+        drasi_lib::passive_component_lifecycle!();
     }
     #[async_trait::async_trait]
     impl EnvelopeSource for InputSource {
@@ -916,15 +918,13 @@ mod traces {
     struct OutputSink(ComponentDescriptor, Arc<tokio::sync::Notify>);
     #[async_trait::async_trait]
     impl ComputationComponent for OutputSink {
+        fn description(&self) -> ComponentDescription {
+            ComponentDescription::undeclared()
+        }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.0
         }
-        async fn start(&mut self) -> Result<()> {
-            Ok(())
-        }
-        async fn stop(&mut self) -> Result<()> {
-            Ok(())
-        }
+        drasi_lib::passive_component_lifecycle!();
     }
     #[async_trait::async_trait]
     impl EnvelopeSink for OutputSink {
@@ -1138,8 +1138,8 @@ mod traces {
                 Arc::new(InMemoryComputationProvider),
                 true,
             )?;
-            query.initialize().await?;
-            query.start().await?;
+            query.initialize(&hooks::initialize_ctx()).await?;
+            query.start(&hooks::start_ctx()).await?;
             let parent = TraceContextV1::new([1; 16], [2; 8], u8::from(sampled), None)?;
             let input = input(1, &["Item"], 1)?
                 .with_execution_context(ExecutionContext::new(parent.clone()));
@@ -1185,8 +1185,8 @@ mod traces {
                 "Debug tracing must not enable Persistence-only commit metrics"
             );
             query.delivery_completed(&output).await?;
-            query.stop().await?;
-            query.dispose().await?;
+            query.stop(&hooks::stop_ctx()).await?;
+            query.dispose(&hooks::dispose_ctx()).await?;
             drop(query);
             drop(graph);
             Ok::<_, anyhow::Error>(())

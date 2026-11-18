@@ -576,11 +576,15 @@ mod tests {
     use crate::observability::{ComponentLogKey, ComponentLogType};
     use tracing_subscriber::filter::filter_fn;
 
+    fn component() -> crate::computation::v1::ComponentId {
+        crate::test_helpers::named_component_id("component")
+    }
+
     fn emit(instance: &str) {
         let span = tracing::info_span!(
             "computation_component",
             instance_id = instance,
-            component_id = "component",
+            component_id = %component(),
             component_type = "source"
         );
         let _entered = span.enter();
@@ -603,8 +607,8 @@ mod tests {
         );
         info.flush().await.unwrap();
         warn.flush().await.unwrap();
-        let one = ComponentLogKey::new("one", ComponentLogType::Source, "component");
-        let two = ComponentLogKey::new("two", ComponentLogType::Source, "component");
+        let one = ComponentLogKey::new("one", ComponentLogType::Source, component());
+        let two = ComponentLogKey::new("two", ComponentLogType::Source, component());
         assert_eq!(info.registry().log_count_by_key(&one).await, 2);
         assert_eq!(info.registry().log_count_by_key(&two).await, 0);
         assert_eq!(warn.registry().log_count_by_key(&one).await, 0);
@@ -629,7 +633,7 @@ mod tests {
         );
         capture.flush().await.unwrap();
         assert_eq!(capture.registry().log_level(), Some(log::LevelFilter::Off));
-        let key = ComponentLogKey::new("off", ComponentLogType::Source, "component");
+        let key = ComponentLogKey::new("off", ComponentLogType::Source, component());
         assert_eq!(capture.registry().log_count_by_key(&key).await, 0);
         capture.shutdown(Duration::from_secs(2)).await.unwrap();
     }

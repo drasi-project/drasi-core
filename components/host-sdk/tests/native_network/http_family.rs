@@ -67,7 +67,7 @@ async fn incoming_http_trace_context_survives_requests_batches_and_native_transp
         let port = free_port()?;
         let mut source = family_component(
             HTTP_SOURCE,
-            "trace-http",
+            NETWORK_SOURCE_ID,
             json!({
                 "stream":"facilities-db/out", "host":"127.0.0.1", "port":port,
                 "ingressCapacity":8, "adaptiveEnabled":true,
@@ -75,9 +75,10 @@ async fn incoming_http_trace_context_survives_requests_batches_and_native_transp
             }),
             linked,
         )?;
-        source.start().await?;
+        source.initialize(&crate::hooks::initialize_ctx()).await?;
+        source.start(&crate::hooks::start_ctx()).await?;
         let client = reqwest::Client::new();
-        let url = format!("http://127.0.0.1:{port}/sources/facilities-db/events");
+        let url = format!("http://127.0.0.1:{port}/sources/{NETWORK_SOURCE_ID}/events");
         for parent in [
             Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"),
             Some("00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-00"),
@@ -115,7 +116,8 @@ async fn incoming_http_trace_context_survives_requests_batches_and_native_transp
                 ExecutionContext::from_w3c_headers(Some(parent.as_bytes()), None),
             );
         }
-        source.stop().await?;
+        source.stop(&crate::hooks::stop_ctx()).await?;
+        source.dispose(&crate::hooks::dispose_ctx()).await?;
     }
     Ok(())
 }

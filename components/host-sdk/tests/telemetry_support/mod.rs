@@ -11,6 +11,8 @@ use std::{sync::Arc, time::Duration};
 mod fixtures;
 pub use fixtures::fixture;
 
+#[path = "../common/hooks.rs"]
+pub mod hooks;
 #[path = "../../../../lib/tests/computation_support/metrics.rs"]
 pub mod metrics;
 pub use metrics::RecordingMetrics;
@@ -130,18 +132,18 @@ pub async fn metrics_contract() -> Result<()> {
     let graph = graph("native-metrics", &metrics, logging.clone(), None, false)?;
     let old = binding(&graph, "native-metrics", 1, logging.clone())?;
     let mut a = create(&plugin, &old, 100)?;
-    a.initialize().await?;
-    a.start().await?;
+    a.initialize(&hooks::initialize_ctx()).await?;
+    a.start(&hooks::start_ctx()).await?;
     run(&mut a, Default::default()).await?;
     assert_eq!(
         metrics.count("drasi.plugin.test-telemetry.frames_received", &[]),
         100
     );
-    a.stop().await?;
+    a.stop(&hooks::stop_ctx()).await?;
     let new = binding(&graph, "native-metrics", 2, logging.clone())?;
     let mut b = create(&plugin, &new, 10)?;
-    b.initialize().await?;
-    b.start().await?;
+    b.initialize(&hooks::initialize_ctx()).await?;
+    b.start(&hooks::start_ctx()).await?;
     run(&mut b, Default::default()).await?;
     update("native-metrics", 2, true, 10)?;
     update("native-metrics", 2, true, 8)?;
@@ -183,13 +185,17 @@ pub async fn metrics_contract() -> Result<()> {
         220
     );
     logging.flush().await?;
-    let key = ComponentLogKey::new("native-metrics", ComponentLogType::Service, PROBE_ID);
+    let key = ComponentLogKey::new(
+        "native-metrics",
+        ComponentLogType::Service,
+        ComponentId::try_new(PROBE_ID)?,
+    );
     assert!(logging.registry().log_count_by_key(&key).await >= 7);
     let values = observations()?;
     assert_eq!(values.as_array().context("observations")?.len(), 2);
-    b.stop().await?;
-    a.dispose().await?;
-    b.dispose().await?;
+    b.stop(&hooks::stop_ctx()).await?;
+    a.dispose(&hooks::dispose_ctx()).await?;
+    b.dispose(&hooks::dispose_ctx()).await?;
     drop(a);
     drop(b);
     assert_eq!(
@@ -206,15 +212,15 @@ pub async fn metrics_contract() -> Result<()> {
     clear()?;
     let renewed = binding(&graph, "native-metrics", 2, logging.clone())?;
     let mut restarted = create(&plugin, &renewed, 3)?;
-    restarted.initialize().await?;
-    restarted.start().await?;
+    restarted.initialize(&hooks::initialize_ctx()).await?;
+    restarted.start(&hooks::start_ctx()).await?;
     run(&mut restarted, Default::default()).await?;
     assert_eq!(
         metrics.count("drasi.plugin.test-telemetry.frames_received", &[]),
         223
     );
-    restarted.stop().await?;
-    restarted.dispose().await?;
+    restarted.stop(&hooks::stop_ctx()).await?;
+    restarted.dispose(&hooks::dispose_ctx()).await?;
     drop(restarted);
     clear()?;
     drop(graph);

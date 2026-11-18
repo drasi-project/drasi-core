@@ -1080,7 +1080,7 @@ impl ComputationComponent for OneSource {
 #[async_trait]
 impl EnvelopeSource for OneSource {
     async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
-        Ok(self.envelope.take().map(|envelope| OutputEnvelope { execution_context: Default::default(),
+        Ok(self.envelope.take().map(|envelope| OutputEnvelope {
             port: PortId::try_new("out").expect("fixture port"),
             envelope,
             execution_context: Default::default(),

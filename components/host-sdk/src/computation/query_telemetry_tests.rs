@@ -526,6 +526,12 @@ fn missing_query_extension_is_optional_unless_explicitly_required() -> anyhow::R
 struct QueryFactory(bool);
 
 impl sdk::Factory for QueryFactory {
+    fn describe(
+        &self,
+        _request: &sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<sdk::ComponentDescription> {
+        Ok(sdk::ComponentDescription::undeclared())
+    }
     fn metadata(&self) -> sdk::FactoryMetadata {
         let schema = GraphChangeCodec::schema();
         sdk::FactoryMetadata {

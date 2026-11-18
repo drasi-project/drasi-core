@@ -22,7 +22,7 @@ fn event() -> proto::SourceChange {
             element: Some(proto::element::Element::Node(proto::Node {
                 metadata: Some(proto::ElementMetadata {
                     reference: Some(proto::ElementReference {
-                        source_id: SOURCE_ID.into(),
+                        namespace: SOURCE_ID.into(),
                         element_id: "row".into(),
                     }),
                     labels: vec!["Room".into()],

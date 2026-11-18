@@ -11,6 +11,12 @@ use drasi_computation_contracts::{
 struct QueryFactory(bool);
 
 impl Factory for QueryFactory {
+    fn describe(
+        &self,
+        _request: &crate::wire::DescribeRequest,
+    ) -> anyhow::Result<crate::ComponentDescription> {
+        Ok(crate::ComponentDescription::undeclared())
+    }
     fn metadata(&self) -> FactoryMetadata {
         let schema = GraphChangeCodec::schema();
         FactoryMetadata {

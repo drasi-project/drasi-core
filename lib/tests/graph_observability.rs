@@ -14,6 +14,7 @@ use drasi_lib::{
         MetricRegistrationContext, TelemetryOptions, TelemetryProfile, TelemetrySettings,
         TELEMETRY_TARGET,
     },
+    ComponentName,
 };
 #[path = "computation_support/metrics.rs"]
 mod recording_metrics;
@@ -40,15 +41,13 @@ async fn directly_constructed_query_uses_real_evaluator_and_commit_boundaries() 
     struct Source(ComponentDescriptor, Option<OutputEnvelope>);
     #[async_trait]
     impl ComputationComponent for Source {
+        fn description(&self) -> ComponentDescription {
+            ComponentDescription::undeclared()
+        }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.0
         }
-        async fn start(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn stop(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
+        drasi_lib::passive_component_lifecycle!();
     }
     #[async_trait]
     impl EnvelopeSource for Source {
@@ -59,15 +58,13 @@ async fn directly_constructed_query_uses_real_evaluator_and_commit_boundaries() 
     struct Sink(ComponentDescriptor);
     #[async_trait]
     impl ComputationComponent for Sink {
+        fn description(&self) -> ComponentDescription {
+            ComponentDescription::undeclared()
+        }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.0
         }
-        async fn start(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn stop(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
+        drasi_lib::passive_component_lifecycle!();
     }
     #[async_trait]
     impl EnvelopeSink for Sink {
@@ -84,7 +81,7 @@ async fn directly_constructed_query_uses_real_evaluator_and_commit_boundaries() 
     let query = ContinuousQueryTransformer::new(
         ContinuousQueryDefinition {
             graph_id: "query-boundaries".into(),
-            id: component("query"),
+            id: id("query"),
             query: "MATCH (n:Person) RETURN n.name AS name".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: stream("query"),
@@ -126,7 +123,7 @@ async fn directly_constructed_query_uses_real_evaluator_and_commit_boundaries() 
                 name("source"),
                 Box::new(Source(
                     ComponentDescriptor::try_new(
-                        component("source"),
+                        id("source"),
                         vec![PortDescriptor::new(
                             port("out"),
                             PortDirection::Output,
@@ -143,7 +140,7 @@ async fn directly_constructed_query_uses_real_evaluator_and_commit_boundaries() 
                 name("sink"),
                 Box::new(Sink(
                     ComponentDescriptor::try_new(
-                        component("sink"),
+                        id("sink"),
                         vec![PortDescriptor::new(
                             port("in"),
                             PortDirection::Input,
@@ -154,14 +151,14 @@ async fn directly_constructed_query_uses_real_evaluator_and_commit_boundaries() 
                     .unwrap(),
                 )),
             )
-            .bind_stream(endpoint("source", "out"), stream("source"))
-            .bind_stream(endpoint("query", "out"), stream("query"))
+            .bind_stream(endpoint(&id("source"), "out"), stream("source"))
+            .bind_stream(endpoint(&id("query"), "out"), stream("query"))
             .connect(
-                edge("source", "query"),
+                edge(&id("source"), &id("query")),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .connect(
-                edge("query", "sink"),
+                edge(&id("query"), &id("sink")),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .build()
@@ -194,7 +191,7 @@ async fn directly_constructed_query_uses_real_evaluator_and_commit_boundaries() 
     assert_eq!(
         metrics.count(
             "drasi.component.calls",
-            &[("component_id", component("query").as_str()), ("operation", "confirm_outputs")]
+            &[("component_id", id("query").as_str()), ("operation", "confirm_outputs")]
         ),
         1
     );
@@ -216,7 +213,7 @@ async fn directly_constructed_query_uses_real_evaluator_and_commit_boundaries() 
     assert_eq!(
         metrics.count(
             "drasi.component.inputs_processed",
-            &[("component_id", component("query").as_str())]
+            &[("component_id", id("query").as_str())]
         ),
         1
     );
@@ -240,15 +237,13 @@ async fn processing_failure_and_cancellation_have_one_local_outcome() {
     }
     #[async_trait]
     impl ComputationComponent for Pending {
+        fn description(&self) -> ComponentDescription {
+            ComponentDescription::undeclared()
+        }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.descriptor
         }
-        async fn start(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn stop(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
+        drasi_lib::passive_component_lifecycle!();
     }
     #[async_trait]
     impl Transformer for Pending {
@@ -271,30 +266,30 @@ async fn processing_failure_and_cancellation_have_one_local_outcome() {
                 .source(
                     name("source"),
                     Box::new(FiniteSource::new(
-                        "source",
-                        vec![output(root("source", 1, &[1]))],
+                        id("source"),
+                        vec![output(root(&id("source"), "source", 1, &[1]))],
                     )),
                 )
                 .transformer(
                     name("pending"),
                     Box::new(Pending {
-                        descriptor: descriptor("pending", &["in"], &["out"]),
+                        descriptor: descriptor(&id("pending"), &["in"], &["out"]),
                         entered: entered.clone(),
                         cancel,
                     }),
                 )
                 .sink(
                     name("sink"),
-                    Box::new(CollectSink::new("sink", &["in"], Arc::default())),
+                    Box::new(CollectSink::new(id("sink"), "sink", &["in"], Arc::default())),
                 )
-                .bind_stream(endpoint("source", "out"), stream("source"))
-                .bind_stream(endpoint("pending", "out"), stream("pending"))
+                .bind_stream(endpoint(&id("source"), "out"), stream("source"))
+                .bind_stream(endpoint(&id("pending"), "out"), stream("pending"))
                 .connect(
-                    edge("source", "pending"),
+                    edge(&id("source"), &id("pending")),
                     Box::new(BoundedPipeConfig { capacity: 1 }),
                 )
                 .connect(
-                    edge("pending", "sink"),
+                    edge(&id("pending"), &id("sink")),
                     Box::new(BoundedPipeConfig { capacity: 1 }),
                 )
                 .build()
@@ -310,7 +305,7 @@ async fn processing_failure_and_cancellation_have_one_local_outcome() {
                         let mut observed = control.subscribe_observed();
                         observed
                             .wait_for(|graph| {
-                                graph.components[&component("pending")].failure.is_some()
+                                graph.components[&id("pending")].failure.is_some()
                             })
                             .await
                             .unwrap();
@@ -329,14 +324,14 @@ async fn processing_failure_and_cancellation_have_one_local_outcome() {
         assert_eq!(
             metrics.count(
                 "drasi.component.inputs_processed",
-                &[("component_id", component("pending").as_str())]
+                &[("component_id", id("pending").as_str())]
             ),
             0
         );
         assert_eq!(
             metrics.count(
                 "drasi.component.outputs_emitted",
-                &[("component_id", component("pending").as_str())]
+                &[("component_id", id("pending").as_str())]
             ),
             0
         );
@@ -354,7 +349,7 @@ async fn processing_failure_and_cancellation_have_one_local_outcome() {
         let durations = metrics.matching(
             "drasi.component.operation.duration",
             &[
-                ("component_id", component("pending").as_str()),
+                ("component_id", id("pending").as_str()),
                 ("operation", "transform"),
                 ("outcome", outcome),
             ],
@@ -375,6 +370,9 @@ async fn readiness_updates_synchronously_and_idle_service_stays_up() {
     }
     #[async_trait]
     impl ComputationComponent for ReadyService {
+        fn description(&self) -> ComponentDescription {
+            ComponentDescription::undeclared()
+        }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.descriptor
         }
@@ -384,11 +382,19 @@ async fn readiness_updates_synchronously_and_idle_service_stays_up() {
         fn bind_control(&mut self, control: ComponentControl) {
             *self.control.lock().unwrap() = Some(control);
         }
-        async fn start(&mut self) -> anyhow::Result<()> {
+        drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
+        async fn start(&mut self, _: &StartContext) -> anyhow::Result<()> {
             self.started.notify_one();
             Ok(())
         }
-        async fn stop(&mut self) -> anyhow::Result<()> {
+        drasi_lib::passive_component_lifecycle!(@hook pause, PauseContext);
+        drasi_lib::passive_component_lifecycle!(@hook resume, ResumeContext);
+        drasi_lib::passive_component_lifecycle!(@hook stop, StopContext);
+        async fn dispose(&mut self, context: &DisposeContext) -> anyhow::Result<()> {
+            anyhow::ensure!(
+                !context.erases_owned_state(),
+                "this component does not support permanent state removal"
+            );
             Ok(())
         }
     }
@@ -406,7 +412,7 @@ async fn readiness_updates_synchronously_and_idle_service_stays_up() {
         .service(
             name("service"),
             Box::new(ReadyService {
-                descriptor: descriptor("service", &[], &[]),
+                descriptor: descriptor(&id("service"), &[], &[]),
                 control: binding.clone(),
                 started: started.clone(),
             }),
@@ -420,7 +426,7 @@ async fn readiness_updates_synchronously_and_idle_service_stays_up() {
         assert_eq!(
             metrics.matching(
                 "drasi.component.up",
-                &[("component_id", component("service").as_str())]
+                &[("component_id", id("service").as_str())]
             )[0]
             .gauge,
             0.0
@@ -430,7 +436,7 @@ async fn readiness_updates_synchronously_and_idle_service_stays_up() {
         let mut observed = control.subscribe_observed();
         tokio::time::timeout(
             Duration::from_secs(5),
-            observed.wait_for(|graph| graph.components[&component("service")].started),
+            observed.wait_for(|graph| graph.components[&id("service")].started),
         )
         .await
         .unwrap()
@@ -438,7 +444,7 @@ async fn readiness_updates_synchronously_and_idle_service_stays_up() {
         assert_eq!(
             metrics.matching(
                 "drasi.component.up",
-                &[("component_id", component("service").as_str())]
+                &[("component_id", id("service").as_str())]
             )[0]
             .gauge,
             1.0
@@ -447,7 +453,7 @@ async fn readiness_updates_synchronously_and_idle_service_stays_up() {
         assert_eq!(
             metrics.matching(
                 "drasi.component.up",
-                &[("component_id", component("service").as_str())]
+                &[("component_id", id("service").as_str())]
             )[0]
             .gauge,
             0.0
@@ -456,7 +462,7 @@ async fn readiness_updates_synchronously_and_idle_service_stays_up() {
         assert_eq!(
             metrics.matching(
                 "drasi.component.up",
-                &[("component_id", component("service").as_str())]
+                &[("component_id", id("service").as_str())]
             )[0]
             .gauge,
             1.0
@@ -468,7 +474,7 @@ async fn readiness_updates_synchronously_and_idle_service_stays_up() {
     assert_eq!(
         metrics.matching(
             "drasi.component.up",
-            &[("component_id", component("service").as_str())]
+            &[("component_id", id("service").as_str())]
         )[0]
         .gauge,
         0.0
@@ -506,17 +512,17 @@ async fn supported_acknowledgements_record_physical_queue_and_input_identity() {
             .source(
                 name("source"),
                 Box::new(FiniteSource::new(
-                    "source",
-                    vec![output(root("source", 1, &[1]))],
+                    id("source"),
+                    vec![output(root(&id("source"), "source", 1, &[1]))],
                 )),
             )
             .sink(
                 name("sink"),
-                Box::new(CollectSink::new("sink", &["in"], Arc::default())),
+                Box::new(CollectSink::new(id("sink"), "sink", &["in"], Arc::default())),
             )
-            .bind_stream(endpoint("source", "out"), stream("source"))
+            .bind_stream(endpoint(&id("source"), "out"), stream("source"))
             .connect(
-                edge("source", "sink"),
+                edge(&id("source"), &id("sink")),
                 Box::new(RetainedPipeConfig {
                     resource,
                     capacity,
@@ -565,15 +571,13 @@ async fn admitted_publication_attempts_and_retries_do_not_duplicate_physical_out
     }
     #[async_trait]
     impl ComputationComponent for Admitted {
+        fn description(&self) -> ComponentDescription {
+            ComponentDescription::undeclared()
+        }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.descriptor
         }
-        async fn start(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn stop(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
+        drasi_lib::passive_component_lifecycle!();
     }
     #[async_trait]
     impl EnvelopeSource for Admitted {
@@ -609,7 +613,7 @@ async fn admitted_publication_attempts_and_retries_do_not_duplicate_physical_out
             subscribers: BTreeMap::from([("sink".into(), SubscriptionStart::Earliest)]),
         },
         provider
-            .create_indexes("admission-observations", "ingress")
+            .create_indexes("admission-observations", &id("ingress"))
             .await
             .unwrap(),
         codec,
@@ -617,7 +621,7 @@ async fn admitted_publication_attempts_and_retries_do_not_duplicate_physical_out
         QosRecoveryOptions::Admission(AdmissionOptions {
             construction_scope: "admission-observations".into(),
             graph_id: "admission-observations".into(),
-            component_id: component("source"),
+            component_id: id("source"),
             failure_scope: FailureMode::ProcessRestart,
             max_producers: NonZeroUsize::new(2).unwrap(),
             receipts_per_producer: NonZeroUsize::new(4).unwrap(),
@@ -647,17 +651,17 @@ async fn admitted_publication_attempts_and_retries_do_not_duplicate_physical_out
             .source(
                 name("source"),
                 Box::new(Admitted {
-                    descriptor: descriptor("source", &[], &["out"]),
+                    descriptor: descriptor(&id("source"), &[], &["out"]),
                     admission: admission.clone(),
                 }),
             )
             .sink(
                 name("sink"),
-                Box::new(CollectSink::new("sink", &["in"], received.clone())),
+                Box::new(CollectSink::new(id("sink"), "sink", &["in"], received.clone())),
             )
-            .bind_stream(endpoint("source", "out"), stream("source"))
+            .bind_stream(endpoint(&id("source"), "out"), stream("source"))
             .connect(
-                edge("source", "sink"),
+                edge(&id("source"), &id("sink")),
                 Box::new(channel.definition().pipe(resource, "sink")),
             )
             .build()
@@ -669,14 +673,14 @@ async fn admitted_publication_attempts_and_retries_do_not_duplicate_physical_out
                 control.startup_report().await.unwrap();
                 admission.wait_active().await.unwrap();
                 let session = admission
-                    .register_producer(component("client"))
+                    .register_producer(id("client"))
                     .await
                     .unwrap();
                 assert_eq!(
                     metrics.count("drasi.component.calls", &[("operation", "publish")]),
                     0
                 );
-                let input = root("client", 1, &[1]);
+                let input = root(&id("client"), "client", 1, &[1]);
                 let receipt = admission.admit(&session, 1, &input).await.unwrap();
                 while channel.progress().await.unwrap().processed["sink"] < receipt.position {
                     tokio::task::yield_now().await;
@@ -684,7 +688,7 @@ async fn admitted_publication_attempts_and_retries_do_not_duplicate_physical_out
                 let duplicate = admission.admit(&session, 1, &input).await.unwrap();
                 assert_eq!(receipt, duplicate);
                 assert!(admission
-                    .admit(&session, 1, &root("client", 1, &[2]))
+                    .admit(&session, 1, &root(&id("client"), "client", 1, &[2]))
                     .await
                     .is_err());
                 admission.producer_status(&session).await.unwrap();
@@ -703,7 +707,7 @@ async fn admitted_publication_attempts_and_retries_do_not_duplicate_physical_out
     assert_eq!(
         metrics.count(
             "drasi.component.calls",
-            &[("component_id", component("source").as_str()), ("operation", "publish")]
+            &[("component_id", id("source").as_str()), ("operation", "publish")]
         ),
         3
     );
@@ -711,7 +715,7 @@ async fn admitted_publication_attempts_and_retries_do_not_duplicate_physical_out
     assert_eq!(
         metrics.count(
             "drasi.component.outputs_emitted",
-            &[("component_id", component("source").as_str())]
+            &[("component_id", id("source").as_str())]
         ),
         1
     );
@@ -811,6 +815,27 @@ fn settings(
         )
 }
 
+/// Explicit fixture UUID per label; the label doubles as the component's name.
+fn id(label: &str) -> ComponentId {
+    component(match label {
+        "source" => 1,
+        "query" => 2,
+        "sink" => 3,
+        "pending" => 4,
+        "service" => 5,
+        "transform" => 6,
+        "one" => 7,
+        "two" => 8,
+        "client" => 9,
+        "ingress" => 10,
+        other => panic!("missing explicit fixture component ID for {other}"),
+    })
+}
+
+fn name(label: &str) -> ComponentName {
+    ComponentName::try_new(label).expect("fixture component name")
+}
+
 struct Burst {
     descriptor: ComponentDescriptor,
     count: usize,
@@ -821,15 +846,13 @@ struct Burst {
 
 #[async_trait]
 impl ComputationComponent for Burst {
+    fn description(&self) -> ComponentDescription {
+        ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 impl Burst {
@@ -837,7 +860,7 @@ impl Burst {
         (0..self.count)
             .map(|_| {
                 self.sequence += 1;
-                output(root("transform", self.sequence, &[1]))
+                output(root(&id("transform"), "transform", self.sequence, &[1]))
             })
             .collect()
     }
@@ -869,14 +892,14 @@ async fn burst_case(count: usize, continuation: bool, tracing: bool) {
             .source(
                 name("source"),
                 Box::new(FiniteSource::new(
-                    "source",
-                    vec![output(root("source", 1, &[7]))],
+                    id("source"),
+                    vec![output(root(&id("source"), "source", 1, &[7]))],
                 )),
             )
             .transformer(
                 name("transform"),
                 Box::new(Burst {
-                    descriptor: descriptor("transform", &["in"], &["out"]),
+                    descriptor: descriptor(&id("transform"), &["in"], &["out"]),
                     count,
                     pending: false,
                     continuation,
@@ -885,24 +908,24 @@ async fn burst_case(count: usize, continuation: bool, tracing: bool) {
             )
             .sink(
                 name("one"),
-                Box::new(CollectSink::new("one", &["in"], collected.clone())),
+                Box::new(CollectSink::new(id("one"), "one", &["in"], collected.clone())),
             )
             .sink(
                 name("two"),
-                Box::new(CollectSink::new("two", &["in"], collected.clone())),
+                Box::new(CollectSink::new(id("two"), "two", &["in"], collected.clone())),
             )
-            .bind_stream(endpoint("source", "out"), stream("source"))
-            .bind_stream(endpoint("transform", "out"), stream("transform"))
+            .bind_stream(endpoint(&id("source"), "out"), stream("source"))
+            .bind_stream(endpoint(&id("transform"), "out"), stream("transform"))
             .connect(
-                edge("source", "transform"),
+                edge(&id("source"), &id("transform")),
                 Box::new(BoundedPipeConfig { capacity: 8 }),
             )
             .connect(
-                edge("transform", "one"),
+                edge(&id("transform"), &id("one")),
                 Box::new(BoundedPipeConfig { capacity: 8 }),
             )
             .connect(
-                edge("transform", "two"),
+                edge(&id("transform"), &id("two")),
                 Box::new(BoundedPipeConfig { capacity: 8 }),
             )
             .build()
@@ -918,7 +941,7 @@ async fn burst_case(count: usize, continuation: bool, tracing: bool) {
     assert_eq!(
         metrics.count(
             "drasi.component.calls",
-            &[("component_id", component("transform").as_str()), ("operation", "transform")]
+            &[("component_id", id("transform").as_str()), ("operation", "transform")]
         ),
         1
     );
@@ -926,7 +949,7 @@ async fn burst_case(count: usize, continuation: bool, tracing: bool) {
         metrics.count(
             "drasi.component.calls",
             &[
-                ("component_id", component("transform").as_str()),
+                ("component_id", id("transform").as_str()),
                 ("operation", "continue_transform")
             ]
         ),
@@ -936,7 +959,7 @@ async fn burst_case(count: usize, continuation: bool, tracing: bool) {
         metrics.count(
             "drasi.component.calls",
             &[
-                ("component_id", component("transform").as_str()),
+                ("component_id", id("transform").as_str()),
                 ("operation", "confirm_outputs")
             ]
         ),
@@ -945,14 +968,14 @@ async fn burst_case(count: usize, continuation: bool, tracing: bool) {
     assert_eq!(
         metrics.count(
             "drasi.component.inputs_processed",
-            &[("component_id", component("transform").as_str()), ("completion", "transformed")]
+            &[("component_id", id("transform").as_str()), ("completion", "transformed")]
         ),
         1
     );
     assert_eq!(
         metrics.count(
             "drasi.component.outputs_emitted",
-            &[("component_id", component("transform").as_str())]
+            &[("component_id", id("transform").as_str())]
         ),
         produced as u64
     );
@@ -968,7 +991,7 @@ async fn burst_case(count: usize, continuation: bool, tracing: bool) {
     let durations = metrics.matching(
         "drasi.component.operation.duration",
         &[
-            ("component_id", component("transform").as_str()),
+            ("component_id", id("transform").as_str()),
             ("operation", "transform"),
             ("outcome", "success"),
         ],
@@ -1028,17 +1051,17 @@ async fn off_has_no_production_series_or_operation_spans() {
             .source(
                 name("source"),
                 Box::new(FiniteSource::new(
-                    "source",
-                    vec![output(root("source", 1, &[1]))],
+                    id("source"),
+                    vec![output(root(&id("source"), "source", 1, &[1]))],
                 )),
             )
             .sink(
                 name("sink"),
-                Box::new(CollectSink::new("sink", &["in"], Arc::default())),
+                Box::new(CollectSink::new(id("sink"), "sink", &["in"], Arc::default())),
             )
-            .bind_stream(endpoint("source", "out"), stream("source"))
+            .bind_stream(endpoint(&id("source"), "out"), stream("source"))
             .connect(
-                edge("source", "sink"),
+                edge(&id("source"), &id("sink")),
                 Box::new(BoundedPipeConfig { capacity: 1 }),
             )
             .build()
@@ -1083,25 +1106,25 @@ async fn retained_and_multicast_backlog_counts_physical_records_not_subscribers_
         .source(
             name("source"),
             Box::new(FiniteSource::new(
-                "source",
-                vec![output(root("source", 1, &[1]))],
+                id("source"),
+                vec![output(root(&id("source"), "source", 1, &[1]))],
             )),
         )
         .sink(
             name("one"),
-            Box::new(CollectSink::new("one", &["in"], received.clone())),
+            Box::new(CollectSink::new(id("one"), "one", &["in"], received.clone())),
         )
         .sink(
             name("two"),
-            Box::new(CollectSink::new("two", &["in"], received.clone())),
+            Box::new(CollectSink::new(id("two"), "two", &["in"], received.clone())),
         )
-        .bind_stream(endpoint("source", "out"), stream("source"))
+        .bind_stream(endpoint(&id("source"), "out"), stream("source"))
         .connect(
-            edge("source", "one"),
+            edge(&id("source"), &id("one")),
             Box::new(channel.definition().pipe(resource.clone(), "one")),
         )
         .connect(
-            edge("source", "two"),
+            edge(&id("source"), &id("two")),
             Box::new(channel.definition().pipe(resource, "two")),
         )
         .build()
@@ -1117,7 +1140,7 @@ async fn retained_and_multicast_backlog_counts_physical_records_not_subscribers_
     assert_eq!(
         metrics.count(
             "drasi.component.outputs_emitted",
-            &[("component_id", component("source").as_str())]
+            &[("component_id", id("source").as_str())]
         ),
         1
     );

@@ -11,6 +11,24 @@ use tracing::instrument::WithSubscriber;
 mod recording;
 use recording::RecordingMetrics;
 
+mod lifecycle_contexts {
+    use crate::computation::v1::{
+        CancellationToken, OperationScope, StartContext, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+}
+
 fn owner(
     metrics: &RecordingMetrics,
     profile: TelemetryProfile,
@@ -84,7 +102,7 @@ fn native_query_exclusions_disable_query_collection_without_disabling_component_
     .resolve("graph", None)
     .unwrap()
     .observations(
-        crate::test_helpers::component_id("query"),
+        crate::test_helpers::named_component_id("query"),
         ComponentRole::Transformer,
         ComponentSemanticKind::Query,
         1,
@@ -142,7 +160,7 @@ async fn native_query_observes_only_evaluation_and_actual_session_commit() {
     assert!(NativeQueryScope::current().is_none());
     let observer = observer.unwrap();
     let memory = InMemoryComputationProvider
-        .create_indexes("native", "query")
+        .create_indexes("native", &crate::test_helpers::named_component_id("query"))
         .await
         .unwrap();
     let indexes = memory.indexes();
@@ -706,7 +724,7 @@ async fn real_query_distinguishes_inputs_due_work_and_idle_notifications() {
             query_definition("MATCH (n:Item) WHERE drasi.trueFor(n.ready, duration({ seconds: 5 })) RETURN n.name AS name"),
             Arc::new(InMemoryComputationProvider),
         ).await.unwrap();
-        query.start().await.unwrap();
+        query.start(&lifecycle_contexts::start()).await.unwrap();
         assert!(query.on_wakeup().await.unwrap().is_empty());
         assert!(metrics.histogram("drasi.query.engine.duration", &[]).is_empty());
         assert!(query.transform(query_input(1)).await.unwrap().is_empty());
@@ -728,7 +746,7 @@ async fn real_query_distinguishes_inputs_due_work_and_idle_notifications() {
         assert!(query.transform(notification).await.unwrap().is_empty());
         assert_eq!(metrics.count("drasi.query.events_processed", &[]), 1);
         assert_eq!(metrics.histogram("drasi.query.engine.duration", &[]).len(), 2);
-        query.stop().await.unwrap();
+        query.stop(&lifecycle_contexts::stop()).await.unwrap();
     }).await;
 }
 
@@ -768,7 +786,7 @@ async fn prepared_input_replay_evaluates_only_fresh_inputs() {
             .await
             .unwrap()
             .with_bootstrap(replay);
-            query.start().await.unwrap();
+            query.start(&lifecycle_contexts::start()).await.unwrap();
             assert_eq!(query.on_wakeup().await.unwrap().len(), 1);
             assert!(query.on_wakeup().await.unwrap().is_empty());
             assert_eq!(
@@ -780,7 +798,7 @@ async fn prepared_input_replay_evaluates_only_fresh_inputs() {
                 metrics.histogram("drasi.query.engine.duration", &[]).len(),
                 1
             );
-            query.stop().await.unwrap();
+            query.stop(&lifecycle_contexts::stop()).await.unwrap();
         })
         .await;
 }
@@ -817,16 +835,16 @@ async fn durable_output_replay_only_observes_real_bookkeeping_commits() {
                 .await
                 .unwrap()
                 .with_delivery_tracking();
-            query.start().await.unwrap();
+            query.start(&lifecycle_contexts::start()).await.unwrap();
             let output = query.transform(query_input(1)).await.unwrap();
             let identity = QueryRecoveryIdentity::from_envelope(&output[0].envelope).unwrap();
-            query.stop().await.unwrap();
+            query.stop(&lifecycle_contexts::stop()).await.unwrap();
             drop(query);
             let mut query = ContinuousQueryTransformer::new(definition(), provider())
                 .await
                 .unwrap()
                 .with_delivery_tracking();
-            query.start().await.unwrap();
+            query.start(&lifecycle_contexts::start()).await.unwrap();
             let commits = metrics.histogram("drasi.query.commit.duration", &[]).len();
             let replay = query.on_wakeup().await.unwrap();
             assert_eq!(replay.len(), 1);
@@ -845,7 +863,7 @@ async fn durable_output_replay_only_observes_real_bookkeeping_commits() {
                 commits + 1
             );
             query.delivery_completed(&replay).await.unwrap();
-            query.stop().await.unwrap();
+            query.stop(&lifecycle_contexts::stop()).await.unwrap();
         })
         .await;
 }

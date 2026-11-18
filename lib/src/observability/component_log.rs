@@ -570,7 +570,7 @@ mod tests {
                 LogLevel::Info,
                 format!("message {index}"),
                 "instance",
-                "component",
+                crate::test_helpers::named_component_id("component"),
                 ComponentLogType::Source,
             )));
         }
@@ -585,13 +585,17 @@ mod tests {
         }
         drop(held);
         runtime.shutdown(Duration::from_secs(2)).await.unwrap();
-        let key = ComponentLogKey::new("instance", ComponentLogType::Source, "component");
+        let key = ComponentLogKey::new(
+            "instance",
+            ComponentLogType::Source,
+            crate::test_helpers::named_component_id("component"),
+        );
         assert_eq!(registry.log_count_by_key(&key).await, accepted);
         assert!(!runtime.try_log(LogMessage::with_instance(
             LogLevel::Info,
             "late",
             "instance",
-            "component",
+            crate::test_helpers::named_component_id("component"),
             ComponentLogType::Source,
         )));
         assert_eq!(runtime.losses().closed, 1);
@@ -618,13 +622,17 @@ mod tests {
         use crate::observability::{ComponentLogRuntime, LogPolicy};
         let runtime = ComponentLogRuntime::new(LogPolicy::new("info").unwrap()).unwrap();
         let registry = runtime.registry();
-        let key = ComponentLogKey::new("instance", ComponentLogType::Source, "component");
+        let key = ComponentLogKey::new(
+            "instance",
+            ComponentLogType::Source,
+            crate::test_helpers::named_component_id("component"),
+        );
         for _ in 0..32 {
             assert!(runtime.try_log(LogMessage::with_instance(
                 LogLevel::Info,
                 "stopping",
                 "instance",
-                "component",
+                crate::test_helpers::named_component_id("component"),
                 ComponentLogType::Source,
             )));
         }

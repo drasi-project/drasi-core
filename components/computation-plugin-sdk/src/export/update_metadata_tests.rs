@@ -114,7 +114,6 @@ impl QueryReader {
             state.retained.remove(0);
         }
         Ok(OutputEnvelope {
-            execution_context: Default::default(),
             port: PortId::try_new("out")?,
             envelope: output,
             execution_context: Default::default(),
@@ -552,7 +551,6 @@ async fn query_metadata_reflection() -> anyhow::Result<()> {
 
     let codec = wire::codec(&[GraphChangeCodec::schema()])?;
     let input = InputEnvelope {
-        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_changes(&[], StreamId::try_new("source/out")?, 1, None)?,
         execution_context: Default::default(),

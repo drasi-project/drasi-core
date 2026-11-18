@@ -324,7 +324,7 @@ mod tests {
             .resolve("graph", None)
             .unwrap();
             for kind in [ComponentSemanticKind::Query, ComponentSemanticKind::Transformer] {
-                let id = crate::test_helpers::component_id(kind.as_str());
+                let id = crate::test_helpers::named_component_id(kind.as_str());
                 let owner = graph
                     .observations(id.clone(), ComponentRole::Transformer, kind, 1)
                     .unwrap();

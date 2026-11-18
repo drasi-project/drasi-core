@@ -85,6 +85,24 @@ async fn record_filtered(
     spans
 }
 
+mod lifecycle_contexts {
+    use crate::computation::v1::{
+        CancellationToken, OperationScope, StartContext, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+}
+
 fn definition(text: &str) -> ContinuousQueryDefinition {
     ContinuousQueryDefinition {
         graph_id: "async-tests".into(),
@@ -420,7 +438,7 @@ async fn query_phase_detail_is_debug_only_bounded_and_keeps_output_parentage() {
             )
             .await
             .unwrap();
-            query.start().await.unwrap();
+            query.start(&lifecycle_contexts::start()).await.unwrap();
             for sequence in 1..=2 {
                 let output = observed_transform(&mut query, input(sequence)).await;
                 assert_eq!(output.len(), 1);
@@ -430,7 +448,7 @@ async fn query_phase_detail_is_debug_only_bounded_and_keeps_output_parentage() {
                 );
                 query.delivery_completed(&output).await.unwrap();
             }
-            query.stop().await.unwrap();
+            query.stop(&lifecycle_contexts::stop()).await.unwrap();
         })
         .await;
         let processing: Vec<_> = spans
@@ -636,7 +654,7 @@ async fn query_phase_enabled_overhead_characterization() {
                 )
                 .await
                 .unwrap();
-                query.start().await.unwrap();
+                query.start(&lifecycle_contexts::start()).await.unwrap();
                 for sequence in 1..=4 {
                     let output = observed_transform(&mut query, input(sequence)).await;
                     query.delivery_completed(&output).await.unwrap();
@@ -647,7 +665,7 @@ async fn query_phase_enabled_overhead_characterization() {
                     query.delivery_completed(&output).await.unwrap();
                 }
                 elapsed = started.elapsed();
-                query.stop().await.unwrap();
+                query.stop(&lifecycle_contexts::stop()).await.unwrap();
             })
             .await;
             let phases = spans
@@ -691,7 +709,7 @@ async fn scheduled_work_is_a_new_attempt_even_without_output_and_empty_probes_ar
             definition("MATCH (n:Item) WITH n, drasi.trueNowOrLater(datetime.realtime().epochMillis >= n.report_time + 1000, n.report_time + 1000) AS expired RETURN n.name AS name"),
             Arc::new(InMemoryComputationProvider),
         ).await.unwrap();
-        query.start().await.unwrap();
+        query.start(&lifecycle_contexts::start()).await.unwrap();
         assert!(query.on_wakeup().await.unwrap().is_empty());
         let output = query.transform(input(1)).await.unwrap();
         assert_eq!(output.len(), 1);
@@ -702,7 +720,7 @@ async fn scheduled_work_is_a_new_attempt_even_without_output_and_empty_probes_ar
         query.delivery_completed(&output).await.unwrap();
         assert!(query.on_wakeup().await.unwrap().is_empty());
         assert!(query.processing_context().unwrap().is_empty());
-        query.stop().await.unwrap();
+        query.stop(&lifecycle_contexts::stop()).await.unwrap();
     }).await;
     let scheduled: Vec<_> = spans
         .iter()
@@ -864,10 +882,10 @@ async fn prepared_input_replay_is_not_bootstrap_and_does_not_duplicate_processin
         .await
         .unwrap()
         .with_bootstrap(bootstrap.clone());
-        query.start().await.unwrap();
-        query.stop().await.unwrap();
+        query.start(&lifecycle_contexts::start()).await.unwrap();
+        query.stop(&lifecycle_contexts::stop()).await.unwrap();
         bootstrap.replay.lock().unwrap().push(input(2).envelope);
-        query.start().await.unwrap();
+        query.start(&lifecycle_contexts::start()).await.unwrap();
         let outputs = query.on_wakeup().await.unwrap();
         assert_eq!(outputs.len(), 1);
         assert_eq!(
@@ -876,10 +894,10 @@ async fn prepared_input_replay_is_not_bootstrap_and_does_not_duplicate_processin
         );
         query.delivery_completed(&outputs).await.unwrap();
         assert!(query.on_wakeup().await.unwrap().is_empty());
-        query.stop().await.unwrap();
+        query.stop(&lifecycle_contexts::stop()).await.unwrap();
         bootstrap.pending.store(true, Ordering::Release);
-        query.start().await.unwrap();
-        query.stop().await.unwrap();
+        query.start(&lifecycle_contexts::start()).await.unwrap();
+        query.stop(&lifecycle_contexts::stop()).await.unwrap();
         let contexts = bootstrap.preparations.lock().unwrap();
         assert!(contexts.len() >= 2);
         assert_ne!(
@@ -985,12 +1003,13 @@ async fn cancelled_bootstrap_closes_its_root_without_publishing_success() {
         .unwrap()
         .with_bootstrap(Arc::new(PendingBootstrap));
         {
-            let start = query.start();
+            let context = lifecycle_contexts::start();
+            let start = query.start(&context);
             tokio::pin!(start);
             assert!(futures::poll!(&mut start).is_pending());
         }
         assert!(BootstrapTrace::current().is_none());
-        query.stop().await.unwrap();
+        query.stop(&lifecycle_contexts::stop()).await.unwrap();
     })
     .await;
     for name in ["query.bootstrap", "bootstrap.snapshot"] {
@@ -1032,7 +1051,7 @@ async fn output_replay_after_reconstruction_has_new_context_but_no_evaluation() 
         .await
         .unwrap()
         .with_delivery_tracking();
-        first.start().await.unwrap();
+        first.start(&lifecycle_contexts::start()).await.unwrap();
         let output = first.transform(input(1)).await.unwrap();
         assert_eq!(output.len(), 1);
         let identity = GraphProducerProgress::from_envelope(&output[0].envelope)
@@ -1041,7 +1060,7 @@ async fn output_replay_after_reconstruction_has_new_context_but_no_evaluation() 
             .identity()
             .clone();
         let original_context = output[0].execution_context.clone();
-        first.stop().await.unwrap();
+        first.stop(&lifecycle_contexts::stop()).await.unwrap();
         drop(first);
         let mut recovered = ContinuousQueryTransformer::new(
             definition("MATCH (n:Item) RETURN n.name AS name"),
@@ -1050,7 +1069,7 @@ async fn output_replay_after_reconstruction_has_new_context_but_no_evaluation() 
         .await
         .unwrap()
         .with_delivery_tracking();
-        recovered.start().await.unwrap();
+        recovered.start(&lifecycle_contexts::start()).await.unwrap();
         let replay = recovered.on_wakeup().await.unwrap();
         assert_eq!(replay.len(), 1);
         assert_eq!(
@@ -1072,7 +1091,7 @@ async fn output_replay_after_reconstruction_has_new_context_but_no_evaluation() 
         );
         recovered.delivery_completed(&replay).await.unwrap();
         assert!(recovered.on_wakeup().await.unwrap().is_empty());
-        recovered.stop().await.unwrap();
+        recovered.stop(&lifecycle_contexts::stop()).await.unwrap();
     })
     .await;
     assert_eq!(

@@ -29,6 +29,9 @@ use std::{
 use tracing::instrument::WithSubscriber;
 use tracing_subscriber::prelude::*;
 
+#[path = "common/hooks.rs"]
+mod hooks;
+
 const SOURCE_ID: &str = "e07b5b54-840c-4c48-bac0-0bbdf637d306";
 const MIDDLE_ID: &str = "3531a429-8ac1-4c60-985f-82ea080c5281";
 const COLLECTED_ID: &str = "f027d30c-f549-4d41-a5cf-bd7f0bc1e606";
@@ -129,15 +132,13 @@ struct Collector {
 
 #[async_trait]
 impl ComputationComponent for Collector {
+    fn description(&self) -> ComponentDescription {
+        ComponentDescription::undeclared()
+    }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
+    drasi_lib::passive_component_lifecycle!();
 }
 
 #[async_trait]
@@ -237,13 +238,13 @@ async fn batch_and_cancellation(plugin: &NativePlugin) -> Result<()> {
         factory(plugin, "sink")
             .create_component(ComponentId::try_new(BATCH_SINK_ID)?, json!({"trace": true}))
     })?;
-    sink.initialize().await?;
-    sink.start().await?;
+    sink.initialize(&hooks::initialize_ctx()).await?;
+    sink.start(&hooks::start_ctx()).await?;
     scope
         .scope(sink.handle_batch(vec![input(52), input(53)]))
         .await?;
-    sink.stop().await?;
-    sink.dispose().await?;
+    sink.stop(&hooks::stop_ctx()).await?;
+    sink.dispose(&hooks::dispose_ctx()).await?;
 
     let mut middle = scope.in_scope(|| {
         factory(plugin, "transformer").create_component(
@@ -251,8 +252,8 @@ async fn batch_and_cancellation(plugin: &NativePlugin) -> Result<()> {
             json!({"trace": true, "block": true}),
         )
     })?;
-    middle.initialize().await?;
-    middle.start().await?;
+    middle.initialize(&hooks::initialize_ctx()).await?;
+    middle.start(&hooks::start_ctx()).await?;
     let result = tokio::time::timeout(
         Duration::from_millis(100),
         scope.scope(middle.transform(input(54))),
@@ -262,8 +263,8 @@ async fn batch_and_cancellation(plugin: &NativePlugin) -> Result<()> {
         result.is_err(),
         "pending native callback should be cancelled by its owner"
     );
-    middle.stop().await?;
-    middle.dispose().await?;
+    middle.stop(&hooks::stop_ctx()).await?;
+    middle.dispose(&hooks::dispose_ctx()).await?;
     assert!(ExecutionContext::current().is_empty());
     let observed = observations()?;
     assert!(
@@ -294,15 +295,13 @@ async fn graph_created_native_batch(plugin: &NativePlugin, sampled: bool) -> Res
     }
     #[async_trait]
     impl ComputationComponent for BatchSource {
+        fn description(&self) -> ComponentDescription {
+            ComponentDescription::undeclared()
+        }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.descriptor
         }
-        async fn start(&mut self) -> Result<()> {
-            Ok(())
-        }
-        async fn stop(&mut self) -> Result<()> {
-            Ok(())
-        }
+        drasi_lib::passive_component_lifecycle!();
     }
     #[async_trait]
     impl EnvelopeSource for BatchSource {
@@ -577,8 +576,8 @@ fn actual_native_libraries_preserve_context_parentage_and_owned_cancellation() -
             ComponentId::try_new("c774822a-9723-46f6-8a50-f35947a3e416")?,
             json!({}),
         )?;
-        old.initialize().await?;
-        old.start().await?;
+        old.initialize(&hooks::initialize_ctx()).await?;
+        old.start(&hooks::start_ctx()).await?;
         let mut empty = input(61);
         empty.execution_context = ExecutionContext::default();
         assert!(old.transform(empty).await?[0].execution_context.is_empty());
@@ -586,8 +585,8 @@ fn actual_native_libraries_preserve_context_parentage_and_owned_cancellation() -
             old.transform(input(62)).await.is_err(),
             "missing capability must not silently discard context"
         );
-        old.stop().await?;
-        old.dispose().await?;
+        old.stop(&hooks::stop_ctx()).await?;
+        old.dispose(&hooks::dispose_ctx()).await?;
         Ok::<_, anyhow::Error>(())
     })?;
     Ok(())

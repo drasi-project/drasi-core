@@ -15,13 +15,23 @@ use drasi_lib::{
 };
 use std::{collections::VecDeque, sync::Arc};
 
+fn id(name: &str) -> drasi_lib::ComponentId {
+    computation_support::component(match name {
+        "source" => 1,
+        "query" => 2,
+        "sink" => 3,
+        "worker-service" => 4,
+        other => panic!("missing explicit fixture component ID for {other}"),
+    })
+}
+
 fn context(id: u8, sampled: bool) -> ExecutionContext {
     ExecutionContext::new(TraceContextV1::new([id; 16], [id; 8], u8::from(sampled), None).unwrap())
 }
 
 fn event(sequence: u64) -> Arc<SourceEventWrapper> {
     Arc::new(SourceEventWrapper::new(
-        "source".into(),
+        id("source"),
         SourceEvent::Change(drasi_core::models::SourceChange::Delete {
             metadata: drasi_core::models::ElementMetadata {
                 reference: drasi_core::models::ElementReference::new(
@@ -111,7 +121,6 @@ async fn blocked_ordinary_enqueue_keeps_the_waiting_items_context() {
 mod traces {
     use super::*;
     use async_trait::async_trait;
-    use computation_support::{component, name};
     use drasi_core::{
         computation::InMemoryComputationProvider,
         models::{Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange},
@@ -132,6 +141,10 @@ mod traces {
     use tracing::instrument::WithSubscriber;
     use tracing_subscriber::{filter::filter_fn, prelude::*};
 
+    fn name(value: &str) -> drasi_lib::ComponentName {
+        drasi_lib::ComponentName::try_new(value).expect("component name")
+    }
+
     fn telemetry() -> TelemetryOptions {
         TelemetryOptions::new(TelemetrySettings::new(TelemetryProfile::Debug).with_metrics(false))
             .with_instance_id("async-tests")
@@ -141,7 +154,7 @@ mod traces {
     fn definition() -> ContinuousQueryDefinition {
         ContinuousQueryDefinition {
             graph_id: "async-tests".into(),
-            id: component("query"),
+            id: id("query"),
             query: "MATCH (n:Item) RETURN n.name AS name".into(),
             language: ComputationQueryLanguage::Cypher,
             output_stream: StreamId::try_new("query/out").unwrap(),
@@ -180,15 +193,13 @@ mod traces {
 
     #[async_trait]
     impl ComputationComponent for EmptySource {
+        fn description(&self) -> ComponentDescription {
+            ComponentDescription::undeclared()
+        }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.0
         }
-        async fn start(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn stop(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
+        drasi_lib::passive_component_lifecycle!();
     }
 
     #[async_trait]
@@ -202,15 +213,13 @@ mod traces {
 
     #[async_trait]
     impl ComputationComponent for DrainSink {
+        fn description(&self) -> ComponentDescription {
+            ComponentDescription::undeclared()
+        }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.0
         }
-        async fn start(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn stop(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
+        drasi_lib::passive_component_lifecycle!();
     }
 
     #[async_trait]
@@ -293,7 +302,7 @@ mod traces {
                     name("source"),
                     Box::new(EmptySource(
                         ComponentDescriptor::try_new(
-                            component("source"),
+                            id("source"),
                             vec![PortDescriptor::new(
                                 PortId::try_new("out").unwrap(),
                                 PortDirection::Output,
@@ -309,7 +318,7 @@ mod traces {
                     name("sink"),
                     Box::new(DrainSink(
                         ComponentDescriptor::try_new(
-                            component("sink"),
+                            id("sink"),
                             vec![PortDescriptor::new(
                                 PortId::try_new("in").unwrap(),
                                 PortDirection::Input,
@@ -321,24 +330,24 @@ mod traces {
                     )),
                 )
                 .bind_stream(
-                    Endpoint::new(component("source"), PortId::try_new("out").unwrap()),
+                    Endpoint::new(id("source"), PortId::try_new("out").unwrap()),
                     StreamId::try_new("source/out").unwrap(),
                 )
                 .bind_stream(
-                    Endpoint::new(component("query"), PortId::try_new("out").unwrap()),
+                    Endpoint::new(id("query"), PortId::try_new("out").unwrap()),
                     StreamId::try_new("query/out").unwrap(),
                 )
                 .connect(
                     EdgeDefinition {
-                        from: Endpoint::new(component("source"), PortId::try_new("out").unwrap()),
-                        to: Endpoint::new(component("query"), PortId::try_new("in").unwrap()),
+                        from: Endpoint::new(id("source"), PortId::try_new("out").unwrap()),
+                        to: Endpoint::new(id("query"), PortId::try_new("in").unwrap()),
                     },
                     Box::new(BoundedPipeConfig { capacity: 1 }),
                 )
                 .connect(
                     EdgeDefinition::new(
-                        Endpoint::new(component("query"), PortId::try_new("out").unwrap()),
-                        Endpoint::new(component("sink"), PortId::try_new("in").unwrap()),
+                        Endpoint::new(id("query"), PortId::try_new("out").unwrap()),
+                        Endpoint::new(id("sink"), PortId::try_new("in").unwrap()),
                     ),
                     Box::new(BoundedPipeConfig { capacity: 1 }),
                 )
@@ -352,9 +361,7 @@ mod traces {
                     if fail {
                         let mut observed = control.subscribe_observed();
                         observed
-                            .wait_for(|graph| {
-                                graph.components[&component("query")].failure.is_some()
-                            })
+                            .wait_for(|graph| graph.components[&id("query")].failure.is_some())
                             .await
                             .unwrap();
                         control.cancel();
@@ -391,7 +398,7 @@ mod traces {
                     span.name == "component.start"
                         && field(span, "component_id")
                             == Some(&opentelemetry::Value::String(
-                                component("query").to_string().into(),
+                                id("query").to_string().into(),
                             ))
                 })
                 .unwrap();
@@ -449,15 +456,13 @@ mod traces {
 
     #[async_trait]
     impl ComputationComponent for WorkService {
+        fn description(&self) -> ComponentDescription {
+            ComponentDescription::undeclared()
+        }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.descriptor
         }
-        async fn start(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn stop(&mut self) -> anyhow::Result<()> {
-            Ok(())
-        }
+        drasi_lib::passive_component_lifecycle!();
     }
 
     #[async_trait]
@@ -477,7 +482,7 @@ mod traces {
                                 .component_id()
                                 .unwrap()
                                 .as_str(),
-                            component("worker-service").as_str(),
+                            id("worker-service").as_str(),
                         );
                         Ok::<_, anyhow::Error>(())
                     })
@@ -501,11 +506,8 @@ mod traces {
                 .service(
                     name("worker-service"),
                     Box::new(WorkService {
-                        descriptor: ComponentDescriptor::try_new(
-                            component("worker-service"),
-                            vec![],
-                        )
-                        .unwrap(),
+                        descriptor: ComponentDescriptor::try_new(id("worker-service"), vec![])
+                            .unwrap(),
                         inputs: receive,
                         done: done.clone(),
                     }),
@@ -542,7 +544,7 @@ mod traces {
         }
         assert!(work.iter().all(|span| field(span, "component_id")
             == Some(&opentelemetry::Value::String(
-                component("worker-service").to_string().into()
+                id("worker-service").to_string().into()
             ))));
     }
 }
