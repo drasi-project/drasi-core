@@ -37,6 +37,7 @@ is the persistence hook, and `Debug` output redacts them.
 | `retryBudgetMs` | integer | `120000` | `1..=3600000`. No retry starts after this long from the first attempt. | Pause |
 | `onPermanentFailure` | string | `"stall"` | What the graph does with an input the destination can never accept: `stall` records a terminal failure on the sink; `skip` logs it, counts it on the sink and continues. Transient failures are always retried in place. See [Delivery failures](#delivery-failures). | Replace |
 | `successStatusCodes` | array | `[200, 201, 203, 204]` | Non-empty, unique, each `200..=299`. `202` is not success unless listed. | Pause |
+| `unroutedChanges` | string | `"send"` | `send` posts a change whose operation has no template route (in its alias's route or `defaultTemplate`) to the default destination; `ignore` completes it without a request, so a route listing only `added` sends nothing for updates and deletes. | Pause |
 | `tlsCaPem` | string | none | PEM CA certificates trusted in addition to the built-in roots. | Stop |
 | `tlsClientCertificatePem` | string | none | PEM client certificate chain (mutual TLS). Requires `tlsClientPrivateKeyPem`. | Stop |
 | `tlsClientPrivateKeyPem` | string, **secret** | none | PEM private key for the client certificate. | Stop |
