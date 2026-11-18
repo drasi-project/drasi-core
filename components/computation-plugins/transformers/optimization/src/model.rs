@@ -297,6 +297,54 @@ impl Sets {
         self.members.values().map(|members| members.len()).sum()
     }
 
+    /// Member count of each set, by name.
+    pub(crate) fn sizes(&self) -> BTreeMap<String, usize> {
+        self.members
+            .iter()
+            .map(|(name, members)| (name.clone(), members.len()))
+            .collect()
+    }
+
+    /// The first precondition that does not hold, as `(name, detail)`.
+    fn unmet(&self, config: &OptimizationConfig) -> Result<Option<(String, String)>> {
+        const SHOWN: usize = 5;
+        for precondition in &config.preconditions {
+            let mut matching = Vec::new();
+            for member in self.get(&precondition.set)?.iter() {
+                if self.all(&precondition.filter, &member.properties)? {
+                    matching.push(member);
+                }
+            }
+            let count = matching.len() as u64;
+            let bound = match (precondition.min, precondition.max) {
+                (Some(min), _) if count < min => format!("at least {min}"),
+                (_, Some(max)) if count > max => format!("at most {max}"),
+                _ => continue,
+            };
+            let mut detail = format!(
+                "precondition {} does not hold: {count} member{} of {} match{}, expected {bound}",
+                precondition.name,
+                if count == 1 { "" } else { "s" },
+                precondition.set,
+                if count == 1 { "es" } else { "" },
+            );
+            if precondition.max.is_some_and(|max| count > max) {
+                let shown: Vec<String> = matching
+                    .iter()
+                    .take(SHOWN)
+                    .map(|member| describe(&member.key))
+                    .collect();
+                detail.push_str(&format!(
+                    ": {}{}",
+                    shown.join(", "),
+                    if matching.len() > SHOWN { ", …" } else { "" }
+                ));
+            }
+            return Ok(Some((precondition.name.clone(), detail)));
+        }
+        Ok(None)
+    }
+
     fn index(&self, set: &str, properties: Vec<String>) -> Result<Arc<Index>> {
         let cache_key = (set.to_owned(), properties);
         if let Some(index) = self.indexes.borrow().get(&cache_key) {
@@ -827,6 +875,8 @@ pub(crate) enum Status {
     Unbounded,
     Limit,
     Error,
+    /// A precondition does not hold; the model was not solved.
+    Unknown,
 }
 
 impl Status {
@@ -837,12 +887,16 @@ impl Status {
             Self::Unbounded => "unbounded",
             Self::Limit => "limit",
             Self::Error => "error",
+            Self::Unknown => "unknown",
         }
     }
 
     /// Whether repeating the solve on the same model gives the same answer.
     pub(crate) fn is_final(self) -> bool {
-        matches!(self, Self::Optimal | Self::Infeasible | Self::Unbounded)
+        matches!(
+            self,
+            Self::Optimal | Self::Infeasible | Self::Unbounded | Self::Unknown
+        )
     }
 }
 
@@ -1030,6 +1084,30 @@ pub(crate) struct MainOutcome {
     pub variables: usize,
     pub constraints: usize,
     pub members: usize,
+    /// Member count of each main set; empty when the sets failed to materialize.
+    pub set_sizes: BTreeMap<String, usize>,
+    /// The precondition that did not hold, if any.
+    pub precondition: Option<String>,
+    /// `{summary: [entry…]}` while optimal with summaries configured; null otherwise.
+    pub summaries: Value,
+}
+
+impl MainOutcome {
+    /// An outcome for a dataset whose sets could not be materialized.
+    pub(crate) fn failed(status: Status, detail: impl Into<String>) -> Self {
+        Self {
+            signature: None,
+            provenance: Value::Null,
+            solved: Solved::failed(status, detail),
+            model: None,
+            variables: 0,
+            constraints: 0,
+            members: 0,
+            set_sizes: BTreeMap::new(),
+            precondition: None,
+            summaries: Value::Null,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1048,11 +1126,14 @@ pub(crate) struct Prepared {
     sets: Sets,
     pub signature: String,
     pub provenance: Value,
+    /// The first precondition that does not hold, as `(name, detail)`.
+    pub unmet: Option<(String, String)>,
 }
 
 /// Materializes the main sets and their signature.
 pub(crate) fn prepare(config: &OptimizationConfig, records: &[Record]) -> Result<Prepared> {
     let sets = Sets::materialize(config, records, None)?;
+    let unmet = sets.unmet(config)?;
     let mut hasher = Fnv::new();
     hasher.write_str(&serde_json::to_string(config)?);
     sets.digest(&mut hasher);
@@ -1079,6 +1160,7 @@ pub(crate) fn prepare(config: &OptimizationConfig, records: &[Record]) -> Result
         signature: hasher.finish(),
         provenance,
         sets,
+        unmet,
     })
 }
 
@@ -1091,20 +1173,32 @@ fn failure(error: &anyhow::Error) -> Solved {
     Solved::failed(status, format!("{error:#}"))
 }
 
-/// Builds and solves the main model.
+/// Builds and solves the main model, unless a precondition does not hold.
 pub(crate) fn solve_main(config: &OptimizationConfig, prepared: &Prepared) -> MainOutcome {
     let members = prepared.sets.total();
-    let (solved, model) = match LinearModel::build(config, &prepared.sets) {
-        Ok(Built::Model(model)) => (
-            model.solve(
-                true,
-                Duration::from_millis(config.time_limit_ms),
-                config.tolerance,
+    let (solved, model) = match &prepared.unmet {
+        Some((_, detail)) => (Solved::failed(Status::Unknown, detail.clone()), None),
+        None => match LinearModel::build(config, &prepared.sets) {
+            Ok(Built::Model(model)) => (
+                model.solve(
+                    true,
+                    Duration::from_millis(config.time_limit_ms),
+                    config.tolerance,
+                ),
+                Some(Arc::new(model)),
             ),
-            Some(Arc::new(model)),
-        ),
-        Ok(Built::Infeasible(detail)) => (Solved::failed(Status::Infeasible, detail), None),
-        Err(error) => (failure(&error), None),
+            Ok(Built::Infeasible(detail)) => (Solved::failed(Status::Infeasible, detail), None),
+            Err(error) => (failure(&error), None),
+        },
+    };
+    let (solved, summaries) = match (&model, solved.status) {
+        (Some(built), Status::Optimal) if !config.summaries.is_empty() => {
+            match summarize(config, &prepared.sets, built, &solved.values) {
+                Ok(summaries) => (solved, summaries),
+                Err(error) => (failure(&error.context("summaries")), Value::Null),
+            }
+        }
+        _ => (solved, Value::Null),
     };
     MainOutcome {
         signature: Some(prepared.signature.clone()),
@@ -1114,7 +1208,72 @@ pub(crate) fn solve_main(config: &OptimizationConfig, prepared: &Prepared) -> Ma
         solved,
         model,
         members,
+        set_sizes: prepared.sets.sizes(),
+        precondition: prepared.unmet.as_ref().map(|(name, _)| name.clone()),
+        summaries,
     }
+}
+
+/// `{summary: [entry…]}` over the nonzero variables of each summary, in member order.
+fn summarize(
+    config: &OptimizationConfig,
+    sets: &Sets,
+    model: &LinearModel,
+    values: &[f64],
+) -> Result<Value> {
+    let mut summaries = serde_json::Map::new();
+    for summary in &config.summaries {
+        let family = config
+            .variables
+            .iter()
+            .position(|variable| variable.name == summary.variable)
+            .with_context(|| format!("unknown variable {}", summary.variable))?;
+        let definition = &config.variables[family];
+        let mut entries = Vec::new();
+        for (variable, value) in model.variables.iter().zip(values) {
+            if variable.family != family || (*value == 0.0 && !definition.output.include_zero) {
+                continue;
+            }
+            let mut entry = serde_json::Map::new();
+            if let Some(member) = &variable.member {
+                if !sets.all(&summary.filter, &member.properties)? {
+                    continue;
+                }
+                match summary
+                    .properties
+                    .as_ref()
+                    .or(definition.output.properties.as_ref())
+                {
+                    Some(names) => {
+                        for name in names {
+                            if let Some(value) = member.properties.get(name) {
+                                entry.insert(name.clone(), value.clone());
+                            }
+                        }
+                    }
+                    None => entry.extend(
+                        member
+                            .properties
+                            .iter()
+                            .filter(|(name, _)| !name.starts_with('$'))
+                            .map(|(name, value)| (name.clone(), value.clone())),
+                    ),
+                }
+            }
+            entry.insert(
+                "value".into(),
+                match variable.kind {
+                    VariableType::Continuous => {
+                        serde_json::Number::from_f64(*value).map_or(Value::Null, Value::Number)
+                    }
+                    _ => Value::from(*value as i64),
+                },
+            );
+            entries.push(Value::Object(entry));
+        }
+        summaries.insert(summary.name.clone(), Value::Array(entries));
+    }
+    Ok(Value::Object(summaries))
 }
 
 /// The distinct scenario values, in key order, with the first raw value of each.
