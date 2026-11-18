@@ -33,6 +33,8 @@ fn create(configuration: Value) -> Result<Optimization> {
             graph_id: "graph".into(),
             generation: 1,
         }),
+        &[],
+        None,
     )
 }
 
@@ -1145,3 +1147,4 @@ async fn output_identities_escape_key_separators() -> Result<()> {
 }
 
 mod placement;
+mod snapshots;

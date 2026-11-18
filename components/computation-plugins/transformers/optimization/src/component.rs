@@ -8,15 +8,16 @@ use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use drasi_computation_contracts::{
     ChangeEnvelope, ComponentDescriptor, ComponentUpdateData, ElementImage, ElementPatch,
-    GraphChangeCodec, GraphProducerIdentity, GraphProducerProgress, InputEnvelope, OutputEnvelope,
-    OutputReaders, PortId, WakeupSource,
+    GraphChangeCodec, GraphProducerIdentity, GraphProducerProgress, InputBinding, InputEnvelope,
+    OutputEnvelope, OutputReaders, PortId, WakeupSource,
 };
 use drasi_computation_plugin_sdk::{
     lifecycle::{
         ApplyContext, ApplyError, Assessment, DisposeContext, InitializeContext, LifecycleError,
         LifecycleResult, PauseContext, ResumeContext, StartContext, StopContext, UpdateBoundary,
     },
-    ApplyUpdateRequest, NativeComponent, NativeManagement, NativeTransformer, Scope, UpdateRequest,
+    ApplyUpdateRequest, NativeComponent, NativeManagement, NativeTransformer, Scope,
+    SnapshotSource, UpdateRequest, UpstreamSnapshots,
 };
 use drasi_core_types::models::{Element, ElementReference, SourceChange};
 use std::{
@@ -92,6 +93,11 @@ pub(crate) struct Optimization {
     inputs: HashMap<ElementReference, Element>,
     /// The latest input, from which emissions derive their lineage.
     last_input: Option<ChangeEnvelope>,
+    /// Upstream snapshot reads, when the host bound `output_snapshots`.
+    snapshots: Option<Arc<dyn SnapshotSource>>,
+    upstreams: UpstreamSnapshots,
+    /// Whether the upstream snapshots have been loaded.
+    loaded: bool,
     /// The latest input effective time; emitted elements carry it.
     clock: u64,
     /// Input (or configuration) changed since the running or last job started.
@@ -123,6 +129,8 @@ impl Optimization {
         descriptor: ComponentDescriptor,
         config: OptimizationConfig,
         scope: Option<&Scope>,
+        inputs: &[InputBinding],
+        snapshots: Option<Arc<dyn SnapshotSource>>,
     ) -> Result<Self> {
         let identity = GraphProducerIdentity::volatile(
             scope
@@ -145,6 +153,9 @@ impl Optimization {
             retired: false,
             inputs: HashMap::new(),
             last_input: None,
+            upstreams: UpstreamSnapshots::new(inputs, &PortId::try_new("in")?),
+            snapshots,
+            loaded: false,
             clock: 0,
             dirty: false,
             first_dirty: None,
@@ -275,9 +286,9 @@ impl Optimization {
 
     /// Emits the difference between the published rows and the current result.
     fn emit(&mut self) -> Result<Vec<OutputEnvelope>> {
-        let Some(last_input) = &self.last_input else {
+        if self.last_input.is_none() && !self.loaded {
             return Ok(Vec::new());
-        };
+        }
         let mut desired = self.solution.clone();
         desired.extend(self.scenarios.clone());
         if let Some((id, row)) = &self.status {
@@ -304,12 +315,21 @@ impl Optimization {
             .sequence
             .checked_add(1)
             .context("optimization output sequence exhausted")?;
-        let mut envelope = GraphChangeCodec::derive_changes(
-            last_input,
-            &changes,
-            self.config.stream.clone(),
-            sequence,
-        )?;
+        // Before any live input (only snapshots loaded) the output is a root envelope.
+        let mut envelope = match &self.last_input {
+            Some(last_input) => GraphChangeCodec::derive_changes(
+                last_input,
+                &changes,
+                self.config.stream.clone(),
+                sequence,
+            )?,
+            None => GraphChangeCodec::encode_changes(
+                &changes,
+                self.config.stream.clone(),
+                sequence,
+                None,
+            )?,
+        };
         envelope.validate_lineage()?;
         GraphProducerProgress::annotate(&mut envelope, &self.identity, sequence)?;
         self.output.publish(&next, sequence)?;
@@ -434,10 +454,16 @@ impl NativeComponent for Optimization {
         if self.started {
             return Err(anyhow::anyhow!("optimization already started").into());
         }
+        if let (Some(source), false) = (self.snapshots.clone(), self.loaded) {
+            let mut batch = self.upstreams.load_all(source.as_ref(), self.clock).await?;
+            self.clock = self.ingest(std::mem::take(&mut batch.changes))?;
+            self.upstreams.commit(batch);
+            self.loaded = true;
+        }
         self.output.set_running(true)?;
         self.started = true;
         self.paused = false;
-        if self.last_input.is_some() {
+        if self.last_input.is_some() || self.loaded {
             self.mark_dirty();
         }
         self.reschedule();
@@ -571,9 +597,27 @@ impl NativeTransformer for Optimization {
             input.envelope.system().control().is_none(),
             "optimization transforms accept graph data, not scheduling or recovery controls"
         );
-        let changes = GraphChangeCodec::decode_changes(&input.envelope)?;
+        let decoded = GraphChangeCodec::decode_changes(&input.envelope)?;
+        let (changes, batch) = match self.snapshots.clone() {
+            Some(source) => {
+                let mut batch = self
+                    .upstreams
+                    .admit(source.as_ref(), &input.envelope, self.clock)
+                    .await?;
+                let mut changes = std::mem::take(&mut batch.changes);
+                if batch.apply_envelope {
+                    batch.include(&decoded);
+                    changes.extend(decoded);
+                }
+                (changes, Some(batch))
+            }
+            None => (decoded, None),
+        };
         let changed = !changes.is_empty();
         self.clock = self.ingest(changes)?;
+        if let Some(batch) = batch {
+            self.upstreams.commit(batch);
+        }
         self.last_input = Some(input.envelope);
         if changed {
             self.mark_dirty();
