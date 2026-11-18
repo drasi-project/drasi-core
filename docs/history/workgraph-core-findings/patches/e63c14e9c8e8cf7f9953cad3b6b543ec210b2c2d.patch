@@ -1,0 +1,798 @@
+diff --git a/components/reactions/github-project-item-refresh/Cargo.toml b/components/reactions/github-project-item-refresh/Cargo.toml
+index 524288644fc5ae5c8804b81c034d071bfdda9ebb..7c0ac7a4630eefeb22dfe2906d5077c28e785c35 100644
+--- a/components/reactions/github-project-item-refresh/Cargo.toml
++++ b/components/reactions/github-project-item-refresh/Cargo.toml
+@@ -35,6 +35,7 @@ drasi-plugin-sdk = { workspace = true }
+ anyhow = "1.0"
+ async-trait = "0.1"
+ chrono = { version = "0.4", features = ["serde"] }
++httpdate = "1"
+ log = "0.4"
+ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+ serde = { version = "1.0", features = ["derive"] }
+diff --git a/components/reactions/github-project-item-refresh/README.md b/components/reactions/github-project-item-refresh/README.md
+index 5d5dd0f73aaba31b6930c4869c08235cb2eae96a..9137c81b33711aab7ac298302a1facba267d6a7b 100644
+--- a/components/reactions/github-project-item-refresh/README.md
++++ b/components/reactions/github-project-item-refresh/README.md
+@@ -41,6 +41,7 @@ reactions:
+           value: "2022-11-28"
+       allowlistedProjectIds:
+         - PVT_kwDOABC123
++      statusFieldName: Status
+       destinationEventUrl: http://127.0.0.1:9001/sources/github-project-state/events
+       destinationBearerSecret:
+         env: PROJECT_STATUS_SOURCE_BEARER
+@@ -57,6 +58,7 @@ reactions:
+ | `graphqlUrl` | No | GitHub GraphQL endpoint (default `https://api.github.com/graphql`) |
+ | `graphqlHeaders` | No | Extra GraphQL request headers |
+ | `allowlistedProjectIds` | No | Allowed project node IDs (`PVT_*`); empty means allow all |
++| `statusFieldName` | No | Project field name read via `fieldValueByName` (default `Status`) |
+ | `destinationEventUrl` | Yes | Standard-mode HTTP source event endpoint |
+ | `destinationBearerSecret` | No | Optional bearer secret for destination source |
+ | `requestTimeoutMs` | No | Shared request timeout for GraphQL and destination HTTP calls |
+diff --git a/components/reactions/github-project-item-refresh/src/config.rs b/components/reactions/github-project-item-refresh/src/config.rs
+index ededecbbb15a12033a02e818bf67c3161b835c3a..dbaa1b546feeae714ca7688dd2427dc50ad0f8b9 100644
+--- a/components/reactions/github-project-item-refresh/src/config.rs
++++ b/components/reactions/github-project-item-refresh/src/config.rs
+@@ -26,6 +26,10 @@ fn default_request_timeout_ms() -> u64 {
+     10_000
+ }
+ 
++fn default_status_field_name() -> String {
++    "Status".to_string()
++}
++
+ fn default_delivery_record_ttl_secs() -> u64 {
+     7 * 24 * 60 * 60
+ }
+@@ -45,6 +49,9 @@ pub struct GitHubProjectItemRefreshConfig {
+     /// Optional allowlist of project node IDs.
+     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+     pub allowlisted_project_ids: Vec<String>,
++    /// Name of the single-select project field representing status.
++    #[serde(default = "default_status_field_name")]
++    pub status_field_name: String,
+     /// Standard-mode HTTP source event endpoint.
+     pub destination_event_url: String,
+     /// Optional bearer token used for destination HTTP source.
+@@ -65,6 +72,7 @@ impl Default for GitHubProjectItemRefreshConfig {
+             graphql_url: default_graphql_url(),
+             graphql_headers: HashMap::new(),
+             allowlisted_project_ids: Vec::new(),
++            status_field_name: default_status_field_name(),
+             destination_event_url: String::new(),
+             destination_bearer_secret: None,
+             request_timeout_ms: default_request_timeout_ms(),
+@@ -86,6 +94,7 @@ impl std::fmt::Debug for GitHubProjectItemRefreshConfig {
+             .field("graphql_url", &self.graphql_url)
+             .field("graphql_headers", &redacted_headers)
+             .field("allowlisted_project_ids", &self.allowlisted_project_ids)
++            .field("status_field_name", &self.status_field_name)
+             .field("destination_event_url", &self.destination_event_url)
+             .field(
+                 "destination_bearer_secret",
+@@ -116,6 +125,9 @@ impl GitHubProjectItemRefreshConfig {
+         }
+         validate_url(&self.graphql_url).context("graphqlUrl")?;
+         validate_url(&self.destination_event_url).context("destinationEventUrl")?;
++        if self.status_field_name.trim().is_empty() {
++            anyhow::bail!("`statusFieldName` must not be empty");
++        }
+ 
+         if self.request_timeout_ms == 0 {
+             anyhow::bail!("`requestTimeoutMs` must be greater than 0");
+diff --git a/components/reactions/github-project-item-refresh/src/descriptor.rs b/components/reactions/github-project-item-refresh/src/descriptor.rs
+index c7de4cbf106690562ef92f05996ad5246900ae14..15afda3bb7f7491c4d3163972c06edfd32789a84 100644
+--- a/components/reactions/github-project-item-refresh/src/descriptor.rs
++++ b/components/reactions/github-project-item-refresh/src/descriptor.rs
+@@ -36,6 +36,9 @@ pub struct GitHubProjectItemRefreshConfigDto {
+     pub graphql_headers: HashMap<String, ConfigValue<String>>,
+     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+     pub allowlisted_project_ids: Vec<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[schema(value_type = Option<ConfigValueString>)]
++    pub status_field_name: Option<ConfigValue<String>>,
+     #[schema(value_type = ConfigValueString)]
+     pub destination_event_url: ConfigValue<String>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+@@ -85,6 +88,7 @@ impl From<&GitHubProjectItemRefreshConfig> for GitHubProjectItemRefreshConfigDto
+             graphql_url: Some(ConfigValue::Static(config.graphql_url.clone())),
+             graphql_headers,
+             allowlisted_project_ids: config.allowlisted_project_ids.clone(),
++            status_field_name: Some(ConfigValue::Static(config.status_field_name.clone())),
+             destination_event_url: ConfigValue::Static(config.destination_event_url.clone()),
+             destination_bearer_secret: config
+                 .destination_bearer_secret
+@@ -157,6 +161,9 @@ impl ReactionPluginDescriptor for GitHubProjectItemRefreshDescriptor {
+         })
+         .field("graphqlHeaders", |f| f.group("GitHub").order(3))
+         .field("allowlistedProjectIds", |f| f.group("GitHub").order(4))
++        .field("statusFieldName", |f| {
++            f.group("GitHub").order(5).placeholder("Status")
++        })
+         .field("destinationEventUrl", |f| f.group("Destination").order(10))
+         .field("destinationBearerSecret", |f| {
+             f.group("Destination").order(11).widget("password")
+@@ -205,6 +212,10 @@ impl ReactionPluginDescriptor for GitHubProjectItemRefreshDescriptor {
+         if !dto.allowlisted_project_ids.is_empty() {
+             builder = builder.with_allowlisted_project_ids(dto.allowlisted_project_ids.clone());
+         }
++        if let Some(status_field_name) = &dto.status_field_name {
++            builder =
++                builder.with_status_field_name(mapper.resolve_string(status_field_name).await?);
++        }
+         if let Some(secret) = &dto.destination_bearer_secret {
+             builder = builder.with_destination_bearer_secret(mapper.resolve_string(secret).await?);
+         }
+diff --git a/components/reactions/github-project-item-refresh/src/graphql.rs b/components/reactions/github-project-item-refresh/src/graphql.rs
+index 256271358e707908688434a24ec8cb3dc35998cb..a0a50ecfbecc34341aced0c8288a2d0af4764c4d 100644
+--- a/components/reactions/github-project-item-refresh/src/graphql.rs
++++ b/components/reactions/github-project-item-refresh/src/graphql.rs
+@@ -14,15 +14,19 @@
+ 
+ use anyhow::Context;
+ use chrono::{DateTime, Utc};
+-use reqwest::{header::HeaderMap, Client};
++use reqwest::{header::HeaderMap, Client, StatusCode};
+ use serde::Deserialize;
+ use serde_json::json;
+ use std::collections::HashMap;
++use std::time::{Duration, SystemTime, UNIX_EPOCH};
+ 
+ use crate::models::FetchedProjectItemState;
+ 
++const RATE_LIMIT_FALLBACK_BACKOFF: Duration = Duration::from_millis(100);
++const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(120);
++
+ const PROJECT_ITEM_STATUS_QUERY: &str = r#"
+-query ProjectItemStatus($projectItemNodeId: ID!) {
++query ProjectItemStatus($projectItemNodeId: ID!, $statusFieldName: String!) {
+   node(id: $projectItemNodeId) {
+     __typename
+     ... on ProjectV2Item {
+@@ -43,7 +47,7 @@ query ProjectItemStatus($projectItemNodeId: ID!) {
+           id
+         }
+       }
+-      fieldValueByName(name: "Status") {
++      fieldValueByName(name: $statusFieldName) {
+         __typename
+         ... on ProjectV2ItemFieldSingleSelectValue {
+           name
+@@ -66,6 +70,8 @@ pub enum GraphqlFetchError {
+     Transport(String),
+     #[error("github graphql responded with HTTP {status}: {body}")]
+     HttpStatus { status: u16, body: String },
++    #[error("github graphql rate-limited with HTTP {status}, retrying in {retry_after:?}")]
++    RateLimited { status: u16, retry_after: Duration },
+     #[error("github graphql returned errors: {0}")]
+     GraphqlErrors(String),
+     #[error("project item '{project_item_node_id}' was not found")]
+@@ -75,8 +81,13 @@ pub enum GraphqlFetchError {
+         project_item_node_id: String,
+         actual: String,
+     },
+-    #[error("project item '{project_item_node_id}' is missing a required Status value")]
+-    MissingStatus { project_item_node_id: String },
++    #[error(
++        "project item '{project_item_node_id}' is missing a required '{status_field_name}' value"
++    )]
++    MissingStatus {
++        project_item_node_id: String,
++        status_field_name: String,
++    },
+     #[error("project item '{project_item_node_id}' is missing required field '{field_name}'")]
+     MissingField {
+         project_item_node_id: String,
+@@ -88,6 +99,7 @@ impl GraphqlFetchError {
+     pub fn is_retryable(&self) -> bool {
+         match self {
+             Self::Transport(_) => true,
++            Self::RateLimited { .. } => true,
+             Self::HttpStatus { status, .. } => *status >= 500 || *status == 429,
+             _ => false,
+         }
+@@ -100,6 +112,7 @@ pub struct GitHubGraphqlClient {
+     url: String,
+     token: String,
+     extra_headers: HashMap<String, String>,
++    status_field_name: String,
+ }
+ 
+ impl GitHubGraphqlClient {
+@@ -108,12 +121,14 @@ impl GitHubGraphqlClient {
+         url: impl Into<String>,
+         token: impl Into<String>,
+         extra_headers: HashMap<String, String>,
++        status_field_name: impl Into<String>,
+     ) -> Self {
+         Self {
+             client,
+             url: url.into(),
+             token: token.into(),
+             extra_headers,
++            status_field_name: status_field_name.into(),
+         }
+     }
+ 
+@@ -127,6 +142,7 @@ impl GitHubGraphqlClient {
+             "query": PROJECT_ITEM_STATUS_QUERY,
+             "variables": {
+                 "projectItemNodeId": project_item_node_id,
++                "statusFieldName": &self.status_field_name,
+             }
+         });
+ 
+@@ -162,12 +178,19 @@ impl GitHubGraphqlClient {
+             .map_err(|e| GraphqlFetchError::Transport(e.to_string()))?;
+ 
+         let status = response.status();
++        let response_headers = response.headers().clone();
+         let raw_text = response
+             .text()
+             .await
+             .map_err(|e| GraphqlFetchError::Transport(e.to_string()))?;
+ 
+         if !status.is_success() {
++            if let Some(retry_after) = rate_limit_retry_after(status, &response_headers) {
++                return Err(GraphqlFetchError::RateLimited {
++                    status: status.as_u16(),
++                    retry_after,
++                });
++            }
+             return Err(GraphqlFetchError::HttpStatus {
+                 status: status.as_u16(),
+                 body: truncate_for_error(&raw_text),
+@@ -228,36 +251,22 @@ impl GitHubGraphqlClient {
+             .as_ref()
+             .map(|content| content.typename.clone());
+ 
+-        let status_value =
+-            node.field_value_by_name
+-                .ok_or_else(|| GraphqlFetchError::MissingStatus {
+-                    project_item_node_id: project_item_node_id.to_string(),
+-                })?;
++        let missing_status = || GraphqlFetchError::MissingStatus {
++            project_item_node_id: project_item_node_id.to_string(),
++            status_field_name: self.status_field_name.clone(),
++        };
++        let status_value = node.field_value_by_name.ok_or_else(&missing_status)?;
+ 
+         if status_value.typename != "ProjectV2ItemFieldSingleSelectValue" {
+-            return Err(GraphqlFetchError::MissingStatus {
+-                project_item_node_id: project_item_node_id.to_string(),
+-            });
++            return Err(missing_status());
+         }
+ 
+-        let status_option_id =
+-            status_value
+-                .option_id
+-                .ok_or_else(|| GraphqlFetchError::MissingStatus {
+-                    project_item_node_id: project_item_node_id.to_string(),
+-                })?;
+-        let status_name = status_value
+-            .name
+-            .ok_or_else(|| GraphqlFetchError::MissingStatus {
+-                project_item_node_id: project_item_node_id.to_string(),
+-            })?;
+-        let status_field_node_id =
+-            status_value
+-                .field
+-                .and_then(|field| field.id)
+-                .ok_or_else(|| GraphqlFetchError::MissingStatus {
+-                    project_item_node_id: project_item_node_id.to_string(),
+-                })?;
++        let status_option_id = status_value.option_id.ok_or_else(&missing_status)?;
++        let status_name = status_value.name.ok_or_else(&missing_status)?;
++        let status_field_node_id = status_value
++            .field
++            .and_then(|field| field.id)
++            .ok_or_else(missing_status)?;
+ 
+         Ok(FetchedProjectItemState {
+             project_item_node_id: item_id,
+@@ -274,6 +283,62 @@ impl GitHubGraphqlClient {
+     }
+ }
+ 
++fn rate_limit_retry_after(status: StatusCode, headers: &HeaderMap) -> Option<Duration> {
++    match status {
++        StatusCode::FORBIDDEN if is_rate_limited_403(headers) => {
++            Some(parse_rate_limit_delay(headers).unwrap_or(RATE_LIMIT_FALLBACK_BACKOFF))
++        }
++        StatusCode::TOO_MANY_REQUESTS => parse_rate_limit_delay(headers),
++        _ => None,
++    }
++}
++
++fn is_rate_limited_403(headers: &HeaderMap) -> bool {
++    headers.contains_key(reqwest::header::RETRY_AFTER)
++        || headers
++            .get("x-ratelimit-remaining")
++            .and_then(|value| value.to_str().ok())
++            .map(str::trim)
++            == Some("0")
++}
++
++fn parse_rate_limit_delay(headers: &HeaderMap) -> Option<Duration> {
++    parse_retry_after_delay(headers).or_else(|| parse_rate_limit_reset_delay(headers))
++}
++
++fn parse_retry_after_delay(headers: &HeaderMap) -> Option<Duration> {
++    let retry_after = headers
++        .get(reqwest::header::RETRY_AFTER)?
++        .to_str()
++        .ok()?
++        .trim();
++    if let Ok(seconds) = retry_after.parse::<u64>() {
++        return Some(Duration::from_secs(seconds).min(MAX_RATE_LIMIT_WAIT));
++    }
++
++    let at = httpdate::parse_http_date(retry_after).ok()?;
++    let delay = at
++        .duration_since(SystemTime::now())
++        .unwrap_or_else(|_| Duration::from_secs(0));
++    Some(delay.min(MAX_RATE_LIMIT_WAIT))
++}
++
++fn parse_rate_limit_reset_delay(headers: &HeaderMap) -> Option<Duration> {
++    let reset_epoch = headers
++        .get("x-ratelimit-reset")?
++        .to_str()
++        .ok()?
++        .trim()
++        .parse::<u64>()
++        .ok()?;
++    let now_epoch = SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .ok()
++        .map(|d| d.as_secs())?;
++    let delay_secs = reset_epoch.saturating_sub(now_epoch);
++    Some(Duration::from_secs(delay_secs).min(MAX_RATE_LIMIT_WAIT))
++}
++
+ fn truncate_for_error(raw: &str) -> String {
+     const MAX: usize = 512;
+     if raw.chars().count() <= MAX {
+diff --git a/components/reactions/github-project-item-refresh/src/lib.rs b/components/reactions/github-project-item-refresh/src/lib.rs
+index 9b55a313882e734ce1fa74fb4eec4cd3ae03bbda..7469bd90ef2e23997f6ec7c380f70341340f8b59 100644
+--- a/components/reactions/github-project-item-refresh/src/lib.rs
++++ b/components/reactions/github-project-item-refresh/src/lib.rs
+@@ -96,6 +96,11 @@ impl GitHubProjectItemRefreshBuilder {
+         self
+     }
+ 
++    pub fn with_status_field_name(mut self, status_field_name: impl Into<String>) -> Self {
++        self.config.status_field_name = status_field_name.into();
++        self
++    }
++
+     pub fn with_destination_event_url(mut self, url: impl Into<String>) -> Self {
+         self.config.destination_event_url = url.into();
+         self
+diff --git a/components/reactions/github-project-item-refresh/src/processing.rs b/components/reactions/github-project-item-refresh/src/processing.rs
+index e0aeb2728215ed66018009250be100d1e2ea23f4..26e1fa6ee7378ba615eb83d037861036aab61f15 100644
+--- a/components/reactions/github-project-item-refresh/src/processing.rs
++++ b/components/reactions/github-project-item-refresh/src/processing.rs
+@@ -31,6 +31,7 @@ use crate::state_store::RefreshStateStore;
+ 
+ const MAX_FETCH_ATTEMPTS: u32 = 3;
+ const INITIAL_BACKOFF_MS: u64 = 100;
++const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(120);
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub enum AddRowOutcome {
+@@ -304,8 +305,17 @@ impl RefreshProcessor {
+                 Ok(fetched) => return Ok(fetched),
+                 Err(err) => {
+                     if attempt < MAX_FETCH_ATTEMPTS && err.is_retryable() {
+-                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+-                        backoff_ms = backoff_ms.saturating_mul(2);
++                        let wait = match &err {
++                            GraphqlFetchError::RateLimited { retry_after, .. } => {
++                                (*retry_after).min(MAX_RATE_LIMIT_WAIT)
++                            }
++                            _ => {
++                                let delay = Duration::from_millis(backoff_ms);
++                                backoff_ms = backoff_ms.saturating_mul(2);
++                                delay
++                            }
++                        };
++                        tokio::time::sleep(wait).await;
+                         continue;
+                     }
+                     return Err(map_graphql_error(err));
+diff --git a/components/reactions/github-project-item-refresh/src/reaction.rs b/components/reactions/github-project-item-refresh/src/reaction.rs
+index cb4ba9c6ed7bfc301d1b3e98d1fc7c9f7b74745a..5d28ca11c00f5e93feb7ca6bb24a4aa38f85c9d5 100644
+--- a/components/reactions/github-project-item-refresh/src/reaction.rs
++++ b/components/reactions/github-project-item-refresh/src/reaction.rs
+@@ -163,6 +163,7 @@ impl Reaction for GitHubProjectItemRefreshReaction {
+                 self.config.graphql_url.clone(),
+                 self.config.github_token.clone(),
+                 self.config.graphql_headers.clone(),
++                self.config.status_field_name.clone(),
+             ),
+             DestinationSourceClient::new(
+                 http_client.clone(),
+diff --git a/components/reactions/github-project-item-refresh/src/tests.rs b/components/reactions/github-project-item-refresh/src/tests.rs
+index 8fe775349ab9c84d213a50a3ef0f80e24f680823..8595e4824eadbd9ce5cd135a1387e898b641efb5 100644
+--- a/components/reactions/github-project-item-refresh/src/tests.rs
++++ b/components/reactions/github-project-item-refresh/src/tests.rs
+@@ -164,12 +164,30 @@ async fn build_processor(
+     destination_url: String,
+     durable_store: Arc<dyn StateStoreProvider>,
+     allowlist: Vec<String>,
++) -> (RefreshProcessor, RefreshStateStore) {
++    build_processor_with_status_field_name(
++        graphql_server,
++        destination_url,
++        durable_store,
++        allowlist,
++        "Status",
++    )
++    .await
++}
++
++async fn build_processor_with_status_field_name(
++    graphql_server: &MockServer,
++    destination_url: String,
++    durable_store: Arc<dyn StateStoreProvider>,
++    allowlist: Vec<String>,
++    status_field_name: &str,
+ ) -> (RefreshProcessor, RefreshStateStore) {
+     let config = GitHubProjectItemRefreshConfig {
+         github_token: "test-token-not-a-secret".to_string(),
+         graphql_url: graphql_server.uri(),
+         graphql_headers: HashMap::new(),
+         allowlisted_project_ids: allowlist,
++        status_field_name: status_field_name.to_string(),
+         destination_event_url: destination_url.clone(),
+         destination_bearer_secret: Some("dest-secret-token".to_string()),
+         request_timeout_ms: 1_000,
+@@ -190,6 +208,7 @@ async fn build_processor(
+             config.graphql_url.clone(),
+             config.github_token,
+             config.graphql_headers,
++            config.status_field_name,
+         ),
+         DestinationSourceClient::new(client, destination_url, config.destination_bearer_secret),
+     );
+@@ -259,6 +278,7 @@ fn config_debug_redacts_secrets() {
+             "graphql-header-secret".to_string(),
+         )]),
+         allowlisted_project_ids: vec![],
++        status_field_name: "Status".to_string(),
+         destination_event_url: "https://dest.example/changes".to_string(),
+         destination_bearer_secret: Some("very-secret".to_string()),
+         request_timeout_ms: 1000,
+@@ -273,6 +293,26 @@ fn config_debug_redacts_secrets() {
+     assert!(rendered.contains("[REDACTED]"));
+ }
+ 
++#[test]
++fn config_validation_rejects_empty_status_field_name() {
++    let config = GitHubProjectItemRefreshConfig {
++        github_token: "test-token-not-a-secret".to_string(),
++        graphql_url: "https://api.github.com/graphql".to_string(),
++        graphql_headers: HashMap::new(),
++        allowlisted_project_ids: vec![],
++        status_field_name: "   ".to_string(),
++        destination_event_url: "https://dest.example/changes".to_string(),
++        destination_bearer_secret: None,
++        request_timeout_ms: 1000,
++        delivery_record_ttl_secs: 3600,
++    };
++
++    let err = config
++        .validate(&["query".to_string()], Some(10))
++        .expect_err("empty statusFieldName should fail validation");
++    assert!(err.to_string().contains("statusFieldName"));
++}
++
+ #[tokio::test]
+ async fn process_success_publishes_and_persists_state() {
+     let graphql_server = MockServer::start().await;
+@@ -349,6 +389,12 @@ async fn process_success_publishes_and_persists_state() {
+ 
+     let graphql_requests = graphql_server.received_requests().await.expect("requests");
+     assert_eq!(graphql_requests.len(), 1);
++    let graphql_body: serde_json::Value =
++        serde_json::from_slice(&graphql_requests[0].body).expect("graphql request body");
++    assert_eq!(
++        graphql_body["variables"]["statusFieldName"],
++        json!("Status")
++    );
+     assert_eq!(
+         graphql_requests[0]
+             .headers
+@@ -491,7 +537,9 @@ async fn missing_status_is_explicit_failure() {
+         .process_add_row(&row)
+         .await
+         .expect_err("must fail");
+-    assert!(err.to_string().contains("missing a required Status"));
++    assert!(err
++        .to_string()
++        .contains("missing a required 'Status' value"));
+ 
+     let key = DeliveryKey::new("delivery-missing-status", "PVTI_missing_status");
+     let publication = state_store
+@@ -847,6 +895,256 @@ async fn retries_safe_reads_and_recovery_from_ambiguous_publication() {
+     );
+ }
+ 
++#[tokio::test]
++async fn rate_limit_403_retries_and_prefers_retry_after_over_reset() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++
++    let reset_epoch = (Utc::now() + Duration::seconds(3)).timestamp().to_string();
++    Mock::given(method("POST"))
++        .and(body_string_contains("PVTI_rate_limited"))
++        .respond_with(
++            ResponseTemplate::new(403)
++                .append_header("retry-after", "1")
++                .append_header("x-ratelimit-remaining", "0")
++                .append_header("x-ratelimit-reset", reset_epoch),
++        )
++        .up_to_n_times(1)
++        .with_priority(1)
++        .mount(&graphql_server)
++        .await;
++    Mock::given(method("POST"))
++        .and(body_string_contains("PVTI_rate_limited"))
++        .respond_with(
++            ResponseTemplate::new(200).set_body_json(graphql_success_response(
++                "PVTI_rate_limited",
++                "PVT_project1",
++                "2026-08-13T19:15:00Z",
++                "In Progress",
++                "opt-ip",
++            )),
++        )
++        .mount(&graphql_server)
++        .await;
++    Mock::given(method("POST"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "success": true,
++            "message": "All 1 events processed successfully"
++        })))
++        .mount(&destination_server)
++        .await;
++
++    let (processor, _) = build_processor(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store,
++        vec![],
++    )
++    .await;
++
++    let started = std::time::Instant::now();
++    let outcome = processor
++        .process_add_row(&test_row(
++            "delivery-rate-limit",
++            "PVTI_rate_limited",
++            "PVT_project1",
++        ))
++        .await
++        .expect("rate-limited fetch should retry");
++    assert_eq!(outcome, AddRowOutcome::Published);
++
++    let elapsed = started.elapsed();
++    assert!(
++        elapsed >= std::time::Duration::from_millis(900),
++        "retry-after=1s should be honored (elapsed={elapsed:?})"
++    );
++    assert!(
++        elapsed < std::time::Duration::from_secs(3),
++        "retry-after should take precedence over x-ratelimit-reset (elapsed={elapsed:?})"
++    );
++
++    let graphql_requests = graphql_server.received_requests().await.expect("requests");
++    assert_eq!(graphql_requests.len(), 2, "expected exactly one retry");
++}
++
++#[tokio::test]
++async fn rate_limit_403_retries_with_retry_after_http_date() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++
++    let retry_after_http_date =
++        httpdate::fmt_http_date(std::time::SystemTime::now() + std::time::Duration::from_secs(1));
++    Mock::given(method("POST"))
++        .and(body_string_contains("PVTI_rate_limited_http_date"))
++        .respond_with(
++            ResponseTemplate::new(403)
++                .append_header("retry-after", retry_after_http_date)
++                .append_header("x-ratelimit-remaining", "0"),
++        )
++        .up_to_n_times(1)
++        .with_priority(1)
++        .mount(&graphql_server)
++        .await;
++    Mock::given(method("POST"))
++        .and(body_string_contains("PVTI_rate_limited_http_date"))
++        .respond_with(
++            ResponseTemplate::new(200).set_body_json(graphql_success_response(
++                "PVTI_rate_limited_http_date",
++                "PVT_project1",
++                "2026-08-13T19:16:00Z",
++                "In Progress",
++                "opt-ip",
++            )),
++        )
++        .mount(&graphql_server)
++        .await;
++    Mock::given(method("POST"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "success": true,
++            "message": "All 1 events processed successfully"
++        })))
++        .mount(&destination_server)
++        .await;
++
++    let (processor, _) = build_processor(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store,
++        vec![],
++    )
++    .await;
++
++    let outcome = processor
++        .process_add_row(&test_row(
++            "delivery-rate-limit-http-date",
++            "PVTI_rate_limited_http_date",
++            "PVT_project1",
++        ))
++        .await
++        .expect("http-date retry-after should be honored");
++    assert_eq!(outcome, AddRowOutcome::Published);
++
++    let graphql_requests = graphql_server.received_requests().await.expect("requests");
++    assert_eq!(graphql_requests.len(), 2, "expected exactly one retry");
++}
++
++#[tokio::test]
++async fn non_rate_limit_403_does_not_retry() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++
++    Mock::given(method("POST"))
++        .and(body_string_contains("PVTI_forbidden"))
++        .respond_with(
++            ResponseTemplate::new(403)
++                .append_header("x-ratelimit-reset", "9999999999")
++                .append_header("x-ratelimit-remaining", "42")
++                .set_body_string("forbidden"),
++        )
++        .mount(&graphql_server)
++        .await;
++
++    let (processor, state_store) = build_processor(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store,
++        vec![],
++    )
++    .await;
++
++    let err = processor
++        .process_add_row(&test_row("delivery-403", "PVTI_forbidden", "PVT_project1"))
++        .await
++        .expect_err("non-rate-limit 403 should be permanent");
++    assert!(err.to_string().contains("HTTP 403"));
++
++    let graphql_requests = graphql_server.received_requests().await.expect("requests");
++    assert_eq!(
++        graphql_requests.len(),
++        1,
++        "403 without rate-limit headers must not retry"
++    );
++
++    let destination_requests = destination_server
++        .received_requests()
++        .await
++        .expect("destination requests");
++    assert_eq!(destination_requests.len(), 0);
++
++    let publication = state_store
++        .get_publication(&DeliveryKey::new("delivery-403", "PVTI_forbidden"))
++        .await
++        .expect("store read")
++        .expect("publication");
++    assert_eq!(publication.state, PublicationState::Failed);
++}
++
++#[tokio::test]
++async fn configurable_status_field_name_is_sent_as_graphql_variable() {
++    let graphql_server = MockServer::start().await;
++    let destination_server = MockServer::start().await;
++    let durable_store: Arc<dyn StateStoreProvider> = Arc::new(DurableMemoryStateStore::new());
++
++    Mock::given(method("POST"))
++        .and(body_string_contains("PVTI_custom_status"))
++        .respond_with(
++            ResponseTemplate::new(200).set_body_json(graphql_success_response(
++                "PVTI_custom_status",
++                "PVT_project1",
++                "2026-08-13T19:20:00Z",
++                "In Progress",
++                "opt-ip",
++            )),
++        )
++        .mount(&graphql_server)
++        .await;
++    Mock::given(method("POST"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++            "success": true,
++            "message": "All 1 events processed successfully"
++        })))
++        .mount(&destination_server)
++        .await;
++
++    let (processor, _) = build_processor_with_status_field_name(
++        &graphql_server,
++        destination_server.uri(),
++        durable_store,
++        vec![],
++        "Workflow Status",
++    )
++    .await;
++
++    let outcome = processor
++        .process_add_row(&test_row(
++            "delivery-custom-status",
++            "PVTI_custom_status",
++            "PVT_project1",
++        ))
++        .await
++        .expect("custom status field should still hydrate and publish");
++    assert_eq!(outcome, AddRowOutcome::Published);
++
++    let graphql_requests = graphql_server.received_requests().await.expect("requests");
++    assert_eq!(graphql_requests.len(), 1);
++    let graphql_body: serde_json::Value =
++        serde_json::from_slice(&graphql_requests[0].body).expect("graphql request body");
++    assert_eq!(
++        graphql_body["variables"]["statusFieldName"],
++        json!("Workflow Status")
++    );
++    assert!(
++        graphql_body["query"]
++            .as_str()
++            .expect("query string")
++            .contains("$statusFieldName"),
++        "query must use statusFieldName variable"
++    );
++}
++
+ #[tokio::test]
+ async fn allowlist_rejection_skips_processing() {
+     let graphql_server = MockServer::start().await;
+diff --git a/components/reactions/github-project-item-refresh/tests/integration_test.rs b/components/reactions/github-project-item-refresh/tests/integration_test.rs
+index d8ef2f8fb5afc83ff7513535a1a748f2e274ea8d..b8ad6d48a294d31f7ad980aa1f866be4530a4446 100644
+--- a/components/reactions/github-project-item-refresh/tests/integration_test.rs
++++ b/components/reactions/github-project-item-refresh/tests/integration_test.rs
+@@ -131,6 +131,7 @@ async fn github_project_item_refresh_end_to_end_add_update_delete() {
+ 
+     Mock::given(method("POST"))
+         .and(body_string_contains("PVTI_e2e_item"))
++        .and(body_string_contains("\"statusFieldName\""))
+         .respond_with(
+             ResponseTemplate::new(200).set_body_json(graphql_success_response(
+                 "PVTI_e2e_item",
+@@ -251,6 +252,9 @@ async fn github_project_item_refresh_end_to_end_add_update_delete() {
+         .await
+         .expect("graphql requests");
+     assert_eq!(graphql_requests.len(), 1, "update/delete must not refetch");
++    let graphql_body: serde_json::Value =
++        serde_json::from_slice(&graphql_requests[0].body).expect("graphql request json");
++    assert_eq!(graphql_body["variables"]["statusFieldName"], "Status");
+ 
+     let body: serde_json::Value =
+         serde_json::from_slice(&destination_requests[0].body).expect("destination body json");

@@ -1,0 +1,534 @@
+diff --git a/Makefile b/Makefile
+index 4e9287bbf7b035ed1715e94d14baf1dde7a75f02..675b7cfd023fe883fef8984c380bb14b98d21148 100644
+--- a/Makefile
++++ b/Makefile
+@@ -49,6 +49,7 @@ build-test-plugins:
+ 	cargo build --lib -p drasi-source-mock --features drasi-source-mock/dynamic-plugin
+ 	cargo build --lib -p drasi-reaction-log --features drasi-reaction-log/dynamic-plugin
+ 	cargo build --lib -p drasi-reaction-sse --features drasi-reaction-sse/dynamic-plugin
++	cargo build --lib -p drasi-reaction-workgraph-router --features drasi-reaction-workgraph-router/dynamic-plugin
+ 	cargo build --lib -p drasi-reaction-snapshot-test
+ 	cargo build --lib -p drasi-identity-test --features drasi-identity-test/dynamic-plugin
+ 	cargo build --lib -p drasi-bootstrap-scriptfile --features drasi-bootstrap-scriptfile/dynamic-plugin
+@@ -58,12 +59,14 @@ build-test-plugins:
+ 		for f in target/debug/libdrasi_source_mock.$$ext \
+ 		         target/debug/libdrasi_reaction_log.$$ext \
+ 		         target/debug/libdrasi_reaction_sse.$$ext \
++		         target/debug/libdrasi_reaction_workgraph_router.$$ext \
+ 		         target/debug/libdrasi_reaction_snapshot_test.$$ext \
+ 		         target/debug/libdrasi_identity_test.$$ext \
+ 		         target/debug/libdrasi_bootstrap_scriptfile.$$ext \
+ 		         target/debug/drasi_source_mock.$$ext \
+ 		         target/debug/drasi_reaction_log.$$ext \
+ 		         target/debug/drasi_reaction_sse.$$ext \
++		         target/debug/drasi_reaction_workgraph_router.$$ext \
+ 		         target/debug/drasi_reaction_snapshot_test.$$ext \
+ 		         target/debug/drasi_identity_test.$$ext \
+ 		         target/debug/drasi_bootstrap_scriptfile.$$ext; do \
+diff --git a/components/host-sdk/Cargo.toml b/components/host-sdk/Cargo.toml
+index 5d2daae98567064348065e94766b36f4d4849103..1cabd39c96d35f4c24bdf5c57bf621a3631e57eb 100644
+--- a/components/host-sdk/Cargo.toml
++++ b/components/host-sdk/Cargo.toml
+@@ -53,6 +53,7 @@ workspace = true
+ 
+ [dev-dependencies]
+ tempfile = "3"
++bincode = "1"
+ libloading = "0.8"
+ rmp-serde = "1"
+ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util"] }
+diff --git a/components/host-sdk/src/loader.rs b/components/host-sdk/src/loader.rs
+index 7b7fab035c24b0828977e2da6ffe5df412bc3fd6..8e0ef969d0cba21e66a2c51d10ead5e7fff743c5 100644
+--- a/components/host-sdk/src/loader.rs
++++ b/components/host-sdk/src/loader.rs
+@@ -350,9 +350,7 @@ pub fn load_plugin_from_path(
+     // safely read the trailing fields.
+     let identity_provider_vtables: Option<
+         Vec<drasi_plugin_sdk::ffi::IdentityProviderPluginVtable>,
+-    > = if plugin_sdk_version
+-        .as_deref()
+-        .and_then(parse_semver)
++    > = if parse_semver(&plugin_sdk_version)
+         .map(|v| v >= MIN_SDK_VERSION_WITH_IDENTITY_PROVIDERS)
+         .unwrap_or(false)
+         && !registration.identity_provider_plugins.is_null()
+@@ -387,16 +385,15 @@ pub fn load_plugin_from_path(
+     // NOTE: `set_log_level` is a trailing field appended for SDK 0.12.0; gate
+     // access on the plugin's reported `sdk_version` like the identity fields
+     // above, since reading it from an older (smaller) layout is UB.
+-    let set_log_level_fn: Option<extern "C" fn(FfiLogLevelFilter)> = if plugin_sdk_version
+-        .as_deref()
+-        .and_then(parse_semver)
+-        .map(|v| v >= MIN_SDK_VERSION_WITH_SET_LOG_LEVEL)
+-        .unwrap_or(false)
+-    {
+-        Some(registration.set_log_level)
+-    } else {
+-        None
+-    };
++    let set_log_level_fn: Option<extern "C" fn(FfiLogLevelFilter)> =
++        if parse_semver(&plugin_sdk_version)
++            .map(|v| v >= MIN_SDK_VERSION_WITH_SET_LOG_LEVEL)
++            .unwrap_or(false)
++        {
++            Some(registration.set_log_level)
++        } else {
++            None
++        };
+ 
+     // Report the host's effective log level so the plugin can drop
+     // filtered-out records before formatting or crossing the FFI.
+@@ -515,30 +512,27 @@ fn sdk_major_minor_compatible(plugin_sdk_version: &str, host_sdk_version: &str)
+ /// Checks that the plugin's SDK version is compatible with the host.
+ /// For cdylib plugins, we check major.minor compatibility (patch differences are OK).
+ ///
+-/// On success returns the plugin's reported `sdk_version` string (if metadata
+-/// was present), so callers can gate access to ABI fields introduced in a
+-/// later SDK revision.
+-fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<Option<String>> {
++/// On success returns the plugin's reported `sdk_version` string so callers
++/// can gate access to ABI fields introduced in a later SDK revision.
++fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<String> {
+     let meta_fn = unsafe {
+         match lib.get::<unsafe extern "C" fn() -> *const PluginMetadata>(b"drasi_plugin_metadata") {
+             Ok(f) => f,
+             Err(_) => {
+-                log::warn!(
+-                    "Plugin '{}' does not export drasi_plugin_metadata — skipping version check",
++                anyhow::bail!(
++                    "Plugin '{}' does not export drasi_plugin_metadata; metadata is required for ABI compatibility checks",
+                     path.display()
+                 );
+-                return Ok(None);
+             }
+         }
+     };
+ 
+     let meta_ptr = unsafe { meta_fn() };
+     if meta_ptr.is_null() {
+-        log::warn!(
+-            "Plugin '{}' returned null metadata — skipping version check",
++        anyhow::bail!(
++            "Plugin '{}' returned null metadata; metadata is required for ABI compatibility checks",
+             path.display()
+         );
+-        return Ok(None);
+     }
+ 
+     let meta = unsafe { &*meta_ptr };
+@@ -581,7 +575,7 @@ fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<Option
+         plugin_target
+     );
+ 
+-    Ok(Some(plugin_sdk_version))
++    Ok(plugin_sdk_version)
+ }
+ 
+ /// Scan the plugin directory and group files by plugin base name.
+@@ -1189,9 +1183,9 @@ mod tests {
+ 
+     #[test]
+     fn test_sdk_major_minor_compatibility() {
+-        assert!(sdk_major_minor_compatible("0.14.0", "0.14.1"));
++        assert!(sdk_major_minor_compatible("0.15.0", "0.15.1"));
+         assert!(sdk_major_minor_compatible("1.2.3", "1.2.0"));
+-        assert!(!sdk_major_minor_compatible("0.13.9", "0.14.0"));
++        assert!(!sdk_major_minor_compatible("0.14.9", "0.15.0"));
+         assert!(!sdk_major_minor_compatible("1.1.0", "2.1.0"));
+     }
+ }
+diff --git a/components/host-sdk/src/proxies/reaction.rs b/components/host-sdk/src/proxies/reaction.rs
+index e06cc5462234579cdfcd4bc27c16833134544137..50fcda632f4e4448d69c52d508e1b454aee61906 100644
+--- a/components/host-sdk/src/proxies/reaction.rs
++++ b/components/host-sdk/src/proxies/reaction.rs
+@@ -21,7 +21,7 @@ use std::sync::Arc;
+ use async_trait::async_trait;
+ 
+ use drasi_lib::identity::IdentityProvider;
+-use drasi_lib::reactions::Reaction;
++use drasi_lib::reactions::{ManagerCheckpointOwnership, Reaction};
+ use drasi_lib::recovery::ReactionRecoveryPolicy;
+ use drasi_lib::{ComponentStatus, ReactionRuntimeContext};
+ use drasi_plugin_sdk::descriptor::ReactionPluginDescriptor;
+@@ -442,6 +442,20 @@ impl Reaction for ReactionProxy {
+         }
+     }
+ 
++    fn checkpoint_ownership(&self) -> ManagerCheckpointOwnership {
++        let ordinal = (self.vtable.checkpoint_ownership_fn)(self.vtable.state as *const c_void);
++        match ordinal {
++            0 => ManagerCheckpointOwnership::Manager,
++            1 => ManagerCheckpointOwnership::Reaction,
++            _ => {
++                log::warn!(
++                    "Unknown checkpoint ownership ordinal {ordinal} from FFI plugin; defaulting to Manager"
++                );
++                ManagerCheckpointOwnership::Manager
++            }
++        }
++    }
++
+     async fn bootstrap(
+         &self,
+         ctx: drasi_lib::reactions::bootstrap_context::BootstrapContext,
+diff --git a/components/host-sdk/tests/integration_test.rs b/components/host-sdk/tests/integration_test.rs
+index b2a37597d60735f2f767c65f3294b7095d60c132..e8ac300f610ffa0b09ff62e4202a3c70a5122e72 100644
+--- a/components/host-sdk/tests/integration_test.rs
++++ b/components/host-sdk/tests/integration_test.rs
+@@ -32,6 +32,7 @@
+ //! ```sh
+ //! cargo build --lib -p drasi-source-mock --features drasi-source-mock/dynamic-plugin
+ //! cargo build --lib -p drasi-reaction-log --features drasi-reaction-log/dynamic-plugin
++//! cargo build --lib -p drasi-reaction-workgraph-router --features drasi-reaction-workgraph-router/dynamic-plugin
+ //! cargo build --lib -p drasi-bootstrap-scriptfile --features drasi-bootstrap-scriptfile/dynamic-plugin
+ //! ```
+ 
+@@ -3146,6 +3147,260 @@ async fn test_stress_rapid_subscribe_drop_under_load() {
+ // silently degrades to no-op even though unit tests (which bypass FFI) pass.
+ // ============================================================================
+ 
++/// Test helper: a durable facade over the in-memory store so durable reactions
++/// can be exercised without an external persistence backend.
++struct DurableMemoryStateStore {
++    inner: drasi_lib::MemoryStateStoreProvider,
++}
++
++impl DurableMemoryStateStore {
++    fn new() -> Self {
++        Self {
++            inner: drasi_lib::MemoryStateStoreProvider::new(),
++        }
++    }
++}
++
++#[async_trait::async_trait]
++impl drasi_lib::state_store::StateStoreProvider for DurableMemoryStateStore {
++    async fn get(
++        &self,
++        store_id: &str,
++        key: &str,
++    ) -> drasi_lib::state_store::StateStoreResult<Option<Vec<u8>>> {
++        self.inner.get(store_id, key).await
++    }
++
++    async fn set(
++        &self,
++        store_id: &str,
++        key: &str,
++        value: Vec<u8>,
++    ) -> drasi_lib::state_store::StateStoreResult<()> {
++        self.inner.set(store_id, key, value).await
++    }
++
++    async fn compare_and_swap(
++        &self,
++        store_id: &str,
++        key: &str,
++        expected: Option<&[u8]>,
++        new_value: Vec<u8>,
++    ) -> drasi_lib::state_store::StateStoreResult<drasi_lib::StateStoreCompareAndSwapResult> {
++        self.inner
++            .compare_and_swap(store_id, key, expected, new_value)
++            .await
++    }
++
++    async fn delete(
++        &self,
++        store_id: &str,
++        key: &str,
++    ) -> drasi_lib::state_store::StateStoreResult<bool> {
++        self.inner.delete(store_id, key).await
++    }
++
++    async fn contains_key(
++        &self,
++        store_id: &str,
++        key: &str,
++    ) -> drasi_lib::state_store::StateStoreResult<bool> {
++        self.inner.contains_key(store_id, key).await
++    }
++
++    async fn get_many(
++        &self,
++        store_id: &str,
++        keys: &[&str],
++    ) -> drasi_lib::state_store::StateStoreResult<std::collections::HashMap<String, Vec<u8>>> {
++        self.inner.get_many(store_id, keys).await
++    }
++
++    async fn set_many(
++        &self,
++        store_id: &str,
++        entries: &[(&str, &[u8])],
++    ) -> drasi_lib::state_store::StateStoreResult<()> {
++        self.inner.set_many(store_id, entries).await
++    }
++
++    async fn delete_many(
++        &self,
++        store_id: &str,
++        keys: &[&str],
++    ) -> drasi_lib::state_store::StateStoreResult<usize> {
++        self.inner.delete_many(store_id, keys).await
++    }
++
++    async fn clear_store(&self, store_id: &str) -> drasi_lib::state_store::StateStoreResult<usize> {
++        self.inner.clear_store(store_id).await
++    }
++
++    async fn list_keys(
++        &self,
++        store_id: &str,
++    ) -> drasi_lib::state_store::StateStoreResult<Vec<String>> {
++        self.inner.list_keys(store_id).await
++    }
++
++    async fn store_exists(&self, store_id: &str) -> drasi_lib::state_store::StateStoreResult<bool> {
++        self.inner.store_exists(store_id).await
++    }
++
++    async fn key_count(&self, store_id: &str) -> drasi_lib::state_store::StateStoreResult<usize> {
++        self.inner.key_count(store_id).await
++    }
++
++    async fn sync(&self) -> drasi_lib::state_store::StateStoreResult<()> {
++        self.inner.sync().await
++    }
++
++    fn is_durable(&self) -> bool {
++        true
++    }
++}
++
++/// Regression test for checkpoint ownership crossing the dynamic reaction FFI
++/// boundary and reaching manager live-enqueue persistence semantics.
++///
++/// The workgraph-router reaction reports `checkpoint_ownership() = Reaction`.
++/// We feed it query results that fail candidate deserialization, so the
++/// reaction itself never advances checkpoints. If ownership forwarding breaks
++/// and defaults to manager-owned, the runtime would still persist a live
++/// checkpoint > 0 at enqueue time. We assert that this never happens through
++/// the plugin proxy path.
++#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
++#[serial]
++#[ignore = "requires cdylib: make build-test-plugins (drasi-source-mock + drasi-reaction-workgraph-router)"]
++async fn test_ffi_reaction_checkpoint_ownership_reaches_manager_live_enqueue() {
++    use drasi_lib::reactions::ManagerCheckpointOwnership;
++    use drasi_lib::state_store::StateStoreProvider;
++
++    if !plugin_exists("drasi-source-mock") || !plugin_exists("drasi-reaction-workgraph-router") {
++        panic!("SKIP: required cdylib plugins not built (drasi-source-mock, drasi-reaction-workgraph-router)");
++    }
++
++    let mock_source_path = require_plugin("drasi-source-mock");
++    let router_reaction_path = require_plugin("drasi-reaction-workgraph-router");
++
++    let source_plugin = load_plugin_from_path(
++        &mock_source_path,
++        std::ptr::null_mut(),
++        callbacks::default_log_callback_fn(),
++        std::ptr::null_mut(),
++        callbacks::default_lifecycle_callback_fn(),
++    )
++    .expect("Should load mock source plugin");
++
++    let reaction_plugin = load_plugin_from_path(
++        &router_reaction_path,
++        std::ptr::null_mut(),
++        callbacks::default_log_callback_fn(),
++        std::ptr::null_mut(),
++        callbacks::default_lifecycle_callback_fn(),
++    )
++    .expect("Should load workgraph-router reaction plugin");
++
++    let source = source_plugin.source_plugins[0]
++        .create_source(
++            "router-ffi-source",
++            &serde_json::json!({
++                "dataType": { "type": "counter" },
++                "intervalMs": 50
++            }),
++            true,
++        )
++        .await
++        .expect("Should create mock source");
++
++    let query_id = "route-awaiting-workgraph-items";
++    let reaction_id = "router-ffi-reaction";
++    let reaction = reaction_plugin.reaction_plugins[0]
++        .create_reaction(
++            reaction_id,
++            vec![query_id.to_string()],
++            &serde_json::json!({
++                "policyId": "checkpoint-ownership-regression",
++                "policyType": "rules_v1",
++                "policyVersion": "1.0.0",
++                "allowedProjects": ["PVT_test"],
++                "allowedRepos": ["drasi-project/drasi-core"],
++                "allowedEventTypes": ["CompletedIssueValidation"],
++                "allowedStatusTransitions": [{ "from": "AwaitingRouting", "to": "AwaitingIssueRiskProfiling" }],
++                "allowedResponsibilityTypes": ["issue-validation"],
++                "allowedActors": [],
++                "trustedRoutingAuthors": [],
++                "trustedLauncherAuthors": [],
++                "trustedAgentAuthors": [],
++                "trustedRouterAuthors": [],
++                "trustedRouterAuthorNodeIds": ["MDQ6VXNlcjE="],
++                "trustedRouterAuthorDatabaseIds": [],
++                "githubGraphqlUrl": "https://api.github.com/graphql",
++                "githubRestUrl": "https://api.github.com",
++                "githubTokenEnv": "PATH",
++                "projectStatusFieldName": "Status",
++                "timeoutSecs": 10,
++                "reservationLeaseSecs": 30,
++                "strictRecovery": true
++            }),
++            true,
++        )
++        .await
++        .expect("Should create workgraph-router reaction");
++
++    assert_eq!(
++        reaction.checkpoint_ownership(),
++        ManagerCheckpointOwnership::Reaction,
++        "checkpoint ownership must cross FFI proxy as Reaction-owned"
++    );
++
++    let store = std::sync::Arc::new(DurableMemoryStateStore::new());
++    let core = drasi_lib::DrasiLib::builder()
++        .with_id("router-ffi-checkpoint-core")
++        .with_state_store_provider(store.clone())
++        .with_source(source)
++        .with_query(
++            drasi_lib::Query::cypher(query_id)
++                .query("MATCH (n:Counter) RETURN n.value AS value")
++                .from_source("router-ffi-source")
++                .build(),
++        )
++        .with_reaction(reaction)
++        .build()
++        .await
++        .expect("Should build DrasiLib");
++
++    core.start().await.expect("Should start DrasiLib");
++    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
++
++    let query_results = core
++        .get_query_results(query_id)
++        .await
++        .expect("Should read query results");
++    assert!(
++        !query_results.is_empty(),
++        "query should produce live results so enqueue path is exercised"
++    );
++
++    core.stop().await.expect("Should stop DrasiLib");
++
++    let checkpoint_key = format!("checkpoint:{query_id}");
++    let checkpoint_bytes = store
++        .get(reaction_id, &checkpoint_key)
++        .await
++        .expect("state store get should succeed");
++
++    let bytes = checkpoint_bytes.expect(
++        "startup should seed a checkpoint entry; missing checkpoint means test did not exercise persistence path",
++    );
++    let checkpoint: drasi_lib::reactions::ReactionCheckpoint =
++        bincode::deserialize(&bytes).expect("checkpoint bytes should deserialize");
++    assert_eq!(
++        checkpoint.sequence, 0,
++        "reaction-owned checkpoint semantics should prevent manager enqueue-time persistence beyond sequence 0"
++    );
++}
++
+ /// Helper: load mock source cdylib, create + initialize + start a source instance.
+ async fn create_started_mock_source(
+     source_id: &str,
+diff --git a/components/plugin-sdk/src/ffi/metadata.rs b/components/plugin-sdk/src/ffi/metadata.rs
+index c26e1f13572b0b5d5391bf6608166f6cd5502f18..758e7105de0cdffaaaea5f1c61ca253a1f8547e3 100644
+--- a/components/plugin-sdk/src/ffi/metadata.rs
++++ b/components/plugin-sdk/src/ffi/metadata.rs
+@@ -48,7 +48,10 @@ use super::types::FfiStr;
+ ///   state transitions needed by cross-replica fencing. The CAS result is a
+ ///   POD status code (`FfiCompareAndSwapResult`) to avoid cross-dylib
+ ///   ownership transfer for newly introduced operations.
+-pub const FFI_SDK_VERSION: &str = "0.14.0";
++/// - `0.15.0`: `ReactionVtable` appends `checkpoint_ownership_fn` (u8 ordinal:
++///   0=Manager, 1=Reaction) so dynamic reactions can opt out of runtime-managed
++///   enqueue-time checkpoint advancement.
++pub const FFI_SDK_VERSION: &str = "0.15.0";
+ 
+ /// The target triple this crate was compiled for.
+ pub const TARGET_TRIPLE: &str = env!("TARGET_TRIPLE");
+diff --git a/components/plugin-sdk/src/ffi/vtable_gen.rs b/components/plugin-sdk/src/ffi/vtable_gen.rs
+index 44dc85a517b72bac6cf03e88215097eee2e6a8b2..1ff7d11c2f06d6fac248334b0ebc32f49905bd2c 100644
+--- a/components/plugin-sdk/src/ffi/vtable_gen.rs
++++ b/components/plugin-sdk/src/ffi/vtable_gen.rs
+@@ -35,7 +35,7 @@ use drasi_lib::channels::events::{
+ use drasi_lib::channels::ChangeReceiver;
+ use drasi_lib::component_graph::ComponentUpdateReceiver;
+ use drasi_lib::config::SourceSubscriptionSettings;
+-use drasi_lib::reactions::Reaction;
++use drasi_lib::reactions::{ManagerCheckpointOwnership, Reaction};
+ use drasi_lib::sources::Source;
+ use drasi_lib::{ComponentStatus, DispatchMode, SourceRuntimeContext, StateStoreProvider};
+ 
+@@ -1634,6 +1634,14 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
+         w.inner.default_recovery_policy() as u8
+     }
+ 
++    extern "C" fn checkpoint_ownership_fn<T: Reaction + 'static>(state: *const c_void) -> u8 {
++        let w = unsafe { &*(state as *const ReactionWrapper<T>) };
++        match w.inner.checkpoint_ownership() {
++            ManagerCheckpointOwnership::Manager => 0,
++            ManagerCheckpointOwnership::Reaction => 1,
++        }
++    }
++
+     extern "C" fn bootstrap_fn<T: Reaction + 'static>(
+         state: *mut c_void,
+         ctx: *const FfiBootstrapContext,
+@@ -1710,6 +1718,7 @@ pub fn build_reaction_vtable<T: Reaction + 'static>(
+         is_durable_fn: is_durable_fn::<T>,
+         needs_snapshot_on_fresh_start_fn: needs_snapshot_on_fresh_start_fn::<T>,
+         default_recovery_policy_fn: default_recovery_policy_fn::<T>,
++        checkpoint_ownership_fn: checkpoint_ownership_fn::<T>,
+         bootstrap_fn: bootstrap_fn::<T>,
+         drop_fn: drop_fn::<T>,
+     }
+@@ -2032,6 +2041,14 @@ pub fn build_reaction_vtable_from_boxed(
+         w.inner.default_recovery_policy() as u8
+     }
+ 
++    extern "C" fn checkpoint_ownership_fn(state: *const c_void) -> u8 {
++        let w = wrapper_ref(state);
++        match w.inner.checkpoint_ownership() {
++            ManagerCheckpointOwnership::Manager => 0,
++            ManagerCheckpointOwnership::Reaction => 1,
++        }
++    }
++
+     extern "C" fn bootstrap_fn(state: *mut c_void, ctx: *const FfiBootstrapContext) -> FfiResult {
+         catch_panic_ffi(|| {
+             let w = wrapper_ref(state);
+@@ -2109,6 +2126,7 @@ pub fn build_reaction_vtable_from_boxed(
+         is_durable_fn,
+         needs_snapshot_on_fresh_start_fn,
+         default_recovery_policy_fn,
++        checkpoint_ownership_fn,
+         bootstrap_fn,
+         drop_fn,
+     }
+diff --git a/components/plugin-sdk/src/ffi/vtables.rs b/components/plugin-sdk/src/ffi/vtables.rs
+index 33e5ac41014113a3069a635d6809f5aa54eaaf75..54391844e6426bf63981fa8ab33e9dd37070e29f 100644
+--- a/components/plugin-sdk/src/ffi/vtables.rs
++++ b/components/plugin-sdk/src/ffi/vtables.rs
+@@ -518,6 +518,8 @@ drasi_ffi_primitives::ffi_vtable! {
+         fn needs_snapshot_on_fresh_start_fn(state: *const) -> bool,
+         /// Default recovery policy (returned as u8 ordinal: 0=Strict, 1=AutoReset, 2=AutoSkipGap).
+         fn default_recovery_policy_fn(state: *const) -> u8,
++        /// Checkpoint ownership mode (returned as u8 ordinal: 0=Manager, 1=Reaction).
++        fn checkpoint_ownership_fn(state: *const) -> u8,
+ 
+         // Bootstrap hook
+         /// Called during startup when bootstrap or recovery is needed.

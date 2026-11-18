@@ -1,0 +1,2452 @@
+diff --git a/lib/Cargo.toml b/lib/Cargo.toml
+index 33dd45d6b77b4fb5f30b1b0d514f64d7e957065b..0c5e5653f802414b0f1f68e21cb5b056bada6d9d 100644
+--- a/lib/Cargo.toml
++++ b/lib/Cargo.toml
+@@ -37,6 +37,7 @@ middleware-decoder = ["drasi-middleware/decoder"]
+ middleware-map = ["drasi-middleware/map"]
+ middleware-parse-json = ["drasi-middleware/parse_json"]
+ middleware-promote = ["drasi-middleware/promote"]
++middleware-regex-extract = ["drasi-middleware/regex_extract"]
+ middleware-relabel = ["drasi-middleware/relabel"]
+ middleware-unwind = ["drasi-middleware/unwind"]
+ 
+@@ -53,6 +54,7 @@ features = [
+     "middleware-map",
+     "middleware-parse-json",
+     "middleware-promote",
++    "middleware-regex-extract",
+     "middleware-relabel",
+     "middleware-unwind",
+ ]
+diff --git a/lib/README.md b/lib/README.md
+index 0a34dc063d89f566320cebf055f67eec11607767..a7988e9546ef2ba20a904b5d6cf26384c1ba8af5 100644
+--- a/lib/README.md
++++ b/lib/README.md
+@@ -679,6 +679,7 @@ drasi-lib = { version = "0.4", features = ["middleware-promote", "middleware-dec
+ | `middleware-relabel` | Transform | Rename element labels |
+ | `middleware-decoder` | Transform | Decode base64, hex, URL-encoded, or JSON-escaped strings |
+ | `middleware-parse-json` | Transform | Parse JSON strings into structured objects |
++| `middleware-regex-extract` | Transform | Extract bounded regex captures from string properties |
+ | `middleware-unwind` | Transform | Expand arrays into separate graph elements |
+ | `middleware-all` | Convenience | Enable all middleware |
+ 
+@@ -1073,6 +1074,7 @@ match core.get_source_status("unknown").await {
+ | `middleware-map` | JSONPath property mapping |
+ | `middleware-parse-json` | Parse JSON strings into objects |
+ | `middleware-promote` | Promote nested properties to top level |
++| `middleware-regex-extract` | Extract bounded regex captures from string properties |
+ | `middleware-relabel` | Rename element labels |
+ | `middleware-unwind` | Expand arrays into elements |
+ | `middleware-all` | Enable all middleware |
+diff --git a/lib/src/lib_core.rs b/lib/src/lib_core.rs
+index 60c45128e12559c855aa5b9943d0d31738253f6c..3eb604279542023fb9a2d3023769a3696f8c921d 100644
+--- a/lib/src/lib_core.rs
++++ b/lib/src/lib_core.rs
+@@ -286,6 +286,11 @@ impl DrasiLib {
+             drasi_middleware::promote::PromoteMiddlewareFactory::new(),
+         ));
+ 
++        #[cfg(feature = "middleware-regex-extract")]
++        middleware_registry.register(Arc::new(
++            drasi_middleware::regex_extract::RegexExtractFactory::new(),
++        ));
++
+         let middleware_registry = Arc::new(middleware_registry);
+ 
+         let query_manager = Arc::new(QueryManager::new(
+@@ -1021,6 +1026,11 @@ mod tests {
+             registry.get("promote").is_some(),
+             "Promote factory should be registered"
+         );
++        #[cfg(feature = "middleware-regex-extract")]
++        assert!(
++            registry.get("regex_extract").is_some(),
++            "RegexExtract factory should be registered"
++        );
+     }
+ 
+     #[tokio::test]
+@@ -1075,6 +1085,7 @@ mod tests {
+             feature = "middleware-decoder",
+             feature = "middleware-parse-json",
+             feature = "middleware-promote",
++            feature = "middleware-regex-extract",
+             feature = "middleware-relabel",
+             feature = "middleware-unwind"
+         )))]
+@@ -1107,6 +1118,7 @@ mod tests {
+             feature = "middleware-decoder",
+             feature = "middleware-parse-json",
+             feature = "middleware-promote",
++            feature = "middleware-regex-extract",
+             feature = "middleware-relabel",
+             feature = "middleware-unwind"
+         )))]
+diff --git a/middleware/Cargo.toml b/middleware/Cargo.toml
+index 9d30def8ed43fa4779d6282da9db43700eda9d81..dd6814e25fe05bee622b69aa00641ebfd40a821a 100644
+--- a/middleware/Cargo.toml
++++ b/middleware/Cargo.toml
+@@ -22,14 +22,15 @@ decoder = []
+ map = []
+ parse_json = []
+ promote = []
++regex_extract = ["dep:regex"]
+ relabel = []
+ unwind = []
+ 
+ # Convenience feature to enable all middleware
+-all = ["jq", "decoder", "map", "parse_json", "promote", "relabel", "unwind"]
++all = ["jq", "decoder", "map", "parse_json", "promote", "regex_extract", "relabel", "unwind"]
+ 
+ [package.metadata.docs.rs]
+-features = ["bundled-jq", "decoder", "map", "parse_json", "promote", "relabel", "unwind"]
++features = ["bundled-jq", "decoder", "map", "parse_json", "promote", "regex_extract", "relabel", "unwind"]
+ 
+ [dependencies]
+ # Core dependencies (always needed)
+@@ -48,6 +49,7 @@ urlencoding = "2.1.2"    # Used by decoder
+ 
+ # Optional: only compiled when jq feature is enabled; use bundled-jq to compile from source
+ jq-rs = { version = "0.4.1", optional = true }
++regex = { version = "1", optional = true }
+ 
+ [dev-dependencies]
+ ordered-float = "3.7.0"  # Used by parse_json tests
+diff --git a/middleware/README.md b/middleware/README.md
+index d6383f06847749367e951f078f65c87911abda05..b6773be4bda1be81cf91427137d55a658959dca2 100644
+--- a/middleware/README.md
++++ b/middleware/README.md
+@@ -14,7 +14,7 @@ All middleware types are **optional** and disabled by default. Enable only the m
+ 
+ ```toml
+ [dependencies]
+-drasi-middleware = { version = "0.3", features = ["jq", "decoder", "map"] }
++drasi-middleware = { version = "0.5", features = ["jq", "decoder", "regex_extract"] }
+ ```
+ 
+ ### Available Middleware Features
+@@ -25,6 +25,7 @@ drasi-middleware = { version = "0.3", features = ["jq", "decoder", "map"] }
+ - **`map`** - JSONPath-based property mapping
+ - **`parse_json`** - Parse JSON strings into structured objects
+ - **`promote`** - Promote nested properties to top level
++- **`regex_extract`** - Extract a bounded regex capture from a string property
+ - **`relabel`** - Transform element labels
+ - **`unwind`** - Unwind arrays into multiple elements
+ - **`all`** - Enable all middleware (convenience feature, includes `bundled-jq`)
+@@ -73,6 +74,78 @@ drasi-middleware = { version = "0.3", features = ["bundled-jq"] }
+ 
+ **Note:** If you don't need JQ middleware, you can use other middleware without installing jq or these build tools.
+ 
++## Source-wide non-destructive pipelines
++
++A query has one middleware pipeline for each source ID. Middleware in that pipeline
++therefore needs to pass unrelated elements through. This example recognizes only
++comments with a versioned header and fenced JSON payload while issues, relations,
++and ordinary comments continue unchanged:
++
++```yaml
++middleware:
++  - name: extract_event_payload
++    kind: regex_extract
++    config:
++      target_property: body
++      pattern: '(?s)^Event/v1\s*\n```json\s*(?<payload>.*?)\s*```'
++      capture_group: payload
++      output_property: event_payload
++      max_capture_size: 65536
++      on_missing: passthrough
++      on_no_match: passthrough
++      on_error: fail
++      on_collision: fail
++  - name: parse_event_payload
++    kind: parse_json
++    config:
++      target_property: event_payload
++      output_property: event
++      on_missing: passthrough
++      on_error: fail
++  - name: derive_event_graph
++    kind: jq
++    config:
++      preserve_input: true
++      include_source_metadata: true
++      reconcile: true
++      mappings:
++        Comment:
++          insert: &event_mappings
++            - elementType: Node
++              label: '"Event"'
++              id: .id
++              query: 'if .event then .event else empty end'
++          update: *event_mappings
++```
++
++`preserve_input` tees the input change after the derived changes, keeping the
++source element available to queries and to later reconciliation. With
++`include_source_metadata`, jq receives a reserved `$source` object containing
++`operation`, `sourceId`, `elementId`, `labels`, `effectiveTime`, `elementType`,
++and `inNode`/`outNode` references for relations. It is opt-in so legacy jq
++queries that copy their entire input do not acquire a new property.
++
++`reconcile` compares deterministic node and relation references produced by the
++current mapping with references produced from the source element already in the
++`ElementIndex`. It emits deletes for stale derived references on source updates
++and deletes. It requires `preserve_input: true`, deterministic `id` expressions,
++and IDs owned exclusively by that source mapping. Insert and update mappings may
++differ: candidate references are deleted only when the reference is present in
++the index. Reconciliation treats mapping errors as failures even when
++`haltOnError` is false; an execution error must not look like an intentionally
++empty jq result and delete valid derived elements. If an update or delete has no
++indexed prior source element, cleanup cannot be reconstructed and a warning is
++logged.
++
++Delete changes do not carry properties or relation endpoints. Legacy delete
++mapping input therefore remains property-free. With `include_source_metadata`,
++relation type and endpoints are recovered from the prior indexed source
++element; if it is unavailable, `$source.elementType` is `"unknown"` and the
++endpoints are omitted.
++
++Legacy jq configuration remains valid: a top-level map of labels to operations
++still has `preserve_input`, structured metadata, and reconciliation disabled.
++
+ ## Middleware Development Guide
+ 
+ This section explains how to develop custom middleware in Drasi core.
+diff --git a/middleware/src/jq/mod.rs b/middleware/src/jq/mod.rs
+index 460ad23fe655246009426deded6f9dc21a041275..11a79d1037c7f323ea4f0b883984d0be4b755d29 100644
+--- a/middleware/src/jq/mod.rs
++++ b/middleware/src/jq/mod.rs
+@@ -12,9 +12,11 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-use std::{cell::RefCell, collections::HashMap, sync::Arc};
+-
+-use jq_rs::{self, JqProgram};
++use std::{
++    cell::RefCell,
++    collections::{HashMap, HashSet},
++    sync::Arc,
++};
+ 
+ use async_trait::async_trait;
+ use drasi_core::{
+@@ -22,10 +24,14 @@ use drasi_core::{
+         ElementIndex, MiddlewareError, MiddlewareSetupError, SourceMiddleware,
+         SourceMiddlewareFactory,
+     },
+-    models::{Element, ElementPropertyMap, ElementReference, SourceChange, SourceMiddlewareConfig},
++    models::{
++        Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
++        SourceMiddlewareConfig,
++    },
+ };
++use jq_rs::{self, JqProgram};
+ use serde::Deserialize;
+-use serde_json::Value;
++use serde_json::{json, Value};
+ 
+ #[cfg(test)]
+ mod tests;
+@@ -45,7 +51,7 @@ pub struct SourceMappedOutput {
+     halt_on_error: bool,
+ }
+ 
+-#[derive(Debug, Clone, Deserialize)]
++#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+ pub enum MapOperation {
+     Insert,
+     Update,
+@@ -55,6 +61,7 @@ pub enum MapOperation {
+ #[derive(Debug, Clone, Deserialize)]
+ pub enum MapElementType {
+     Node,
++    #[serde(alias = "relation")]
+     #[serde(rename_all = "camelCase")]
+     Relation {
+         in_node_id: String,
+@@ -74,251 +81,433 @@ pub struct SourceMappedOperations {
+     delete: Vec<SourceMappedOutput>,
+ }
+ 
++#[derive(Debug, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct ExtendedJqConfig {
++    mappings: HashMap<String, SourceMappedOperations>,
++    #[serde(default)]
++    preserve_input: bool,
++    #[serde(default)]
++    include_source_metadata: bool,
++    #[serde(default)]
++    reconcile: bool,
++}
++
++#[derive(Debug, Deserialize)]
++#[serde(untagged)]
++enum JqConfig {
++    Extended(ExtendedJqConfig),
++    Legacy(HashMap<String, SourceMappedOperations>),
++}
++
+ thread_local! {
+     static JQ_CACHE: RefCell<HashMap<String, RefCell<JqProgram>>> = RefCell::new(HashMap::new());
+ }
+ 
+ pub struct JQ {
+     mappings: HashMap<String, SourceMappedOperations>,
++    preserve_input: bool,
++    include_source_metadata: bool,
++    reconcile: bool,
+ }
+ 
+ impl JQ {
+-    fn new(mappings: HashMap<String, SourceMappedOperations>) -> Self {
+-        Self { mappings }
++    fn new(config: JqConfig) -> Self {
++        match config {
++            JqConfig::Extended(config) => Self {
++                mappings: config.mappings,
++                preserve_input: config.preserve_input,
++                include_source_metadata: config.include_source_metadata,
++                reconcile: config.reconcile,
++            },
++            JqConfig::Legacy(mappings) => Self {
++                mappings,
++                preserve_input: false,
++                include_source_metadata: false,
++                reconcile: false,
++            },
++        }
+     }
+-}
+ 
+-#[async_trait]
+-impl SourceMiddleware for JQ {
+-    async fn process(
++    async fn previous_element(
+         &self,
+-        source_change: SourceChange,
+-        _element_index: &dyn ElementIndex,
+-    ) -> Result<Vec<SourceChange>, MiddlewareError> {
+-        let metadata = match &source_change {
+-            SourceChange::Insert { element } => element.get_metadata(),
+-            SourceChange::Update { element } => element.get_metadata(),
+-            SourceChange::Delete { metadata } => metadata,
+-            SourceChange::Future { .. } => return Ok(vec![source_change]),
+-        };
++        source_change: &SourceChange,
++        element_index: &dyn ElementIndex,
++    ) -> Result<Option<Arc<Element>>, MiddlewareError> {
++        if !(self.reconcile
++            || (self.include_source_metadata
++                && matches!(source_change, SourceChange::Delete { .. })))
++        {
++            return Ok(None);
++        }
++        match source_change {
++            SourceChange::Update { element } => {
++                Ok(element_index.get_element(element.get_reference()).await?)
++            }
++            SourceChange::Delete { metadata } => {
++                Ok(element_index.get_element(&metadata.reference).await?)
++            }
++            SourceChange::Insert { .. } | SourceChange::Future { .. } => Ok(None),
++        }
++    }
+ 
++    fn mappings_for<'a>(
++        &'a self,
++        metadata: &ElementMetadata,
++        operation: MapOperation,
++    ) -> Vec<&'a SourceMappedOutput> {
++        metadata
++            .labels
++            .iter()
++            .flat_map(move |label| {
++                self.mappings
++                    .get(label.as_ref())
++                    .map(|operations| match operation {
++                        MapOperation::Insert => operations.insert.as_slice(),
++                        MapOperation::Update => operations.update.as_slice(),
++                        MapOperation::Delete => operations.delete.as_slice(),
++                    })
++                    .unwrap_or_default()
++                    .iter()
++            })
++            .collect()
++    }
++
++    fn derive(
++        &self,
++        element: &Element,
++        operation: MapOperation,
++        delete_metadata: Option<&ElementMetadata>,
++        previous_element: Option<&Element>,
++    ) -> Result<Vec<SourceChange>, MiddlewareError> {
++        let metadata = delete_metadata.unwrap_or_else(|| element.get_metadata());
++        let source_obj = self.source_object(
++            element,
++            operation,
++            metadata,
++            if operation == MapOperation::Delete {
++                previous_element
++            } else {
++                Some(element)
++            },
++        );
++        let source_obj_str = serde_json::to_string(&source_obj).map_err(|error| {
++            MiddlewareError::SourceChangeError(format!(
++                "Failed to serialize jq input object: {error}"
++            ))
++        })?;
+         let mut results = Vec::new();
+ 
+-        for label in metadata.labels.iter() {
+-            let mappings = match self.mappings.get(&label.to_string()) {
+-                //todo: use Arc<str> instead of String
+-                Some(mappings) => match &source_change {
+-                    SourceChange::Insert { .. } => &mappings.insert,
+-                    SourceChange::Update { .. } => &mappings.update,
+-                    SourceChange::Delete { .. } => &mappings.delete,
+-                    _ => continue,
+-                },
+-                None => continue,
++        for mapping in self.mappings_for(metadata, operation) {
++            let output_operation = mapping.op.unwrap_or(operation);
++            let output = match run_jq(&mapping.query, &source_obj_str) {
++                Ok(output) => output,
++                Err(error) if self.reconcile || mapping.halt_on_error => return Err(error),
++                Err(error) => {
++                    log::error!("{error}");
++                    continue;
++                }
+             };
+ 
+-            log::info!("Processing mappings for label: {label}");
+-
+-            #[allow(unused_assignments)]
+-            let mut del_element_binding = Option::<Element>::None;
+-
+-            #[allow(clippy::unwrap_used)]
+-            let element = match &source_change {
+-                SourceChange::Insert { element } => element,
+-                SourceChange::Update { element } => element,
+-                SourceChange::Delete { metadata } => {
+-                    del_element_binding = Some(Element::Node {
+-                        metadata: metadata.clone(),
+-                        properties: ElementPropertyMap::new(),
+-                    });
+-                    del_element_binding.as_ref().unwrap()
++            let query_output = match parse_jq_output(&output) {
++                Ok(output) => output,
++                Err(error) if self.reconcile || mapping.halt_on_error => return Err(error),
++                Err(error) => {
++                    log::error!("{error}");
++                    continue;
+                 }
+-                _ => continue,
+             };
+ 
+-            for mapping in mappings {
+-                let op = match &mapping.op {
+-                    Some(op) => op,
+-                    None => match &source_change {
+-                        SourceChange::Insert { .. } => &MapOperation::Insert,
+-                        SourceChange::Update { .. } => &MapOperation::Update,
+-                        SourceChange::Delete { .. } => &MapOperation::Delete,
+-                        _ => continue,
+-                    },
+-                };
++            for item in query_output {
++                match self.map_item(&item, mapping, output_operation, metadata, element) {
++                    Ok(change) => results.push(change),
++                    Err(error) if self.reconcile || mapping.halt_on_error => return Err(error),
++                    Err(error) => log::error!("{error}"),
++                }
++            }
++        }
+ 
+-                let source_obj: Value = element.into();
+-
+-                let source_obj_str = match serde_json::to_string(&source_obj) {
+-                    Ok(s) => s,
+-                    Err(e) => {
+-                        log::error!("Failed to serialize source object to string: {e}");
+-                        if mapping.halt_on_error {
+-                            return Err(MiddlewareError::SourceChangeError(format!(
+-                                "Failed to serialize source object to string: {e}"
+-                            )));
+-                        }
+-                        continue;
+-                    }
+-                };
++        Ok(results)
++    }
+ 
+-                let output = match run_jq(mapping.query.as_str(), &source_obj_str) {
+-                    Ok(output) => {
+-                        log::info!("JQ output: {output}");
+-                        output
+-                    }
+-                    Err(e) => {
+-                        log::error!("{e}");
+-                        if mapping.halt_on_error {
+-                            return Err(e);
+-                        }
+-                        continue;
+-                    }
+-                };
++    fn source_object(
++        &self,
++        element: &Element,
++        operation: MapOperation,
++        metadata: &ElementMetadata,
++        endpoint_element: Option<&Element>,
++    ) -> Value {
++        let mut value: Value = element.into();
++        if !self.include_source_metadata {
++            return value;
++        }
+ 
+-                let query_output: Vec<Value> = if output.is_empty() {
+-                    continue;
+-                } else {
+-                    match serde_json::from_str::<Value>(&output) {
+-                        Ok(v) => {
+-                            if v.is_array() {
+-                                v.as_array().unwrap_or(&vec![]).to_vec()
+-                            } else {
+-                                vec![v]
+-                            }
+-                        }
+-                        Err(e) => {
+-                            log::error!("Failed to parse JQ output as JSON: {e}");
+-                            if mapping.halt_on_error {
+-                                return Err(MiddlewareError::SourceChangeError(format!(
+-                                    "Failed to parse JQ output as JSON: {e}"
+-                                )));
+-                            }
+-                            continue;
+-                        }
+-                    }
+-                };
++        let element_type = match endpoint_element {
++            Some(Element::Relation { .. }) => "relation",
++            Some(Element::Node { .. }) => "node",
++            None => "unknown",
++        };
++        let mut source_metadata = json!({
++            "operation": operation_name(operation),
++            "sourceId": metadata.reference.source_id.as_ref(),
++            "elementId": metadata.reference.element_id.as_ref(),
++            "labels": metadata.labels.iter().map(|label| label.as_ref()).collect::<Vec<_>>(),
++            "effectiveTime": metadata.effective_from,
++            "elementType": element_type,
++        });
++        if let Some(Element::Relation {
++            in_node, out_node, ..
++        }) = endpoint_element
++        {
++            source_metadata["inNode"] = reference_value(in_node);
++            source_metadata["outNode"] = reference_value(out_node);
++        }
++        if let Some(object) = value.as_object_mut() {
++            object.insert("$source".to_string(), source_metadata);
++        }
++        value
++    }
+ 
+-                for item in query_output {
+-                    let mut new_metadata = metadata.clone();
+-                    let item_str = item.to_string();
+-
+-                    if let Some(id) = &mapping.id {
+-                        new_metadata.reference.element_id =
+-                            match jq_get_string(id.as_str(), &item_str) {
+-                                Ok(id) => Arc::from(id),
+-                                Err(e) => {
+-                                    log::error!("Failed to get id from JQ expression: {e}");
+-                                    if mapping.halt_on_error {
+-                                        return Err(MiddlewareError::SourceChangeError(format!(
+-                                            "Failed to get id from JQ expression: {e}"
+-                                        )));
+-                                    }
+-                                    continue;
+-                                }
+-                            };
+-                    };
+-
+-                    if let Some(label) = &mapping.label {
+-                        let new_label = match jq_get_string(label.as_str(), &item_str) {
+-                            Ok(l) => Arc::from(l),
+-                            Err(e) => {
+-                                log::error!("Failed to get label from JQ expression: {e}");
+-                                if mapping.halt_on_error {
+-                                    return Err(MiddlewareError::SourceChangeError(format!(
+-                                        "Failed to get label from JQ expression: {e}"
+-                                    )));
+-                                }
+-                                continue;
+-                            }
+-                        };
+-                        new_metadata.labels = Arc::from(vec![new_label]);
+-                    }
++    fn map_item(
++        &self,
++        item: &Value,
++        mapping: &SourceMappedOutput,
++        operation: MapOperation,
++        metadata: &ElementMetadata,
++        source_element: &Element,
++    ) -> Result<SourceChange, MiddlewareError> {
++        let mut new_metadata = metadata.clone();
++        let item_str = serde_json::to_string(item).map_err(|error| {
++            MiddlewareError::SourceChangeError(format!(
++                "Failed to serialize jq mapping output: {error}"
++            ))
++        })?;
+ 
+-                    let new_element = match &mapping.element_type {
+-                        Some(MapElementType::Node) => Element::Node {
+-                            metadata: new_metadata,
+-                            properties: item.into(),
+-                        },
+-                        Some(MapElementType::Relation {
+-                            in_node_id,
+-                            out_node_id,
+-                        }) => {
+-                            let in_node_id = match jq_get_string(in_node_id, &item_str) {
+-                                Ok(id) => Arc::from(id),
+-                                Err(e) => {
+-                                    log::error!("Failed to get in_node_id from JQ expression: {e}");
+-                                    if mapping.halt_on_error {
+-                                        return Err(MiddlewareError::SourceChangeError(format!(
+-                                            "Failed to get in_node_id from JQ expression: {e}"
+-                                        )));
+-                                    }
+-                                    continue;
+-                                }
+-                            };
+-
+-                            let out_node_id = match jq_get_string(out_node_id, &item_str) {
+-                                Ok(id) => Arc::from(id),
+-                                Err(e) => {
+-                                    log::error!(
+-                                        "Failed to get out_node_id from JQ expression: {e}"
+-                                    );
+-                                    if mapping.halt_on_error {
+-                                        return Err(MiddlewareError::SourceChangeError(format!(
+-                                            "Failed to get out_node_id from JQ expression: {e}"
+-                                        )));
+-                                    }
+-                                    continue;
+-                                }
+-                            };
+-
+-                            Element::Relation {
+-                                metadata: new_metadata,
+-                                in_node: ElementReference::new(
+-                                    &metadata.reference.source_id,
+-                                    &in_node_id,
+-                                ),
+-                                out_node: ElementReference::new(
+-                                    &metadata.reference.source_id,
+-                                    &out_node_id,
+-                                ),
+-                                properties: item.into(),
+-                            }
+-                        }
+-                        None => match element {
+-                            Element::Node { .. } => Element::Node {
+-                                metadata: new_metadata,
+-                                properties: item.into(),
+-                            },
+-                            Element::Relation {
+-                                in_node, out_node, ..
+-                            } => Element::Relation {
+-                                metadata: new_metadata,
+-                                in_node: in_node.clone(),
+-                                out_node: out_node.clone(),
+-                                properties: item.into(),
+-                            },
+-                        },
+-                    };
+-
+-                    match op {
+-                        MapOperation::Insert => results.push(SourceChange::Insert {
+-                            element: new_element,
+-                        }),
+-                        MapOperation::Update => results.push(SourceChange::Update {
+-                            element: new_element,
+-                        }),
+-                        MapOperation::Delete => results.push(SourceChange::Delete {
+-                            metadata: new_element.get_metadata().clone(),
+-                        }),
++        if let Some(id) = &mapping.id {
++            new_metadata.reference.element_id = Arc::from(
++                jq_get_string(id, &item_str).map_err(|error| contextual_error("id", error))?,
++            );
++        }
++        if let Some(label) = &mapping.label {
++            let label = jq_get_string(label, &item_str)
++                .map_err(|error| contextual_error("label", error))?;
++            new_metadata.labels = Arc::new([Arc::from(label)]);
++        }
++
++        let new_element = match &mapping.element_type {
++            Some(MapElementType::Node) => Element::Node {
++                metadata: new_metadata,
++                properties: item.into(),
++            },
++            Some(MapElementType::Relation {
++                in_node_id,
++                out_node_id,
++            }) => {
++                let in_node_id = jq_get_string(in_node_id, &item_str)
++                    .map_err(|error| contextual_error("in_node_id", error))?;
++                let out_node_id = jq_get_string(out_node_id, &item_str)
++                    .map_err(|error| contextual_error("out_node_id", error))?;
++                Element::Relation {
++                    metadata: new_metadata,
++                    in_node: ElementReference::new(&metadata.reference.source_id, &in_node_id),
++                    out_node: ElementReference::new(&metadata.reference.source_id, &out_node_id),
++                    properties: item.into(),
++                }
++            }
++            None => match source_element {
++                Element::Node { .. } => Element::Node {
++                    metadata: new_metadata,
++                    properties: item.into(),
++                },
++                Element::Relation {
++                    in_node, out_node, ..
++                } => Element::Relation {
++                    metadata: new_metadata,
++                    in_node: in_node.clone(),
++                    out_node: out_node.clone(),
++                    properties: item.into(),
++                },
++            },
++        };
++
++        Ok(match operation {
++            MapOperation::Insert => SourceChange::Insert {
++                element: new_element,
++            },
++            MapOperation::Update => SourceChange::Update {
++                element: new_element,
++            },
++            MapOperation::Delete => SourceChange::Delete {
++                metadata: new_element.get_metadata().clone(),
++            },
++        })
++    }
++
++    fn live_outputs(
++        &self,
++        element: &Element,
++    ) -> Result<HashMap<ElementReference, ElementMetadata>, MiddlewareError> {
++        let mut outputs = HashMap::new();
++        for operation in [MapOperation::Insert, MapOperation::Update] {
++            for change in self.derive(element, operation, None, Some(element))? {
++                match change {
++                    SourceChange::Insert { element } | SourceChange::Update { element } => {
++                        outputs.insert(
++                            element.get_reference().clone(),
++                            element.get_metadata().clone(),
++                        );
+                     }
++                    SourceChange::Delete { .. } | SourceChange::Future { .. } => {}
+                 }
+             }
+         }
++        Ok(outputs)
++    }
++
++    async fn reconciliation_deletes(
++        &self,
++        source_change: &SourceChange,
++        previous_element: Option<&Element>,
++        current_changes: &[SourceChange],
++        element_index: &dyn ElementIndex,
++    ) -> Result<Vec<SourceChange>, MiddlewareError> {
++        if !self.reconcile || matches!(source_change, SourceChange::Insert { .. }) {
++            return Ok(Vec::new());
++        }
++        let Some(previous_element) = previous_element else {
++            log::warn!(
++                "jq reconciliation could not find previous source element {}",
++                source_change.get_reference()
++            );
++            return Ok(Vec::new());
++        };
++
++        let current_references: HashSet<&ElementReference> = current_changes
++            .iter()
++            .map(|change| match change {
++                SourceChange::Insert { element } | SourceChange::Update { element } => {
++                    element.get_reference()
++                }
++                SourceChange::Delete { metadata } => &metadata.reference,
++                SourceChange::Future { future_ref } => &future_ref.element_ref,
++            })
++            .collect();
++        let effective_from = source_change.get_transaction_time();
++        let mut deletes = Vec::new();
++        for (reference, mut metadata) in self.live_outputs(previous_element)? {
++            if current_references.contains(&reference) {
++                continue;
++            }
++            // Insert and update mappings may differ. Only an indexed candidate
++            // was actually materialized by an earlier source change.
++            if element_index.get_element(&reference).await?.is_some() {
++                metadata.effective_from = effective_from;
++                deletes.push(SourceChange::Delete { metadata });
++            }
++        }
++        Ok(deletes)
++    }
++}
++
++#[async_trait]
++impl SourceMiddleware for JQ {
++    async fn process(
++        &self,
++        source_change: SourceChange,
++        element_index: &dyn ElementIndex,
++    ) -> Result<Vec<SourceChange>, MiddlewareError> {
++        if matches!(source_change, SourceChange::Future { .. }) {
++            return Ok(vec![source_change]);
++        }
++
++        let previous_element = self.previous_element(&source_change, element_index).await?;
++        if self.include_source_metadata
++            && matches!(source_change, SourceChange::Delete { .. })
++            && previous_element.is_none()
++        {
++            log::warn!(
++                "jq delete metadata for {} has no indexed source element; elementType is unknown and relation endpoints are unavailable",
++                source_change.get_reference()
++            );
++        }
++        let operation = source_change_operation(&source_change);
++        let delete_element;
++        let (element, delete_metadata) = match &source_change {
++            SourceChange::Insert { element } | SourceChange::Update { element } => (element, None),
++            SourceChange::Delete { metadata } => {
++                delete_element = Element::Node {
++                    metadata: metadata.clone(),
++                    properties: ElementPropertyMap::new(),
++                };
++                (&delete_element, Some(metadata))
++            }
++            SourceChange::Future { .. } => unreachable!(),
++        };
++
++        let mut derived = self.derive(
++            element,
++            operation,
++            delete_metadata,
++            previous_element.as_deref(),
++        )?;
++        let mut results = self
++            .reconciliation_deletes(
++                &source_change,
++                previous_element.as_deref(),
++                &derived,
++                element_index,
++            )
++            .await?;
++        results.append(&mut derived);
++        if self.preserve_input {
++            results.push(source_change);
++        }
+         Ok(results)
+     }
+ }
+ 
+-pub struct JQFactory {}
++fn source_change_operation(change: &SourceChange) -> MapOperation {
++    match change {
++        SourceChange::Insert { .. } => MapOperation::Insert,
++        SourceChange::Update { .. } => MapOperation::Update,
++        SourceChange::Delete { .. } => MapOperation::Delete,
++        SourceChange::Future { .. } => unreachable!(),
++    }
++}
++
++fn operation_name(operation: MapOperation) -> &'static str {
++    match operation {
++        MapOperation::Insert => "insert",
++        MapOperation::Update => "update",
++        MapOperation::Delete => "delete",
++    }
++}
++
++fn reference_value(reference: &ElementReference) -> Value {
++    json!({
++        "sourceId": reference.source_id.as_ref(),
++        "elementId": reference.element_id.as_ref(),
++    })
++}
++
++fn parse_jq_output(output: &str) -> Result<Vec<Value>, MiddlewareError> {
++    if output.is_empty() {
++        return Ok(Vec::new());
++    }
++    let value = serde_json::from_str::<Value>(output).map_err(|error| {
++        MiddlewareError::SourceChangeError(format!("Failed to parse jq output as JSON: {error}"))
++    })?;
++    match value {
++        Value::Array(values) => Ok(values),
++        value => Ok(vec![value]),
++    }
++}
++
++fn contextual_error(context: &str, error: MiddlewareError) -> MiddlewareError {
++    MiddlewareError::SourceChangeError(format!("Failed to resolve jq {context}: {error}"))
++}
++
++pub struct JQFactory;
+ 
+ impl Default for JQFactory {
+     fn default() -> Self {
+@@ -328,7 +517,7 @@ impl Default for JQFactory {
+ 
+ impl JQFactory {
+     pub fn new() -> Self {
+-        JQFactory {}
++        Self
+     }
+ }
+ 
+@@ -341,23 +530,32 @@ impl SourceMiddlewareFactory for JQFactory {
+         &self,
+         config: &SourceMiddlewareConfig,
+     ) -> Result<Arc<dyn SourceMiddleware>, MiddlewareSetupError> {
+-        let cfg = Value::Object(config.config.clone());
+-        let mappings = match serde_json::from_value(cfg) {
+-            Ok(mappings) => mappings,
+-            Err(e) => {
++        let uses_extended_options = ["preserve_input", "include_source_metadata", "reconcile"]
++            .iter()
++            .any(|key| config.config.get(*key).is_some_and(Value::is_boolean));
++        if uses_extended_options && !config.config.contains_key("mappings") {
++            return Err(MiddlewareSetupError::InvalidConfiguration(format!(
++                "[{}] Extended jq configuration must place label mappings under 'mappings'",
++                config.name
++            )));
++        }
++        let parsed_config: JqConfig = serde_json::from_value(Value::Object(config.config.clone()))
++            .map_err(|error| {
++                MiddlewareSetupError::InvalidConfiguration(format!(
++                    "[{}] Invalid jq configuration: {error}",
++                    config.name
++                ))
++            })?;
++        if let JqConfig::Extended(extended) = &parsed_config {
++            if extended.reconcile && !extended.preserve_input {
+                 return Err(MiddlewareSetupError::InvalidConfiguration(format!(
+-                    "Invalid configuration: {e}"
+-                )))
++                    "[{}] jq 'reconcile' requires 'preserve_input: true'",
++                    config.name
++                )));
+             }
+-        };
+-
+-        log::info!(
+-            "Map middleware {} mappings loaded: {:#?}",
+-            config.name,
+-            mappings
+-        );
++        }
+ 
+-        Ok(Arc::new(JQ::new(mappings)) as Arc<dyn SourceMiddleware>)
++        Ok(Arc::new(JQ::new(parsed_config)))
+     }
+ }
+ 
+@@ -366,8 +564,8 @@ fn run_jq(query: &str, input: &str) -> Result<String, MiddlewareError> {
+         let mut cache = cache.borrow_mut();
+ 
+         if !cache.contains_key(query) {
+-            let program = jq_rs::compile(query).map_err(|e| {
+-                MiddlewareError::SourceChangeError(format!("JQ compilation error: {e}"))
++            let program = jq_rs::compile(query).map_err(|error| {
++                MiddlewareError::SourceChangeError(format!("JQ compilation error: {error}"))
+             })?;
+             cache.insert(query.to_string(), RefCell::new(program));
+         }
+@@ -375,10 +573,10 @@ fn run_jq(query: &str, input: &str) -> Result<String, MiddlewareError> {
+         let program_cell = cache.get(query).ok_or_else(|| {
+             MiddlewareError::SourceChangeError("JQ program not found in cache".to_string())
+         })?;
+-        let mut program = program_cell.borrow_mut();
+-        program
+-            .run(input)
+-            .map_err(|e| MiddlewareError::SourceChangeError(format!("JQ execution error: {e}")))
++        let result = program_cell.borrow_mut().run(input).map_err(|error| {
++            MiddlewareError::SourceChangeError(format!("JQ execution error: {error}"))
++        });
++        result
+     })
+ }
+ 
+@@ -387,14 +585,16 @@ fn jq_get_string(query: &str, input: &str) -> Result<String, MiddlewareError> {
+     let output = run_jq(query, input)?;
+ 
+     serde_json::from_str::<Value>(&output)
+-        .map_err(|e| {
+-            MiddlewareError::SourceChangeError(format!("Failed to parse JQ output as JSON: {e}"))
++        .map_err(|error| {
++            MiddlewareError::SourceChangeError(format!(
++                "Failed to parse JQ output as JSON: {error}"
++            ))
+         })
+-        .and_then(|v| {
+-            if v.is_string() {
+-                Ok(v.as_str().unwrap_or_default().to_string())
++        .and_then(|value| {
++            if let Some(value) = value.as_str() {
++                Ok(value.to_string())
+             } else {
+-                Ok(v.to_string())
++                Ok(value.to_string())
+             }
+         })
+ }
+diff --git a/middleware/src/jq/tests.rs b/middleware/src/jq/tests.rs
+index c9821de56c844d5c4b098c40ebde0ecc4d8d7192..013a0feb3413a912d265b1ee933e95dd0946550d 100644
+--- a/middleware/src/jq/tests.rs
++++ b/middleware/src/jq/tests.rs
+@@ -109,6 +109,392 @@ mod process {
+         );
+     }
+ 
++    mod extended_config {
++        use std::{collections::HashSet, sync::Arc};
++
++        use drasi_core::{
++            in_memory_index::in_memory_element_index::InMemoryElementIndex,
++            interface::{ElementIndex, SourceMiddleware, SourceMiddlewareFactory},
++            models::{
++                Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue,
++                SourceChange, SourceMiddlewareConfig,
++            },
++        };
++        use serde_json::{json, Value};
++
++        use crate::jq::JQFactory;
++
++        fn middleware(config: Value) -> Arc<dyn SourceMiddleware> {
++            let config = SourceMiddlewareConfig {
++                name: "jq-extended".into(),
++                kind: "jq".into(),
++                config: config.as_object().unwrap().clone(),
++            };
++            JQFactory::new().create(&config).unwrap()
++        }
++
++        fn node_change(operation: &str, properties: Value) -> SourceChange {
++            let element = Element::Node {
++                metadata: ElementMetadata {
++                    reference: ElementReference::new("github", "comment:1"),
++                    labels: Arc::new([Arc::from("Comment")]),
++                    effective_from: 42,
++                },
++                properties: ElementPropertyMap::from(properties),
++            };
++            match operation {
++                "insert" => SourceChange::Insert { element },
++                "update" => SourceChange::Update { element },
++                _ => panic!("unsupported operation"),
++            }
++        }
++
++        fn reconciliation_config() -> Value {
++            json!({
++                "preserve_input": true,
++                "include_source_metadata": true,
++                "reconcile": true,
++                "mappings": {
++                    "Comment": {
++                        "insert": [
++                            {
++                                "op": "Insert",
++                                "elementType": "Node",
++                                "label": "\"DerivedNode\"",
++                                "id": ".id",
++                                "query": "if .valid then {\"id\":\"derived:1\",\"value\":.value} else empty end"
++                            },
++                            {
++                                "op": "Insert",
++                                "elementType": {
++                                    "relation": {
++                                        "inNodeId": ".inId",
++                                        "outNodeId": ".outId"
++                                    }
++                                },
++                                "label": "\"DERIVED_REL\"",
++                                "id": ".id",
++                                "query": "if .valid then {\"id\":\"derived-rel:1\",\"inId\":\"issue:1\",\"outId\":\"derived:1\"} else empty end"
++                            }
++                        ],
++                        "update": [
++                            {
++                                "op": "Update",
++                                "elementType": "Node",
++                                "label": "\"DerivedNode\"",
++                                "id": ".id",
++                                "query": "if .valid then {\"id\":\"derived:1\",\"value\":.value} else empty end"
++                            },
++                            {
++                                "op": "Update",
++                                "elementType": {
++                                    "relation": {
++                                        "inNodeId": ".inId",
++                                        "outNodeId": ".outId"
++                                    }
++                                },
++                                "label": "\"DERIVED_REL\"",
++                                "id": ".id",
++                                "query": "if .valid then {\"id\":\"derived-rel:1\",\"inId\":\"issue:1\",\"outId\":\"derived:1\"} else empty end"
++                            }
++                        ]
++                    }
++                }
++            })
++        }
++
++        async fn index_outputs(index: &InMemoryElementIndex, changes: &[SourceChange]) {
++            for change in changes {
++                if let SourceChange::Insert { element } | SourceChange::Update { element } = change
++                {
++                    index.set_element(element, &Vec::new()).await.unwrap();
++                }
++            }
++        }
++
++        #[tokio::test]
++        async fn preserves_input_and_exposes_structured_metadata() {
++            let subject = middleware(json!({
++                "preserve_input": true,
++                "include_source_metadata": true,
++                "mappings": {
++                    "Comment": {
++                        "insert": [{
++                            "op": "Insert",
++                            "label": "\"Observed\"",
++                            "id": "\"observed:1\"",
++                            "query": "{\"source\": .\"$source\"}"
++                        }],
++                        "update": [{
++                            "op": "Update",
++                            "label": "\"Observed\"",
++                            "id": "\"observed:1\"",
++                            "query": "{\"source\": .\"$source\"}"
++                        }]
++                    }
++                }
++            }));
++            let input = node_change("insert", json!({"body": "hello"}));
++            let output = subject
++                .process(input.clone(), &InMemoryElementIndex::new())
++                .await
++                .unwrap();
++
++            assert_eq!(output.len(), 2);
++            assert_eq!(output[1], input);
++            let SourceChange::Insert { element } = &output[0] else {
++                panic!("expected derived insert");
++            };
++            let ElementValue::Object(source) = element.get_properties().get("source").unwrap()
++            else {
++                panic!("expected source metadata object");
++            };
++            assert_eq!(
++                source.get("operation"),
++                Some(&ElementValue::String(Arc::from("insert")))
++            );
++            assert_eq!(
++                source.get("sourceId"),
++                Some(&ElementValue::String(Arc::from("github")))
++            );
++            assert_eq!(
++                source.get("elementId"),
++                Some(&ElementValue::String(Arc::from("comment:1")))
++            );
++            assert_eq!(
++                source.get("effectiveTime"),
++                Some(&ElementValue::Integer(42))
++            );
++
++            let update = node_change("update", json!({"body": "changed"}));
++            let output = subject
++                .process(update, &InMemoryElementIndex::new())
++                .await
++                .unwrap();
++            let SourceChange::Update { element } = &output[0] else {
++                panic!("expected derived update");
++            };
++            let ElementValue::Object(source) = element.get_properties().get("source").unwrap()
++            else {
++                panic!("expected source metadata object");
++            };
++            assert_eq!(
++                source.get("operation"),
++                Some(&ElementValue::String(Arc::from("update")))
++            );
++        }
++
++        #[tokio::test]
++        async fn exposes_delete_and_relation_endpoint_metadata() {
++            let subject = middleware(json!({
++                "preserve_input": true,
++                "include_source_metadata": true,
++                "mappings": {
++                    "LINK": {
++                        "insert": [{
++                            "op": "Insert",
++                            "elementType": "Node",
++                            "label": "\"Observed\"",
++                            "id": "\"observed:relation\"",
++                            "query": "{\"source\": .\"$source\"}"
++                        }],
++                        "delete": [{
++                            "op": "Insert",
++                            "elementType": "Node",
++                            "label": "\"Observed\"",
++                            "id": "\"observed:delete\"",
++                            "query": "{\"source\": .\"$source\"}"
++                        }]
++                    }
++                }
++            }));
++            let relation = Element::Relation {
++                metadata: ElementMetadata {
++                    reference: ElementReference::new("github", "link:1"),
++                    labels: Arc::new([Arc::from("LINK")]),
++                    effective_from: 50,
++                },
++                in_node: ElementReference::new("github", "issue:1"),
++                out_node: ElementReference::new("github", "item:1"),
++                properties: ElementPropertyMap::new(),
++            };
++            let index = InMemoryElementIndex::new();
++            index.set_element(&relation, &Vec::new()).await.unwrap();
++
++            let insert = subject
++                .process(
++                    SourceChange::Insert {
++                        element: relation.clone(),
++                    },
++                    &index,
++                )
++                .await
++                .unwrap();
++            let SourceChange::Insert { element } = &insert[0] else {
++                panic!("expected derived insert");
++            };
++            let ElementValue::Object(source) = element.get_properties().get("source").unwrap()
++            else {
++                panic!("expected source metadata object");
++            };
++            assert!(matches!(
++                source.get("inNode"),
++                Some(ElementValue::Object(_))
++            ));
++            assert!(matches!(
++                source.get("outNode"),
++                Some(ElementValue::Object(_))
++            ));
++
++            let delete = subject
++                .process(
++                    SourceChange::Delete {
++                        metadata: relation.get_metadata().clone(),
++                    },
++                    &index,
++                )
++                .await
++                .unwrap();
++            let SourceChange::Insert { element } = &delete[0] else {
++                panic!("expected observed delete metadata");
++            };
++            let ElementValue::Object(source) = element.get_properties().get("source").unwrap()
++            else {
++                panic!("expected source metadata object");
++            };
++            assert_eq!(
++                source.get("operation"),
++                Some(&ElementValue::String(Arc::from("delete")))
++            );
++            assert!(matches!(
++                source.get("inNode"),
++                Some(ElementValue::Object(_))
++            ));
++        }
++
++        #[tokio::test]
++        async fn creates_fan_out_and_reconciles_invalidating_update() {
++            let subject = middleware(reconciliation_config());
++            let index = InMemoryElementIndex::new();
++            let insert_input = node_change("insert", json!({"valid": true, "value": "old"}));
++            let insert = subject.process(insert_input, &index).await.unwrap();
++
++            assert_eq!(
++                insert
++                    .iter()
++                    .filter(|change| matches!(change, SourceChange::Insert { .. }))
++                    .count(),
++                3
++            );
++            assert!(insert.iter().any(|change| matches!(
++                change,
++                SourceChange::Insert {
++                    element: Element::Relation { .. }
++                }
++            )));
++            index_outputs(&index, &insert).await;
++
++            let update = subject
++                .process(
++                    node_change("update", json!({"valid": false, "value": "ignored"})),
++                    &index,
++                )
++                .await
++                .unwrap();
++            let deleted_ids: HashSet<String> = update
++                .iter()
++                .filter_map(|change| match change {
++                    SourceChange::Delete { metadata } => {
++                        Some(metadata.reference.element_id.to_string())
++                    }
++                    _ => None,
++                })
++                .collect();
++            assert_eq!(
++                deleted_ids,
++                HashSet::from(["derived:1".to_string(), "derived-rel:1".to_string()])
++            );
++            assert!(matches!(update.last(), Some(SourceChange::Update { .. })));
++        }
++
++        #[tokio::test]
++        async fn delete_cleans_up_previous_fan_out() {
++            let subject = middleware(reconciliation_config());
++            let index = InMemoryElementIndex::new();
++            let insert = subject
++                .process(
++                    node_change("insert", json!({"valid": true, "value": "old"})),
++                    &index,
++                )
++                .await
++                .unwrap();
++            index_outputs(&index, &insert).await;
++
++            let delete = SourceChange::Delete {
++                metadata: ElementMetadata {
++                    reference: ElementReference::new("github", "comment:1"),
++                    labels: Arc::new([Arc::from("Comment")]),
++                    effective_from: 100,
++                },
++            };
++            let output = subject.process(delete.clone(), &index).await.unwrap();
++            let deleted_ids: HashSet<String> = output
++                .iter()
++                .filter_map(|change| match change {
++                    SourceChange::Delete { metadata } => {
++                        Some(metadata.reference.element_id.to_string())
++                    }
++                    _ => None,
++                })
++                .collect();
++            assert_eq!(
++                deleted_ids,
++                HashSet::from([
++                    "comment:1".to_string(),
++                    "derived:1".to_string(),
++                    "derived-rel:1".to_string()
++                ])
++            );
++            assert_eq!(output.last(), Some(&delete));
++        }
++
++        #[test]
++        fn reconcile_requires_preserved_input() {
++            let config = SourceMiddlewareConfig {
++                name: "jq-extended".into(),
++                kind: "jq".into(),
++                config: json!({
++                    "reconcile": true,
++                    "mappings": {}
++                })
++                .as_object()
++                .unwrap()
++                .clone(),
++            };
++            assert!(JQFactory::new().create(&config).is_err());
++        }
++
++        #[test]
++        fn legacy_label_may_match_an_extended_option_name() {
++            let config = SourceMiddlewareConfig {
++                name: "jq-legacy".into(),
++                kind: "jq".into(),
++                config: json!({
++                    "reconcile": {
++                        "insert": [{
++                            "op": "Insert",
++                            "query": "."
++                        }]
++                    }
++                })
++                .as_object()
++                .expect("legacy jq configuration must be an object")
++                .clone(),
++            };
++            assert!(JQFactory::new().create(&config).is_ok());
++        }
++    }
++
+     #[tokio::test]
+     pub async fn map_insert_to_multiple() {
+         let factory = JQFactory::new();
+diff --git a/middleware/src/lib.rs b/middleware/src/lib.rs
+index a7469df1d067cc7ae1ed9639dab17c0b74db1733..73398a7914d0e2a195581338b8891e3e022f5798 100644
+--- a/middleware/src/lib.rs
++++ b/middleware/src/lib.rs
+@@ -29,8 +29,19 @@ pub mod parse_json;
+ #[cfg(feature = "promote")]
+ pub mod promote;
+ 
++#[cfg(feature = "regex_extract")]
++pub mod regex_extract;
++
+ #[cfg(feature = "relabel")]
+ pub mod relabel;
+ 
+ #[cfg(feature = "unwind")]
+ pub mod unwind;
++
++#[cfg(all(
++    test,
++    feature = "jq",
++    feature = "parse_json",
++    feature = "regex_extract"
++))]
++mod pipeline_tests;
+diff --git a/middleware/src/parse_json/README.md b/middleware/src/parse_json/README.md
+index b5b6fb089a30baf9f6779417d1c605e6229cf2a9..fad290c0e8a93e41c4ce82e13f1510c8d81bcbda 100644
+--- a/middleware/src/parse_json/README.md
++++ b/middleware/src/parse_json/README.md
+@@ -10,7 +10,7 @@ The `parse_json` middleware processes `SourceChange` events (specifically `Inser
+ 2.  **Validate Type:** It checks if the value of the `target_property` is a string (`ElementValue::String`). If not, it either skips the element or fails, based on the `on_error` setting.
+ 3.  **Parse JSON:** It attempts to parse the string value as a JSON document using `serde_json`.
+ 4.  **Convert Value:** If parsing is successful, it converts the resulting `serde_json::Value` into the corresponding `ElementValue` variant (e.g., `ElementValue::Object`, `ElementValue::List`, `ElementValue::Integer`, etc.).
+-5.  **Handle Errors:** If parsing or conversion fails (e.g., invalid JSON syntax, unsupported JSON structure), it either skips the element (keeping the original string value) or fails the processing entirely, based on the `on_error` setting.
++5.  **Handle Errors:** If parsing or conversion fails (e.g., invalid JSON syntax, unsupported JSON structure), it either skips the element (keeping the original string value) or fails the processing entirely, based on the `on_error` setting. A missing target can independently pass through via `on_missing: "passthrough"`.
+ 6.  **Store Result:** If parsing and conversion are successful, the resulting `ElementValue` is stored:
+     *   In the property specified by `output_property`, if provided.
+     *   Otherwise, it overwrites the original `target_property`.
+@@ -26,6 +26,7 @@ The middleware is configured using a JSON object with the following fields:
+ | `target_property`   | String                        | Yes      |              | The name of the element property containing the JSON string to be parsed.                                                                 |
+ | `output_property`   | String                        | No       | `null`       | Optional. The name of the property where the parsed `ElementValue` should be stored. If omitted or `null`, `target_property` will be overwritten. |
+ | `on_error`          | String (`"skip"` or `"fail"`) | No       | `"fail"`     | Defines behavior when an error occurs (missing target, wrong type, parsing/conversion failure): `"skip"` logs a warning and passes the change through unchanged; `"fail"` stops processing and returns an error. |
++| `on_missing`        | String (`"error"` or `"passthrough"`) | No | `"error"` | `"error"` preserves the historical behavior and applies `on_error`; `"passthrough"` quietly preserves changes without the target property. |
+ | `max_json_size`     | Integer (bytes)               | No       | `1_048_576`  | Maximum size (in bytes) of the JSON string that will be parsed. Use to guard against unexpectedly large payloads.                                                               |
+ | `max_nesting_depth` | Integer                       | No       | `20`         | Maximum allowed nesting depth for objects/arrays within the JSON document. Prevents excessively nested or malicious payloads.                                                   |
+ 
+@@ -38,6 +39,7 @@ The middleware is configured using a JSON object with the following fields:
+   "config": {
+     "target_property": "raw_event_json",
+     "output_property": "event_details",
++    "on_missing": "passthrough",
+     "on_error": "skip"
+   }
+ }
+diff --git a/middleware/src/parse_json/mod.rs b/middleware/src/parse_json/mod.rs
+index 0981378079c5e2c874070f10dc98fbdb11787843..c59b663854b870a5946c5e8718f1e62eb241a428 100644
+--- a/middleware/src/parse_json/mod.rs
++++ b/middleware/src/parse_json/mod.rs
+@@ -47,6 +47,17 @@ pub enum ParseJsonErrorType {
+     ConversionError,
+ }
+ 
++/// Behavior when the configured target property is absent.
++#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
++#[serde(rename_all = "lowercase")]
++pub enum MissingPropertyHandling {
++    /// Preserve the existing behavior by routing missing properties through `on_error`.
++    #[default]
++    Error,
++    /// Pass the source change through unchanged without logging an error.
++    Passthrough,
++}
++
+ /// Configuration for the ParseJson middleware.
+ #[derive(Debug, Clone, Deserialize)]
+ #[serde(deny_unknown_fields)]
+@@ -59,6 +70,9 @@ pub struct ParseJsonConfig {
+     /// How to handle errors during parsing or if the target property is missing/invalid.
+     #[serde(default)]
+     pub on_error: ErrorHandling,
++    /// How to handle elements that do not contain `target_property`.
++    #[serde(default)]
++    pub on_missing: MissingPropertyHandling,
+     /// Maximum size in bytes for the JSON string (default: 1MB)
+     #[serde(default = "default_max_json_size")]
+     pub max_json_size: usize,
+@@ -200,6 +214,9 @@ impl ParseJson {
+                 );
+             }
+             None => {
++                if self.config.on_missing == MissingPropertyHandling::Passthrough {
++                    return Ok(());
++                }
+                 return self.handle_error(
+                     ParseJsonErrorType::MissingProperty,
+                     format!(
+diff --git a/middleware/src/parse_json/tests.rs b/middleware/src/parse_json/tests.rs
+index 7afaa011823fd685c64b449f0bc13b64b740ead7..455eb1e3008690b0a116bb81af4e9bbf835a5b8d 100644
+--- a/middleware/src/parse_json/tests.rs
++++ b/middleware/src/parse_json/tests.rs
+@@ -446,6 +446,22 @@ mod process {
+         assert_eq!(output_changes[0], original_change_clone);
+     }
+ 
++    #[tokio::test]
++    async fn test_passthrough_on_missing_property_without_error_policy() {
++        let factory = ParseJsonFactory::default();
++        let config = create_mw_config(json!({
++            "target_property": "non_existent",
++            "on_missing": "passthrough"
++        }));
++        let middleware = factory.create(&config).unwrap();
++        let index = InMemoryElementIndex::new();
++        let input_change = create_node_insert_change(json!({ "id": 1 }));
++        let original_change_clone = input_change.clone();
++
++        let output_changes = middleware.process(input_change, &index).await.unwrap();
++        assert_eq!(output_changes, vec![original_change_clone]);
++    }
++
+     #[tokio::test]
+     async fn test_skip_on_invalid_type() {
+         let factory = ParseJsonFactory::default();
+diff --git a/middleware/src/pipeline_tests.rs b/middleware/src/pipeline_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..58c12d0751a042d6cf1f0b713447622f1406f63a
+--- /dev/null
++++ b/middleware/src/pipeline_tests.rs
+@@ -0,0 +1,231 @@
++// Copyright 2026 The Drasi Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++use std::{collections::HashSet, sync::Arc};
++
++use drasi_core::{
++    in_memory_index::in_memory_element_index::InMemoryElementIndex,
++    interface::ElementIndex,
++    middleware::{MiddlewareContainer, MiddlewareTypeRegistry, SourceMiddlewarePipeline},
++    models::{
++        Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
++        SourceMiddlewareConfig,
++    },
++};
++use serde_json::{json, Value};
++
++use crate::{jq::JQFactory, parse_json::ParseJsonFactory, regex_extract::RegexExtractFactory};
++
++fn middleware_config(name: &str, kind: &str, config: Value) -> Arc<SourceMiddlewareConfig> {
++    Arc::new(SourceMiddlewareConfig {
++        name: Arc::from(name),
++        kind: Arc::from(kind),
++        config: config
++            .as_object()
++            .expect("middleware test configuration must be an object")
++            .clone(),
++    })
++}
++
++fn pipeline() -> SourceMiddlewarePipeline {
++    let configs = vec![
++        middleware_config(
++            "extract",
++            "regex_extract",
++            json!({
++                "target_property": "body",
++                "pattern": r"(?s)^WorkGraphEvent/v1\s*\n```json\s*(?<payload>.*?)\s*```",
++                "capture_group": "payload",
++                "output_property": "event_payload",
++                "on_missing": "passthrough",
++                "on_no_match": "passthrough",
++                "on_error": "fail"
++            }),
++        ),
++        middleware_config(
++            "parse",
++            "parse_json",
++            json!({
++                "target_property": "event_payload",
++                "output_property": "event",
++                "on_missing": "passthrough",
++                "on_error": "fail"
++            }),
++        ),
++        middleware_config(
++            "derive",
++            "jq",
++            json!({
++                "preserve_input": true,
++                "reconcile": true,
++                "mappings": {
++                    "GitHubComment": {
++                        "insert": [
++                            {
++                                "op": "Insert",
++                                "elementType": "Node",
++                                "label": "\"WorkItem\"",
++                                "id": ".id",
++                                "query": "if .event then .event.work_item else empty end"
++                            },
++                            {
++                                "op": "Insert",
++                                "elementType": {
++                                    "relation": {
++                                        "inNodeId": ".issue_id",
++                                        "outNodeId": ".work_item_id"
++                                    }
++                                },
++                                "label": "\"TRACKS\"",
++                                "id": ".id",
++                                "query": "if .event then .event.relation else empty end"
++                            }
++                        ],
++                        "update": [
++                            {
++                                "op": "Update",
++                                "elementType": "Node",
++                                "label": "\"WorkItem\"",
++                                "id": ".id",
++                                "query": "if .event then .event.work_item else empty end"
++                            },
++                            {
++                                "op": "Update",
++                                "elementType": {
++                                    "relation": {
++                                        "inNodeId": ".issue_id",
++                                        "outNodeId": ".work_item_id"
++                                    }
++                                },
++                                "label": "\"TRACKS\"",
++                                "id": ".id",
++                                "query": "if .event then .event.relation else empty end"
++                            }
++                        ]
++                    }
++                }
++            }),
++        ),
++    ];
++    let mut registry = MiddlewareTypeRegistry::new();
++    registry.register(Arc::new(RegexExtractFactory::new()));
++    registry.register(Arc::new(ParseJsonFactory::new()));
++    registry.register(Arc::new(JQFactory::new()));
++    let container =
++        MiddlewareContainer::new(&registry, configs).expect("middleware container should build");
++    SourceMiddlewarePipeline::new(
++        &container,
++        vec!["extract".into(), "parse".into(), "derive".into()],
++    )
++    .expect("middleware pipeline should build")
++}
++
++fn node_change(operation: &str, id: &str, label: &str, properties: Value) -> SourceChange {
++    let element = Element::Node {
++        metadata: ElementMetadata {
++            reference: ElementReference::new("github", id),
++            labels: Arc::new([Arc::from(label)]),
++            effective_from: 10,
++        },
++        properties: ElementPropertyMap::from(properties),
++    };
++    match operation {
++        "insert" => SourceChange::Insert { element },
++        "update" => SourceChange::Update { element },
++        _ => panic!("unsupported operation"),
++    }
++}
++
++async fn index_outputs(index: &InMemoryElementIndex, changes: &[SourceChange]) {
++    for change in changes {
++        if let SourceChange::Insert { element } | SourceChange::Update { element } = change {
++            index
++                .set_element(element, &Vec::new())
++                .await
++                .expect("test output should be indexed");
++        }
++    }
++}
++
++#[tokio::test]
++async fn source_wide_pipeline_passes_unrelated_elements_and_reconciles_events() {
++    let pipeline = pipeline();
++    let index = Arc::new(InMemoryElementIndex::new());
++
++    for unrelated in [
++        node_change("insert", "issue:1", "Issue", json!({"title": "Issue"})),
++        node_change(
++            "insert",
++            "comment:ordinary",
++            "GitHubComment",
++            json!({"body": "ordinary comment"}),
++        ),
++    ] {
++        let output = pipeline
++            .process(unrelated.clone(), index.clone())
++            .await
++            .expect("unrelated input should pass through");
++        assert_eq!(output, vec![unrelated]);
++    }
++
++    let event = node_change(
++        "insert",
++        "comment:event",
++        "GitHubComment",
++        json!({
++            "body": "WorkGraphEvent/v1\n```json\n{\"work_item\":{\"id\":\"work:1\",\"title\":\"Build\"},\"relation\":{\"id\":\"tracks:1\",\"issue_id\":\"issue:1\",\"work_item_id\":\"work:1\"}}\n```"
++        }),
++    );
++    let created = pipeline
++        .process(event, index.clone())
++        .await
++        .expect("event should fan out");
++    assert_eq!(
++        created
++            .iter()
++            .filter(|change| matches!(change, SourceChange::Insert { .. }))
++            .count(),
++        3
++    );
++    index_outputs(index.as_ref(), &created).await;
++
++    let invalidated = pipeline
++        .process(
++            node_change(
++                "update",
++                "comment:event",
++                "GitHubComment",
++                json!({"body": "edited into an ordinary comment"}),
++            ),
++            index.clone(),
++        )
++        .await
++        .expect("event invalidation should reconcile");
++    let deleted: HashSet<String> = invalidated
++        .iter()
++        .filter_map(|change| match change {
++            SourceChange::Delete { metadata } => Some(metadata.reference.element_id.to_string()),
++            _ => None,
++        })
++        .collect();
++    assert_eq!(
++        deleted,
++        HashSet::from(["work:1".to_string(), "tracks:1".to_string()])
++    );
++    assert!(matches!(
++        invalidated.last(),
++        Some(SourceChange::Update { element })
++            if element.get_reference().element_id.as_ref() == "comment:event"
++    ));
++}
+diff --git a/middleware/src/regex_extract/README.md b/middleware/src/regex_extract/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..8724136e8a5c3a4d139d00c03d441fcb227a2025
+--- /dev/null
++++ b/middleware/src/regex_extract/README.md
+@@ -0,0 +1,39 @@
++# RegexExtract Middleware
++
++`regex_extract` searches a string property with a regex compiled during
++middleware setup and writes one named or numbered capture as an
++`ElementValue::String`. Insert and Update metadata and element types are
++preserved. Delete and Future changes always pass through unchanged.
++
++## Configuration
++
++| Field | Type | Required | Default | Description |
++|---|---|---:|---|---|
++| `target_property` | string | yes | | Property to search |
++| `pattern` | string | yes | | Rust `regex` syntax, compiled at setup |
++| `capture_group` | string or non-negative integer | yes | | Existing named or numbered group; `0` selects the full match |
++| `output_property` | string | yes | | Property receiving the captured string |
++| `max_capture_size` | integer | no | `1048576` | Maximum captured bytes |
++| `on_missing` | `passthrough`, `drop`, or `fail` | no | `passthrough` | Missing target policy |
++| `on_no_match` | `passthrough`, `drop`, or `fail` | no | `passthrough` | No-match policy |
++| `on_error` | `passthrough`, `drop`, or `fail` | no | `fail` | Wrong type, nonparticipating capture, or oversize capture policy |
++| `on_collision` | `overwrite`, `passthrough`, `drop`, or `fail` | no | `fail` | Existing distinct output property policy |
++
++```json
++{
++  "target_property": "message",
++  "pattern": "(?s)^Envelope/v1\\n```json\\s*(?<document>.*?)\\s*```",
++  "capture_group": "document",
++  "output_property": "document_json",
++  "max_capture_size": 65536,
++  "on_missing": "passthrough",
++  "on_no_match": "passthrough",
++  "on_error": "fail",
++  "on_collision": "fail"
++}
++```
++
++The defaults make the middleware safe in a source-wide pipeline: unrelated
++elements and nonmatching strings pass through, while malformed matching input
++does not silently succeed. If `output_property` equals `target_property`, the
++captured value replaces the input without being treated as a collision.
+diff --git a/middleware/src/regex_extract/mod.rs b/middleware/src/regex_extract/mod.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..5e8c27ee25b45323a0729ab946d39551a2667703
+--- /dev/null
++++ b/middleware/src/regex_extract/mod.rs
+@@ -0,0 +1,351 @@
++// Copyright 2026 The Drasi Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++use std::sync::Arc;
++
++use async_trait::async_trait;
++use drasi_core::{
++    interface::{
++        ElementIndex, MiddlewareError, MiddlewareSetupError, SourceMiddleware,
++        SourceMiddlewareFactory,
++    },
++    models::{Element, ElementValue, SourceChange, SourceMiddlewareConfig},
++};
++use regex::Regex;
++use serde::Deserialize;
++use serde_json::Value;
++
++#[cfg(test)]
++mod tests;
++
++fn default_max_capture_size() -> usize {
++    1024 * 1024
++}
++
++/// A numbered or named regex capture group.
++#[derive(Debug, Clone, Deserialize)]
++#[serde(untagged)]
++pub enum CaptureGroup {
++    Number(usize),
++    Name(String),
++}
++
++/// Policy for a missing target, a non-match, or an extraction error.
++#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
++#[serde(rename_all = "lowercase")]
++pub enum ExtractionPolicy {
++    #[default]
++    Passthrough,
++    Drop,
++    Fail,
++}
++
++/// Policy when `output_property` already exists.
++#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
++#[serde(rename_all = "lowercase")]
++pub enum CollisionPolicy {
++    Overwrite,
++    Passthrough,
++    Drop,
++    #[default]
++    Fail,
++}
++
++/// Configuration for generic regex capture extraction.
++#[derive(Debug, Clone, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct RegexExtractConfig {
++    /// String property to search.
++    pub target_property: String,
++    /// Rust regex syntax pattern, compiled when the middleware is created.
++    pub pattern: String,
++    /// Named or numbered capture group. Group zero selects the full match.
++    pub capture_group: CaptureGroup,
++    /// Property that receives the captured string.
++    pub output_property: String,
++    /// Maximum capture size in bytes.
++    #[serde(default = "default_max_capture_size")]
++    pub max_capture_size: usize,
++    /// Behavior when `target_property` is absent.
++    #[serde(default)]
++    pub on_missing: ExtractionPolicy,
++    /// Behavior when the regex does not match.
++    #[serde(default)]
++    pub on_no_match: ExtractionPolicy,
++    /// Behavior for invalid input types, unmatched capture groups, and oversize captures.
++    #[serde(default = "default_error_policy")]
++    pub on_error: ExtractionPolicy,
++    /// Behavior when a distinct `output_property` already exists.
++    #[serde(default)]
++    pub on_collision: CollisionPolicy,
++}
++
++fn default_error_policy() -> ExtractionPolicy {
++    ExtractionPolicy::Fail
++}
++
++pub struct RegexExtract {
++    name: String,
++    regex: Regex,
++    config: RegexExtractConfig,
++}
++
++enum ExtractionResult {
++    Captured(String),
++    Missing,
++    NoMatch,
++    Error(String),
++    Collision,
++}
++
++#[async_trait]
++impl SourceMiddleware for RegexExtract {
++    async fn process(
++        &self,
++        source_change: SourceChange,
++        _element_index: &dyn ElementIndex,
++    ) -> Result<Vec<SourceChange>, MiddlewareError> {
++        match source_change {
++            SourceChange::Insert { mut element } => match self.extract(&mut element)? {
++                true => Ok(vec![SourceChange::Insert { element }]),
++                false => Ok(Vec::new()),
++            },
++            SourceChange::Update { mut element } => match self.extract(&mut element)? {
++                true => Ok(vec![SourceChange::Update { element }]),
++                false => Ok(Vec::new()),
++            },
++            SourceChange::Delete { .. } | SourceChange::Future { .. } => Ok(vec![source_change]),
++        }
++    }
++}
++
++impl RegexExtract {
++    fn extract(&self, element: &mut Element) -> Result<bool, MiddlewareError> {
++        let result = self.extraction_result(element);
++        match result {
++            ExtractionResult::Captured(capture) => {
++                let properties = match element {
++                    Element::Node { properties, .. } | Element::Relation { properties, .. } => {
++                        properties
++                    }
++                };
++                properties.insert(
++                    &self.config.output_property,
++                    ElementValue::String(Arc::from(capture)),
++                );
++                Ok(true)
++            }
++            ExtractionResult::Missing => self.apply_policy(
++                self.config.on_missing,
++                format!(
++                    "Target property '{}' is missing",
++                    self.config.target_property
++                ),
++            ),
++            ExtractionResult::NoMatch => self.apply_policy(
++                self.config.on_no_match,
++                format!(
++                    "Pattern did not match property '{}'",
++                    self.config.target_property
++                ),
++            ),
++            ExtractionResult::Error(message) => self.apply_policy(self.config.on_error, message),
++            ExtractionResult::Collision => match self.config.on_collision {
++                CollisionPolicy::Overwrite => {
++                    unreachable!("overwrite collisions are handled before policy dispatch")
++                }
++                CollisionPolicy::Passthrough => Ok(true),
++                CollisionPolicy::Drop => Ok(false),
++                CollisionPolicy::Fail => Err(self.error(format!(
++                    "Output property '{}' already exists",
++                    self.config.output_property
++                ))),
++            },
++        }
++    }
++
++    fn extraction_result(&self, element: &Element) -> ExtractionResult {
++        let properties = element.get_properties();
++        let input = match properties.get(&self.config.target_property) {
++            Some(ElementValue::String(value)) => value,
++            Some(value) => {
++                return ExtractionResult::Error(format!(
++                    "Target property '{}' must be a String, found {}",
++                    self.config.target_property,
++                    element_value_type(value)
++                ));
++            }
++            None => return ExtractionResult::Missing,
++        };
++
++        let captures = match self.regex.captures(input) {
++            Some(captures) => captures,
++            None => return ExtractionResult::NoMatch,
++        };
++        let capture = match &self.config.capture_group {
++            CaptureGroup::Number(group) => captures.get(*group),
++            CaptureGroup::Name(group) => captures.name(group),
++        };
++        let capture = match capture {
++            Some(capture) => capture.as_str(),
++            None => {
++                return ExtractionResult::Error(format!(
++                    "Capture group {:?} did not participate in the match",
++                    self.config.capture_group
++                ));
++            }
++        };
++
++        if capture.len() > self.config.max_capture_size {
++            return ExtractionResult::Error(format!(
++                "Capture size {} exceeds max_capture_size {}",
++                capture.len(),
++                self.config.max_capture_size
++            ));
++        }
++
++        if self.config.output_property != self.config.target_property
++            && properties.get(&self.config.output_property).is_some()
++            && self.config.on_collision != CollisionPolicy::Overwrite
++        {
++            return ExtractionResult::Collision;
++        }
++
++        ExtractionResult::Captured(capture.to_string())
++    }
++
++    fn apply_policy(
++        &self,
++        policy: ExtractionPolicy,
++        message: String,
++    ) -> Result<bool, MiddlewareError> {
++        match policy {
++            ExtractionPolicy::Passthrough => Ok(true),
++            ExtractionPolicy::Drop => Ok(false),
++            ExtractionPolicy::Fail => Err(self.error(message)),
++        }
++    }
++
++    fn error(&self, message: String) -> MiddlewareError {
++        MiddlewareError::SourceChangeError(format!("[{}] {message}", self.name))
++    }
++}
++
++fn element_value_type(value: &ElementValue) -> &'static str {
++    match value {
++        ElementValue::Null => "Null",
++        ElementValue::Bool(_) => "Bool",
++        ElementValue::Integer(_) => "Integer",
++        ElementValue::Float(_) => "Float",
++        ElementValue::String(_) => "String",
++        ElementValue::List(_) => "List",
++        ElementValue::Object(_) => "Object",
++        ElementValue::LocalDateTime(_) => "LocalDateTime",
++        ElementValue::ZonedDateTime(_) => "ZonedDateTime",
++    }
++}
++
++pub struct RegexExtractFactory;
++
++impl RegexExtractFactory {
++    pub fn new() -> Self {
++        Self
++    }
++}
++
++impl Default for RegexExtractFactory {
++    fn default() -> Self {
++        Self::new()
++    }
++}
++
++impl SourceMiddlewareFactory for RegexExtractFactory {
++    fn name(&self) -> String {
++        "regex_extract".to_string()
++    }
++
++    fn create(
++        &self,
++        config: &SourceMiddlewareConfig,
++    ) -> Result<Arc<dyn SourceMiddleware>, MiddlewareSetupError> {
++        let regex_config: RegexExtractConfig =
++            serde_json::from_value(Value::Object(config.config.clone())).map_err(|error| {
++                MiddlewareSetupError::InvalidConfiguration(format!(
++                    "[{}] Invalid regex_extract configuration: {error}",
++                    config.name
++                ))
++            })?;
++
++        validate_config(config, &regex_config)?;
++        let regex = Regex::new(&regex_config.pattern).map_err(|error| {
++            MiddlewareSetupError::InvalidConfiguration(format!(
++                "[{}] Invalid regex pattern: {error}",
++                config.name
++            ))
++        })?;
++        validate_capture_group(config, &regex_config.capture_group, &regex)?;
++
++        Ok(Arc::new(RegexExtract {
++            name: config.name.to_string(),
++            regex,
++            config: regex_config,
++        }))
++    }
++}
++
++fn validate_config(
++    middleware: &SourceMiddlewareConfig,
++    config: &RegexExtractConfig,
++) -> Result<(), MiddlewareSetupError> {
++    for (name, value) in [
++        ("target_property", &config.target_property),
++        ("pattern", &config.pattern),
++        ("output_property", &config.output_property),
++    ] {
++        if value.is_empty() {
++            return Err(MiddlewareSetupError::InvalidConfiguration(format!(
++                "[{}] '{name}' cannot be empty",
++                middleware.name
++            )));
++        }
++    }
++    if config.max_capture_size == 0 {
++        return Err(MiddlewareSetupError::InvalidConfiguration(format!(
++            "[{}] 'max_capture_size' must be greater than zero",
++            middleware.name
++        )));
++    }
++    Ok(())
++}
++
++fn validate_capture_group(
++    middleware: &SourceMiddlewareConfig,
++    capture_group: &CaptureGroup,
++    regex: &Regex,
++) -> Result<(), MiddlewareSetupError> {
++    let valid = match capture_group {
++        CaptureGroup::Number(group) => *group < regex.captures_len(),
++        CaptureGroup::Name(group) => {
++            !group.is_empty() && regex.capture_names().flatten().any(|name| name == group)
++        }
++    };
++    if valid {
++        Ok(())
++    } else {
++        Err(MiddlewareSetupError::InvalidConfiguration(format!(
++            "[{}] Capture group {:?} does not exist in the pattern",
++            middleware.name, capture_group
++        )))
++    }
++}
+diff --git a/middleware/src/regex_extract/tests.rs b/middleware/src/regex_extract/tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..14683f07e14216cb2f33e67c0b8ea1cae04d466f
+--- /dev/null
++++ b/middleware/src/regex_extract/tests.rs
+@@ -0,0 +1,270 @@
++// Copyright 2026 The Drasi Authors.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++use std::sync::Arc;
++
++use drasi_core::{
++    in_memory_index::in_memory_element_index::InMemoryElementIndex,
++    interface::{MiddlewareSetupError, SourceMiddlewareFactory},
++    models::{
++        Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
++        SourceMiddlewareConfig,
++    },
++};
++use serde_json::{json, Value};
++
++use super::RegexExtractFactory;
++
++fn middleware(config: Value) -> Arc<dyn drasi_core::interface::SourceMiddleware> {
++    let config = SourceMiddlewareConfig {
++        name: "extract".into(),
++        kind: "regex_extract".into(),
++        config: config.as_object().unwrap().clone(),
++    };
++    RegexExtractFactory::new().create(&config).unwrap()
++}
++
++fn change(properties: Value) -> SourceChange {
++    SourceChange::Insert {
++        element: Element::Node {
++            metadata: ElementMetadata {
++                reference: ElementReference::new("github", "comment:1"),
++                labels: Arc::new([Arc::from("Comment")]),
++                effective_from: 42,
++            },
++            properties: ElementPropertyMap::from(properties),
++        },
++    }
++}
++
++fn base_config() -> Value {
++    json!({
++        "target_property": "body",
++        "pattern": r"(?s)^Header\n```json\s*(?<payload>.*?)\s*```",
++        "capture_group": "payload",
++        "output_property": "payload"
++    })
++}
++
++#[tokio::test]
++async fn extracts_named_capture_and_preserves_metadata() {
++    let input = change(json!({"body": "Header\n```json\n{\"id\":1}\n```"}));
++    let expected_metadata = match &input {
++        SourceChange::Insert { element } => element.get_metadata().clone(),
++        _ => unreachable!(),
++    };
++    let output = middleware(base_config())
++        .process(input, &InMemoryElementIndex::new())
++        .await
++        .unwrap();
++
++    let SourceChange::Insert { element } = &output[0] else {
++        panic!("expected insert");
++    };
++    assert_eq!(element.get_metadata(), &expected_metadata);
++    assert_eq!(
++        element.get_properties().get("payload"),
++        Some(&ElementValue::String(Arc::from("{\"id\":1}")))
++    );
++}
++
++#[tokio::test]
++async fn missing_and_no_match_pass_through_by_default() {
++    for input in [
++        change(json!({"title": "ordinary"})),
++        change(json!({"body": "ordinary comment"})),
++    ] {
++        let expected = input.clone();
++        let output = middleware(base_config())
++            .process(input, &InMemoryElementIndex::new())
++            .await
++            .unwrap();
++        assert_eq!(output, vec![expected]);
++    }
++}
++
++#[tokio::test]
++async fn policies_drop_or_fail_as_configured() {
++    let drop = middleware(json!({
++        "target_property": "body",
++        "pattern": "(?<value>match)",
++        "capture_group": "value",
++        "output_property": "value",
++        "on_no_match": "drop"
++    }));
++    assert!(drop
++        .process(
++            change(json!({"body": "nope"})),
++            &InMemoryElementIndex::new()
++        )
++        .await
++        .unwrap()
++        .is_empty());
++
++    let fail = middleware(json!({
++        "target_property": "body",
++        "pattern": "(?<value>match)?",
++        "capture_group": "value",
++        "output_property": "value",
++        "on_error": "fail"
++    }));
++    let error = fail
++        .process(change(json!({"body": ""})), &InMemoryElementIndex::new())
++        .await
++        .unwrap_err();
++    assert!(error.to_string().contains("did not participate"));
++}
++
++#[tokio::test]
++async fn enforces_capture_size_and_collision_policy() {
++    let oversize = middleware(json!({
++        "target_property": "body",
++        "pattern": "(.*)",
++        "capture_group": 1,
++        "output_property": "capture",
++        "max_capture_size": 3
++    }));
++    assert!(oversize
++        .process(
++            change(json!({"body": "four"})),
++            &InMemoryElementIndex::new()
++        )
++        .await
++        .unwrap_err()
++        .to_string()
++        .contains("max_capture_size"));
++
++    let collision = middleware(json!({
++        "target_property": "body",
++        "pattern": "(.*)",
++        "capture_group": 1,
++        "output_property": "capture"
++    }));
++    assert!(collision
++        .process(
++            change(json!({"body": "new", "capture": "old"})),
++            &InMemoryElementIndex::new()
++        )
++        .await
++        .unwrap_err()
++        .to_string()
++        .contains("already exists"));
++
++    let overwrite = middleware(json!({
++        "target_property": "body",
++        "pattern": "(.*)",
++        "capture_group": 1,
++        "output_property": "capture",
++        "on_collision": "overwrite"
++    }));
++    let output = overwrite
++        .process(
++            change(json!({"body": "new", "capture": "old"})),
++            &InMemoryElementIndex::new(),
++        )
++        .await
++        .unwrap();
++    let SourceChange::Insert { element } = &output[0] else {
++        panic!("expected insert");
++    };
++    assert_eq!(
++        element.get_properties().get("capture"),
++        Some(&ElementValue::String(Arc::from("new")))
++    );
++}
++
++#[test]
++fn validates_pattern_and_capture_group_at_setup() {
++    for config in [
++        json!({
++            "target_property": "body",
++            "pattern": "(",
++            "capture_group": 1,
++            "output_property": "capture"
++        }),
++        json!({
++            "target_property": "body",
++            "pattern": "(value)",
++            "capture_group": "missing",
++            "output_property": "capture"
++        }),
++        json!({
++            "target_property": "body",
++            "pattern": "(value)",
++            "capture_group": 2,
++            "output_property": "capture"
++        }),
++    ] {
++        let config = SourceMiddlewareConfig {
++            name: "extract".into(),
++            kind: "regex_extract".into(),
++            config: config.as_object().unwrap().clone(),
++        };
++        assert!(matches!(
++            RegexExtractFactory::new().create(&config),
++            Err(MiddlewareSetupError::InvalidConfiguration(_))
++        ));
++    }
++}
++
++#[tokio::test]
++async fn update_is_typed_and_delete_passes_through() {
++    let insert = change(json!({"body": "Header\n```json\n{}\n```"}));
++    let SourceChange::Insert { element } = insert else {
++        unreachable!()
++    };
++    let update = SourceChange::Update { element };
++    let output = middleware(base_config())
++        .process(update, &InMemoryElementIndex::new())
++        .await
++        .unwrap();
++    assert!(matches!(output.as_slice(), [SourceChange::Update { .. }]));
++
++    let delete = SourceChange::Delete {
++        metadata: ElementMetadata {
++            reference: ElementReference::new("github", "comment:1"),
++            labels: Arc::new([Arc::from("Comment")]),
++            effective_from: 43,
++        },
++    };
++    let output = middleware(base_config())
++        .process(delete.clone(), &InMemoryElementIndex::new())
++        .await
++        .unwrap();
++    assert_eq!(output, vec![delete]);
++}
++
++#[tokio::test]
++async fn supports_full_match_and_in_place_output() {
++    let subject = middleware(json!({
++        "target_property": "body",
++        "pattern": "value",
++        "capture_group": 0,
++        "output_property": "body"
++    }));
++    let output = subject
++        .process(
++            change(json!({"body": "value"})),
++            &InMemoryElementIndex::new(),
++        )
++        .await
++        .unwrap();
++    let SourceChange::Insert { element } = &output[0] else {
++        panic!("expected insert");
++    };
++    assert_eq!(
++        element.get_properties().get("body"),
++        Some(&ElementValue::String(Arc::from("value")))
++    );
++}
