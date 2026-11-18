@@ -53,6 +53,8 @@ The solver is [`good_lp`](https://crates.io/crates/good_lp) with the pure-Rust
 | `sets`, `variables` | required | Index sets and variable families. |
 | `constraints`, `objectives`, `scenarios` | `[]` | The rest of the model. |
 | `provenance` | none | `{set, properties?}`. Copies the first member (in key order) of `set` onto the status and scenario rows as a `provenance` map: the listed properties, or all properties not starting with `$`. Null when the set is empty. |
+| `preconditions` | `[]` | Input checks that must hold before the model is solved. See [Preconditions](#preconditions-unknown-rather-than-a-guess). |
+| `summaries` | `[]` | Solution lists copied onto the status row. See [Summaries](#summaries-the-whole-solution-in-one-row). |
 
 ### Sets
 
@@ -134,18 +136,76 @@ in `removeFrom` (default: `[set]`).
 To analyse an upstream-defined dataset instead, run a second instance fed by a
 different query. This is also how capacity-only variants are run.
 
+### Preconditions (unknown rather than a guess)
+
+A precondition is declared as:
+
+`{name, set, where?, min?, max?}`
+
+It counts the members of `set` that pass `where`; at least one of `min` and `max`
+is required. Preconditions are checked in order on the main dataset, after the
+sets are materialized. When one does not hold:
+
+- the model is not solved, and the status is `unknown`;
+- `detail` names the precondition, the count and the bound, and for `max` the
+  first five matching member keys, for example `precondition health-known does
+  not hold: 1 member of bins matches, expected at most 0: [EU-B]`;
+- the status row's `precondition` property holds its name (null otherwise);
+- no solution or scenario rows are published, and `scenarios` is null.
+
+Use them so that a solver never answers from incomplete or untrusted facts:
+an input that has not loaded (`min: 1`), a member whose state is unknown
+(`where` on that state, `max: 0`), or records that disagree with a context
+record (`notInSet` the context, `max: 0`). Preconditions are not re-checked
+inside scenarios.
+
+### Summaries (the whole solution in one row)
+
+A summary is declared as:
+
+`{name, variable, where?, properties?}`
+
+While the status is `optimal`, the status row's `summaries.<name>` is a list with
+one entry per nonzero variable of the family (every variable with
+`output.includeZero`) that passes `where`, in member key order. Each entry holds
+the listed member properties (default: the variable's output properties) and
+`value`. Otherwise `summaries` is null.
+
+Solution rows arrive as separate changes, and disappear when the result is not
+optimal. Consumers that act on a solution as a whole, such as approval
+workflows or an idempotent apply, read the summary instead: it changes
+atomically with the status. Keep summaries small; they are copied on every
+status change.
+
 ## Output rows
 
 | Row | Id | Properties |
 |---|---|---|
 | Solution | `<variable>/<key parts…>` (`<variable>` for scalars) | Selected member properties, `variable`, `value` (integer for binary/integer variables) |
-| Status (`statusLabel`) | `status` | `status`, `detail`, `objective`, `objectives`, `signature`, `variables`, `constraints`, `members` |
+| Status (`statusLabel`) | `status` | `status`, `detail`, `objective`, `objectives`, `signature`, `solutionSignature`, `variables`, `constraints`, `members`, `setSizes`; `precondition`, `summaries`, `scenarios` and `scenariosSignature` when configured |
 | Scenario (`scenarioLabel`) | `scenario/<name>/<value>` | `scenario`, `property`, `value`, `status`, `feasible`, `detail`, `objectives`, `signature` |
 
 In ids, `%` is escaped as `%25` and `/` as `%2F`.
 
 - **Status.** One of `optimal`, `infeasible`, `unbounded`, `limit` (a time or size
-  limit was reached) or `error`.
+  limit was reached), `error`, or `unknown` (a precondition does not hold).
+- **`signature` and `solutionSignature`.** `signature` identifies the inputs
+  (and configuration) that were solved. `solutionSignature` is a 64-bit FNV-1a
+  over the published solution rows, null unless optimal. Together they let a
+  consumer check that a solution it approved is still the published one, and
+  was solved from the same facts.
+- **`setSizes`.** Member count of each main set, by name; empty when the sets
+  could not be materialized.
+- **`scenarios` (status row).** Per scenario: `values` analysed, how many stayed
+  `feasible`, and `failures`, a list of `{value, status, detail}` for every value
+  that did not (infeasible or unsolved), in value order. The first failure is
+  therefore the lowest-sorted loss that leaves no solution. `scenariosSignature`
+  is the input signature the roll-up was computed for: like the scenario rows,
+  the last completed analysis stays published until the next one replaces it.
+  Null before the first analysis and while the status is `unknown`.
+- **Infeasible `detail`.** When a constraint row has no eligible variables and
+  cannot hold, `detail` names it and its group key, for example `constraint
+  assign-once[support] has no eligible variables and cannot hold`.
 - **Solution rows.** These exist only while the latest status is `optimal`. Every
   other status retracts them.
 - **`provenance`.** Present only when configured. Consumers use it to check
@@ -167,6 +227,24 @@ placement and resilience solver purely through configuration. It uses:
 - A lexicographic objective: minimize moves from the previous assignment, then
   minimize the peak.
 - Worker and region loss scenarios.
+
+## Example: workload placement with approvals
+
+The tests `placement_*` in `src/component/tests/placement.rs` place workloads on
+deployments under a policy, health and capacity:
+
+- Inputs from upstream queries: one `PlanContext` (run and revision),
+  `PlanItem` (demand and current deployment), `PlanBin` (capacity and health),
+  and `PlanPair` (one policy decision per workload and deployment, joined with
+  the demand, current deployment and capacity).
+- Binary `assign` over allowed pairs on healthy deployments with room.
+- Exactly-one and capacity constraints; minimize moves, then peak utilization.
+- A `loss` scenario per healthy deployment, read through the status row's
+  `scenarios.loss.failures`.
+- Preconditions that give `unknown` for unknown health, undecided or missing
+  policy, and inputs from another revision.
+- `summaries` of all and of moved assignments, and `signature` /
+  `solutionSignature` to detect stale approvals.
 
 ## Validation
 

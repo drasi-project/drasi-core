@@ -537,6 +537,18 @@ fn configuration_is_validated() {
         json!({"stream": "s", "debounceMs": 100, "maxDelayMs": 10, "sets": [], "variables": []}),
         json!({"stream": "s", "sets": [{"name": "a", "label": "A"}], "variables": [],
                "scenarios": [{"name": "loss", "set": "missing", "property": "p"}]}),
+        json!({"stream": "s", "sets": [{"name": "a", "label": "A"}], "variables": [{"name": "x", "type": "binary", "over": "a"}],
+               "preconditions": [{"name": "p", "set": "a"}]}),
+        json!({"stream": "s", "sets": [{"name": "a", "label": "A"}], "variables": [{"name": "x", "type": "binary", "over": "a"}],
+               "preconditions": [{"name": "p", "set": "a", "min": 2, "max": 1}]}),
+        json!({"stream": "s", "sets": [{"name": "a", "label": "A"}], "variables": [{"name": "x", "type": "binary", "over": "a"}],
+               "preconditions": [{"name": "p", "set": "missing", "max": 0}]}),
+        json!({"stream": "s", "sets": [{"name": "a", "label": "A"}], "variables": [{"name": "x", "type": "binary", "over": "a"}],
+               "summaries": [{"name": "s", "variable": "missing"}]}),
+        json!({"stream": "s", "sets": [{"name": "a", "label": "A"}], "variables": [{"name": "x", "type": "continuous"}],
+               "summaries": [{"name": "s", "variable": "x", "properties": ["p"]}]}),
+        json!({"stream": "s", "sets": [{"name": "a", "label": "A"}], "variables": [{"name": "x", "type": "binary", "over": "a"}],
+               "summaries": [{"name": "s", "variable": "x"}, {"name": "s", "variable": "x"}]}),
     ];
     for configuration in invalid {
         assert!(
@@ -1131,3 +1143,5 @@ async fn output_identities_escape_key_separators() -> Result<()> {
     assert_eq!(rows["take/x%2Fy%25"].1["name"], "x/y%");
     Ok(())
 }
+
+mod placement;

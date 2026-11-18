@@ -28,7 +28,7 @@ use tokio::time::Instant;
 
 use crate::{
     config::OptimizationConfig,
-    model::Record,
+    model::{Record, Status},
     output::{self, EmittedRows, OutRow, Output, Rows},
     worker::{self, Events, Job, JobEvent, Wake},
 };
@@ -108,6 +108,10 @@ pub(crate) struct Optimization {
     /// Signature of the main result currently published.
     current_signature: Option<String>,
     current_provenance: serde_json::Value,
+    /// The main result is `unknown` (a precondition does not hold).
+    main_unknown: bool,
+    /// Scenario roll-up and the signature it was computed for.
+    rollup: Option<(serde_json::Value, Option<String>)>,
     solution: Rows,
     status: Option<(String, OutRow)>,
     scenarios: Rows,
@@ -152,6 +156,8 @@ impl Optimization {
             last_signature: None,
             current_signature: None,
             current_provenance: serde_json::Value::Null,
+            main_unknown: false,
+            rollup: None,
             solution: Rows::new(),
             status: None,
             scenarios: Rows::new(),
@@ -235,9 +241,11 @@ impl Optimization {
         match event {
             JobEvent::Main(outcome) => {
                 self.solution = output::solution_rows(&self.config, &outcome);
-                self.status = Some(output::status_row(&self.config, &outcome));
-                if outcome.signature.is_none() {
+                self.status = Some(output::status_row(&self.config, &outcome, &self.solution));
+                self.main_unknown = outcome.solved.status == Status::Unknown;
+                if outcome.signature.is_none() || self.main_unknown {
                     self.scenarios.clear();
+                    self.rollup = None;
                 }
                 self.current_signature = outcome
                     .signature
@@ -252,6 +260,12 @@ impl Optimization {
                     self.current_signature.as_deref(),
                     &self.current_provenance,
                 );
+                self.rollup = (!self.main_unknown).then(|| {
+                    (
+                        output::scenario_rollup(&self.config, &outcomes),
+                        self.current_signature.clone(),
+                    )
+                });
                 self.last_signature = self.current_signature.clone();
             }
             JobEvent::Unchanged => {}
@@ -267,7 +281,20 @@ impl Optimization {
         let mut desired = self.solution.clone();
         desired.extend(self.scenarios.clone());
         if let Some((id, row)) = &self.status {
-            desired.insert(id.clone(), row.clone());
+            let mut row = row.clone();
+            if !self.config.scenarios.is_empty() {
+                // The latest completed analysis stays until the next one replaces it.
+                let (rollup, signature) = self
+                    .rollup
+                    .clone()
+                    .unwrap_or((serde_json::Value::Null, None));
+                row.properties.insert("scenarios".into(), rollup);
+                row.properties.insert(
+                    "scenariosSignature".into(),
+                    signature.map_or(serde_json::Value::Null, serde_json::Value::from),
+                );
+            }
+            desired.insert(id.clone(), row);
         }
         let (next, changes) = output::diff(&self.emitted, &desired, &self.namespace(), self.clock);
         if changes.is_empty() {
@@ -462,6 +489,8 @@ impl NativeComponent for Optimization {
             self.last_signature = None;
             self.current_signature = None;
             self.current_provenance = serde_json::Value::Null;
+            self.main_unknown = false;
+            self.rollup = None;
             self.solution.clear();
             self.status = None;
             self.scenarios.clear();

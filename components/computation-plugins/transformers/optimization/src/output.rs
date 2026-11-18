@@ -21,7 +21,7 @@ use std::{
 
 use crate::{
     config::{OptimizationConfig, VariableType},
-    model::{clean_float, Key, MainOutcome, Properties, ScenarioOutcome, Status},
+    model::{clean_float, Fnv, Key, MainOutcome, Properties, ScenarioOutcome, Status},
 };
 
 /// The id, label and properties of one output element.
@@ -125,7 +125,32 @@ pub(crate) fn solution_rows(config: &OptimizationConfig, outcome: &MainOutcome) 
     rows
 }
 
-pub(crate) fn status_row(config: &OptimizationConfig, outcome: &MainOutcome) -> (String, OutRow) {
+/// Stable identity of a published solution: 64-bit FNV-1a over its rows.
+fn solution_signature(rows: &Rows) -> String {
+    let mut hasher = Fnv::new();
+    hasher.write_u64(rows.len() as u64);
+    for (id, row) in rows {
+        hasher.write_str(id);
+        hasher.write_str(&row.label);
+        hasher.write_str(
+            &Value::Object(
+                row.properties
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect(),
+            )
+            .to_string(),
+        );
+    }
+    hasher.finish()
+}
+
+/// The status row of a main outcome whose solution rows are `solution`.
+pub(crate) fn status_row(
+    config: &OptimizationConfig,
+    outcome: &MainOutcome,
+    solution: &Rows,
+) -> (String, OutRow) {
     let solved = &outcome.solved;
     let mut properties = Properties::new();
     properties.insert("status".into(), Value::from(solved.status.as_str()));
@@ -150,6 +175,36 @@ pub(crate) fn status_row(config: &OptimizationConfig, outcome: &MainOutcome) -> 
     properties.insert("members".into(), Value::from(outcome.members));
     if config.provenance.is_some() {
         properties.insert("provenance".into(), outcome.provenance.clone());
+    }
+    properties.insert(
+        "solutionSignature".into(),
+        if solved.status == Status::Optimal {
+            Value::from(solution_signature(solution))
+        } else {
+            Value::Null
+        },
+    );
+    properties.insert(
+        "setSizes".into(),
+        Value::Object(
+            outcome
+                .set_sizes
+                .iter()
+                .map(|(name, size)| (name.clone(), Value::from(*size)))
+                .collect(),
+        ),
+    );
+    if !config.preconditions.is_empty() {
+        properties.insert(
+            "precondition".into(),
+            outcome
+                .precondition
+                .as_deref()
+                .map_or(Value::Null, Value::from),
+        );
+    }
+    if !config.summaries.is_empty() {
+        properties.insert("summaries".into(), outcome.summaries.clone());
     }
     (
         "status".into(),
@@ -179,7 +234,7 @@ pub(crate) fn scenario_rows(
                 match outcome.status {
                     Status::Optimal | Status::Unbounded => Value::Bool(true),
                     Status::Infeasible => Value::Bool(false),
-                    Status::Limit | Status::Error => Value::Null,
+                    Status::Limit | Status::Error | Status::Unknown => Value::Null,
                 },
             );
             properties.insert("detail".into(), Value::from(outcome.detail.as_str()));
@@ -206,6 +261,35 @@ pub(crate) fn scenario_rows(
             )
         })
         .collect()
+}
+
+/// Per scenario: how many values were analysed, how many stayed feasible, and
+/// every value that did not (infeasible or unsolved), in value order.
+pub(crate) fn scenario_rollup(config: &OptimizationConfig, outcomes: &[ScenarioOutcome]) -> Value {
+    let mut rollup = Map::new();
+    for definition in &config.scenarios {
+        let mut values = 0_u64;
+        let mut feasible = 0_u64;
+        let mut failures = Vec::new();
+        for outcome in outcomes.iter().filter(|o| o.scenario == definition.name) {
+            values += 1;
+            if matches!(outcome.status, Status::Optimal | Status::Unbounded) {
+                feasible += 1;
+                continue;
+            }
+            let mut failure = Map::new();
+            failure.insert("value".into(), outcome.value.clone());
+            failure.insert("status".into(), Value::from(outcome.status.as_str()));
+            failure.insert("detail".into(), Value::from(outcome.detail.as_str()));
+            failures.push(Value::Object(failure));
+        }
+        let mut summary = Map::new();
+        summary.insert("values".into(), Value::from(values));
+        summary.insert("feasible".into(), Value::from(feasible));
+        summary.insert("failures".into(), Value::Array(failures));
+        rollup.insert(definition.name.clone(), Value::Object(summary));
+    }
+    Value::Object(rollup)
 }
 
 /// An emitted element and the row it was built from.
