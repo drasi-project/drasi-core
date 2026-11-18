@@ -50,6 +50,9 @@ pub struct OptimizationConfig {
     pub status_label: String,
     #[serde(default = "default_scenario_label")]
     pub scenario_label: String,
+    /// Publish a result only together with its scenario analysis.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub atomic_scenarios: bool,
     pub sets: Vec<SetDef>,
     pub variables: Vec<VariableDef>,
     #[serde(default)]
@@ -138,6 +141,9 @@ fn default_scenario_label() -> String {
 }
 fn default_scale() -> f64 {
     1.0
+}
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 fn is_one(value: &f64) -> bool {
     *value == 1.0
@@ -785,6 +791,14 @@ impl OptimizationConfig {
             )
             .constraint(constraint(json!({"type": "string", "minLength": 1})))
             .default(DEFAULT_SCENARIO_LABEL),
+            ConfigOption::new(
+                "atomicScenarios",
+                Json,
+                false,
+                "Publish each result together with its scenario analysis, so status, solution and scenario rows always describe the same inputs. A running solve then finishes before the next starts.",
+            )
+            .constraint(constraint(json!({"type": "boolean"})))
+            .default(false),
             ConfigOption::new(
                 "sets",
                 Array,

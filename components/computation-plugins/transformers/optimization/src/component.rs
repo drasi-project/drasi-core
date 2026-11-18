@@ -29,7 +29,7 @@ use tokio::time::Instant;
 
 use crate::{
     config::OptimizationConfig,
-    model::{Record, Status},
+    model::{MainOutcome, Record, Status},
     output::{self, EmittedRows, OutRow, Output, Rows},
     worker::{self, Events, Job, JobEvent, Wake},
 };
@@ -118,6 +118,8 @@ pub(crate) struct Optimization {
     main_unknown: bool,
     /// Scenario roll-up and the signature it was computed for.
     rollup: Option<(serde_json::Value, Option<String>)>,
+    /// With `atomicScenarios`, a main result waiting for its scenario analysis.
+    held_main: Option<Box<MainOutcome>>,
     solution: Rows,
     status: Option<(String, OutRow)>,
     scenarios: Rows,
@@ -169,6 +171,7 @@ impl Optimization {
             current_provenance: serde_json::Value::Null,
             main_unknown: false,
             rollup: None,
+            held_main: None,
             solution: Rows::new(),
             status: None,
             scenarios: Rows::new(),
@@ -206,6 +209,11 @@ impl Optimization {
         }
     }
 
+    /// Results are published only with their scenario analysis.
+    fn atomic(&self) -> bool {
+        self.config.atomic_scenarios && !self.config.scenarios.is_empty()
+    }
+
     fn cancelling(&self) -> bool {
         self.job
             .as_ref()
@@ -215,12 +223,16 @@ impl Optimization {
     fn reschedule(&self) {
         let open = self.started && !self.paused && !self.retired;
         // A due solve waiting on a cancelled job is woken by the job's events.
-        let deadline = self.due().filter(|_| !self.cancelling());
+        // An atomic job runs to completion; its events wake the next solve.
+        let deadline = self
+            .due()
+            .filter(|_| !self.cancelling() && (!self.atomic() || self.job.is_none()));
         self.wake.schedule(open, self.job.is_some(), deadline);
     }
 
     fn abandon_job(&mut self) {
         self.generation += 1;
+        self.held_main = None;
         if let Some(job) = self.job.take() {
             job.cancel.store(true, Ordering::Release);
         }
@@ -250,21 +262,12 @@ impl Optimization {
 
     fn accept(&mut self, event: JobEvent) {
         match event {
-            JobEvent::Main(outcome) => {
-                self.solution = output::solution_rows(&self.config, &outcome);
-                self.status = Some(output::status_row(&self.config, &outcome, &self.solution));
-                self.main_unknown = outcome.solved.status == Status::Unknown;
-                if outcome.signature.is_none() || self.main_unknown {
-                    self.scenarios.clear();
-                    self.rollup = None;
-                }
-                self.current_signature = outcome
-                    .signature
-                    .clone()
-                    .filter(|_| outcome.solved.status.is_final());
-                self.current_provenance = outcome.provenance.clone();
-            }
+            JobEvent::Main(outcome) if self.atomic() => self.held_main = Some(outcome),
+            JobEvent::Main(outcome) => self.apply_main(&outcome),
             JobEvent::Scenarios(outcomes) => {
+                if let Some(main) = self.held_main.take() {
+                    self.apply_main(&main);
+                }
                 self.scenarios = output::scenario_rows(
                     &self.config,
                     &outcomes,
@@ -280,8 +283,29 @@ impl Optimization {
                 self.last_signature = self.current_signature.clone();
             }
             JobEvent::Unchanged => {}
-            JobEvent::Finished => self.job = None,
+            JobEvent::Finished => {
+                // A job that ends without scenarios (the inputs failed to load) still publishes.
+                if let Some(main) = self.held_main.take() {
+                    self.apply_main(&main);
+                }
+                self.job = None;
+            }
         }
+    }
+
+    fn apply_main(&mut self, outcome: &MainOutcome) {
+        self.solution = output::solution_rows(&self.config, outcome);
+        self.status = Some(output::status_row(&self.config, outcome, &self.solution));
+        self.main_unknown = outcome.solved.status == Status::Unknown;
+        if outcome.signature.is_none() || self.main_unknown {
+            self.scenarios.clear();
+            self.rollup = None;
+        }
+        self.current_signature = outcome
+            .signature
+            .clone()
+            .filter(|_| outcome.solved.status.is_final());
+        self.current_provenance = outcome.provenance.clone();
     }
 
     /// Emits the difference between the published rows and the current result.
@@ -649,7 +673,8 @@ impl NativeTransformer for Optimization {
         if self.due().is_some_and(|due| due <= Instant::now()) {
             match &self.job {
                 None => self.launch()?,
-                Some(job) => job.cancel.store(true, Ordering::Release),
+                Some(job) if !self.atomic() => job.cancel.store(true, Ordering::Release),
+                Some(_) => {}
             }
         }
         self.reschedule();
