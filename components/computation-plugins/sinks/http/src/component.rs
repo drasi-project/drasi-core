@@ -4,7 +4,7 @@
 //! The HTTP sink component: lifecycle, management, rendering and delivery.
 
 use crate::{
-    config::{duration, HttpSinkConfig},
+    config::{duration, HttpSinkConfig, UnroutedChanges},
     render::Renderer,
     transport::{self, build_client, Attempts, ClientSettings, Request},
     wire,
@@ -276,6 +276,11 @@ impl HttpSink {
             let output = notification.output();
             let label = output.endpoint().to_string();
             let sequence = notification.sequence();
+            if self.config.unrouted_changes == UnroutedChanges::Ignore
+                && self.spec(notification).is_none()
+            {
+                continue;
+            }
             let Some(max_items) = max_items else {
                 let delivery = match self.render(notification) {
                     Ok(request) => {
@@ -367,8 +372,8 @@ fn insert_output_headers(headers: &mut HeaderMap, output: &SinkOutput) -> Result
 /// Classifies each configuration change by the weakest safe boundary.
 ///
 /// * Pause (in place): everything read per delivery — templates, headers,
-///   secret headers, token, timeout, request size, retries, retry budget
-///   and success statuses.
+///   secret headers, token, timeout, request size, retries, retry budget,
+///   success statuses and unrouted-change handling.
 /// * Stop (restart): destination and connection settings bound into the
 ///   client or the host batching declaration — url, baseUrl, batchEndpoint,
 ///   TLS, connect timeout, connection pool, adaptive and maxBatchBytes.
@@ -436,6 +441,11 @@ pub(crate) fn plan(
         "onPermanentFailure",
         c.on_permanent_failure != p.on_permanent_failure,
         Replace,
+    );
+    planner.field(
+        "unroutedChanges",
+        c.unrouted_changes != p.unrouted_changes,
+        Pause,
     );
     planner.field(
         "successStatusCodes",
