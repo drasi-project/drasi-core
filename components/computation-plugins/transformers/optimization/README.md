@@ -22,6 +22,10 @@ The solver is [`good_lp`](https://crates.io/crates/good_lp) with the pure-Rust
 - **Changes during a solve.** If inputs change while a solve is running, its main
   result is still published. Any pending scenario solves are cancelled, and a new
   solve follows.
+- **`atomicScenarios`.** With scenarios configured, the main result is held back
+  and published together with its scenario analysis. Consumers then never see a
+  new result beside the previous analysis. A running solve also finishes before
+  the next starts, instead of being cancelled.
 - **Skipped solves.** A model signature (64-bit FNV-1a over all set members) is
   computed first. If it is unchanged since the last completed solve, nothing is
   re-solved or re-emitted.
@@ -61,6 +65,7 @@ The solver is [`good_lp`](https://crates.io/crates/good_lp) with the pure-Rust
 | `maxRecords`, `maxVariables`, `maxConstraints` | 100000 each | Size limits. Exceeding `maxRecords` rejects the input batch; exceeding the variable or constraint limit gives status `limit`. |
 | `maxScenarios` | 64 | Scenario values solved per batch. Values beyond this report status `limit`. |
 | `tolerance` | 1e-6 | Relative tolerance used to hold earlier objectives at their optimum. |
+| `atomicScenarios` | false | Publish each result only together with its scenario analysis (see Behaviour). |
 | `statusLabel` / `scenarioLabel` | `OptimizationStatus` / `OptimizationScenario` | Labels of the status and scenario rows. |
 | `sets`, `variables` | required | Index sets and variable families. |
 | `constraints`, `objectives`, `scenarios` | `[]` | The rest of the model. |
@@ -212,8 +217,9 @@ In ids, `%` is escaped as `%25` and `/` as `%2F`.
   `feasible`, and `failures`, a list of `{value, status, detail}` for every value
   that did not (infeasible or unsolved), in value order. The first failure is
   therefore the lowest-sorted loss that leaves no solution. `scenariosSignature`
-  is the input signature the roll-up was computed for: like the scenario rows,
-  the last completed analysis stays published until the next one replaces it.
+  is the input signature the roll-up was computed for. Like the scenario rows,
+  the last completed analysis stays published until the next one replaces it,
+  unless `atomicScenarios` is set.
   Null before the first analysis and while the status is `unknown`.
 - **Infeasible `detail`.** When a constraint row has no eligible variables and
   cannot hold, `detail` names it and its group key, for example `constraint

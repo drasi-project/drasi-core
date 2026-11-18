@@ -510,3 +510,67 @@ async fn placement_identities_detect_stale_approvals() -> Result<()> {
     assert_ne!(plan.candidate, first.candidate);
     Ok(())
 }
+
+/// Status rows in emitted batches: (signature, scenariosSignature, first failure).
+fn published_statuses(batches: &[Vec<SourceChange>]) -> Vec<(Value, Value, Value)> {
+    batches
+        .iter()
+        .flatten()
+        .filter_map(|change| match change {
+            SourceChange::Insert { element } | SourceChange::Replace { element }
+                if element.get_reference().element_id.as_ref() == "status" =>
+            {
+                let p = element
+                    .get_properties()
+                    .map_iter(|name, value| (name.to_string(), Value::from(value)))
+                    .collect::<serde_json::Map<_, _>>();
+                Some((
+                    p["signature"].clone(),
+                    p["scenariosSignature"].clone(),
+                    p["scenarios"]["loss"]["failures"][0]["value"].clone(),
+                ))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn atomic_scenarios_publish_each_result_with_its_own_analysis() -> Result<()> {
+    let mut model = placement_model();
+    model["atomicScenarios"] = json!(true);
+    let mut fleet = Fleet::seed();
+    fleet
+        .route("support", "EU-B")
+        .route("batch", "US-C")
+        .health("EU-A", "unhealthy");
+    let mut optimization = started(model).await?;
+    let mut current = BTreeMap::new();
+    sync(&mut optimization, &mut current, fleet.records()).await?;
+    let degraded = answer(snapshot(&optimization).await?);
+    assert_eq!(degraded.failures[0].0, "EU-B");
+
+    // EU-A recovers: the result and its analysis arrive together, never the new
+    // result beside the previous analysis (losing EU-B would leave no plan).
+    fleet.health("EU-A", "healthy");
+    let next = fleet.records();
+    let changes: Vec<SourceChange> = next
+        .iter()
+        .filter(|(id, element)| current.get(*id) != Some(*element))
+        .map(|(_, element)| SourceChange::Replace {
+            element: element.clone(),
+        })
+        .collect();
+    send(&mut optimization, &changes).await?;
+    let batches = settle(&mut optimization).await?;
+    let statuses = published_statuses(&batches);
+    assert!(!statuses.is_empty());
+    for (signature, scenarios, first) in &statuses {
+        assert_eq!(
+            signature, scenarios,
+            "status published beside a stale analysis"
+        );
+        assert_eq!(*first, Value::Null, "safe once EU-A is back");
+    }
+    Ok(())
+}
