@@ -184,7 +184,7 @@ impl NativeComponent for GrpcSource {
             .map(|tls| tls.server_config(vec![b"h2".to_vec()]))
             .transpose()?;
         let options = ServeOptions {
-            incoming: crate::incoming::IncomingOptions {
+            incoming: drasi_computation_network_common::grpc_incoming::IncomingOptions {
                 tls,
                 max_connections: self.config.max_connections,
                 header_read_timeout: Duration::from_millis(self.config.header_read_timeout_ms),
@@ -472,7 +472,7 @@ impl source::source_service_server::SourceService for SourceService {
 }
 
 pub(crate) struct ServeOptions {
-    incoming: crate::incoming::IncomingOptions,
+    incoming: drasi_computation_network_common::grpc_incoming::IncomingOptions,
     max_concurrent_streams: usize,
     timeout: Duration,
     grpc: Arc<Live<GrpcLive>>,
@@ -518,7 +518,7 @@ async fn serve(listener: TcpListener, ingress: Arc<Ingress>, options: ServeOptio
         .add_service(InterceptedService::new(source, access.clone()))
         .add_service(InterceptedService::new(admission, access))
         .serve_with_incoming_shutdown(
-            crate::incoming::limited(listener, options.incoming),
+            drasi_computation_network_common::grpc_incoming::limited(listener, options.incoming),
             cancel.cancelled_owned(),
         )
         .await?;

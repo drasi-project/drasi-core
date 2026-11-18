@@ -138,6 +138,7 @@ members = [
   "components/computation-plugins/sources/grpc",
   "components/computation-plugins/sources/http",
   "components/computation-plugins/sources/mysql",
+  "components/computation-plugins/sources/otel",
   "components/computation-plugins/sources/mssql",
   "components/computation-plugins/sources/postgres",
   "components/computation-plugins/sources/sqlite",
@@ -222,6 +223,7 @@ drasi-computation-source-bridge = { version = "0.11.3", path = "components/compu
 drasi-computation-source-grpc = { version = "0.11.3", path = "components/computation-plugins/sources/grpc" }
 drasi-computation-source-http = { version = "0.11.3", path = "components/computation-plugins/sources/http" }
 drasi-computation-source-mysql = { version = "0.11.3", path = "components/computation-plugins/sources/mysql" }
+drasi-computation-source-otel = { version = "0.11.3", path = "components/computation-plugins/sources/otel" }
 drasi-computation-source-mssql = { path = "components/computation-plugins/sources/mssql" }
 drasi-computation-source-postgres = { version = "0.11.3", path = "components/computation-plugins/sources/postgres" }
 drasi-computation-source-sqlite = { version = "0.11.3", path = "components/computation-plugins/sources/sqlite" }

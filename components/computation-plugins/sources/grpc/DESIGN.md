@@ -28,7 +28,7 @@ envelope.
 
 ```
  client ─► TCP accept ─► connection cap ─► [TLS] ─► HTTP/2 preface ─► tonic HTTP/2
-              (incoming.rs: TLS handshake and preface within headerReadTimeoutMs)
+              (network-common grpc_incoming: TLS handshake and preface within headerReadTimeoutMs)
               │
               ▼
         Access interceptor: per-client rate limit ─► bearer token   (every RPC)
@@ -47,7 +47,7 @@ envelope.
 |---|---|---|
 | `GrpcSource` | `src/component.rs` | Lifecycle, management, `SourceService`, interceptor, server assembly |
 | Admission service | `src/durable_grpc.rs` | `AdmissionService` handlers and protobuf mapping |
-| Incoming | `src/incoming.rs` | Connection-limited accept stream; accept-error backoff |
+| Incoming | `drasi_computation_network_common::grpc_incoming` | Connection-limited accept stream; accept-error backoff (shared with the OTel source) |
 | `SourceRuntime` / `Ingress` | `common/network/src/ingress.rs` | Listener ownership, pause gating, volatile queue, Stop modes, live settings |
 | Durable admission | `common/network/src/durable.rs` | Session protocol and server-sequenced producer |
 | Security | `common/network/src/security.rs` | Bearer tokens, rate limiting, TLS material validation |
@@ -134,7 +134,7 @@ before changing anything.
 - **TLS:** the same rustls configuration as the HTTP source
   (`TlsMaterial::server_config`, ring provider, safe default protocol
   versions), offering ALPN `h2`. An optional client CA requires client
-  certificates (mutual TLS). Handshakes run in `incoming.rs`, concurrently, so
+  certificates (mutual TLS). Handshakes run in the shared `grpc_incoming` stream, concurrently, so
   one slow client never delays accepting another.
 - **Resource bounds:**
   - open connections (`maxConnections`); excess connections close at once, and

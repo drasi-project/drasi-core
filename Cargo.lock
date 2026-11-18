@@ -3116,6 +3116,7 @@ name = "drasi-computation-network-common"
 version = "0.11.3"
 dependencies = [
  "anyhow",
+ "async-stream",
  "axum 0.7.9",
  "chrono",
  "drasi-computation-contracts",
@@ -3138,6 +3139,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-util",
+ "tonic",
  "tower 0.4.13",
 ]
 
@@ -3466,6 +3468,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "drasi-computation-source-otel"
+version = "0.11.3"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.7.9",
+ "bytes",
+ "chrono",
+ "drasi-computation-contracts",
+ "drasi-computation-network-common",
+ "drasi-computation-plugin-sdk",
+ "drasi-core-types",
+ "flate2",
+ "ordered-float 3.9.2",
+ "prost 0.14.4",
+ "prost-build",
+ "protoc-bin-vendored",
+ "rcgen",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+]
+
+[[package]]
 name = "drasi-computation-source-postgres"
 version = "0.11.3"
 dependencies = [
@@ -3730,6 +3760,7 @@ dependencies = [
  "drasi-computation-source-http",
  "drasi-computation-source-mssql",
  "drasi-computation-source-mysql",
+ "drasi-computation-source-otel",
  "drasi-computation-source-postgres",
  "drasi-computation-source-sqlite",
  "drasi-computation-transformer-query",
@@ -3759,6 +3790,7 @@ dependencies = [
  "p256",
  "p384",
  "pem",
+ "prost 0.14.4",
  "prost-types 0.14.4",
  "reqwest 0.12.28",
  "rmp-serde",

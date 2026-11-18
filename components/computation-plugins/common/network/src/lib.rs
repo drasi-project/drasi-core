@@ -15,6 +15,8 @@ pub mod batching;
 pub mod config;
 #[cfg(feature = "ingress")]
 pub mod durable;
+#[cfg(feature = "grpc-listener")]
+pub mod grpc_incoming;
 #[cfg(feature = "ingress")]
 pub mod ingress;
 #[cfg(feature = "sink")]

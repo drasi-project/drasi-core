@@ -1,6 +1,6 @@
 # Native network shared helpers
 
-This crate holds the code shared by the native HTTP and gRPC components. It
+This crate holds the code shared by the native HTTP, gRPC and OpenTelemetry components. It
 contains no component implementation, plugin export or registered factory.
 
 | Module | Feature | Contents |
@@ -8,7 +8,8 @@ contains no component implementation, plugin export or registered factory.
 | `config` | always (items gated by feature) | `SecretString` (always); listener security settings (`SecuritySettings`, `IngressSecurity`, `TlsMaterial`, `RateLimit`) and secure defaults (`listener`); `IngressConfig` and `ingress_options` (`ingress`); sink helpers: reserved headers, `delivery_id`, `ClientTls`, `sanitize` (sink features) |
 | `security` | `listener` | Constant-time bearer-token `Authenticator`, per-client `RateLimiter`, TLS server configuration (rustls, ring) |
 | `server` | `listener` | The shared HTTP listener: TLS, connection cap, header-read timeout, graceful drain; used by the HTTP source and the SSE sink |
-| `ingress` | `ingress` | `SourceRuntime` (listener ownership, Start with cancellation and deadline, Pause gating of data admission, Drain/Abort Stop, live settings) and `Ingress` (access control, request slots, volatile admission, typed `IngressError`). Drain stops accepting but lets in-flight admissions finish and answer; Abort interrupts them as uncertain |
+| `grpc_incoming` | `grpc-listener` | The connection-limited, TLS-capable incoming stream for tonic servers (HTTP/2 preface deadline, concurrent handshakes); used by the gRPC and OTel sources |
+| `ingress` | `ingress` | `SourceRuntime` (listener ownership, Start with cancellation and deadline, one or several listeners per activation (`start_listeners`), Pause gating of data admission, Drain/Abort Stop, live settings) and `Ingress` (access control, request slots, volatile admission, all-or-nothing volatile group admission (`admit_all`), typed `IngressError`). Drain stops accepting but lets in-flight admissions finish and answer; Abort interrupts them as uncertain |
 | `durable` | `ingress` | Durable admission with back-pressure (`admit_wait`): the session protocol, and the server-sequenced producer used by standard routes. Batches are not atomic; the committed prefix is always reported |
 | `update` | always | `BoundaryPlanner` for classifying configuration changes, `ensure_same_component`, `inputs_changed` |
 | `retry` | `sink` | Sink delivery retries: jittered exponential backoff, `Retry-After`, a total time budget; `InputOutcome` applies a sink's `onPermanentFailure` to the changes of one input |

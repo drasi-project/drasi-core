@@ -187,6 +187,10 @@ impl ConfigOption {
             },
         }
     }
+    /// The configuration key this option describes.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
     pub fn constraint(
         mut self,
         constraint: drasi_computation_contracts::ConfigurationConstraint,

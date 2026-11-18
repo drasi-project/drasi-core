@@ -1,7 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! The connection-limited incoming stream for the tonic server.
+//! The connection-limited incoming stream for tonic servers, shared by the
+//! native gRPC and OpenTelemetry sources.
 //!
 //! Each accepted connection holds a permit until it closes; connections beyond
 //! `maxConnections` are closed immediately. A connection must finish its TLS
@@ -12,7 +13,7 @@
 //! another. Accept errors (for example running out of file descriptors) are
 //! logged and retried after a short pause.
 
-use drasi_computation_network_common::{diag, tokio_rustls::TlsAcceptor};
+use crate::diag;
 use futures_util::Stream;
 use std::{
     future::Future,
@@ -29,6 +30,7 @@ use tokio::{
     task::JoinSet,
     time::{Instant, Sleep},
 };
+use tokio_rustls::TlsAcceptor;
 use tonic::transport::server::{Connected, TcpConnectInfo};
 
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
@@ -36,7 +38,7 @@ const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
 /// The HTTP/2 client connection preface (RFC 9113 section 3.4).
 const PREFACE_BYTES: usize = 24;
 
-type TlsStream = drasi_computation_network_common::tokio_rustls::server::TlsStream<TcpStream>;
+type TlsStream = tokio_rustls::server::TlsStream<TcpStream>;
 
 enum Transport {
     Plain(TcpStream),
@@ -45,7 +47,7 @@ enum Transport {
 
 /// An accepted connection that releases its slot when dropped and fails its
 /// reads if the HTTP/2 preface does not arrive before the deadline.
-pub(crate) struct LimitedStream {
+pub struct LimitedStream {
     inner: Transport,
     info: TcpConnectInfo,
     preface: Option<Pin<Box<Sleep>>>,
@@ -136,8 +138,8 @@ impl AsyncWrite for LimitedStream {
 }
 
 /// Listener settings for [`limited`].
-pub(crate) struct IncomingOptions {
-    pub tls: Option<Arc<drasi_computation_network_common::tokio_rustls::rustls::ServerConfig>>,
+pub struct IncomingOptions {
+    pub tls: Option<Arc<rustls::ServerConfig>>,
     pub max_connections: usize,
     /// Deadline for the TLS handshake and the HTTP/2 connection preface.
     pub header_read_timeout: Duration,
@@ -149,7 +151,7 @@ enum Event {
 }
 
 /// Accepts connections up to `max_connections` at a time.
-pub(crate) fn limited(
+pub fn limited(
     listener: TcpListener,
     options: IncomingOptions,
 ) -> impl Stream<Item = io::Result<LimitedStream>> {
