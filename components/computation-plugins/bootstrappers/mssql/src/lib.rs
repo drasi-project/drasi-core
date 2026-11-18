@@ -21,14 +21,13 @@ use drasi_computation_contracts::{
 };
 use drasi_computation_plugin_sdk::{
     BootstrapCompletionKind, BootstrapFactory, BootstrapFactoryMetadata,
-    BootstrapOutputDescription, BootstrapSession, ConfigSchema, ConfigType, CreateRequest,
-    ElementNamespace, NativeBootstrapProvider, NativeSourceProgress, PairedBootstrapFactory,
-    PluginDefinition, QuiescentBootstrapProvider, Scope,
+    BootstrapOutputDescription, BootstrapSession, ConfigDefinition, ConfigOption, ConfigType,
+    CreateRequest, ElementNamespace, NativeBootstrapProvider, NativeSourceProgress,
+    PairedBootstrapFactory, PluginDefinition, QuiescentBootstrapProvider, Scope,
 };
 use drasi_mssql_common::native::{
-    coordination,
+    coordination, definition,
     provider::{SnapshotProvider, DEFAULT_STOP_TIMEOUT_MS},
-    settings::SETTINGS_FIELDS,
     NativeSettings,
 };
 use std::sync::Arc;
@@ -37,6 +36,9 @@ pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
 pub const MSSQL_BOOTSTRAP: &str = "drasi.mssql/bootstrap";
 pub const MSSQL_SNAPSHOT: &str = "drasi.mssql/snapshot";
 pub struct MsSqlReadOnlySnapshotFactory;
+
+/// Upper bound on `stopTimeoutMs`.
+pub const MAX_STOP_TIMEOUT_MS: u64 = 3_600_000;
 
 /// The read-only snapshot's configuration: optional `labels` (an upper bound
 /// on the tables read, each query's labels narrowing it) and `stopTimeoutMs`
@@ -64,7 +66,7 @@ impl Configuration {
             None => DEFAULT_STOP_TIMEOUT_MS,
             Some(value) => value
                 .as_u64()
-                .filter(|ms| (1..=3_600_000).contains(ms))
+                .filter(|ms| (1..=MAX_STOP_TIMEOUT_MS).contains(ms))
                 .context("stopTimeoutMs must be an integer in 1..=3600000")?,
         };
         let settings = NativeSettings::from_value(serde_json::Value::Object(object))?;
@@ -76,30 +78,33 @@ impl Configuration {
     }
 }
 
-fn snapshot_metadata() -> BootstrapFactoryMetadata {
-    let mut fields = vec![
-        ("labels", ConfigType::Array, false),
-        ("stopTimeoutMs", ConfigType::Integer, false),
+/// The read-only snapshot's published configuration: `labels` and
+/// `stopTimeoutMs` beside the source's own settings options (from the shared
+/// `drasi_mssql_common::native::definition`), without the source-only
+/// `barrierTable`.
+pub fn definition() -> ConfigDefinition {
+    let mut options = vec![
+        ConfigOption::new("labels", ConfigType::Array, false, "Upper bound on the tables read; each query's labels narrow it further. Empty reads every configured table.")
+            .default(serde_json::json!([])),
+        ConfigOption::new("stopTimeoutMs", ConfigType::Integer, false, "How long stop waits for snapshot cleanup.")
+            .default(DEFAULT_STOP_TIMEOUT_MS)
+            .minimum(1)
+            .maximum(MAX_STOP_TIMEOUT_MS),
     ];
-    for name in SETTINGS_FIELDS {
-        let kind = match *name {
-            "port" | "connectTimeoutMs" | "commandTimeoutMs" | "pollIntervalMs" | "maxRows"
-            | "maxBytes" | "reconnectBudgetMs" => ConfigType::Integer,
-            "trustServerCertificate" => ConfigType::Boolean,
-            "tables" | "tableKeys" => ConfigType::Array,
-            _ => ConfigType::String,
-        };
-        fields.push((name, kind, *name == "database"));
-    }
-    let mut configuration = ConfigSchema::from_fields(fields);
-    if let Some(password) = configuration.fields.get_mut("password") {
-        password.secret = true;
-    }
+    options.extend(
+        definition::options()
+            .into_iter()
+            .filter(|option| option.name() != "barrierTable"),
+    );
+    ConfigDefinition::try_new(options).expect("constant SQL Server snapshot configuration")
+}
+
+fn snapshot_metadata() -> BootstrapFactoryMetadata {
     BootstrapFactoryMetadata {
         implementation: ImplementationIdentity::try_new(MSSQL_SNAPSHOT, "1")
             .expect("constant implementation"),
         configuration_version: 1,
-        configuration,
+        configuration: definition().schema(),
         source_progress: false,
         pairing: None,
     }
@@ -306,9 +311,36 @@ mod tests {
             .map(|(name, _)| name.as_str())
             .collect();
         assert_eq!(secrets, ["password"], "password is the only secret");
-        for name in SETTINGS_FIELDS {
-            assert!(metadata.configuration.fields.contains_key(*name), "{name}");
+        let source = ConfigDefinition::try_new(definition::options())?;
+        for (name, field) in &source.schema().fields {
+            if name == "barrierTable" {
+                assert!(!metadata.configuration.fields.contains_key(name));
+                continue;
+            }
+            assert_eq!(
+                metadata
+                    .configuration
+                    .fields
+                    .get(name)
+                    .map(|f| (f.value_type, f.secret)),
+                Some((field.value_type, field.secret)),
+                "{name} is published exactly as the source publishes it"
+            );
+            assert_eq!(
+                definition().details().fields.get(name).map(|f| &f.default),
+                source.details().fields.get(name).map(|f| &f.default),
+                "{name} has the source's default"
+            );
         }
+        drasi_computation_plugin_sdk::testing::ensure_camel_case_configuration(
+            &metadata.configuration,
+        )?;
+        let mut nested = value();
+        nested["tableKeys"] = serde_json::json!([{"table": "dbo.Items", "key_columns": ["id"]}]);
+        assert!(
+            Configuration::from_value(&nested).is_err(),
+            "nested keys are camelCase too"
+        );
         let mut legacy = value();
         legacy["settings"] = serde_json::json!({"connection": {}});
         assert!(Configuration::from_value(&legacy).is_err());

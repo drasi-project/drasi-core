@@ -44,7 +44,11 @@ fn consumer(configuration: Value) -> Result<Box<dyn NativeConsumer>> {
     let factory = HttpDeliveryFactory;
     let request = create_request(&factory, &ComponentId::try_new(CONSUMER_ID)?, configuration);
     match factory
-        .create(&request, ControlSender::default())?
+        .create(
+            &request,
+            ControlSender::default(),
+            drasi_computation_plugin_sdk::ServiceBindings::none(),
+        )?
         .component
     {
         Component::Consumer(consumer) => Ok(consumer),
@@ -235,7 +239,7 @@ async fn lifecycle_and_erase() -> Result<()> {
 fn configuration_round_trips_and_validates() -> Result<()> {
     let factory = HttpDeliveryFactory;
     let metadata = factory.metadata();
-    let details = factory.configuration_details().context("details")?;
+    let details = factory.configuration_details();
     details.validate_schema(&metadata.configuration)?;
     for configuration in [
         json!({"url": "http://127.0.0.1:9/drasi/delivery/v1"}),
@@ -271,6 +275,8 @@ fn assessment_matrix() -> Result<()> {
     let current = json!({"url": "http://127.0.0.1:9/d"});
     let boundary = |proposed: Value| {
         HttpDeliveryFactory
+            .update_planner()
+            .expect("factory planner")
             .assess(&update_request(
                 &HttpDeliveryFactory,
                 &id,

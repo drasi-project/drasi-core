@@ -280,9 +280,18 @@ pub struct PluginVTable {
 pub struct FactoryVTable {
     pub header: Header,
     pub release: Option<unsafe extern "C" fn(*mut c_void)>,
-    /// Configuration-only constructor. No I/O, activation, workers or blocking.
-    pub create:
-        Option<unsafe extern "C" fn(*mut c_void, BorrowedBytes, *mut ComponentHandle) -> Status>,
+    /// The single configuration-only constructor. No I/O, activation, workers
+    /// or blocking. The non-null `ServiceBindingsV1` carries every Host service
+    /// bound to this construction together; the Host binds only services the
+    /// factory's manifest declares.
+    pub create: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            BorrowedBytes,
+            *const services::ServiceBindingsV1,
+            *mut ComponentHandle,
+        ) -> Status,
+    >,
     /// Pure factory planner. Input is a JSON UpdateRequest and success returns a
     /// JSON Assessment, each bounded by MAX_METADATA_BYTES. No construction, I/O,
     /// activation or inspection of mutable external state. An unsupported change

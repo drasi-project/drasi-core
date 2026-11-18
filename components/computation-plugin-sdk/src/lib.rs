@@ -56,7 +56,9 @@ pub use bootstrap_coordination::{
     SourceBootstrapProgress,
 };
 pub use component::{
-    NativeComponent, NativeManagement, NativeService, NativeSink, NativeSource, NativeTransformer,
+    BootstrapInput, NativeBootstrapInput, NativeComponent, NativeDurableBootstrapInput,
+    NativeDurableOutput, NativeInputBindings, NativeManagement, NativeService, NativeSink,
+    NativeSource, NativeTransformer,
 };
 pub use configuration::{ConfigDefinition, ConfigDetails, ConfigOption};
 pub use consumer::{ConsumerMode, NativeConsumer, NativeTransactionalConsumer};
@@ -65,9 +67,13 @@ pub use control::{
     ControlDirection, ControlMessage, ControlNotification, ControlSender, ControlTarget,
     NativeControlHandler, SendControl,
 };
-pub use export::{Component, CreatedComponent, ExportedPlugin, Factory, PluginDefinition};
+pub use export::{
+    ActivationCredentialEndpoint, Component, CreatedComponent, ExportedPlugin, Factory,
+    PluginDefinition, ServiceBindings, SourceBootstrapCoordination, UpdatePlanner,
+};
 pub use metadata::{
-    Capabilities, ConfigField, ConfigSchema, ConfigType, FactoryMetadata, PluginMetadata,
+    Capabilities, ConfigField, ConfigSchema, ConfigType, FactoryMetadata, HostServices,
+    PluginMetadata,
 };
 pub use output_snapshots::{
     NativeOutputSnapshot, NativeOutputSnapshots, OutputSnapshotHeader, SnapshotOpen,
@@ -127,44 +133,11 @@ macro_rules! export_computation_plugin {
             .unwrap_or(std::ptr::null())
         }
         #[no_mangle]
-        pub extern "C" fn drasi_computation_plugin_services_v1(
-        ) -> *const $crate::abi::services::PluginServicesV1 {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                match __drasi_computation_export() {
-                    Ok(export) => export.services(),
-                    Err(_) => std::ptr::null(),
-                }
-            }))
-            .unwrap_or(std::ptr::null())
-        }
-        #[no_mangle]
         pub extern "C" fn drasi_computation_plugin_batching_v1(
         ) -> *const $crate::abi::batching::PluginBatchingV1 {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match __drasi_computation_export() {
                     Ok(export) => export.batching(),
-                    Err(_) => std::ptr::null(),
-                }
-            }))
-            .unwrap_or(std::ptr::null())
-        }
-        #[no_mangle]
-        pub extern "C" fn drasi_computation_plugin_output_snapshots_v1(
-        ) -> *const $crate::abi::output_snapshots::PluginOutputSnapshotsV1 {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                match __drasi_computation_export() {
-                    Ok(export) => export.output_snapshots(),
-                    Err(_) => std::ptr::null(),
-                }
-            }))
-            .unwrap_or(std::ptr::null())
-        }
-        #[no_mangle]
-        pub extern "C" fn drasi_computation_plugin_processing_v1(
-        ) -> *const $crate::abi::processing::PluginProcessingV1 {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                match __drasi_computation_export() {
-                    Ok(export) => export.processing(),
                     Err(_) => std::ptr::null(),
                 }
             }))

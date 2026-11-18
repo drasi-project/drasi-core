@@ -295,17 +295,19 @@ async fn bootstrap_coordination_constructor_only_describes_and_validates_immutab
 ) -> anyhow::Result<()> {
     for shared in [false, true] {
         let native = unsafe {
-            NativePlugin::from_entry_points_with_bootstrap_coordination(
+            NativePlugin::from_entry_points_with(
                 if shared {
                     shared_metadata
                 } else {
                     single_metadata
                 },
                 if shared { shared_entry } else { single_entry },
-                Some(recovery),
-                Some(consumers),
-                None,
-                Some(extension),
+                crate::computation::EntryPoints {
+                    recovery: Some(recovery),
+                    consumer_progress: Some(consumers),
+                    coordination: Some(extension),
+                    ..Default::default()
+                },
             )?
         };
         let factory = &native.factories()[0];
@@ -444,22 +446,41 @@ async fn bootstrap_coordination_validates_every_returned_handle_field() -> anyho
 
 struct OrdinaryFactory(bool);
 impl sdk::Factory for OrdinaryFactory {
+    /// Every field described (fixture).
+    fn configuration_details(&self) -> sdk::ConfigDetails {
+        sdk::ConfigDetails {
+            fields: sdk::Factory::metadata(self)
+                .configuration
+                .fields
+                .into_keys()
+                .map(|name| {
+                    let details = sdk::configuration::ConfigFieldDetails {
+                        description: format!("Fixture field {name}."),
+                        ..Default::default()
+                    };
+                    (name, details)
+                })
+                .collect(),
+        }
+    }
     fn describe(
         &self,
         _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
     ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
         Ok(drasi_computation_plugin_sdk::ComponentDescription::undeclared())
     }
+    /// The flag declares coordination without a progress mode: a
+    /// contradiction refused when the plugin is defined.
     fn metadata(&self) -> sdk::FactoryMetadata {
-        metadata()
-    }
-    fn supports_bootstrap_coordination(&self) -> bool {
-        self.0
+        let mut metadata = metadata();
+        metadata.capabilities.services.bootstrap_coordination = self.0;
+        metadata
     }
     fn create(
         &self,
         request: &CreateRequest,
         _: sdk::ControlSender,
+        _services: sdk::ServiceBindings,
     ) -> anyhow::Result<sdk::CreatedComponent> {
         Ok(
             sdk::Component::Source(Box::new(OrdinarySource(ComponentDescriptor::try_new(
@@ -555,8 +576,6 @@ async fn bootstrap_coordination_absent_and_opted_out_factories_preserve_ordinary
     }
     // Merely advertising the extension cannot grant coordination without its
     // required source progress service.
-    assert!(ordinary_definition(true)
-        .and_then(NativePlugin::from_definition)
-        .is_err());
+    assert!(ordinary_definition(true).is_err());
     Ok(())
 }

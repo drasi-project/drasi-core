@@ -57,7 +57,7 @@ impl Graph {
         gate: Option<Arc<super::lifecycle::Gate>>,
     ) -> Result<Self> {
         let configuration = json!({
-            "query": TEXT, "bootstrap": true, "source_transactions": limits(),
+            "query": TEXT, "bootstrap": true, "sourceTransactions": crate::transaction_settings(limits()),
             "recovery": if gate.is_some() { "auto_reset" } else { "strict" }
         });
         Self::with_configuration(

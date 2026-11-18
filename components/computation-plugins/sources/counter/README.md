@@ -9,7 +9,7 @@ cargo build -p drasi-computation-source-counter --features dynamic-plugin
 ```
 
 The `out` port emits `GraphChangeCodec` envelopes. Configuration requires `stream`;
-defaults are `count=10`, `start=0`, `step=1`, `interval_ms=0`, `paused=false`.
+defaults are `count=10`, `start=0`, `step=1`, `intervalMs=0`, `paused=false`.
 Counts must be nonnegative and the configured integer range must not overflow.
 
 This is a finite **volatile example**, not a persistent or replayable source.

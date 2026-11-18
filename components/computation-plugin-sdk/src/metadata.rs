@@ -272,6 +272,114 @@ pub struct Capabilities {
     /// Optional output progress behavior, independent of semantic identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_progress: Option<OutputProgress>,
+    /// The Host services this factory's components are constructed with. This
+    /// is the only declaration: the Host binds any subset of them together
+    /// through the single create entry, the SDK derives every ABI answer from
+    /// it, and contradictory combinations are refused here, at plugin load.
+    #[serde(default, skip_serializing_if = "HostServices::is_empty")]
+    pub services: HostServices,
+}
+
+/// Host services a factory declares once. The Host binds any subset of them to
+/// one construction and the factory's `create` receives them all together
+/// (`ServiceBindings`). Optional services (`source_progress`,
+/// `source_admission`, `output_snapshot_reads`) may be left unbound by the
+/// graph; `consumer_progress`, `consumer` and indexed processing
+/// (`Capabilities::indexed_processing`) are required whenever declared.
+/// Factory-level implementations (`activation_credentials`,
+/// `bootstrap_coordination`, and update planning through `update_modes`) must
+/// be present exactly when declared; `PluginDefinition::new` checks that.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostServices {
+    /// A source resumes from the committed progress of one downstream owner.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_progress: bool,
+    /// A producer reads every downstream consumer's committed progress.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub consumer_progress: bool,
+    /// A single-output source admits events through a Host-owned channel.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_admission: bool,
+    /// A sink or transformer reads committed snapshots of graph outputs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub output_snapshot_reads: bool,
+    /// A handled sink whose deliveries the Host owns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer: Option<crate::ConsumerMode>,
+    /// An ordinary sink whose input batches the Host collects.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sink_batching: bool,
+    /// A source coordinates paired bootstrap providers from its progress owners.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bootstrap_coordination: bool,
+    /// Activation credentials from a Host identity resource.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub activation_credentials: bool,
+}
+
+impl HostServices {
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// Role rules and the combinations that contradict each other. Everything
+    /// else may be declared and bound together.
+    fn validate(&self, metadata: &FactoryMetadata, outputs: usize) -> anyhow::Result<()> {
+        let role = metadata.role;
+        let c = &metadata.capabilities;
+        anyhow::ensure!(
+            !self.source_progress || role == ComponentRole::Source,
+            "source progress requires a native source"
+        );
+        anyhow::ensure!(
+            !self.consumer_progress
+                || matches!(role, ComponentRole::Source | ComponentRole::Transformer),
+            "consumer progress requires a native source or transformer"
+        );
+        anyhow::ensure!(
+            !self.source_admission || (role == ComponentRole::Source && outputs == 1),
+            "source admission requires a single-output native source"
+        );
+        anyhow::ensure!(
+            !self.output_snapshot_reads
+                || matches!(role, ComponentRole::Sink | ComponentRole::Transformer),
+            "output snapshot reads require a native sink or transformer"
+        );
+        if let Some(mode) = self.consumer {
+            mode.validate_factory(metadata)?;
+        }
+        anyhow::ensure!(
+            !self.sink_batching || role == ComponentRole::Sink,
+            "host-owned batching requires a native sink"
+        );
+        // Contradictions: each pair names two owners of the same fact.
+        anyhow::ensure!(
+            !(self.source_progress && self.consumer_progress),
+            "a source cannot declare both single-owner and consumer-group progress: \
+             each is the owner of its replay position"
+        );
+        anyhow::ensure!(
+            !(self.source_admission && (self.source_progress || self.consumer_progress)),
+            "source admission owns the source's replay; it cannot also declare a progress owner"
+        );
+        anyhow::ensure!(
+            !(self.consumer.is_some() && self.sink_batching),
+            "a consumer's deliveries are Host-owned; it cannot also declare Host-owned batching"
+        );
+        anyhow::ensure!(
+            !(c.durable_output && self.consumer_progress),
+            "durable output owns retained output through indexed processing; it cannot also \
+             declare consumer progress"
+        );
+        anyhow::ensure!(
+            !self.bootstrap_coordination
+                || (role == ComponentRole::Source
+                    && (self.source_progress ^ self.consumer_progress)),
+            "bootstrap coordination requires a source declaring one progress mode"
+        );
+        Ok(())
+    }
 }
 
 impl Capabilities {
@@ -608,6 +716,7 @@ impl FactoryMetadata {
             !c.startup_continuation || c.continuations,
             "startup continuation requires transformer continuations"
         );
+        c.services.validate(self, outputs)?;
         anyhow::ensure!(!c.transactional || (inputs == 1 && outputs == 1
             && !c.wakeups && !c.continuations && !c.control && !c.readiness),
             "transaction participants must be linear and cannot own control, wakeups or continuations");

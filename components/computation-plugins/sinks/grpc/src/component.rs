@@ -4,7 +4,7 @@
 //! The gRPC sink component: lifecycle, management and delivery.
 
 use crate::{
-    config::{ascii_metadata, BatchingConfig, GrpcReactionConfig, GrpcSinkConfig, OutputFormat},
+    config::{ascii_metadata, GrpcReactionConfig, GrpcSinkConfig, OutputFormat},
     proto::reaction,
     render::Renderer,
     transport::{self, ChangeClient, Failure},
@@ -16,7 +16,7 @@ use drasi_computation_contracts::{
     PermanentFailurePolicy, SinkBatching, SinkCompletion, SinkOutputs,
 };
 use drasi_computation_network_common::{
-    batching::{AdaptiveBatchConfig, AdaptivePolicy},
+    batching::AdaptivePolicy,
     config::{delivery_id, sanitize, COMPONENT_HEADER, DELIVERY_ID_HEADER, PORT_HEADER},
     diag,
     retry::{InputOutcome, Retry, RetryPolicy},
@@ -77,36 +77,12 @@ impl Live {
             output_format: OutputFormat::Proto,
             ..projection.clone()
         };
-        let (fixed_batch_size, fixed_flush_ms, adaptive) = match config.batching_config() {
-            BatchingConfig::Fixed {
-                batch_size,
-                batch_flush_timeout_ms,
-            } => (batch_size, batch_flush_timeout_ms, None),
-            BatchingConfig::Adaptive {
-                adaptive_min_batch_size,
-                adaptive_max_batch_size,
-                adaptive_window_size,
-                adaptive_batch_timeout_ms,
-            } => {
-                let max_wait = Duration::from_millis(adaptive_batch_timeout_ms);
-                let policy = AdaptivePolicy::new(
-                    AdaptiveBatchConfig {
-                        min_batch_size: adaptive_min_batch_size,
-                        max_batch_size: adaptive_max_batch_size,
-                        throughput_window: Duration::from_millis(adaptive_window_size as u64 * 100),
-                        max_wait_time: max_wait,
-                        min_wait_time: Duration::from_millis(100).min(max_wait),
-                        adaptive_enabled: true,
-                    },
-                    config.max_batch_bytes,
-                )?;
-                (
-                    adaptive_max_batch_size,
-                    adaptive_batch_timeout_ms,
-                    Some(policy),
-                )
-            }
-        };
+        let adaptive = config
+            .adaptive
+            .as_ref()
+            .map(|adaptive| AdaptivePolicy::from_settings(adaptive, config.max_batch_bytes))
+            .transpose()?;
+        let (fixed_batch_size, fixed_flush_ms) = (config.batch_size, config.batch_flush_timeout_ms);
         let mut secret = MetadataMap::new();
         for (name, value) in config.secret_headers()? {
             let key: MetadataKey<Ascii> = name.parse()?;
@@ -141,8 +117,7 @@ impl Live {
             return Some(adaptive.current());
         }
         (self.fixed_batch_size > 1).then_some(SinkBatching {
-            // The host contract allows at most 1024 inputs per batch.
-            max_inputs: self.fixed_batch_size.min(1024),
+            max_inputs: self.fixed_batch_size.min(SinkBatching::MAX_INPUTS),
             max_operations: self.fixed_batch_size,
             max_bytes: self.max_batch_bytes,
             max_delay_ms: self.fixed_flush_ms,
@@ -187,10 +162,23 @@ impl Batch {
     }
 }
 
+/// The two `/` separators of `{component}/{port}/{range}`.
+const DELIVERY_ID_SEPARATORS: usize = 2;
+/// The longest range `{u64}.{u64}-{u64}.{u64}`: four 20-digit numbers and
+/// three punctuation bytes.
+const DELIVERY_ID_RANGE_BYTES: usize = 4 * 20 + 3;
+/// Upper bound on the protobuf framing of one metadata map entry (entry,
+/// key and value tags and length prefixes).
+const METADATA_ENTRY_FRAMING_BYTES: usize = 8;
+
 /// Upper bound on the encoded `x-drasi-delivery-id` map entry for a key.
 fn delivery_id_bytes(key: &ChangeBatchKey) -> usize {
-    // `{component}/{port}/{u64}.{u64}-{u64}.{u64}` plus the name and framing.
-    DELIVERY_ID_HEADER.len() + key.component.as_str().len() + key.port.as_str().len() + 2 + 83 + 8
+    DELIVERY_ID_HEADER.len()
+        + key.component.as_str().len()
+        + key.port.as_str().len()
+        + DELIVERY_ID_SEPARATORS
+        + DELIVERY_ID_RANGE_BYTES
+        + METADATA_ENTRY_FRAMING_BYTES
 }
 
 pub(crate) struct GrpcSink {
@@ -569,7 +557,7 @@ pub(crate) fn plan(current: &GrpcSinkConfig, proposed: &GrpcSinkConfig) -> Asses
     );
     planner.field(
         "batching",
-        c.batching != p.batching
+        c.adaptive != p.adaptive
             || c.batch_size != p.batch_size
             || c.batch_flush_timeout_ms != p.batch_flush_timeout_ms
             || c.max_batch_bytes != p.max_batch_bytes,

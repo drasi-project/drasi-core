@@ -30,11 +30,18 @@ declares.
 
 ## Standalone snapshots
 
-Select `drasi.postgres/snapshot` with a secret `settings`
-object containing `host` (default `localhost`), `port` (5432), `database`, `user`,
-`password` (empty), `ssl_mode` (`prefer`), optional `tls_ca_pem`, explicit `tables`,
-optional `table_keys`, and positive `max_tables`, `max_protocol_bytes`,
-`io_timeout_ms`, `max_duration_ms`. Tables may be schema-qualified; selection,
+Select `drasi.postgres/snapshot` with one flat camelCase object, like the
+SQLite and MySQL standalone snapshots: `host` (default `localhost`), `port`
+(5432), `database`, `user`, `password` (empty; the only secret, a secret
+reference), `sslMode` (`prefer`), optional `tlsCaPem`, explicit `tables`,
+optional `tableKeys` (`[{"table": "...", "keyColumns": [...]}]`), and positive
+`maxTables` (256), `maxProtocolBytes` (16 MiB), `ioTimeoutMs` (30000) and
+`maxDurationMs` (300000). The connection, TLS and key options are published
+from the same definition as the native source's
+(`drasi_postgres_common::replication::definition`), so they carry the source's
+descriptions, defaults and allowed values; an unknown key at any level
+(including the retired nested `settings` object and snake_case names) is
+refused. Tables may be schema-qualified; selection,
 keys and bounds are validated before connection. The served source and stream
 are not configured: the graph relation supplies the source whose `bootstrap`
 input the provider is connected to (or the single source a query reads, for a
@@ -217,7 +224,7 @@ filters, inheritance and partition-root remapping reject explicitly.
 ```sh
 cargo build -p drasi-computation-bootstrap-postgres --features dynamic-plugin
 make build-native-postgres-plugins
-cargo test -p drasi-source-postgres --test native_transactions
+cargo test -p drasi-computation-source-postgres --test native_transactions
 ```
 
 The legacy `BootstrapProvider` callback remains available for unconverted

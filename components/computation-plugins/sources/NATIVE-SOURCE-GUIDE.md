@@ -34,9 +34,23 @@ Own independent workers with the SDK's `ActivationScope` (re-exported from
 A source whose only work is network admission refuses new input while paused
 (for example, HTTP `503`, bridge `Busy`); it needs no worker gate.
 
+## Declared services
+
+- Declare every Host service once, in `Capabilities::services`
+  (`source_progress`, `consumer_progress`, `source_admission`,
+  `bootstrap_coordination`, `activation_credentials`). `Factory::create`
+  receives every bound service together in `ServiceBindings`; there are no
+  per-service create hooks.
+- Return the factory-level implementations exactly when declared:
+  `Factory::activation_credentials` and `Factory::bootstrap_coordination`. The
+  library is refused at load otherwise.
+- Only contradictory declarations are refused: single-owner with
+  consumer-group progress, admission with a progress owner, coordination
+  without exactly one progress mode.
+
 ## Management
 
-- Implement `Factory::supports_update_planning` and `Factory::assess`. The
+- Implement `UpdatePlanner::assess` and return it from `Factory::update_planner`. The
   assessment must be pure: configuration only, with no I/O, no clock and no
   external state.
 - Implement `NativeManagement` and declare `management: true` with every
@@ -61,10 +75,18 @@ A source whose only work is network admission refuses new input while paused
 
 ## Configuration
 
+- Keys are lowerCamelCase at every level (`intervalMs`, `tlsCaPem`); database
+  plugins name their connection `host`, `port`, `database`, `user`, `password`.
+  No snake_case aliases. The conformance kit's `configuration_round_trip`
+  checks the published keys (`testing::ensure_camel_case_configuration`).
 - `#[serde(deny_unknown_fields)]` on every configuration struct, including
-  nested ones.
-- Publish `configuration_details`. Every published default must equal the serde
-  default. A computed default uses `default_description` instead of a literal.
+  nested ones. Generate the published schema from the same types or option
+  list the parser uses; a provider that shares a source's settings publishes
+  the source's options (from the shared `*-common` `definition` module), never
+  a hand-maintained copy or a name-to-type match.
+- Publish `configuration_details` (required): describe every schema field;
+  `PluginDefinition::new` refuses an undescribed field. Every published default
+  must equal the serde default. A computed default uses `default_description` instead of a literal.
 - Mark secrets with `ConfigOption::secret()`. The host resolves references only
   for **top-level** fields, so keep each secret top-level. Never mark a whole
   nested object secret.

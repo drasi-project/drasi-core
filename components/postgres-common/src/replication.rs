@@ -30,6 +30,7 @@ use crate::{
 };
 
 pub mod coordination;
+pub mod definition;
 pub mod error;
 pub mod rows;
 pub mod schema;

@@ -20,7 +20,7 @@ fn settings(component: &str, from: &str) -> serde_json::Value {
 fn configured(component: &str, from: &str) -> serde_json::Value {
     let mut configuration = settings(component, from);
     configuration["query"] = json!(TEXT);
-    configuration["outbox_capacity"] = json!(8);
+    configuration["outboxCapacity"] = json!(8);
     configuration
 }
 
@@ -243,6 +243,9 @@ async fn shared_query_middleware_uses_actual_query_producer_scope() -> Result<()
     derived_input_scope().await
 }
 
+/// The factory publishes its registry's kinds in its configuration schema, so
+/// an unregistered kind is refused by the declared schema, before any
+/// construction or index access.
 #[test]
 fn shared_query_middleware_rejects_unknown_factory_before_opening_indexes() -> Result<()> {
     let directory = tempfile::tempdir()?;
@@ -258,7 +261,7 @@ fn shared_query_middleware_rejects_unknown_factory_before_opening_indexes() -> R
         .err()
         .context("unknown middleware was accepted")?;
     assert!(
-        format!("{error:#}").contains("missing-middleware"),
+        format!("{error:#}").contains("configuration field middleware"),
         "{error:#}"
     );
     assert!(std::fs::read_dir(directory.path())?.next().is_none());

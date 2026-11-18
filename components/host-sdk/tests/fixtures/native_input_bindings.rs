@@ -14,6 +14,23 @@ use std::{io::Write, path::PathBuf, sync::Arc};
 pub struct Factory;
 
 impl sdk::Factory for Factory {
+    /// Every field described (fixture).
+    fn configuration_details(&self) -> sdk::ConfigDetails {
+        sdk::ConfigDetails {
+            fields: sdk::Factory::metadata(self)
+                .configuration
+                .fields
+                .into_keys()
+                .map(|name| {
+                    let details = sdk::configuration::ConfigFieldDetails {
+                        description: format!("Fixture field {name}."),
+                        ..Default::default()
+                    };
+                    (name, details)
+                })
+                .collect(),
+        }
+    }
     fn describe(
         &self,
         _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
@@ -54,6 +71,7 @@ impl sdk::Factory for Factory {
         &self,
         request: &sdk::CreateRequest,
         _: sdk::ControlSender,
+        _services: sdk::ServiceBindings,
     ) -> anyhow::Result<sdk::CreatedComponent> {
         Ok(
             sdk::Component::Transformer(Box::new(Transformer::new(request, self.metadata())?))
@@ -65,6 +83,23 @@ impl sdk::Factory for Factory {
 pub struct TransactionalFactory;
 
 impl sdk::Factory for TransactionalFactory {
+    /// Every field described (fixture).
+    fn configuration_details(&self) -> sdk::ConfigDetails {
+        sdk::ConfigDetails {
+            fields: sdk::Factory::metadata(self)
+                .configuration
+                .fields
+                .into_keys()
+                .map(|name| {
+                    let details = sdk::configuration::ConfigFieldDetails {
+                        description: format!("Fixture field {name}."),
+                        ..Default::default()
+                    };
+                    (name, details)
+                })
+                .collect(),
+        }
+    }
     fn describe(
         &self,
         _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
@@ -84,6 +119,7 @@ impl sdk::Factory for TransactionalFactory {
         &self,
         request: &sdk::CreateRequest,
         _: sdk::ControlSender,
+        _services: sdk::ServiceBindings,
     ) -> anyhow::Result<sdk::CreatedComponent> {
         Ok(
             sdk::Component::Transactional(Box::new(Transformer::new(request, self.metadata())?))
@@ -123,15 +159,6 @@ impl sdk::NativeComponent for Transformer {
 
     fn configuration(&self) -> anyhow::Result<serde_json::Value> {
         Ok(self.configuration.clone())
-    }
-
-    fn supports_input_binding_updates(&self) -> bool {
-        true
-    }
-
-    async fn bind_inputs(&mut self, bindings: &[InputBinding]) -> anyhow::Result<()> {
-        self.bindings = Some(bindings.to_vec());
-        Ok(())
     }
 
     async fn start(
@@ -179,6 +206,17 @@ impl sdk::NativeComponent for Transformer {
     ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
         Ok(())
     }
+    fn input_bindings(&mut self) -> Option<&mut dyn sdk::NativeInputBindings> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl sdk::NativeInputBindings for Transformer {
+    async fn bind_inputs(&mut self, bindings: &[InputBinding]) -> anyhow::Result<()> {
+        self.bindings = Some(bindings.to_vec());
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -221,6 +259,23 @@ impl sdk::TransactionalComponent for Transformer {
 pub struct ConsumerFactory;
 
 impl sdk::Factory for ConsumerFactory {
+    /// Every field described (fixture).
+    fn configuration_details(&self) -> sdk::ConfigDetails {
+        sdk::ConfigDetails {
+            fields: sdk::Factory::metadata(self)
+                .configuration
+                .fields
+                .into_keys()
+                .map(|name| {
+                    let details = sdk::configuration::ConfigFieldDetails {
+                        description: format!("Fixture field {name}."),
+                        ..Default::default()
+                    };
+                    (name, details)
+                })
+                .collect(),
+        }
+    }
     fn describe(
         &self,
         request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
@@ -250,19 +305,20 @@ impl sdk::Factory for ConsumerFactory {
             completion: Some(SinkCompletion::Handled),
             capabilities: sdk::Capabilities {
                 input_binding_updates: true,
+                services: sdk::HostServices {
+                    consumer: Some(sdk::ConsumerMode::External),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         }
-    }
-
-    fn consumer_mode(&self) -> Option<sdk::ConsumerMode> {
-        Some(sdk::ConsumerMode::External)
     }
 
     fn create(
         &self,
         request: &sdk::CreateRequest,
         _: sdk::ControlSender,
+        _services: sdk::ServiceBindings,
     ) -> anyhow::Result<sdk::CreatedComponent> {
         let observations = request
             .configuration
@@ -294,16 +350,6 @@ impl sdk::NativeComponent for Consumer {
 
     fn configuration(&self) -> anyhow::Result<serde_json::Value> {
         Ok(self.configuration.clone())
-    }
-
-    fn supports_input_binding_updates(&self) -> bool {
-        true
-    }
-
-    async fn bind_inputs(&mut self, bindings: &[InputBinding]) -> anyhow::Result<()> {
-        std::fs::write(&self.observations, serde_json::to_vec(bindings)?)?;
-        self.bound = true;
-        Ok(())
     }
 
     async fn start(
@@ -346,6 +392,18 @@ impl sdk::NativeComponent for Consumer {
         &mut self,
         _: &drasi_computation_plugin_sdk::lifecycle::DisposeContext,
     ) -> drasi_computation_plugin_sdk::lifecycle::LifecycleResult {
+        Ok(())
+    }
+    fn input_bindings(&mut self) -> Option<&mut dyn sdk::NativeInputBindings> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl sdk::NativeInputBindings for Consumer {
+    async fn bind_inputs(&mut self, bindings: &[InputBinding]) -> anyhow::Result<()> {
+        std::fs::write(&self.observations, serde_json::to_vec(bindings)?)?;
+        self.bound = true;
         Ok(())
     }
 }

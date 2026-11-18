@@ -17,11 +17,9 @@ use drasi_computation_plugin_sdk::{
 use drasi_core_types::models::SourceMiddlewareConfig;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    mapping::{Mapper, Pipeline},
-    output::Output,
-    state::State,
-};
+use drasi_computation_middleware_common::{Mode, Pipeline};
+
+use crate::{mapping::Mapper, output::Output, state::State};
 
 #[cfg(test)]
 mod tests;
@@ -54,6 +52,7 @@ impl View {
     ) -> Result<Self> {
         let configuration: Configuration = serde_json::from_value(configuration)?;
         let mapper = Box::new(Pipeline::new(
+            Mode::Images,
             &configuration.middleware,
             &configuration.pipeline,
         )?);

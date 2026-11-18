@@ -120,7 +120,7 @@ the dedicated [stateful view transformer][view-transform] when the output must
 describe the current dataset.
 
 The `drasi.standard/view` factory reconstructs complete input images, runs the
-configured map/relabel pipeline, and records the outputs actually emitted.
+configured stateless middleware pipeline (shared with `drasi.standard/middleware`), and records the outputs actually emitted.
 For example, removing a product from a filtered projection retracts its old
 output; removing a child from an expansion deletes that child's output; changing
 a key removes the old identity. Historical mapping is not rerun to guess what

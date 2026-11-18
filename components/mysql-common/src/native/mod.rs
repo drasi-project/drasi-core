@@ -17,6 +17,7 @@ pub mod binlog;
 pub mod catalog;
 pub mod connection;
 pub mod ddl;
+pub mod definition;
 pub mod errors;
 pub mod progress;
 pub mod rows;

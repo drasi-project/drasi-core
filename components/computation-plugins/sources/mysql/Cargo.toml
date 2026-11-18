@@ -36,7 +36,23 @@ serde_json = "1"
 tokio = { version = "1", features = ["sync", "rt", "time", "macros"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "time", "macros"] }
+# The live tests (`tests/native_live.rs`) drive the shared engine through
+# test-only DrasiLib adapters and build graphs from this plugin's factories
+# through the Host SDK.
+drasi-computation-bootstrap-mysql.workspace = true
+drasi-core.workspace = true
+drasi-host-sdk.workspace = true
+drasi-index-rocksdb = { workspace = true, features = ["computation"] }
+drasi-lib.workspace = true
+drasi-mysql-common = { workspace = true, features = ["native", "storedproc"] }
+drasi-reaction-application.workspace = true
+futures-util = "0.3"
+mysql_common = { version = "0.37", features = ["binlog"] }
+shared-tests = { path = "../../../../shared-tests" }
+tempfile = "3"
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["mysql"] }
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "time", "macros", "process"] }
 
 [lints]
 workspace = true

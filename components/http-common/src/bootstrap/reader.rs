@@ -25,10 +25,10 @@ use drasi_core_types::models::SourceChange;
 
 use super::auth::{self, ResolvedAuth};
 use super::config::{EndpointConfig, HttpBootstrapConfig, HttpMethod, OperationType};
-use super::content_parser::{self, ContentType};
 use super::pagination::{self, NextPage, Paginator};
 use super::response;
-use super::template_engine::TemplateEngine;
+use crate::content::{parse_content, ContentType};
+use crate::template::TemplateEngine;
 
 /// Default maximum number of pages to fetch per endpoint to prevent infinite loops.
 const DEFAULT_MAX_PAGES: u64 = 10_000;
@@ -166,7 +166,7 @@ impl HttpSnapshotReader {
             .response
             .content_type
             .as_ref()
-            .map(ContentType::from_override);
+            .map(ContentType::from);
 
         // Set up pagination with SSRF protection (origin host validation)
         let origin_host = pagination::extract_origin_host(&endpoint.url).unwrap_or_default();
@@ -381,7 +381,7 @@ impl HttpSnapshotReader {
             let ct = resolve_content_type(content_type_override, &response_headers);
 
             // Validate: parse response body
-            match content_parser::parse_body(&response_text, &ct) {
+            match parse_content(response_text.as_bytes(), ct.clone()) {
                 Ok(parsed) => return Ok((parsed, response_headers)),
                 Err(e) => {
                     // Body parsing failed — likely truncated response.
@@ -393,7 +393,7 @@ impl HttpSnapshotReader {
                         max_retries + 1,
                         response_text.len(),
                     );
-                    last_error = Some(e.context(format!(
+                    last_error = Some(anyhow::Error::new(e).context(format!(
                         "Failed to parse response from '{}' as {ct:?} \
                          (body length: {}, possible truncation)",
                         url,

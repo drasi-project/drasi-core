@@ -11,7 +11,7 @@
 use anyhow::{Context, Result};
 use drasi_computation_contracts::ComponentId;
 use drasi_computation_plugin_sdk::{ConfigDefinition, ConfigOption, ConfigType};
-use drasi_mysql_common::native::{settings::*, MySqlConfig, MySqlOutput, MySqlSourceSettings};
+use drasi_mysql_common::native::{definition, MySqlConfig, MySqlOutput, MySqlSourceSettings};
 use serde_json::{json, Value};
 
 /// A parsed standalone snapshot configuration.
@@ -50,67 +50,10 @@ impl BootstrapConfig {
     }
 }
 
-fn string(name: &str, required: bool, description: &str) -> ConfigOption {
-    ConfigOption::new(name, ConfigType::String, required, description)
-}
-
-fn integer(name: &str, description: &str, default: u64, minimum: i64) -> ConfigOption {
-    ConfigOption::new(name, ConfigType::Integer, false, description)
-        .default(default)
-        .minimum(minimum)
-}
-
-/// The shared options. They mirror the native MySQL source's definition;
-/// a unit test checks both describe exactly [`MySqlSourceSettings`].
-fn shared_options() -> Vec<ConfigOption> {
-    vec![
-        string("host", false, "MySQL host name or address.").default("localhost"),
-        ConfigOption::new("port", ConfigType::Integer, false, "MySQL port.")
-            .default(DEFAULT_PORT)
-            .minimum(1)
-            .maximum(65_535),
-        string("database", true, "Database (schema) to load. Any MySQL identifier."),
-        string("user", true, "Login user. Coordinated loading needs RELOAD (FLUSH TABLES WITH READ LOCK), REPLICATION CLIENT, REPLICATION SLAVE and SELECT; standalone loading needs SELECT."),
-        string("password", false, "Login password. A secret reference.").secret(),
-        string("sslMode", false, "disabled, if_available, require, require_verify_ca or require_verify_full.")
-            .default("if_available")
-            .allowed([json!("disabled"), json!("if_available"), json!("require"), json!("require_verify_ca"), json!("require_verify_full")]),
-        string("tlsCaPem", false, "Additional trusted CA certificates (PEM, at most 64 KiB)."),
-        string("tlsClientCertPem", false, "Client certificate chain (PEM) for mutual TLS."),
-        string("tlsClientKeyPem", false, "PKCS#8 private key (PEM) of tlsClientCertPem. A secret reference.").secret(),
-        ConfigOption::new("serverId", ConfigType::Integer, false, "The paired source's replica server ID.")
-            .minimum(1)
-            .maximum(u64::from(u32::MAX))
-            .default_description("derived from the source component ID"),
-        integer("heartbeatIntervalMs", "The paired source's heartbeat period.", DEFAULT_HEARTBEAT_INTERVAL_MS, 1),
-        ConfigOption::new("tables", ConfigType::Array, false, "Tables to load; the standalone snapshot requires an explicit list.")
-            .default(json!([])),
-        ConfigOption::new("tableKeys", ConfigType::Array, false, "Explicit keys, as {\"table\": \"name\", \"keyColumns\": [..]}.")
-            .default(json!([])),
-        string("startFrom", false, "Coordinated loading requires snapshot; the standalone snapshot requires end.")
-            .default("end")
-            .allowed([json!("end"), json!("beginning"), json!("gtid"), json!("position"), json!("snapshot")]),
-        string("startGtidSet", false, "Unused by bootstrap; accepted so the source configuration can be shared."),
-        string("startBinlogFile", false, "Unused by bootstrap; accepted so the source configuration can be shared."),
-        ConfigOption::new("startBinlogPosition", ConfigType::Integer, false, "Unused by bootstrap; accepted so the source configuration can be shared.")
-            .minimum(4)
-            .maximum(u64::from(u32::MAX)),
-        integer("snapshotLockTimeoutMs", "Longest wait for FLUSH TABLES WITH READ LOCK.", DEFAULT_SNAPSHOT_LOCK_TIMEOUT_MS, 1),
-        integer("maxTransactionChanges", "The paired source's transaction change limit.", DEFAULT_MAX_TRANSACTION_CHANGES as u64, 1),
-        integer("maxTransactionBytes", "The paired source's transaction byte limit.", DEFAULT_MAX_TRANSACTION_BYTES as u64, 1),
-        integer("maxTransactionDurationMs", "The paired source's transaction deadline.", DEFAULT_MAX_TRANSACTION_DURATION_MS, 1),
-        integer("maxProtocolBytes", "Largest MySQL packet or row accepted, in bytes.", DEFAULT_MAX_PROTOCOL_BYTES as u64, 256),
-        integer("ioTimeoutMs", "Deadline for connecting and each packet exchange.", DEFAULT_IO_TIMEOUT_MS, 1),
-        ConfigOption::new("reconnectBudgetMs", ConfigType::Integer, false, "The paired source's reconnect budget; unused by bootstrap.")
-            .default(DEFAULT_RECONNECT_BUDGET_MS)
-            .minimum(0)
-            .maximum(MAX_RECONNECT_BUDGET_MS),
-    ]
-}
-
-/// The published standalone configuration.
+/// The published standalone configuration: `labels` beside the native
+/// source's own settings options (`drasi_mysql_common::native::definition`).
 pub fn definition() -> ConfigDefinition {
-    let mut options = shared_options();
+    let mut options = definition::options();
     options.push(
         ConfigOption::new("labels", ConfigType::Array, false, "Upper bound on the tables loaded, within the allowlist; empty loads the whole allowlist. Each query's labels narrow it further.")
             .default(json!([])),
@@ -131,34 +74,16 @@ mod tests {
     }
 
     #[test]
-    fn shared_options_describe_exactly_the_shared_settings() {
-        let mut settings = MySqlSourceSettings::new("h", 3306, "app", "u");
-        settings.tls_ca_pem = Some("x".into());
-        settings.tls_client_cert_pem = Some("x".into());
-        settings.tls_client_key_pem = Some("x".into());
-        settings.server_id = std::num::NonZeroU32::new(1);
-        settings.start_gtid_set = Some("x".into());
-        settings.start_binlog_file = Some("x".into());
-        settings.start_binlog_position = Some(4);
-        let serialized = serde_json::to_value(&settings).unwrap();
-        let mut expected: Vec<_> = serialized.as_object().unwrap().keys().cloned().collect();
-        expected.sort();
-        let mut published: Vec<_> = definition()
-            .schema()
-            .fields
-            .keys()
-            .map(|name| name.to_string())
-            .filter(|name| name != "labels")
-            .collect();
-        published.sort();
-        assert_eq!(published, expected);
-        let defaults =
-            serde_json::to_value(MySqlSourceSettings::new("localhost", 3306, "a", "u")).unwrap();
-        for (name, field) in definition().details().fields {
-            if let (Some(default), Some(actual)) = (field.default, defaults.get(&name)) {
-                assert_eq!(actual, &default, "{name}");
-            }
-        }
+    fn options_are_the_source_settings_options_plus_labels() {
+        let source = ConfigDefinition::try_new(definition::options()).unwrap();
+        let published = definition().schema();
+        let mut names: Vec<_> = published.fields.keys().cloned().collect();
+        names.retain(|name| name != "labels");
+        assert!(names.iter().eq(source.schema().fields.keys()));
+        drasi_computation_plugin_sdk::testing::ensure_camel_case_configuration(&published).unwrap();
+        let mut nested = base();
+        nested["tableKeys"] = json!([{"table": "items", "key_columns": ["id"]}]);
+        assert!(BootstrapConfig::from_value(&nested).is_err());
     }
 
     #[test]

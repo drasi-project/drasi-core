@@ -27,9 +27,10 @@ use drasi_computation_contracts::{
     ComponentRole, ComponentUpdateMode, GraphChangeCodec, ImplementationIdentity,
 };
 use drasi_computation_plugin_sdk::{
-    lifecycle::Assessment, ActivationCredentialContext, Capabilities, Component, ConfigDetails,
-    ControlSender, CreateRequest, CreatedComponent, Factory, FactoryMetadata,
-    NativeConsumerProgress, PluginDefinition, UpdateRequest,
+    lifecycle::Assessment, ActivationCredentialContext, ActivationCredentialEndpoint, Capabilities,
+    Component, ConfigDetails, ControlSender, CreateRequest, CreatedComponent, Factory,
+    FactoryMetadata, HostServices, NativeConsumerProgress, PluginDefinition, ServiceBindings,
+    SourceBootstrapCoordination, UpdatePlanner, UpdateRequest,
 };
 use std::sync::Arc;
 
@@ -143,22 +144,54 @@ impl Factory for MsSqlSourceFactory {
                 erases_owned_state: true,
                 // Outputs carry source replay progress, not a producer identity of their
                 // own (Host admission, when bound, publishes under its durable identity).
+                services: HostServices {
+                    consumer_progress: true,
+                    bootstrap_coordination: true,
+                    activation_credentials: true,
+                    ..HostServices::default()
+                },
                 ..Capabilities::default()
             },
         }
     }
-    fn configuration_details(&self) -> Option<ConfigDetails> {
-        Some(config::definition().details())
+    fn configuration_details(&self) -> ConfigDetails {
+        config::definition().details()
     }
-    fn supports_update_planning(&self) -> bool {
-        true
+
+    fn create(
+        &self,
+        request: &CreateRequest,
+        _control: ControlSender,
+        services: ServiceBindings,
+    ) -> Result<CreatedComponent> {
+        let progress = services
+            .consumer_progress
+            .context("SQL Server source requires its actual consumer-progress binding")?;
+        Ok(Component::Source(Box::new(self.create_source(
+            request,
+            &progress,
+            tiberius_connectors(),
+        )?))
+        .into())
     }
+    fn update_planner(&self) -> Option<&dyn UpdatePlanner> {
+        Some(self)
+    }
+    fn activation_credentials(&self) -> Option<&dyn ActivationCredentialEndpoint> {
+        Some(self)
+    }
+    fn bootstrap_coordination(&self) -> Option<&dyn SourceBootstrapCoordination> {
+        Some(self)
+    }
+}
+
+impl UpdatePlanner for MsSqlSourceFactory {
     fn assess(&self, request: &UpdateRequest) -> Result<Assessment> {
         management::assess(request)
     }
-    fn supports_activation_credentials(&self) -> bool {
-        true
-    }
+}
+
+impl ActivationCredentialEndpoint for MsSqlSourceFactory {
     fn activation_credential_context(
         &self,
         request: &CreateRequest,
@@ -171,12 +204,9 @@ impl Factory for MsSqlSourceFactory {
         context.validate()?;
         Ok(context)
     }
-    fn supports_consumer_progress(&self) -> bool {
-        true
-    }
-    fn supports_bootstrap_coordination(&self) -> bool {
-        true
-    }
+}
+
+impl SourceBootstrapCoordination for MsSqlSourceFactory {
     fn create_bootstrap_coordinator(
         &self,
         request: &CreateRequest,
@@ -190,22 +220,6 @@ impl Factory for MsSqlSourceFactory {
             SourceConfig::from_value(&request.configuration)?,
             progress,
         )?))
-    }
-    fn create(&self, _: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
-        anyhow::bail!("SQL Server source requires its actual consumer-progress binding")
-    }
-    fn create_with_consumer_progress(
-        &self,
-        request: &CreateRequest,
-        _control: ControlSender,
-        progress: NativeConsumerProgress,
-    ) -> Result<CreatedComponent> {
-        Ok(Component::Source(Box::new(self.create_source(
-            request,
-            &progress,
-            tiberius_connectors(),
-        )?))
-        .into())
     }
 }
 
@@ -234,11 +248,10 @@ mod tests {
         assert!(metadata.capabilities.management && metadata.capabilities.erases_owned_state);
         assert!(metadata.configuration.fields["password"].secret);
         assert!(!metadata.configuration.fields.contains_key("settings"));
-        assert!(MsSqlSourceFactory.supports_consumer_progress());
-        assert!(MsSqlSourceFactory.supports_activation_credentials());
-        let details = MsSqlSourceFactory
-            .configuration_details()
-            .context("configuration details")?;
+        assert!(metadata.capabilities.services.consumer_progress);
+        assert!(metadata.capabilities.services.activation_credentials);
+        assert!(MsSqlSourceFactory.activation_credentials().is_some());
+        let details = MsSqlSourceFactory.configuration_details();
         details.validate_schema(&metadata.configuration)?;
         Ok(())
     }

@@ -19,7 +19,7 @@ use std::collections::HashMap;
 
 /// Top-level configuration for the HTTP bootstrap provider.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HttpBootstrapConfig {
     /// List of endpoint configurations to fetch data from.
     pub endpoints: Vec<EndpointConfig>,
@@ -56,7 +56,7 @@ fn default_retry_delay_ms() -> u64 {
 
 /// Configuration for a single HTTP endpoint to bootstrap from.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EndpointConfig {
     /// The URL to fetch data from.
     pub url: String,
@@ -100,7 +100,12 @@ pub enum HttpMethod {
 
 /// Authentication configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "kebab-case")]
+#[serde(
+    tag = "type",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum AuthConfig {
     /// Bearer token authentication.
     Bearer {
@@ -149,7 +154,12 @@ pub enum ApiKeyLocation {
 
 /// Pagination configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "kebab-case")]
+#[serde(
+    tag = "type",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum PaginationConfig {
     /// Offset/limit pagination.
     OffsetLimit {
@@ -353,7 +363,7 @@ fn default_per_page_param() -> String {
 
 /// Response parsing configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ResponseConfig {
     /// JSONPath expression to locate the array of items in the response.
     /// Use "$" if the response is a top-level array.
@@ -383,7 +393,7 @@ pub enum ContentTypeOverride {
 
 /// Mapping configuration from response items to Drasi graph elements.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ElementMappingConfig {
     /// Type of element to create.
     pub element_type: ElementType,
@@ -417,7 +427,7 @@ pub enum ElementType {
 
 /// Template for element creation using Handlebars expressions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ElementTemplate {
     /// Handlebars template for element ID.
     pub id: String,
@@ -450,13 +460,13 @@ mod tests {
                 "method": "GET",
                 "auth": {
                     "type": "bearer",
-                    "token_env": "API_TOKEN"
+                    "tokenEnv": "API_TOKEN"
                 },
                 "pagination": {
                     "type": "offset-limit",
-                    "offset_param": "offset",
-                    "limit_param": "limit",
-                    "page_size": 100
+                    "offsetParam": "offset",
+                    "limitParam": "limit",
+                    "pageSize": 100
                 },
                 "response": {
                     "itemsPath": "$.data",
@@ -493,11 +503,11 @@ mod tests {
     fn test_deserialize_cursor_pagination() {
         let json = r#"{
             "type": "cursor",
-            "cursor_param": "starting_after",
-            "cursor_path": "$.data[-1].id",
-            "has_more_path": "$.has_more",
-            "page_size_param": "limit",
-            "page_size": 100
+            "cursorParam": "starting_after",
+            "cursorPath": "$.data[-1].id",
+            "hasMorePath": "$.has_more",
+            "pageSizeParam": "limit",
+            "pageSize": 100
         }"#;
 
         let config: PaginationConfig = serde_json::from_str(json).unwrap();
@@ -520,9 +530,9 @@ mod tests {
     fn test_deserialize_oauth2_auth() {
         let json = r#"{
             "type": "oauth2-client-credentials",
-            "token_url": "https://auth.example.com/token",
-            "client_id_env": "CLIENT_ID",
-            "client_secret_env": "CLIENT_SECRET",
+            "tokenUrl": "https://auth.example.com/token",
+            "clientIdEnv": "CLIENT_ID",
+            "clientSecretEnv": "CLIENT_SECRET",
             "scopes": ["read", "write"]
         }"#;
 
@@ -542,8 +552,8 @@ mod tests {
     fn test_deserialize_next_url_pagination() {
         let json = r#"{
             "type": "next-url",
-            "next_url_path": "$.nextRecordsUrl",
-            "base_url": "https://instance.salesforce.com"
+            "nextUrlPath": "$.nextRecordsUrl",
+            "baseUrl": "https://instance.salesforce.com"
         }"#;
 
         let config: PaginationConfig = serde_json::from_str(json).unwrap();
@@ -560,6 +570,52 @@ mod tests {
             }
             _ => panic!("Expected NextUrl pagination"),
         }
+    }
+
+    #[test]
+    fn keys_are_camel_case_and_unknown_nested_keys_are_refused() {
+        let endpoint = |auth: serde_json::Value,
+                        pagination: serde_json::Value,
+                        template: serde_json::Value| {
+            serde_json::json!({"endpoints": [{
+                "url": "https://api.example.com/users",
+                "auth": auth,
+                "pagination": pagination,
+                "response": {"mappings": [{"elementType": "node", "template": template}]}
+            }]})
+        };
+        let template = serde_json::json!({"id": "{{item.id}}", "labels": ["User"]});
+        let good = endpoint(
+            serde_json::json!({"type": "bearer", "tokenEnv": "TOKEN"}),
+            serde_json::json!({"type": "offset-limit", "offsetParam": "o", "pageSize": 10}),
+            template.clone(),
+        );
+        serde_json::from_value::<HttpBootstrapConfig>(good).unwrap();
+        for (auth, pagination, template) in [
+            (
+                serde_json::json!({"type": "bearer", "token_env": "TOKEN"}),
+                serde_json::Value::Null,
+                template.clone(),
+            ),
+            (
+                serde_json::Value::Null,
+                serde_json::json!({"type": "offset-limit", "page_size": 10}),
+                template.clone(),
+            ),
+            (
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+                serde_json::json!({"id": "x", "labels": [], "propertys": {}}),
+            ),
+        ] {
+            let value = endpoint(auth, pagination, template);
+            assert!(serde_json::from_value::<HttpBootstrapConfig>(value).is_err());
+        }
+        let mut misspelled = endpoint(serde_json::Value::Null, serde_json::Value::Null, template);
+        misspelled["endpoints"][0]["response"]["itemPath"] = serde_json::json!("$");
+        assert!(serde_json::from_value::<HttpBootstrapConfig>(misspelled).is_err());
+        misspelled = serde_json::json!({"endpoints": [], "timeout_seconds": 1});
+        assert!(serde_json::from_value::<HttpBootstrapConfig>(misspelled).is_err());
     }
 
     fn make_valid_config() -> HttpBootstrapConfig {

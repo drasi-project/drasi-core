@@ -14,7 +14,10 @@ use drasi_core_types::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
 use drasi_postgres_common::{
-    config::{SslMode, TableKeyConfig},
+    config::SslMode,
+    replication::settings::{
+        PostgresTableKey, DEFAULT_IO_TIMEOUT_MS, DEFAULT_MAX_PROTOCOL_BYTES, DEFAULT_PORT,
+    },
     replication::{connect_with_options, field, row_element, Connection, ConnectionOptions},
     types::{ColumnInfo, RelationInfo, ReplicaIdentity},
     PostgresValue,
@@ -34,8 +37,15 @@ use tokio::{
     time::Instant,
 };
 
+/// Default `maxTables`.
+pub const DEFAULT_MAX_TABLES: usize = 256;
+/// Default `maxDurationMs`.
+pub const DEFAULT_MAX_DURATION_MS: u64 = 300_000;
+
+/// The standalone snapshot's configuration: one flat camelCase object.
+/// `password` is the only secret. Unknown keys at any level are refused.
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PostgresBootstrapConfig {
     #[serde(default = "default_host")]
     pub host: String,
@@ -51,10 +61,14 @@ pub struct PostgresBootstrapConfig {
     pub tls_ca_pem: Option<String>,
     pub tables: Vec<String>,
     #[serde(default)]
-    pub table_keys: Vec<TableKeyConfig>,
+    pub table_keys: Vec<PostgresTableKey>,
+    #[serde(default = "default_max_tables")]
     pub max_tables: NonZeroUsize,
+    #[serde(default = "default_max_protocol_bytes")]
     pub max_protocol_bytes: NonZeroUsize,
+    #[serde(default = "default_io_timeout_ms")]
     pub io_timeout_ms: NonZeroU64,
+    #[serde(default = "default_max_duration_ms")]
     pub max_duration_ms: NonZeroU64,
 }
 
@@ -62,10 +76,58 @@ fn default_host() -> String {
     "localhost".into()
 }
 fn default_port() -> u16 {
-    5432
+    DEFAULT_PORT
+}
+fn default_max_tables() -> NonZeroUsize {
+    NonZeroUsize::new(DEFAULT_MAX_TABLES).expect("nonzero constant")
+}
+fn default_max_protocol_bytes() -> NonZeroUsize {
+    NonZeroUsize::new(DEFAULT_MAX_PROTOCOL_BYTES).expect("nonzero constant")
+}
+fn default_io_timeout_ms() -> NonZeroU64 {
+    NonZeroU64::new(DEFAULT_IO_TIMEOUT_MS).expect("nonzero constant")
+}
+fn default_max_duration_ms() -> NonZeroU64 {
+    NonZeroU64::new(DEFAULT_MAX_DURATION_MS).expect("nonzero constant")
+}
+
+/// The published configuration: the source's own connection and key options
+/// (from the shared `drasi_postgres_common::replication::definition`) plus
+/// the snapshot's explicit table list and bounds, with the serde defaults.
+pub fn definition() -> drasi_computation_plugin_sdk::ConfigDefinition {
+    use drasi_computation_plugin_sdk::{ConfigDefinition, ConfigOption, ConfigType};
+    const SHARED: [&str; 9] = [
+        "host",
+        "port",
+        "database",
+        "user",
+        "password",
+        "sslMode",
+        "tlsCaPem",
+        "tableKeys",
+        "maxProtocolBytes",
+    ];
+    let mut options: Vec<ConfigOption> = drasi_postgres_common::replication::definition::options()
+        .into_iter()
+        .filter(|option| SHARED.contains(&option.name()))
+        .collect();
+    options.extend([
+        ConfigOption::new("tables", ConfigType::Array, true, "Tables to read, as schema.table (public may be omitted); at least one and at most maxTables."),
+        ConfigOption::new("maxTables", ConfigType::Integer, false, "Most tables in the selection.").default(DEFAULT_MAX_TABLES as u64).minimum(1),
+        ConfigOption::new("ioTimeoutMs", ConfigType::Integer, false, "Deadline for connecting and each catalog or row read.").default(DEFAULT_IO_TIMEOUT_MS).minimum(1),
+        ConfigOption::new("maxDurationMs", ConfigType::Integer, false, "Deadline for the whole snapshot.").default(DEFAULT_MAX_DURATION_MS).minimum(1),
+    ]);
+    ConfigDefinition::try_new(options).expect("constant PostgreSQL snapshot configuration")
 }
 
 impl PostgresBootstrapConfig {
+    /// Parses and statically validates a configuration.
+    pub fn from_value(value: &serde_json::Value) -> Result<Self> {
+        let config: Self = serde_json::from_value(value.clone())?;
+        config.validate()?;
+        Ok(config)
+    }
+
     fn validate(&self) -> Result<()> {
         anyhow::ensure!(
             self.port > 0
@@ -93,7 +155,7 @@ impl PostgresBootstrapConfig {
         );
         anyhow::ensure!(
             !self.tables.is_empty() && self.tables.len() <= self.max_tables.get(),
-            "PostgreSQL snapshot requires an explicit table selection within max_tables"
+            "PostgreSQL snapshot requires an explicit table selection within maxTables"
         );
         let mut tables = BTreeSet::new();
         for table in &self.tables {

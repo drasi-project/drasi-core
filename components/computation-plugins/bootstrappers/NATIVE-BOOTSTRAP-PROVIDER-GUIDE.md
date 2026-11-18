@@ -82,8 +82,9 @@ A paired family has three parts:
 
 - the protocol constants in the family's `*-common` crate (for example
   `drasi_postgres_common::replication::coordination`);
-- the source factory: `supports_bootstrap_coordination`,
-  `create_bootstrap_coordinator` and a `describe` that declares the offer
+- the source factory: `HostServices::bootstrap_coordination` declared with one
+  progress mode, `Factory::bootstrap_coordination` returning its
+  `SourceBootstrapCoordination::create_bootstrap_coordinator` and a `describe` that declares the offer
   (only for configurations that can coordinate, such as `coordinatedSnapshot:
   true` or `startFrom: snapshot`);
 - the bootstrap library's factory: usually the SDK's
@@ -156,6 +157,19 @@ single source gives the provider no namespace, and the edge is refused when
 it binds (`BootstrapNamespace`); a declared element identity is compared with
 the served source's in either case.
 
+## Configuration
+
+- One flat object; keys are lowerCamelCase at every level and every nested
+  type has `deny_unknown_fields`. `describe` parses the whole typed
+  configuration, so a misspelled nested key is refused when the graph asks
+  for the description, before any I/O.
+- A provider that accepts its source's settings publishes the source's own
+  options from the shared `*-common` `definition` module (SQL Server, MySQL,
+  PostgreSQL), plus its own fields with their serde defaults. Never maintain
+  a copy of the source's option list or a field-name allow-list.
+- Secrets are top-level fields (`password`), never a secret `settings`
+  object.
+
 ## Lifecycle
 
 - Construction is configuration-only: no I/O, no clock, no secret resolution
@@ -178,6 +192,9 @@ Each provider crate covers:
 
 - `describe` and `metadata` agree (`BootstrapFactoryMetadata::validate_description`),
   and configuration keys the graph relation or the paired source own are
+  refused;
+- published keys are camelCase (`testing::ensure_camel_case_configuration`),
+  published defaults equal the parsed defaults, and an unknown nested key is
   refused;
 - the provider variant matches the declared completion;
 - the served source is required from the session for `servedSource`

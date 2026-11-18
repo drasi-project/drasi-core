@@ -412,7 +412,8 @@ fn validate_base_url(base_url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_batch_endpoint(endpoint: &str) -> anyhow::Result<()> {
+/// The rule for an HTTP `batchEndpoint`: an absolute, untemplated path.
+pub fn validate_batch_endpoint(endpoint: &str) -> anyhow::Result<()> {
     if endpoint.is_empty() {
         anyhow::bail!("must not be empty");
     }

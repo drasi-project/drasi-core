@@ -49,6 +49,8 @@ mod port_format_tests;
 mod processing_fixture;
 #[path = "processing_tests.rs"]
 mod processing_tests;
+#[path = "service_binding_tests.rs"]
+mod service_binding_tests;
 #[path = "snapshot_tests.rs"]
 mod snapshot_tests;
 #[path = "source_schema_tests.rs"]
@@ -117,6 +119,23 @@ struct TestFactory {
     transactional: bool,
 }
 impl sdk::Factory for TestFactory {
+    /// Every field described (fixture).
+    fn configuration_details(&self) -> sdk::ConfigDetails {
+        sdk::ConfigDetails {
+            fields: sdk::Factory::metadata(self)
+                .configuration
+                .fields
+                .into_keys()
+                .map(|name| {
+                    let details = sdk::configuration::ConfigFieldDetails {
+                        description: format!("Fixture field {name}."),
+                        ..Default::default()
+                    };
+                    (name, details)
+                })
+                .collect(),
+        }
+    }
     fn describe(
         &self,
         _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
@@ -161,6 +180,7 @@ impl sdk::Factory for TestFactory {
         &self,
         request: &sdk::CreateRequest,
         _: sdk::ControlSender,
+        _services: sdk::ServiceBindings,
     ) -> anyhow::Result<sdk::CreatedComponent> {
         anyhow::ensure!(
             request.configuration["fail_create"] != true,
@@ -417,11 +437,20 @@ fn definition() -> anyhow::Result<sdk::PluginDefinition> {
     ])
 }
 sdk::export_computation_plugin!(definition());
+/// The extensions the shared test definition's declared services require.
+fn entry_points() -> crate::computation::EntryPoints {
+    crate::computation::EntryPoints {
+        consumer: Some(drasi_computation_plugin_consumer_v1),
+        ..Default::default()
+    }
+}
+
 fn plugin() -> Arc<NativePlugin> {
     unsafe {
-        NativePlugin::from_entry_points(
+        NativePlugin::from_entry_points_with(
             drasi_computation_plugin_metadata,
             drasi_computation_plugin_entry,
+            entry_points(),
         )
     }
     .unwrap()

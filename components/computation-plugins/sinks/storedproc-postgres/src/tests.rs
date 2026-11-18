@@ -110,7 +110,11 @@ fn update(current: Value, proposed: Value) -> UpdateRequest {
 }
 
 fn boundary(current: &Value, proposed: Value) -> Option<UpdateBoundary> {
-    match PostgresStoredProcFactory.assess(&update(current.clone(), proposed)) {
+    match PostgresStoredProcFactory
+        .update_planner()
+        .expect("factory planner")
+        .assess(&update(current.clone(), proposed))
+    {
         Ok(Assessment::Supported { boundary, .. }) => Some(boundary),
         _ => None,
     }
@@ -126,13 +130,16 @@ fn factory_metadata_declares_consumer_management_erase_and_secrets() -> Result<(
     let metadata = factory.metadata();
     assert_eq!(metadata.role, ComponentRole::Sink);
     assert_eq!(metadata.completion, Some(SinkCompletion::Handled));
-    assert_eq!(factory.consumer_mode(), Some(ConsumerMode::External));
+    assert_eq!(
+        factory.metadata().capabilities.services.consumer,
+        Some(ConsumerMode::External)
+    );
     assert!(metadata.capabilities.erases_owned_state);
-    assert!(metadata.capabilities.management && factory.supports_update_planning());
-    assert!(factory.supports_activation_credentials());
+    assert!(metadata.capabilities.management && factory.update_planner().is_some());
+    assert!(factory.activation_credentials().is_some());
     assert_eq!(metadata.ports.len(), 1);
     assert_eq!(metadata.ports[0].id().as_str(), "in");
-    let details = factory.configuration_details().context("details")?;
+    let details = factory.configuration_details();
     details.validate_schema(&metadata.configuration)?;
     let fields = &metadata.configuration.fields;
     for secret in ["password", "tlsClientPrivateKeyPem"] {
@@ -157,7 +164,10 @@ fn factory_metadata_declares_consumer_management_erase_and_secrets() -> Result<(
     assert_eq!(details.fields["maxStreams"].default, Some(json!(4096)));
     assert_eq!(details.fields["sslMode"].default, Some(json!("require")));
     assert_eq!(
-        factory.activation_credential_context(&request(full_config()))?,
+        factory
+            .activation_credentials()
+            .expect("credential endpoint")
+            .activation_credential_context(&request(full_config()))?,
         ActivationCredentialContext {
             hostname: "db.example".into(),
             port: 6543
@@ -169,9 +179,7 @@ fn factory_metadata_declares_consumer_management_erase_and_secrets() -> Result<(
 #[test]
 fn configuration_round_trips_with_published_defaults() -> Result<()> {
     let metadata = PostgresStoredProcFactory.metadata();
-    let details = PostgresStoredProcFactory
-        .configuration_details()
-        .context("details")?;
+    let details = PostgresStoredProcFactory.configuration_details();
     for configuration in [config(), full_config()] {
         let exposed = sink(configuration.clone())?.configuration()?;
         assert!(
@@ -424,7 +432,7 @@ fn routes_resolve_alias_then_last_segment_then_default() -> Result<()> {
     }))?;
     let commands = Commands::compile(&config)?;
     let render = |alias: &str, operation| match commands.resolve(alias, operation) {
-        Command::Template(template) => Some(template.render(&json!({})).unwrap().0),
+        Command::Template(template) => Some(template.render(&json!({})).unwrap().sql),
         Command::None => None,
     };
     assert_eq!(
@@ -593,13 +601,20 @@ fn assess_matrix_classifies_every_field() {
     let mut moved = update(full_config(), full_config());
     moved.proposed.scope.as_mut().unwrap().graph_id = "elsewhere".into();
     assert!(matches!(
-        PostgresStoredProcFactory.assess(&moved),
+        PostgresStoredProcFactory
+            .update_planner()
+            .expect("factory planner")
+            .assess(&moved),
         Ok(Assessment::Unsupported { .. })
     ));
     // A different component is not an update.
     let mut renamed = update(full_config(), full_config());
     renamed.proposed.id = ComponentId::generate();
-    assert!(PostgresStoredProcFactory.assess(&renamed).is_err());
+    assert!(PostgresStoredProcFactory
+        .update_planner()
+        .expect("factory planner")
+        .assess(&renamed)
+        .is_err());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -665,6 +680,8 @@ async fn in_place_and_restart_updates_apply_to_a_stopped_sink() -> Result<()> {
     let apply = |current: Value, proposed: Value| {
         let request = update(current, proposed);
         let plan = PostgresStoredProcFactory
+            .update_planner()
+            .expect("factory planner")
             .assess(&request)
             .unwrap()
             .plan()

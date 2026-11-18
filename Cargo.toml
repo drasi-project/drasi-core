@@ -131,8 +131,10 @@ members = [
   "components/computation-plugins/bootstrappers/postgres",
   "components/computation-plugins/bootstrappers/sqlite",
   "components/computation-plugins/common/bridge",
+  "components/computation-plugins/common/middleware",
   "components/computation-plugins/common/network",
   "components/computation-plugins/common/storedproc",
+  "components/computation-plugins/common/template",
   "components/computation-plugins/sources/bridge",
   "components/computation-plugins/sources/counter",
   "components/computation-plugins/sources/grpc",
@@ -223,8 +225,10 @@ drasi-computation-bootstrap-mssql = { path = "components/computation-plugins/boo
 drasi-computation-bootstrap-postgres = { version = "0.11.3", path = "components/computation-plugins/bootstrappers/postgres" }
 drasi-computation-bootstrap-sqlite = { version = "0.11.3", path = "components/computation-plugins/bootstrappers/sqlite" }
 drasi-computation-bridge-common = { version = "0.11.3", path = "components/computation-plugins/common/bridge" }
+drasi-computation-middleware-common = { version = "0.11.3", path = "components/computation-plugins/common/middleware" }
 drasi-computation-network-common = { version = "0.11.3", path = "components/computation-plugins/common/network" }
 drasi-computation-storedproc-common = { version = "0.11.3", path = "components/computation-plugins/common/storedproc" }
+drasi-computation-template-common = { version = "0.11.3", path = "components/computation-plugins/common/template" }
 drasi-computation-source-bridge = { version = "0.11.3", path = "components/computation-plugins/sources/bridge" }
 drasi-computation-source-grpc = { version = "0.11.3", path = "components/computation-plugins/sources/grpc" }
 drasi-computation-source-http = { version = "0.11.3", path = "components/computation-plugins/sources/http" }

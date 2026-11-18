@@ -25,9 +25,9 @@ is the persistence hook, and `Debug` output redacts them.
 | `headers` | object | `{}` | Static headers. Names are case-insensitive and normalized to lower case; duplicates and reserved names reject. `content-type` defaults to `application/json`. Values are not templates. | Pause |
 | `secretHeaders` | object, **secret** | none | Secret static headers (API keys), merged into `headers` with the same rules. A name may not appear in both. | Pause |
 | `outputTemplates` | object | none | See [Templates](#templates). | Pause |
-| `adaptive` | object | none | `adaptiveMinBatchSize` (1), `adaptiveMaxBatchSize` (100, ≤ 65536), `adaptiveWindowSize` (10 = 1 s, 1..=255), `adaptiveBatchTimeoutMs` (1000, ≤ 60000). Requires `batchEndpoint`. | Stop |
+| `adaptive` | object | none | The shared native adaptive object: `minBatchSize` (10), `maxBatchSize` (1000, ≤ 65536), `minWaitMs` (1), `maxWaitMs` (100, ≤ 60000), `windowMs` (5000, ≤ 3600000); unknown keys reject. Identical in the gRPC sink and HTTP source (`drasi_computation_network_common::batching`). Requires `batchEndpoint`. | Pause (bounds); enabling or disabling it also changes `batchEndpoint` |
 | `batchEndpoint` | string | none | Path beginning with one `/`, no template. Requires `adaptive`. | Stop |
-| `maxBatchBytes` | integer | `16777216` | `1..=67108864`. Host collection bound for one batch of inputs. | Stop |
+| `maxBatchBytes` | integer | `16777216` | `1..=67108864`. Host collection bound for one batch of inputs. | Pause |
 | `maxRequestBytes` | integer | `33554432` | `1..=33554432`. Largest rendered body; batches split here. | Pause |
 | `timeoutMs` | integer | `60000` | ≥ 1. One attempt, from connecting until the response body is read. | Pause |
 | `connectTimeoutMs` | integer | `10000` | ≥ 1. TCP and TLS connection deadline. | Stop |
@@ -102,7 +102,7 @@ Batched delivery to a receiver that queues work (202 accepted deliberately):
 {
   "baseUrl": "https://ingest.example",
   "batchEndpoint": "/batch",
-  "adaptive": {"adaptiveMinBatchSize": 10, "adaptiveMaxBatchSize": 500, "adaptiveBatchTimeoutMs": 200},
+  "adaptive": {"minBatchSize": 10, "maxBatchSize": 500, "maxWaitMs": 200},
   "successStatusCodes": [200, 202, 204],
   "maxRetries": 10,
   "retryBudgetMs": 600000
@@ -155,11 +155,14 @@ Context keys: `operation`, `output.alias`, `output.component`, `output.port`,
 `after` holds only the properties it sets), `removedProperties`,
 `effectiveFrom`.
 
+Templates use the [shared native template engine](../../common/template/README.md), the same in every native sink.
 Helpers: `json`, and the Handlebars built-ins `if`, `unless`, `each`, `with`,
 `lookup`, `raw`, `log`, `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `and`, `or`,
 `not`, `len`. Any other helper, a partial or a decorator rejects at
-construction. Missing fields render empty; `{{x}}` is HTML-escaped, so use
-`{{json x}}` or `{{{x}}}` for raw values.
+construction, in any branch. Rendering is strict: reading a field the change
+does not carry (for example `after` on a delete) is a render failure, so guard
+optional parts with `{{#if after}}…{{/if}}`. Values are not escaped; inside a
+JSON body write `{{json x}}` so strings are quoted and escaped.
 
 **Render failures:** a template that fails to render, a rendered URL off the
 base origin, an invalid rendered header value, a batch item that is not JSON,
@@ -212,8 +215,8 @@ Update column). Neither owns processing state, so every update preserves data.
 
 | Change | Sink | Consumer |
 |---|---|---|
-| Templates, headers, secret headers, token, timeout, request/message size, retries, retry budget, failure policy, success statuses | Pause | Pause (token, timeout, size) |
-| URL, base URL, batch endpoint, adaptive, `maxBatchBytes`, TLS, connect timeout, pool | Stop | Stop (URL, TLS, connect timeout) |
+| Templates, headers, secret headers, token, timeout, request/message size, retries, retry budget, failure policy, success statuses, adaptive bounds, `maxBatchBytes` | Pause | Pause (token, timeout, size) |
+| URL, base URL, batch endpoint, TLS, connect timeout, pool | Stop | Stop (URL, TLS, connect timeout) |
 | `outputs`, input bindings | Replace | — |
 
 An invalid proposed configuration (including template routes that name no
@@ -267,8 +270,9 @@ From `drasi-reaction-http` (breaking; no automatic migration):
 | `outputTemplates.routes` keyed by query ID | keyed by output alias | Unaliased outputs are named after their component. |
 | template context `query_id`, `query_name`, `data`, `metadata` | `output.*`, `sequence`, `identity`, `before`, `after`, … | See [Templates](#templates). |
 | render failure falls back to the default body/URL | permanent failure of that change under `onPermanentFailure` | |
+| missing field renders empty; `{{x}}` HTML-escaped | missing field is a render failure; no escaping | The shared native template engine. Guard optional images with `{{#if …}}`; use `{{json x}}` inside JSON bodies. |
 | static headers in templates rendered | `headers` are static; use template `headers` | |
-| `adaptive`, `batchEndpoint` | same | Host-owned collection; `maxBatchBytes`, `maxRequestBytes`. |
+| `adaptive` (`adaptiveMinBatchSize`, `adaptiveMaxBatchSize`, `adaptiveWindowSize` in 100 ms units, `adaptiveBatchTimeoutMs`), `batchEndpoint` | `adaptive` (`minBatchSize`, `maxBatchSize`, `minWaitMs`, `maxWaitMs`, `windowMs`), `batchEndpoint` | The shared native adaptive object; the old keys are rejected. Host-owned collection; `maxBatchBytes`, `maxRequestBytes`. |
 | `priorityQueueCapacity` | removed | Host pipes bound queuing. |
 | `recoveryPolicy` (strict / auto-skip-gap), poison drop | `onPermanentFailure` (`stall` / `skip`); outages are retried in place by the graph | `stall` never drops; `skip` drops only permanently rejected changes (4xx other than 408/409/425/429). |
 | pool idle 90 s, 10 per host | `poolIdleTimeoutMs`, `poolMaxIdlePerHost` | Same defaults. |

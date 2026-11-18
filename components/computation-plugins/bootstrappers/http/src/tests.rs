@@ -55,7 +55,7 @@ fn construction_is_query_scoped_and_does_not_resolve_or_fetch_credentials() -> R
     ExportedPlugin::new(plugin()?)?;
     let mut request = request()?;
     request.configuration["settings"]["endpoints"][0]["auth"] = json!({
-        "type":"bearer","token_env":"DRASI_NATIVE_BOOTSTRAP_NOT_RESOLVED_AT_CONSTRUCTION"
+        "type":"bearer","tokenEnv":"DRASI_NATIVE_BOOTSTRAP_NOT_RESOLVED_AT_CONSTRUCTION"
     });
     let provider = create(&request)?;
     assert_eq!(
@@ -151,7 +151,16 @@ fn query_labels_select_mapped_elements() -> Result<()> {
 #[test]
 fn nested_typos_and_invalid_limits_are_rejected_before_io() -> Result<()> {
     for field in [
-        "settings", "endpoint", "response", "mapping", "template", "auth", "bounds", "header",
+        "settings",
+        "endpoint",
+        "response",
+        "mapping",
+        "template",
+        "auth",
+        "bounds",
+        "header",
+        "snake-auth",
+        "snake-pagination",
     ] {
         let mut request = request()?;
         match field {
@@ -171,48 +180,86 @@ fn nested_typos_and_invalid_limits_are_rejected_before_io() -> Result<()> {
             }
             "auth" => {
                 request.configuration["settings"]["endpoints"][0]["auth"] =
-                    json!({"type":"bearer","token_env":"TOKEN","username_env":"USER"})
+                    json!({"type":"bearer","tokenEnv":"TOKEN","usernameEnv":"USER"})
             }
             "bounds" => request.configuration["outputCapacity"] = json!(0),
             "header" => {
                 request.configuration["settings"]["endpoints"][0]["headers"] =
                     json!({"x-test":"bad\nvalue"})
             }
+            "snake-auth" => {
+                request.configuration["settings"]["endpoints"][0]["auth"] =
+                    json!({"type":"bearer","token_env":"TOKEN"})
+            }
+            "snake-pagination" => {
+                request.configuration["settings"]["endpoints"][0]["pagination"] =
+                    json!({"type":"offset-limit","page_size":10})
+            }
             _ => unreachable!(),
         }
         assert!(create(&request).is_err(), "{field}");
+        assert!(
+            HttpBootstrapFactory
+                .describe(&request.configuration)
+                .is_err(),
+            "{field} is refused when the graph asks for the description"
+        );
     }
     Ok(())
 }
 
 #[test]
-fn published_authentication_and_pagination_shapes_are_accepted() -> Result<()> {
+fn camel_case_authentication_and_pagination_shapes_are_accepted() -> Result<()> {
     for (auth, pagination) in [
         (
-            json!({"type":"bearer","token_env":"TOKEN"}),
-            json!({"type":"offset-limit","page_size":10}),
+            json!({"type":"bearer","tokenEnv":"TOKEN"}),
+            json!({"type":"offset-limit","pageSize":10}),
         ),
         (
-            json!({"type":"basic","username_env":"USER","password_env":"PASSWORD"}),
-            json!({"type":"page-number","page_size":10}),
+            json!({"type":"basic","usernameEnv":"USER","passwordEnv":"PASSWORD"}),
+            json!({"type":"page-number","pageSize":10,"pageSizeParam":"per_page"}),
         ),
         (
-            json!({"type":"api-key","location":"query","name":"key","value_env":"KEY"}),
-            json!({"type":"cursor","cursor_param":"cursor","cursor_path":"$.cursor"}),
+            json!({"type":"api-key","location":"query","name":"key","valueEnv":"KEY"}),
+            json!({"type":"cursor","cursorParam":"cursor","cursorPath":"$.cursor"}),
         ),
         (
-            json!({"type":"api-key","location":"header","name":"x-key","value_env":"KEY"}),
+            json!({"type":"api-key","location":"header","name":"x-key","valueEnv":"KEY"}),
             json!({"type":"link-header"}),
         ),
         (
-            json!({"type":"oauth2-client-credentials","token_url":"https://example.invalid/token","client_id_env":"CLIENT","client_secret_env":"SECRET"}),
-            json!({"type":"next-url","next_url_path":"$.next"}),
+            json!({"type":"oauth2-client-credentials","tokenUrl":"https://example.invalid/token","clientIdEnv":"CLIENT","clientSecretEnv":"SECRET"}),
+            json!({"type":"next-url","nextUrlPath":"$.next"}),
         ),
     ] {
         let mut request = request()?;
         request.configuration["settings"]["endpoints"][0]["auth"] = auth;
         request.configuration["settings"]["endpoints"][0]["pagination"] = pagination;
         create(&request)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn published_defaults_are_the_parsed_defaults() -> Result<()> {
+    let definition = definition();
+    let schema = definition.schema();
+    assert!(HttpBootstrapFactory
+        .metadata()
+        .configuration
+        .fields
+        .keys()
+        .eq(schema.fields.keys()));
+    drasi_computation_plugin_sdk::testing::ensure_camel_case_configuration(&schema)?;
+    let parsed = serde_json::to_value(HttpBootstrapConfig::from_value(&configuration())?)?;
+    for name in schema.fields.keys() {
+        if name != "settings" {
+            assert_eq!(
+                definition.details().fields[name].default.as_ref(),
+                Some(&parsed[name]),
+                "{name}"
+            );
+        }
     }
     Ok(())
 }

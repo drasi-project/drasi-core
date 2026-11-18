@@ -48,7 +48,7 @@ cargo test -p drasi-computation-sink-storedproc-postgres --test live -- --ignore
 cargo build --locked --features dynamic-plugin -p drasi-computation-source-postgres \
   -p drasi-computation-bootstrap-postgres -p drasi-computation-sink-storedproc-postgres
 # copy the three libraries into target/debug/plugins/, then:
-cargo test --locked -p drasi-source-postgres --test native_transactions -- --ignored \
+cargo test --locked -p drasi-computation-source-postgres --test native_transactions -- --ignored \
   --test-threads=1 storedproc
 ```
 

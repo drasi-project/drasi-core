@@ -46,10 +46,12 @@ same flat settings. MariaDB is not supported.
 
 `make test-native-mysql` builds the three MySQL libraries and runs the Host
 suite (`native_mysql_components`) with Podman, static and dynamic, on both Tokio
-flavours. Engine-level live tests (erase, pause across server timeouts,
-reconnect after a killed session, DDL policy, large transactions, extended
-types) run with:
+flavours. The crate's own live suite (`tests/native_live.rs`, Podman, ignored by
+default) drives the shared engine directly through test-only adapters (erase,
+pause across server timeouts, reconnect after a killed session, DDL policy,
+large transactions, extended types, process exits, coordinated snapshots and
+shared consumer replay) and builds its graph cases from this plugin's factories:
 
 ```sh
-cargo test -p drasi-source-mysql --lib -- --ignored native::tests::production --test-threads=1
+cargo test --locked -p drasi-computation-source-mysql --test native_live -- --ignored --test-threads=1
 ```

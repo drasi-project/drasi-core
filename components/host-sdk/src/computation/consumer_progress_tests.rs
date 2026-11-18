@@ -334,13 +334,14 @@ async fn consumer_progress_rejects_missing_substituted_conflicting_and_mutating_
         (ComponentRole::Service, false),
         (ComponentRole::Source, true),
     ] {
-        let definition = sdk::PluginDefinition::new(
+        // Refused when the plugin is defined, before anything is loaded.
+        assert!(sdk::PluginDefinition::new(
             "fixture/invalid",
             "1",
             vec![Arc::new(fixture::Factory(role, legacy))],
             vec![GraphChangeCodec::schema()],
-        )?;
-        assert!(NativePlugin::from_definition(definition).is_err());
+        )
+        .is_err());
     }
     Ok(())
 }
@@ -522,6 +523,9 @@ fn consumer_progress_input_policy_cannot_be_exported_without_its_required_bindin
     }
     struct Factory;
     impl sdk::Factory for Factory {
+        fn configuration_details(&self) -> sdk::ConfigDetails {
+            fixture::mode_details()
+        }
         fn describe(
             &self,
             _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
@@ -531,12 +535,14 @@ fn consumer_progress_input_policy_cannot_be_exported_without_its_required_bindin
         fn metadata(&self) -> sdk::FactoryMetadata {
             let mut metadata = fixture::Factory(ComponentRole::Source, false).metadata();
             metadata.capabilities.control = false;
+            metadata.capabilities.services = sdk::HostServices::default();
             metadata
         }
         fn create(
             &self,
             request: &sdk::CreateRequest,
             _: sdk::ControlSender,
+            _services: sdk::ServiceBindings,
         ) -> anyhow::Result<sdk::CreatedComponent> {
             Ok(sdk::Component::Source(Box::new(Source {
                 descriptor: self.metadata().descriptor(request.id.clone())?,
@@ -697,20 +703,19 @@ fn consumer_progress_malformed_extension_rejects_before_entry() {
                 header: abi::Header::new::<abi::consumer_progress::PluginConsumerProgressV1>(),
                 version: abi::consumer_progress::VERSION + 1,
                 reserved: 0,
-                factory: None,
-                create: None,
                 inspect: None,
                 position_policy: None,
             };
         &TABLE
     }
     assert!(unsafe {
-        NativePlugin::from_entry_points_with_consumer_progress(
+        NativePlugin::from_entry_points_with(
             metadata,
             entry,
-            None,
-            None,
-            Some(extension),
+            crate::computation::EntryPoints {
+                consumer_progress: Some(extension),
+                ..Default::default()
+            },
         )
     }
     .is_err());
@@ -756,6 +761,7 @@ fn consumer_progress_sdk_rejects_unbound_base_creation_even_without_host_negotia
         let result = sdk::transport::take_status((*factory.vtable).create.unwrap()(
             factory.state,
             abi::BorrowedBytes::new(&bytes),
+            &abi::services::ServiceBindingsV1::none(),
             &mut component,
         ));
         assert!(result.is_err());
@@ -825,7 +831,7 @@ fn native_input_progress_binding_is_optional_scoped_and_not_atomic() -> anyhow::
         for invalid in plugin.factories().iter().filter(|factory| {
             factory.metadata().role == ComponentRole::Source
                 || factory.metadata().completion == Some(SinkCompletion::Accepted)
-                || factory.consumer_mode().is_some()
+                || factory.metadata().capabilities.services.consumer.is_some()
         }) {
             assert!(!invalid
                 .descriptor()

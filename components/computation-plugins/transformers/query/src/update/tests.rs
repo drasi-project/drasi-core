@@ -16,7 +16,9 @@ trait PlanUpdate {
 
 impl<F: Factory> PlanUpdate for F {
     fn plan_update(&self, request: &UpdateRequest) -> anyhow::Result<ComponentUpdatePlan> {
-        self.assess(request)?
+        self.update_planner()
+            .ok_or_else(|| anyhow::anyhow!("factory does not plan updates"))?
+            .assess(request)?
             .plan()
             .ok_or_else(|| anyhow::anyhow!("update unsupported"))
     }
@@ -95,14 +97,14 @@ fn factory_planning_accepts_sdk_attached_plugin_provenance_without_allowing_a_ch
     let factory = IndexedQueryFactory::default();
     let mut current = request(
         &factory,
-        json!({"query": "MATCH (n) RETURN n", "outbox_capacity": 2}),
+        json!({"query": "MATCH (n) RETURN n", "outboxCapacity": 2}),
     )?;
     current.implementation.plugin = Some(drasi_computation_contracts::PluginIdentity {
         id: env!("CARGO_PKG_NAME").into(),
         version: env!("CARGO_PKG_VERSION").into(),
     });
     let mut proposed = current.clone();
-    proposed.configuration["outbox_capacity"] = json!(4);
+    proposed.configuration["outboxCapacity"] = json!(4);
     let mut request = UpdateRequest { current, proposed };
     assert_eq!(
         factory.plan_update(&request)?.data,
@@ -119,7 +121,7 @@ fn streaming_query_updates_reset_but_retained_updates_cannot_discard_history() -
     let factory = IndexedQueryFactory::default();
     let current = request(
         &factory,
-        json!({"query": "MATCH (n:Item) RETURN n.value AS value", "outbox_capacity": 4}),
+        json!({"query": "MATCH (n:Item) RETURN n.value AS value", "outboxCapacity": 4}),
     )?;
     let mut proposed = current.clone();
     proposed.configuration["query"] = json!("MATCH (n:Other) RETURN n.value AS value");
@@ -134,7 +136,7 @@ fn streaming_query_updates_reset_but_retained_updates_cannot_discard_history() -
         }
     );
     let mut proposed = current.clone();
-    proposed.configuration["outbox_capacity"] = json!(1);
+    proposed.configuration["outboxCapacity"] = json!(1);
     assert!(factory
         .plan_update(&UpdateRequest {
             current: current.clone(),
@@ -163,7 +165,7 @@ fn reconstruction_directive_cannot_replace_the_bootstrap_requirement() -> anyhow
     assert!(validate_creation(&request).is_err());
     request.configuration["bootstrap"] = json!(true);
     validate_creation(&request)?;
-    assert!(request.configuration.get("reset_configuration").is_none());
+    assert!(request.configuration.get("resetConfiguration").is_none());
     Ok(())
 }
 
@@ -227,4 +229,56 @@ pub(crate) mod lifecycle_ctx {
     pub(crate) fn apply(boundary: UpdateBoundary) -> ApplyContext {
         ApplyContext::new(scope(), boundary)
     }
+}
+
+#[test]
+fn configuration_keys_are_camel_case_and_nested_unknown_keys_are_refused() -> anyhow::Result<()> {
+    let factory = IndexedQueryFactory::default();
+    let middleware = default_middleware_registry();
+    let metadata = factory.metadata();
+    drasi_computation_plugin_sdk::testing::ensure_camel_case_configuration(
+        &metadata.configuration,
+    )?;
+    let accepted = request(
+        &factory,
+        json!({
+            "query": "MATCH (n) RETURN n",
+            "outboxCapacity": 3,
+            "resetConfiguration": true,
+            "sourceTransactions": {"maxChanges": 8, "maxBytes": 4096, "maxDurationMs": 1000}
+        }),
+    )?;
+    metadata.configuration.validate(&accepted.configuration)?;
+    let (definition, execution) = query_configuration(&accepted, &middleware)?;
+    assert_eq!(definition.outbox_capacity.get(), 3);
+    let limits = execution.source_transactions.expect("limits");
+    assert_eq!(
+        (
+            limits.max_changes.get(),
+            limits.max_bytes.get(),
+            limits.max_duration_ms.get()
+        ),
+        (8, 4096, 1000)
+    );
+    for snake in [
+        "outbox_capacity",
+        "reset_configuration",
+        "source_transactions",
+    ] {
+        let mut configuration = json!({"query": "MATCH (n) RETURN n"});
+        configuration[snake] = json!(1);
+        assert!(
+            metadata.configuration.validate(&configuration).is_err(),
+            "{snake} is not a published key"
+        );
+    }
+    let nested = request(
+        &factory,
+        json!({
+            "query": "MATCH (n) RETURN n",
+            "sourceTransactions": {"maxChanges": 8, "maxBytes": 4096, "max_duration_ms": 1000}
+        }),
+    )?;
+    assert!(query_configuration(&nested, &middleware).is_err());
+    Ok(())
 }

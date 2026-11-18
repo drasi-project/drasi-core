@@ -46,7 +46,7 @@ pub enum Profile {
 /// (`drasi.output/<hash>`). An entry ending in `/` is a prefix that needs at
 /// least one more character; any other entry is one exact namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Namespace {
     pub version: u32,
     pub source_prefixes: Vec<String>,
@@ -83,7 +83,12 @@ impl Namespace {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
 pub enum Transport {
     Unix {
         data_path: String,
@@ -167,7 +172,7 @@ impl Transport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct Limits {
     pub max_envelope_bytes: usize,
     pub max_operations: usize,
@@ -237,7 +242,7 @@ fn failure_scope() -> FailureMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BridgeConfig {
     pub link_id: String,
     pub sender_instance: String,
@@ -258,11 +263,7 @@ pub struct BridgeConfig {
     /// What the graph does with an input the sender can never deliver; the
     /// same `onPermanentFailure` setting every sink has. Only senders publish
     /// it in their configuration schema.
-    #[serde(
-        default,
-        rename = "onPermanentFailure",
-        skip_serializing_if = "is_stall"
-    )]
+    #[serde(default, skip_serializing_if = "is_stall")]
     pub on_permanent_failure: drasi_lib::computation::v1::PermanentFailurePolicy,
 }
 

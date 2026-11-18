@@ -312,7 +312,7 @@ fn metadata_is_valid() -> Result<()> {
     plugin()?;
     let metadata = GrpcSinkFactory.metadata();
     assert!(metadata.capabilities.management && metadata.capabilities.erases_owned_state);
-    assert!(GrpcSinkFactory.supports_update_planning());
+    assert!(GrpcSinkFactory.update_planner().is_some());
     let fields = &metadata.configuration.fields;
     assert!(fields["secretMetadata"].secret && fields["tlsClientPrivateKeyPem"].secret);
     assert!(!fields["metadata"].secret);
@@ -375,7 +375,7 @@ fn configuration_round_trips() -> Result<()> {
                 "retryBudgetMs": 5000,
                 "keepaliveIntervalMs": 0,
                 "compression": "gzip",
-                "batching": {"mode": "adaptive", "adaptiveMinBatchSize": 1, "adaptiveMaxBatchSize": 50, "adaptiveWindowSize": 10, "adaptiveBatchTimeoutMs": 1000},
+                "adaptive": {"minBatchSize": 1, "maxBatchSize": 50, "minWaitMs": 1, "maxWaitMs": 1000, "windowMs": 1000},
                 "outputTemplates": {"routes": {"q": {"added": {"template": "{\"n\":{{sequence}}}", "metadata": {"x-op": "{{operation}}"}}}}},
                 "outputFormat": "proto",
             }),
@@ -440,7 +440,10 @@ fn changed_inputs_replace_the_sink() -> Result<()> {
     let mut moved = inputs();
     moved[0].stream = StreamId::try_new("q/other")?;
     request.proposed.inputs = moved;
-    let assessment = GrpcSinkFactory.assess(&request)?;
+    let assessment = GrpcSinkFactory
+        .update_planner()
+        .expect("factory planner")
+        .assess(&request)?;
     assert_eq!(
         assessment
             .plan()

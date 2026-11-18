@@ -12,10 +12,8 @@ pub extern "C" fn drasi_computation_plugin_bootstrap_coordination_v1(
         header: abi::Header::new::<PluginBootstrapCoordinationV1>(),
         version: VERSION,
         reserved: 0,
-        source_factory: None,
         bootstrap_factory: None,
         create: None,
-        create_source: None,
         create_bootstrap: None,
     };
     &TABLE

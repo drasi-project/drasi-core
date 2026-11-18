@@ -17,8 +17,8 @@ cargo build -p drasi-computation-bootstrap-http --features dynamic-plugin
   "settings": {
     "endpoints": [{
       "url": "https://api.example/rooms",
-      "auth": {"type": "bearer", "token_env": "ROOM_API_TOKEN"},
-      "pagination": {"type": "offset-limit", "page_size": 100},
+      "auth": {"type": "bearer", "tokenEnv": "ROOM_API_TOKEN"},
+      "pagination": {"type": "offset-limit", "pageSize": 100},
       "response": {
         "itemsPath": "$.items",
         "mappings": [{
@@ -59,9 +59,25 @@ single served source is refused when it binds. See the
 `settings` uses the existing [HTTP bootstrap configuration](../../../bootstrappers/http/README.md):
 multiple endpoints, GET/POST/PUT, headers/body, bearer/API-key/basic/OAuth2 client
 credentials, offset/page/cursor/Link/next-URL pagination, JSON/XML/YAML parsing
-and node/relation response mapping. Authentication/pagination variant fields
-retain their published snake_case names. The actual mapping and REST reader are
+and node/relation response mapping. Unlike the legacy provider's descriptor, every
+key is camelCase at every level (`tokenEnv`, `usernameEnv`, `clientIdEnv`,
+`offsetParam`, `pageSizeParam`, `pageSize`, `cursorPath`, `nextUrlPath`, ...)
+and an unknown key at any level is refused when the graph asks for the
+provider's description, before any I/O. The published schema comes from
+the same types (`definition()`), with the defaults shown above. The actual mapping and REST reader are
 shared with the legacy provider, not copied into another transport.
+
+Response bodies are parsed by the same content parser as the HTTP source's
+webhook routes (`drasi_http_common::content`), and item templates render with
+the same template engine (`drasi_http_common::template`), so one XML or JSON
+document maps to the same values on both paths. XML elements that contain only
+text are strings (`<id>7</id>` is `"7"`, never `{"$text": "7"}`), attributes
+are `@name` fields, mixed text is `_text`, repeated elements are arrays and the
+document element is unwrapped. A response with `Content-Type: text/plain` is a
+string; set `response.contentType` to parse it as JSON, XML or YAML. Templates
+have the source-mapping helpers (`lowercase`, `uppercase`, `concat`, `default`,
+`json`, ...); a single-path template (`{{item.count}}`) keeps the value's JSON
+type, and any other template's text becomes JSON when it parses as JSON.
 
 ## Hosting and lifetime
 

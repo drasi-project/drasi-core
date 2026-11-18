@@ -181,8 +181,9 @@ without Stop and Start (SP-03).
 
 ## Templates
 
-Compiled once at construction with the shared parameter-only rule
-(`drasi_reaction_common::sql_template::validate_parameter_only`): every value
+Compiled once at construction by the shared native template engine
+(`drasi-computation-template-common`, `ParameterTemplate`) under its
+parameter-only rule: every value
 is a `{{param <path>}}` rendered as `?`; plain `{{x}}`, raw `{{{x}}}`, other
 value helpers (`{{json x}}`), partials and decorators are rejected. `if`,
 `unless`, `each` and `with` may select or exclude SQL text. Rendering is

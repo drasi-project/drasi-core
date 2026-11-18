@@ -26,10 +26,11 @@ use drasi_computation_contracts::{
     ComponentRole, ComponentUpdateMode, GraphChangeCodec, ImplementationIdentity, StreamId,
 };
 use drasi_computation_plugin_sdk::{
-    lifecycle::Assessment, wire::DescribeRequest, ActivationCredentialContext, Capabilities,
-    Component, ComponentDescription, ConfigDetails, ControlSender, CreateRequest, CreatedComponent,
-    Factory, FactoryMetadata, NativeConsumerProgress, NativeSourceProgress, PluginDefinition,
-    UpdateRequest,
+    lifecycle::Assessment, wire::DescribeRequest, ActivationCredentialContext,
+    ActivationCredentialEndpoint, Capabilities, Component, ComponentDescription, ConfigDetails,
+    ControlSender, CreateRequest, CreatedComponent, Factory, FactoryMetadata, HostServices,
+    NativeConsumerProgress, PluginDefinition, ServiceBindings, SourceBootstrapCoordination,
+    UpdatePlanner, UpdateRequest,
 };
 use drasi_mysql_common::native::{
     progress::ConsumerBinding,
@@ -96,6 +97,13 @@ fn metadata(mode: Mode) -> FactoryMetadata {
             erases_owned_state: true,
             // Outputs carry source replay progress, not a producer identity of their
             // own (Host admission, when bound, publishes under its durable identity).
+            services: HostServices {
+                source_progress: progress(mode, false) == MySqlProgress::Single,
+                consumer_progress: matches!(progress(mode, false), MySqlProgress::Group { .. }),
+                bootstrap_coordination: coordinator::protocol(mode).is_some(),
+                activation_credentials: true,
+                ..HostServices::default()
+            },
             ..Capabilities::default()
         },
     }
@@ -216,148 +224,168 @@ fn consumers(
     ConsumerBinding::new(&request.id, view, progress.consumer_ids())
 }
 
-macro_rules! common_factory_methods {
-    ($mode:expr) => {
-        fn describe(&self, request: &DescribeRequest) -> Result<ComponentDescription> {
-            describe($mode, request)
+macro_rules! mysql_factory {
+    ($factory:ty, $mode:expr) => {
+        impl UpdatePlanner for $factory {
+            fn assess(&self, request: &UpdateRequest) -> Result<Assessment> {
+                management::assess($mode, request)
+            }
         }
-        fn metadata(&self) -> FactoryMetadata {
-            metadata($mode)
+        impl ActivationCredentialEndpoint for $factory {
+            fn activation_credential_context(
+                &self,
+                request: &CreateRequest,
+            ) -> Result<ActivationCredentialContext> {
+                credential_context($mode, request)
+            }
         }
-        fn configuration_details(&self) -> Option<ConfigDetails> {
-            Some(config::definition($mode).details())
+        impl SourceBootstrapCoordination for $factory {
+            fn create_bootstrap_coordinator(
+                &self,
+                request: &CreateRequest,
+                progress: drasi_computation_plugin_sdk::SourceBootstrapProgress,
+            ) -> Result<Arc<dyn drasi_computation_plugin_sdk::NativeSourceBootstrapCoordinator>>
+            {
+                Ok(Arc::new(coordinator::Coordinator::new(
+                    request,
+                    parse($mode, request)?,
+                    progress,
+                )?))
+            }
         }
-        fn supports_update_planning(&self) -> bool {
-            true
-        }
-        fn assess(&self, request: &UpdateRequest) -> Result<Assessment> {
-            management::assess($mode, request)
-        }
-        fn supports_activation_credentials(&self) -> bool {
-            true
-        }
-        fn supports_bootstrap_coordination(&self) -> bool {
-            coordinator::protocol($mode).is_some()
-        }
-        fn create_bootstrap_coordinator(
-            &self,
-            request: &CreateRequest,
-            progress: drasi_computation_plugin_sdk::SourceBootstrapProgress,
-        ) -> Result<Arc<dyn drasi_computation_plugin_sdk::NativeSourceBootstrapCoordinator>> {
-            Ok(Arc::new(coordinator::Coordinator::new(
-                request,
-                parse($mode, request)?,
-                progress,
-            )?))
-        }
-        fn activation_credential_context(
-            &self,
-            request: &CreateRequest,
-        ) -> Result<ActivationCredentialContext> {
-            credential_context($mode, request)
+        impl Factory for $factory {
+            fn describe(&self, request: &DescribeRequest) -> Result<ComponentDescription> {
+                describe($mode, request)
+            }
+            fn metadata(&self) -> FactoryMetadata {
+                metadata($mode)
+            }
+            fn configuration_details(&self) -> ConfigDetails {
+                config::definition($mode).details()
+            }
+            fn update_planner(&self) -> Option<&dyn UpdatePlanner> {
+                Some(self)
+            }
+            fn activation_credentials(&self) -> Option<&dyn ActivationCredentialEndpoint> {
+                Some(self)
+            }
+            fn bootstrap_coordination(&self) -> Option<&dyn SourceBootstrapCoordination> {
+                coordinator::protocol($mode).map(|_| self as &dyn SourceBootstrapCoordination)
+            }
+            fn create(
+                &self,
+                request: &CreateRequest,
+                _: ControlSender,
+                services: ServiceBindings,
+            ) -> Result<CreatedComponent> {
+                create($mode, request, services)
+            }
         }
     };
 }
 
-impl Factory for MySqlChangesFactory {
-    common_factory_methods!(Mode::Changes);
-    fn create(&self, request: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
-        create_untracked(Mode::Changes, request)
+mysql_factory!(MySqlChangesFactory, Mode::Changes);
+mysql_factory!(
+    MySqlUntrackedTransactionsFactory,
+    Mode::UntrackedTransactions
+);
+mysql_factory!(MySqlPositionalChangesFactory, Mode::PositionalChanges);
+mysql_factory!(MySqlTransactionsFactory, Mode::Transactions);
+mysql_factory!(MySqlSharedTransactionsFactory, Mode::SharedTransactions);
+mysql_factory!(MySqlSharedChangesFactory, Mode::SharedChanges);
+mysql_factory!(
+    MySqlSharedPositionalChangesFactory,
+    Mode::SharedPositionalChanges
+);
+
+/// Constructs a `mode` source from the progress its declaration binds.
+fn create(
+    mode: Mode,
+    request: &CreateRequest,
+    services: ServiceBindings,
+) -> Result<CreatedComponent> {
+    match mode {
+        Mode::Changes | Mode::UntrackedTransactions | Mode::PositionalChanges => {
+            create_untracked(mode, request)
+        }
+        Mode::Transactions => create_transactions(
+            request,
+            services
+                .source_progress
+                .context("MySQL transactions require their actual query progress owner")?,
+        ),
+        Mode::SharedTransactions => create_shared_transactions(
+            request,
+            services
+                .consumer_progress
+                .context("MySQL shared transactions require their actual fixed consumer set")?,
+        ),
+        Mode::SharedChanges | Mode::SharedPositionalChanges => create_shared_rows(
+            mode,
+            request,
+            &services
+                .consumer_progress
+                .context("MySQL shared rows require their actual fixed consumer set")?,
+        ),
     }
 }
 
-impl Factory for MySqlUntrackedTransactionsFactory {
-    common_factory_methods!(Mode::UntrackedTransactions);
-    fn create(&self, request: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
-        create_untracked(Mode::UntrackedTransactions, request)
-    }
+fn create_transactions(
+    request: &CreateRequest,
+    progress: drasi_computation_plugin_sdk::NativeSourceProgress,
+) -> Result<CreatedComponent> {
+    let config = parse(Mode::Transactions, request)?;
+    let scope = request
+        .scope
+        .as_ref()
+        .context("MySQL transactions require graph scope")?;
+    let reader = progress.reader();
+    anyhow::ensure!(
+        reader.graph_id() == scope.graph_id,
+        "MySQL progress belongs to another graph"
+    );
+    let stream = StreamId::try_new(config.stream.clone())?;
+    let engine = config.engine_config(&request.id)?;
+    let source = if config.settings.start_from == StartFrom::Snapshot {
+        MySqlSource::with_published_bootstrap(
+            request.id.clone(),
+            stream,
+            engine,
+            Some(reader),
+            None,
+        )?
+    } else {
+        MySqlSource::new(request.id.clone(), stream, engine, Some(reader))?
+    };
+    Ok(component(
+        config,
+        source.with_status(status_sink(&request.id)),
+    ))
 }
 
-impl Factory for MySqlPositionalChangesFactory {
-    common_factory_methods!(Mode::PositionalChanges);
-    fn create(&self, request: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
-        create_untracked(Mode::PositionalChanges, request)
-    }
-}
-
-impl Factory for MySqlTransactionsFactory {
-    common_factory_methods!(Mode::Transactions);
-    fn supports_source_progress(&self) -> bool {
-        true
-    }
-    fn create(&self, _: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
-        anyhow::bail!("MySQL transactions require their actual query progress owner")
-    }
-    fn create_with_progress(
-        &self,
-        request: &CreateRequest,
-        _: ControlSender,
-        progress: NativeSourceProgress,
-    ) -> Result<CreatedComponent> {
-        let config = parse(Mode::Transactions, request)?;
-        let scope = request
-            .scope
-            .as_ref()
-            .context("MySQL transactions require graph scope")?;
-        let reader = progress.reader();
-        anyhow::ensure!(
-            reader.graph_id() == scope.graph_id,
-            "MySQL progress belongs to another graph"
-        );
-        let stream = StreamId::try_new(config.stream.clone())?;
-        let engine = config.engine_config(&request.id)?;
-        let source = if config.settings.start_from == StartFrom::Snapshot {
-            MySqlSource::with_published_bootstrap(
-                request.id.clone(),
-                stream,
-                engine,
-                Some(reader),
-                None,
-            )?
-        } else {
-            MySqlSource::new(request.id.clone(), stream, engine, Some(reader))?
-        };
-        Ok(component(
-            config,
-            source.with_status(status_sink(&request.id)),
-        ))
-    }
-}
-
-impl Factory for MySqlSharedTransactionsFactory {
-    common_factory_methods!(Mode::SharedTransactions);
-    fn supports_consumer_progress(&self) -> bool {
-        true
-    }
-    fn create(&self, _: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
-        anyhow::bail!("MySQL shared transactions require their actual fixed consumer set")
-    }
-    fn create_with_consumer_progress(
-        &self,
-        request: &CreateRequest,
-        _: ControlSender,
-        progress: NativeConsumerProgress,
-    ) -> Result<CreatedComponent> {
-        let config = parse(Mode::SharedTransactions, request)?;
-        let consumers = consumers(request, &progress)?;
-        let stream = StreamId::try_new(config.stream.clone())?;
-        let engine = config.engine_config(&request.id)?;
-        let source = if config.settings.start_from == StartFrom::Snapshot {
-            MySqlSource::with_published_bootstrap(
-                request.id.clone(),
-                stream,
-                engine,
-                None,
-                Some(consumers),
-            )?
-        } else {
-            MySqlSource::new_with_consumer_progress(request.id.clone(), stream, engine, consumers)?
-        };
-        Ok(component(
-            config,
-            source.with_status(status_sink(&request.id)),
-        ))
-    }
+fn create_shared_transactions(
+    request: &CreateRequest,
+    progress: NativeConsumerProgress,
+) -> Result<CreatedComponent> {
+    let config = parse(Mode::SharedTransactions, request)?;
+    let consumers = consumers(request, &progress)?;
+    let stream = StreamId::try_new(config.stream.clone())?;
+    let engine = config.engine_config(&request.id)?;
+    let source = if config.settings.start_from == StartFrom::Snapshot {
+        MySqlSource::with_published_bootstrap(
+            request.id.clone(),
+            stream,
+            engine,
+            None,
+            Some(consumers),
+        )?
+    } else {
+        MySqlSource::new_with_consumer_progress(request.id.clone(), stream, engine, consumers)?
+    };
+    Ok(component(
+        config,
+        source.with_status(status_sink(&request.id)),
+    ))
 }
 
 /// A shared row source (`shared-changes`, `shared-positional-changes`).
@@ -381,40 +409,4 @@ fn create_shared_rows(
         config,
         source.with_status(status_sink(&request.id)),
     ))
-}
-
-impl Factory for MySqlSharedChangesFactory {
-    common_factory_methods!(Mode::SharedChanges);
-    fn supports_consumer_progress(&self) -> bool {
-        true
-    }
-    fn create(&self, _: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
-        anyhow::bail!("MySQL shared rows require their actual fixed consumer set")
-    }
-    fn create_with_consumer_progress(
-        &self,
-        request: &CreateRequest,
-        _: ControlSender,
-        progress: NativeConsumerProgress,
-    ) -> Result<CreatedComponent> {
-        create_shared_rows(Mode::SharedChanges, request, &progress)
-    }
-}
-
-impl Factory for MySqlSharedPositionalChangesFactory {
-    common_factory_methods!(Mode::SharedPositionalChanges);
-    fn supports_consumer_progress(&self) -> bool {
-        true
-    }
-    fn create(&self, _: &CreateRequest, _: ControlSender) -> Result<CreatedComponent> {
-        anyhow::bail!("positional MySQL replay requires its actual fixed consumer set")
-    }
-    fn create_with_consumer_progress(
-        &self,
-        request: &CreateRequest,
-        _: ControlSender,
-        progress: NativeConsumerProgress,
-    ) -> Result<CreatedComponent> {
-        create_shared_rows(Mode::SharedPositionalChanges, request, &progress)
-    }
 }

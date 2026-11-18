@@ -23,10 +23,8 @@ pub(super) static EXTENSION: PluginBootstrapCoordinationV1 = PluginBootstrapCoor
     header: Header::new::<PluginBootstrapCoordinationV1>(),
     version: VERSION,
     reserved: 0,
-    source_factory: Some(source_factory),
     bootstrap_factory: Some(bootstrap_factory),
     create: Some(create),
-    create_source: Some(create_source),
     create_bootstrap: Some(create_bootstrap),
 };
 
@@ -331,18 +329,6 @@ impl futures_core::Stream for PairedStream {
     }
 }
 
-unsafe extern "C" fn source_factory(raw: *mut c_void, index: u32) -> Reply {
-    transport::reply_boundary(|| {
-        let plugin = unsafe { state_ref::<Arc<PluginState>>(raw)? };
-        let factory = plugin
-            .definition
-            .factories
-            .get(index as usize)
-            .ok_or_else(|| Failure::protocol("unknown source/bootstrap factory"))?;
-        wire::encode(&factory.supports_bootstrap_coordination()).map_err(Failure::from)
-    })
-}
-
 unsafe extern "C" fn bootstrap_factory(raw: *mut c_void, index: u32) -> Reply {
     transport::reply_boundary(|| {
         let plugin = unsafe { state_ref::<Arc<PluginState>>(raw)? };
@@ -439,23 +425,27 @@ unsafe extern "C" fn create(
         let metadata = &factory.plugin.definition.metadata.factories[factory.index];
         let implementation = &factory.plugin.definition.factories[factory.index];
         let construct = || -> anyhow::Result<Arc<Coordinator>> {
+            let services = &metadata.capabilities.services;
+            let coordination = implementation
+                .bootstrap_coordination()
+                .filter(|_| services.bootstrap_coordination)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("native factory does not declare bootstrap coordination")
+                })?;
             anyhow::ensure!(
-                implementation.supports_bootstrap_coordination()
-                    && metadata.role == drasi_computation_contracts::ComponentRole::Source
-                    && request.implementation == metadata.implementation
+                request.implementation == metadata.implementation
                     && request.configuration_version == metadata.configuration_version,
                 "source/bootstrap coordinator factory mismatch"
             );
             validate_create_request(factory, &request)?;
             let readers = unsafe { progress(readers, &request)? };
             anyhow::ensure!(
-                matches!(&readers, SourceBootstrapProgress::Single(_))
-                    == implementation.supports_source_progress()
+                matches!(&readers, SourceBootstrapProgress::Single(_)) == services.source_progress
                     && matches!(&readers, SourceBootstrapProgress::Shared { .. })
-                        == implementation.supports_consumer_progress(),
+                        == services.consumer_progress,
                 "source/bootstrap coordinator progress mode mismatch"
             );
-            let engine = implementation.create_bootstrap_coordinator(&request, readers.clone())?;
+            let engine = coordination.create_bootstrap_coordinator(&request, readers.clone())?;
             Ok(Arc::new(Coordinator {
                 plugin: factory.plugin.clone(),
                 index: factory.index,
@@ -537,30 +527,6 @@ pub(super) unsafe fn source_lease(
         owner: owner.clone(),
         state,
     })
-}
-
-unsafe extern "C" fn create_source(
-    factory: *mut c_void,
-    request: BorrowedBytes,
-    coordinator: *const BootstrapCoordinatorHandle,
-    progress: *const abi::recovery::SourceProgressV1,
-    consumers: *const abi::consumer_progress::ConsumerProgressV1,
-    out: *mut abi::ComponentHandle,
-) -> Status {
-    unsafe {
-        create_component_with_services(
-            factory,
-            request,
-            std::ptr::null(),
-            progress,
-            consumers,
-            std::ptr::null(),
-            false,
-            coordinator,
-            std::ptr::null(),
-            out,
-        )
-    }
 }
 
 static VTABLE: BootstrapCoordinatorVTable = BootstrapCoordinatorVTable {

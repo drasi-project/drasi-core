@@ -20,28 +20,18 @@ pub const MIDDLEWARE: &str = "drasi.standard/middleware";
 pub struct MiddlewareFactory;
 
 fn configuration_definition() -> drasi_computation_plugin_sdk::ConfigDefinition {
-    use drasi_computation_plugin_sdk::{ConfigDefinition, ConfigOption as Field, ConfigType::*};
-    ConfigDefinition::try_new([
-        Field::new("stream", String, true, "Nonempty output stream identifier."),
-        Field::new(
-            "middleware",
-            Array,
-            true,
-            "Named middleware configurations; this component supplies map and relabel.",
-        ),
-        Field::new(
-            "pipeline",
-            Array,
-            true,
-            "Ordered middleware names to apply; every name must refer to a declared configuration.",
-        ),
-        Field::new(
-            "bootstrap",
-            Boolean,
-            false,
-            "Initialize from a quiescent provider and expose the transformed current snapshot.",
-        ),
-    ])
+    use drasi_computation_plugin_sdk::{ConfigDefinition, ConfigOption, ConfigType};
+    ConfigDefinition::try_new(
+        drasi_computation_middleware_common::Mode::Events
+            .options()
+            .into_iter()
+            .chain([ConfigOption::new(
+                "bootstrap",
+                ConfigType::Boolean,
+                false,
+                "Initialize from a quiescent provider and expose the transformed current snapshot.",
+            )]),
+    )
     .expect("constant middleware configuration")
 }
 
@@ -65,8 +55,8 @@ impl Factory for MiddlewareFactory {
     ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
         Ok(request.volatile_transformer())
     }
-    fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
-        Some(configuration_definition().details())
+    fn configuration_details(&self) -> drasi_computation_plugin_sdk::ConfigDetails {
+        configuration_definition().details()
     }
 
     fn metadata(&self) -> FactoryMetadata {
@@ -101,6 +91,7 @@ impl Factory for MiddlewareFactory {
         &self,
         request: &CreateRequest,
         _control: ControlSender,
+        _services: drasi_computation_plugin_sdk::ServiceBindings,
     ) -> anyhow::Result<CreatedComponent> {
         Ok(Component::Transformer(Box::new(component::Middleware::new(
             self.metadata().descriptor(request.id.clone())?,

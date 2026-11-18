@@ -38,5 +38,23 @@ serde_json = "1"
 tokio = { version = "1", features = ["net", "io-util", "sync", "rt", "macros", "time"] }
 uuid = { version = "1", features = ["v4"] }
 
+# The live qualification suite (tests/native_transactions.rs) drives the
+# plugin through drasi-lib graphs and the Host SDK. Dev-only edges are outside
+# the native dependency boundary (ci/check_native_dependencies.py).
+[dev-dependencies]
+drasi-computation-bootstrap-postgres.workspace = true
+drasi-computation-sink-storedproc-postgres.workspace = true
+drasi-core.workspace = true
+drasi-host-sdk.workspace = true
+drasi-index-rocksdb = { workspace = true, features = ["computation"] }
+drasi-lib.workspace = true
+drasi-reaction-application.workspace = true
+native-tls = "0.2"
+rcgen = "0.13"
+tempfile = "3"
+testcontainers = "0.27"
+tokio = { version = "1", features = ["full"] }
+tokio-postgres = "0.7"
+
 [lints]
 workspace = true

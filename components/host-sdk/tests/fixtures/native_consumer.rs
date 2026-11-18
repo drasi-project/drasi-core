@@ -12,6 +12,23 @@ use std::sync::Mutex;
 pub struct Factory(pub sdk::ConsumerMode);
 
 impl sdk::Factory for Factory {
+    /// Every field described (fixture).
+    fn configuration_details(&self) -> sdk::ConfigDetails {
+        sdk::ConfigDetails {
+            fields: sdk::Factory::metadata(self)
+                .configuration
+                .fields
+                .into_keys()
+                .map(|name| {
+                    let details = sdk::configuration::ConfigFieldDetails {
+                        description: format!("Fixture field {name}."),
+                        ..Default::default()
+                    };
+                    (name, details)
+                })
+                .collect(),
+        }
+    }
     /// Inputs deliver keyed on producer identity with the configured
     /// `deliveryGuarantee` (a transactional consumer only exactly once).
     fn describe(
@@ -72,16 +89,20 @@ impl sdk::Factory for Factory {
                 PipeRequirements::default(),
             )],
             completion: Some(SinkCompletion::Handled),
-            capabilities: sdk::Capabilities::default(),
+            capabilities: sdk::Capabilities {
+                services: sdk::HostServices {
+                    consumer: Some(self.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
         }
-    }
-    fn consumer_mode(&self) -> Option<sdk::ConsumerMode> {
-        Some(self.0)
     }
     fn create(
         &self,
         request: &sdk::CreateRequest,
         _: sdk::ControlSender,
+        _services: sdk::ServiceBindings,
     ) -> anyhow::Result<sdk::CreatedComponent> {
         let handler = Box::new(Handler {
             descriptor: self.metadata().descriptor(request.id.clone())?,

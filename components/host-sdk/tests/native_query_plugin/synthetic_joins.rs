@@ -245,7 +245,7 @@ async fn join_graph(
         json!({
             "query": JOIN_QUERY, "bootstrap": true,
             "language": language, "joins": joins,
-            "source_transactions": limits(), "recovery":"strict",
+            "sourceTransactions": crate::transaction_settings(limits()), "recovery":"strict",
         }),
         vec!["orders".into(), "customers".into()],
     )
@@ -417,7 +417,7 @@ async fn synthetic_join_auto_reset_preserves_completed_coordinator_ownership() -
             None,
             json!({
                 "query":JOIN_QUERY, "bootstrap":true, "language":"cypher",
-                "joins":changed, "source_transactions":limits(), "recovery":"auto_reset",
+                "joins":changed, "sourceTransactions": crate::transaction_settings(limits()), "recovery":"auto_reset",
             }),
             vec!["orders".into(), "customers".into()],
         )

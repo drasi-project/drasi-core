@@ -26,12 +26,13 @@ fn progress() -> Arc<QuerySourceProgress> {
 
 fn bootstrap_plugin() -> Arc<NativePlugin> {
     unsafe {
-        NativePlugin::from_entry_points_with_bootstrap(
+        NativePlugin::from_entry_points_with(
             drasi_computation_plugin_metadata,
             drasi_computation_plugin_entry,
-            None,
-            None,
-            Some(drasi_computation_plugin_bootstrap_v1),
+            crate::computation::EntryPoints {
+                bootstrap: Some(drasi_computation_plugin_bootstrap_v1),
+                ..super::entry_points()
+            },
         )
     }
     .unwrap()
@@ -712,12 +713,13 @@ fn native_bootstrap_malformed_negotiation_rejects_before_entry() {
         &TABLE
     }
     assert!(unsafe {
-        NativePlugin::from_entry_points_with_bootstrap(
+        NativePlugin::from_entry_points_with(
             drasi_computation_plugin_metadata,
             entry,
-            None,
-            None,
-            Some(extension),
+            crate::computation::EntryPoints {
+                bootstrap: Some(extension),
+                ..super::entry_points()
+            },
         )
     }
     .is_err());

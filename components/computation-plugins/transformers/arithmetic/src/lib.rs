@@ -38,8 +38,8 @@ impl Factory for ArithmeticFactory {
     ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
         Ok(request.volatile_transformer())
     }
-    fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
-        Some(component::configuration_definition().details())
+    fn configuration_details(&self) -> drasi_computation_plugin_sdk::ConfigDetails {
+        component::configuration_definition().details()
     }
 
     fn metadata(&self) -> FactoryMetadata {
@@ -72,6 +72,7 @@ impl Factory for ArithmeticFactory {
         &self,
         request: &CreateRequest,
         _control: ControlSender,
+        _services: drasi_computation_plugin_sdk::ServiceBindings,
     ) -> anyhow::Result<CreatedComponent> {
         Ok(
             Component::Transactional(Box::new(component::Arithmetic::new(

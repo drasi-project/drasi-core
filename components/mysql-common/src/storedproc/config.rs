@@ -247,7 +247,7 @@ impl MySqlStoredProcConfig {
             "configure routes or defaultTemplate with at least one command template"
         );
         for template in self.templates() {
-            drasi_reaction_common::sql_template::validate_parameter_only(template)
+            drasi_computation_template_common::validate_parameter_only(template)
                 .context("MySQL command template")?;
         }
         Ok(())

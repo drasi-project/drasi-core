@@ -67,7 +67,7 @@ async fn native_webhooks_reuse_auth_mapping_timestamps_content_types_and_cors() 
         let port = free_port()?;
         let config = json!({
             "stream":"hooks/out","host":"127.0.0.1","port":port,
-            "ingressCapacity":4,"adaptiveEnabled":true,"adaptiveMinBatchSize":2,"adaptiveMaxBatchSize":2,
+            "ingressCapacity":4,"adaptive":{"minBatchSize":2,"maxBatchSize":2},
             "webhooks":{"errorBehavior":"reject","cors":{"allowOrigins":["https://example.test"]},
                 "routes":[{
                     "path":"/hooks/:tenant","methods":["POST"],
@@ -193,8 +193,7 @@ async fn native_http_adaptive_prefetch_keeps_the_first_event_when_next_is_cancel
             NETWORK_SOURCE_ID,
             json!({
                 "stream":"facilities-db/out","host":"127.0.0.1","port":port,"ingressCapacity":3,
-                "adaptiveEnabled":true,"adaptiveMinBatchSize":3,"adaptiveMaxBatchSize":3,
-                "adaptiveMinWaitMs":1000,"adaptiveMaxWaitMs":1000
+                "adaptive":{"minBatchSize":3,"maxBatchSize":3,"minWaitMs":1000,"maxWaitMs":1000}
             }),
             linked,
         )?;
@@ -349,9 +348,9 @@ fn snapshot_config(address: SocketAddr) -> Value {
         "maxDurationMs":5000,"settings":{"maxRetries":1,"retryDelayMs":1,"maxPages":4,
             "endpoints":[{
                 "url":format!("http://{address}/rows"),
-                "auth":{"type":"oauth2-client-credentials","token_url":format!("http://{address}/token"),
-                    "client_id_env":"NATIVE_HTTP_BOOTSTRAP_CLIENT_TEST","client_secret_env":"NATIVE_HTTP_BOOTSTRAP_SECRET_TEST"},
-                "pagination":{"type":"offset-limit","page_size":1,"total_path":"$.total"},
+                "auth":{"type":"oauth2-client-credentials","tokenUrl":format!("http://{address}/token"),
+                    "clientIdEnv":"NATIVE_HTTP_BOOTSTRAP_CLIENT_TEST","clientSecretEnv":"NATIVE_HTTP_BOOTSTRAP_SECRET_TEST"},
+                "pagination":{"type":"offset-limit","pageSize":1,"totalPath":"$.total"},
                 "response":{"itemsPath":"$.items","mappings":[{"elementType":"node","template":{
                     "id":"{{item.id}}","labels":["Room"],"properties":{"value":"{{item.value}}"}
                 }}]}
@@ -405,7 +404,7 @@ async fn native_http_templates_and_coalesced_bodies_keep_the_legacy_wire_contrac
             "00000000-0000-0000-0000-000000000608",
             json!({
                 "outputs":{"q":{"component":RESULT_QUERY_ID,"port":"out"}},"baseUrl":format!("http://{}",server.address),
-                "adaptive":{"adaptiveMinBatchSize":2,"adaptiveMaxBatchSize":2,"adaptiveBatchTimeoutMs":50},
+                "adaptive":{"minBatchSize":2,"maxBatchSize":2,"maxWaitMs":50},
                 "batchEndpoint":"/batch"
             }),
             linked,

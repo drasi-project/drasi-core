@@ -8,6 +8,7 @@
 
 pub mod catalog;
 mod cursor;
+pub mod definition;
 mod engine;
 pub mod error;
 pub mod identifiers;

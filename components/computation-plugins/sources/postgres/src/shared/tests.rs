@@ -138,8 +138,20 @@ fn constructor_retains_capability_without_reading_and_policy_identity_is_stable(
         &source.input_position_policy().unwrap()
     ));
     assert!(source.configuration()?.get("coordinatedSnapshot").is_none());
-    assert!(crate::PostgresSharedRowsFactory.supports_consumer_progress());
-    assert!(!crate::PostgresSharedRowsFactory.supports_source_progress());
+    assert!(
+        crate::PostgresSharedRowsFactory
+            .metadata()
+            .capabilities
+            .services
+            .consumer_progress
+    );
+    assert!(
+        !crate::PostgresSharedRowsFactory
+            .metadata()
+            .capabilities
+            .services
+            .source_progress
+    );
     assert!(!crate::PostgresSharedRowsFactory
         .metadata()
         .configuration
@@ -401,8 +413,20 @@ fn transaction_binding_is_constructor_safe_and_has_no_single_owner_or_row_option
         !fields.contains_key("coordinatedSnapshot") && !fields.contains_key("persistent"),
         "shared transactions have no single-owner or row options"
     );
-    assert!(crate::PostgresSharedTransactionsFactory.supports_consumer_progress());
-    assert!(!crate::PostgresSharedTransactionsFactory.supports_source_progress());
+    assert!(
+        crate::PostgresSharedTransactionsFactory
+            .metadata()
+            .capabilities
+            .services
+            .consumer_progress
+    );
+    assert!(
+        !crate::PostgresSharedTransactionsFactory
+            .metadata()
+            .capabilities
+            .services
+            .source_progress
+    );
     Ok(())
 }
 

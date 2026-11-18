@@ -24,8 +24,8 @@ async fn fixture(mode: DispatchMode, retention: usize) -> Result<(tempfile::Temp
         json!({
             "query": TEXT,
             "bootstrap": true,
-            "source_transactions": limits(),
-            "outbox_capacity": retention,
+            "sourceTransactions": crate::transaction_settings(limits()),
+            "outboxCapacity": retention,
         }),
         vec!["items".into()],
         Some((mode, 1)),
@@ -303,8 +303,8 @@ async fn subscription_during_bootstrap() -> Result<()> {
         1,
         Some(gate.clone()),
         json!({
-            "query": TEXT, "bootstrap": true, "source_transactions": limits(),
-            "outbox_capacity": 64,
+            "query": TEXT, "bootstrap": true, "sourceTransactions": crate::transaction_settings(limits()),
+            "outboxCapacity": 64,
         }),
         vec!["items".into()],
         Some((DispatchMode::Channel, 1)),

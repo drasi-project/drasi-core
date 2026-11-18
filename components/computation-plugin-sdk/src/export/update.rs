@@ -59,16 +59,18 @@ pub(super) fn assess_factory(
     validate_request(state, request)?;
     let factory = &state.plugin.definition.factories[state.index];
     let metadata = &state.plugin.definition.metadata.factories[state.index];
-    anyhow::ensure!(
-        factory.supports_update_planning() && !metadata.capabilities.update_modes.is_empty(),
-        Failure::new(
-            abi::status::UNSUPPORTED,
-            "native factory does not support updates"
-        )
-    );
+    let planner = factory
+        .update_planner()
+        .filter(|_| !metadata.capabilities.update_modes.is_empty())
+        .ok_or_else(|| {
+            Failure::new(
+                abi::status::UNSUPPORTED,
+                "native factory does not support updates",
+            )
+        })?;
     // Planning has the same description-only view over JSON and during apply
     // validation. Creation annotations cannot change a previously returned plan.
-    let assessment = factory.assess(&description(request))?;
+    let assessment = planner.assess(&description(request))?;
     validate_assessment(state, request, &assessment)?;
     Ok(assessment)
 }

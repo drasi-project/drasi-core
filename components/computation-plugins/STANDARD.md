@@ -9,11 +9,11 @@ are `"1"` and configuration versions are `1`.
 
 | Implementation | Role | Configuration |
 |---|---|---|
-| `drasi.standard/volatile-counter` | `EnvelopeSource` | `stream` required; `count=10`, `start=0`, `step=1`, `interval_ms=0`, `paused=false` |
-| `drasi.standard/middleware` | `Transformer` | Required `stream`, `middleware`, `pipeline`; supports existing `map` and `relabel` middleware |
-| `drasi.standard/view` | `Transformer` | Required `stream`, `middleware`, `pipeline`; maintains complete map/relabel projections and recorded output associations |
+| `drasi.standard/volatile-counter` | `EnvelopeSource` | `stream` required; `count=10`, `start=0`, `step=1`, `intervalMs=0`, `paused=false` |
+| `drasi.standard/middleware` | `Transformer` | Required `stream`, `middleware`, `pipeline`; declared stateless kinds `decoder`, `map`, `parse_json`, `promote`, `relabel` (the schema rejects others at binding) |
+| `drasi.standard/view` | `Transformer` | Required `stream`, `middleware`, `pipeline`; same declared kinds and shared pipeline as `middleware`, over complete images (insert-only map rules); maintains projections and recorded output associations |
 | `drasi.standard/capture` | `EnvelopeSink` | `path` required; `append=false` |
-| `drasi.standard/arithmetic` | `Transformer`, optional transaction participant | `stream` required; `field="value"`, `add=0`, `multiply=1`, `counter_property="batch_count"` |
+| `drasi.standard/arithmetic` | `Transformer`, optional transaction participant | `stream` required; `field="value"`, `add=0`, `multiply=1`, `counterProperty="batch_count"` |
 
 Every data port uses `GraphChangeCodec::schema()`. Sources expose `out`, sinks
 expose `in`, and transformers expose both. Configuration getters return the
@@ -46,7 +46,7 @@ in-flight operation. Control handling remains independent of a blocked `next()`.
 Ordinary peer status notifications are advisory. Unknown custom commands and
 non-null payloads fail explicitly.
 
-The counter factory supports managed `interval_ms` updates using
+The counter factory supports managed `intervalMs` updates using
 `InPlace`/`Preserve`. The host pauses processing around the update; the component
 keeps its UUID, emitted count, next value, sequence, and explicit control pause
 state. Changes to count, start, step, stream, or the initial paused setting are
@@ -103,8 +103,8 @@ includes the configured batch-count property. Distinct steps can use the same
 state keys without sharing state. No commit method, workers or external effects
 exist in the participant.
 
-For two steps with `add=2,multiply=1,counter_property="first_count"` and
-`add=0,multiply=4,counter_property="second_count"`, input `value=3` produces
+For two steps with `add=2,multiply=1,counterProperty="first_count"` and
+`add=0,multiply=4,counterProperty="second_count"`, input `value=3` produces
 `value=20,first_count=1,second_count=1`. The container owns atomic state/output
 commit and recovery. A retry of committed input may redeliver retained output
 without rerunning either step.

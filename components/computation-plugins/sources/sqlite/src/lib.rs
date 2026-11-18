@@ -35,9 +35,9 @@ use drasi_computation_contracts::{
 };
 use drasi_computation_plugin_sdk::{
     lifecycle::Assessment, Capabilities, Component, ConfigDetails, ControlSender, CreateRequest,
-    CreatedComponent, Factory, FactoryMetadata, NativeConsumerProgress,
-    NativeSourceBootstrapCoordinator, NativeSourceProgress, PluginDefinition,
-    SourceBootstrapProgress, UpdateRequest,
+    CreatedComponent, Factory, FactoryMetadata, HostServices, NativeSourceBootstrapCoordinator,
+    PluginDefinition, ServiceBindings, SourceBootstrapCoordination, SourceBootstrapProgress,
+    UpdatePlanner, UpdateRequest,
 };
 use std::sync::Arc;
 
@@ -105,6 +105,12 @@ fn metadata(mode: Mode) -> FactoryMetadata {
             erases_owned_state: true,
             // Outputs carry source replay progress, not a producer identity of their
             // own (Host admission, when bound, publishes under its durable identity).
+            services: HostServices {
+                source_progress: matches!(mode, Mode::Replay),
+                consumer_progress: matches!(mode, Mode::Shared),
+                bootstrap_coordination: mode.journal(),
+                ..HostServices::default()
+            },
             ..Capabilities::default()
         },
     }
@@ -188,34 +194,13 @@ impl SqliteFactory {
     }
 }
 
-impl Factory for SqliteFactory {
-    fn describe(
-        &self,
-        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
-    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        describe_configuration(&self.configuration(&request.request)?, &request.descriptor)
-    }
-    fn metadata(&self) -> FactoryMetadata {
-        metadata(self.0)
-    }
-    fn configuration_details(&self) -> Option<ConfigDetails> {
-        Some(config::definition(self.0).details())
-    }
-    fn supports_update_planning(&self) -> bool {
-        true
-    }
+impl UpdatePlanner for SqliteFactory {
     fn assess(&self, request: &UpdateRequest) -> Result<Assessment> {
         management::assess(self.0, request)
     }
-    fn supports_source_progress(&self) -> bool {
-        matches!(self.0, Mode::Replay)
-    }
-    fn supports_consumer_progress(&self) -> bool {
-        matches!(self.0, Mode::Shared)
-    }
-    fn supports_bootstrap_coordination(&self) -> bool {
-        self.0.journal()
-    }
+}
+
+impl SourceBootstrapCoordination for SqliteFactory {
     fn create_bootstrap_coordinator(
         &self,
         request: &CreateRequest,
@@ -238,65 +223,76 @@ impl Factory for SqliteFactory {
             request, config, progress,
         )?))
     }
-    fn create(&self, request: &CreateRequest, control: ControlSender) -> Result<CreatedComponent> {
-        anyhow::ensure!(
-            !self.0.journal(),
-            "SQLite journal factories require persistent source progress from the host"
-        );
-        let config = self.configuration(request)?;
-        let source = SqliteSource::build(request.id.clone(), config, component::Progress::None)?
-            .with_control(control);
-        Ok(Component::Source(Box::new(source)).into())
+}
+
+impl Factory for SqliteFactory {
+    fn describe(
+        &self,
+        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
+    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        describe_configuration(&self.configuration(&request.request)?, &request.descriptor)
     }
-    fn create_with_progress(
+    fn metadata(&self) -> FactoryMetadata {
+        metadata(self.0)
+    }
+    fn configuration_details(&self) -> ConfigDetails {
+        config::definition(self.0).details()
+    }
+    fn update_planner(&self) -> Option<&dyn UpdatePlanner> {
+        Some(self)
+    }
+    fn bootstrap_coordination(&self) -> Option<&dyn SourceBootstrapCoordination> {
+        self.0
+            .journal()
+            .then_some(self as &dyn SourceBootstrapCoordination)
+    }
+    /// Each mode receives the progress its declaration binds: none for the
+    /// volatile modes, one owner for replay and the consumer group for shared.
+    fn create(
         &self,
         request: &CreateRequest,
         control: ControlSender,
-        progress: NativeSourceProgress,
+        services: ServiceBindings,
     ) -> Result<CreatedComponent> {
-        anyhow::ensure!(
-            matches!(self.0, Mode::Replay),
-            "SQLite factory does not accept single-owner progress"
-        );
         let config = self.configuration(request)?;
-        anyhow::ensure!(
-            !config.coordinated_snapshot,
-            "SQLite coordinated source requires its actual coordinator resource"
-        );
-        anyhow::ensure!(
-            self.graph(request)? == progress.reader().graph_id(),
-            "SQLite progress belongs to another graph"
-        );
-        let source = SqliteSource::build(
-            request.id.clone(),
-            config,
-            component::Progress::Single(progress.reader()),
-        )?
-        .with_control(control);
-        Ok(Component::Source(Box::new(source)).into())
-    }
-    fn create_with_consumer_progress(
-        &self,
-        request: &CreateRequest,
-        control: ControlSender,
-        progress: NativeConsumerProgress,
-    ) -> Result<CreatedComponent> {
-        anyhow::ensure!(
-            matches!(self.0, Mode::Shared),
-            "SQLite factory does not accept a consumer group"
-        );
-        let config = self.configuration(request)?;
-        anyhow::ensure!(
-            !config.coordinated_snapshot,
-            "SQLite coordinated source requires its actual coordinator resource"
-        );
-        anyhow::ensure!(
-            self.graph(request)? == progress.reader().graph_id(),
-            "SQLite consumer group belongs to another graph"
-        );
-        let source = SqliteSource::with_consumers(request.id.clone(), config, progress)?
-            .with_control(control);
-        Ok(Component::Source(Box::new(source)).into())
+        let source = match self.0 {
+            Mode::Changes | Mode::Transactions => {
+                SqliteSource::build(request.id.clone(), config, component::Progress::None)?
+            }
+            Mode::Replay => {
+                let progress = services.source_progress.context(
+                    "SQLite journal factories require persistent source progress from the host",
+                )?;
+                anyhow::ensure!(
+                    !config.coordinated_snapshot,
+                    "SQLite coordinated source requires its actual coordinator resource"
+                );
+                anyhow::ensure!(
+                    self.graph(request)? == progress.reader().graph_id(),
+                    "SQLite progress belongs to another graph"
+                );
+                SqliteSource::build(
+                    request.id.clone(),
+                    config,
+                    component::Progress::Single(progress.reader()),
+                )?
+            }
+            Mode::Shared => {
+                let progress = services.consumer_progress.context(
+                    "SQLite journal factories require persistent source progress from the host",
+                )?;
+                anyhow::ensure!(
+                    !config.coordinated_snapshot,
+                    "SQLite coordinated source requires its actual coordinator resource"
+                );
+                anyhow::ensure!(
+                    self.graph(request)? == progress.reader().graph_id(),
+                    "SQLite consumer group belongs to another graph"
+                );
+                SqliteSource::with_consumers(request.id.clone(), config, progress)?
+            }
+        };
+        Ok(Component::Source(Box::new(source.with_control(control))).into())
     }
 }
 

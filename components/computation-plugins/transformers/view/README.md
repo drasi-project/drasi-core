@@ -15,9 +15,13 @@ evaluator, graph runtime or legacy plugin SDK.
 
 ## Configuration
 
-The required fields are `stream`, `middleware` and `pipeline`. The stream names
-this view's output. Middleware names must be unique, and every pipeline step
-must name a declared middleware. An empty pipeline is an identity view.
+The required fields are `stream`, `middleware` and `pipeline`, with the same
+meaning and the same declared kinds (`decoder`, `map`, `parse_json`, `promote`,
+`relabel`) as the [middleware transformer](../middleware): both use the one
+pipeline in [`drasi-computation-middleware-common`](../../common/middleware).
+The stream names this view's output. Middleware names must be unique, and every
+pipeline step must name a declared middleware. An empty pipeline is an identity
+view.
 
 This example projects the active children of each `Parent` node:
 
@@ -50,12 +54,13 @@ This example projects the active children of each `Parent` node:
 }
 ```
 
-The implementation reuses the existing **map** and **relabel** processors. A map
-receives a complete current input image as an `Insert`, including after a
-replacement or patch. Therefore configure only its `insert` rules. An explicit
-rule `op` may be `Insert` or `Replace`; both mean a complete projected image.
-Event-specific `update` / `delete` rules and output `Update` / `Delete`
-operations are rejected at construction, not silently ignored. Every pipeline
+Every step receives a complete current input image as an `Insert`, including
+after a replacement or patch, and must return complete images. Therefore a map
+declares only `insert` rules. An explicit rule `op` may be `Insert` or
+`Replace`; both mean a complete projected image. This restriction is part of
+the published configuration schema: event-specific `update` / `delete` rules
+and output `Update` / `Delete` operations are rejected when the graph binds
+the view (and again at construction), not silently ignored. Every pipeline
 step operates on complete images. The view determines the actual output change
 operations by comparing its previous and newly projected datasets.
 
@@ -86,9 +91,9 @@ element key. Distinct inputs must not produce the same output identity; duplicat
 identities within one input's projection are also errors. The component does
 not invent merging or ownership rules for ambiguous outputs.
 
-This component does not add a mode to, or change the behavior of, the existing
-stateless map/jq middleware or native middleware transformer. Jq and other
-middleware kinds are not registered by this view factory.
+The view and the stateless middleware transformer share one pipeline; the view
+only adds the complete-image restriction above. `jq` (system libjq) and
+`unwind` (stored images) are not declared by this factory.
 
 ## Dataset semantics
 

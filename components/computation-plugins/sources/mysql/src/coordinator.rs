@@ -193,12 +193,7 @@ impl NativeSourceBootstrapCoordinator for Coordinator {
                 )?
             }
             (Mode::SharedChanges, SourceBootstrapLiveProgress::Shared(reader)) => {
-                MySqlSource::shared_rows(
-                    id.clone(),
-                    stream,
-                    engine,
-                    consumers(reader)?,
-                )?
+                MySqlSource::shared_rows(id.clone(), stream, engine, consumers(reader)?)?
             }
             _ => anyhow::bail!("MySQL source/bootstrap live progress mode changed"),
         };

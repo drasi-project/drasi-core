@@ -3,29 +3,22 @@
 
 //! Command templates compiled once at construction.
 //!
-//! Templates pass the shared parameter-only rule
-//! (`drasi_reaction_common::sql_template`), so every value is a `{{param …}}`
-//! that renders as a `?` placeholder and is bound positionally. Rendering
-//! runs in strict mode: a referenced field that the change does not carry is
-//! a render failure, which is permanent for that change (D-5).
+//! Templates are compiled by the shared native template engine
+//! (`drasi-computation-template-common`) under its parameter-only rule, so
+//! every value is a `{{param …}}` that renders as a `?` placeholder and is
+//! bound positionally. Rendering is strict: a referenced field that the
+//! change does not carry is a render failure, which is permanent for that
+//! change (D-5).
 
 use super::config::MySqlStoredProcConfig;
-use anyhow::{anyhow, Context, Result};
-use handlebars::{
-    Context as RenderState, Handlebars, Helper, HelperResult, Output, RenderContext,
-    RenderErrorReason,
-};
+use anyhow::{Context, Result};
+use drasi_computation_template_common::{ParameterTemplate, Placeholder};
 use serde_json::Value;
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::collections::HashMap;
 
 /// Compiled command templates keyed by their source text.
 pub struct Commands {
-    registry: Handlebars<'static>,
-    names: HashMap<String, String>,
-    parameters: Arc<Mutex<Vec<Value>>>,
+    templates: HashMap<String, ParameterTemplate>,
 }
 
 /// One rendered command.
@@ -36,77 +29,28 @@ pub struct Rendered {
 
 impl Commands {
     pub fn compile(config: &MySqlStoredProcConfig) -> Result<Self> {
-        let parameters = Arc::new(Mutex::new(Vec::new()));
-        let mut registry = Handlebars::new();
-        registry.set_strict_mode(true);
-        let buffer = parameters.clone();
-        registry.register_helper(
-            "param",
-            Box::new(
-                move |helper: &Helper<'_>,
-                      _: &Handlebars<'_>,
-                      _: &RenderState,
-                      _: &mut RenderContext<'_, '_>,
-                      out: &mut dyn Output|
-                      -> HelperResult {
-                    let value = helper.param(0).ok_or_else(|| {
-                        RenderErrorReason::Other("`param` requires one argument".into())
-                    })?;
-                    if value.is_value_missing() {
-                        return Err(RenderErrorReason::Other(
-                            "`param` referenced a field that the change does not carry".into(),
-                        )
-                        .into());
-                    }
-                    buffer
-                        .lock()
-                        .map_err(|_| RenderErrorReason::Other("parameter buffer poisoned".into()))?
-                        .push(value.value().clone());
-                    out.write("?")?;
-                    Ok(())
-                },
-            ),
-        );
-        let mut names = HashMap::new();
-        for (index, template) in config.templates().enumerate() {
-            if names.contains_key(template) {
+        let mut templates = HashMap::new();
+        for template in config.templates() {
+            if templates.contains_key(template) {
                 continue;
             }
-            let name = format!("command-{index}");
-            registry
-                .register_template_string(&name, template)
+            let compiled = ParameterTemplate::compile(template, Placeholder::Question)
                 .with_context(|| format!("invalid MySQL command template: {template}"))?;
-            names.insert(template.to_owned(), name);
+            templates.insert(template.to_owned(), compiled);
         }
-        Ok(Self {
-            registry,
-            names,
-            parameters,
-        })
+        Ok(Self { templates })
     }
 
     /// Renders `template` (a configured template) against `context`.
     pub fn render(&self, template: &str, context: &Value) -> Result<Rendered> {
-        let name = self
-            .names
+        let rendered = self
+            .templates
             .get(template)
-            .context("MySQL command template was not compiled")?;
-        let mut buffer = self
-            .parameters
-            .lock()
-            .map_err(|_| anyhow!("parameter buffer poisoned"))?;
-        buffer.clear();
-        drop(buffer);
-        let sql = self.registry.render(name, context);
-        let parameters = std::mem::take(
-            &mut *self
-                .parameters
-                .lock()
-                .map_err(|_| anyhow!("parameter buffer poisoned"))?,
-        );
+            .context("MySQL command template was not compiled")?
+            .render(context)?;
         Ok(Rendered {
-            sql: sql?.trim().to_owned(),
-            parameters,
+            sql: rendered.sql.trim().to_owned(),
+            parameters: rendered.parameters,
         })
     }
 }

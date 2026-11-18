@@ -96,11 +96,14 @@ protocol is shaped like a query result. Every native sink states, per change:
 
 A valid identity-only deletion with no before image and no envelope timestamp is
 delivered as `{operation: "DELETE", identity, output, sequence}` and nothing
-else. The HTTP, SSE and log sinks render templates in non-strict mode, so a
-template that reads an absent field renders an empty value. The gRPC sink
-renders strictly, so an absent field is a render failure. A render failure is a
-per-change failure under the sink's failure policy, never a silent fallback to
-another body. Every templating sink registers the `json` helper.
+else. Every templating sink (HTTP, gRPC, SSE, log and the stored-procedure
+sinks) renders through one engine, `drasi-computation-template-common`
+([semantics](common/template/README.md)): templates compile once and every
+helper call is checked statically; rendering is strict, so a template that
+reads an absent field fails to render; values are never HTML-escaped (use
+`{{json x}}` inside JSON); the helper set is the same everywhere. A render
+failure is a per-change failure under the sink's failure policy, never a silent
+fallback to another body.
 
 Template routes use the operation's group: `added` (ADD), `updated` (REPLACE
 and PATCH; the context's `operation` tells them apart) and `deleted` (DELETE).

@@ -334,9 +334,9 @@ impl HostConfig {
         for (component, spec) in bridge_components {
             let source = spec.implementation.name.as_ref() == "drasi.bridge/source";
             let peer_key = if source {
-                "sender_instance"
+                "senderInstance"
             } else {
-                "receiver_instance"
+                "receiverInstance"
             };
             let peer = match spec.configuration.get(peer_key) {
                 Some(ConfigurationValue::Literal(value)) => value.as_str(),

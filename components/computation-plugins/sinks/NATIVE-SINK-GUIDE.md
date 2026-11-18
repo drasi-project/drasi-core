@@ -20,6 +20,16 @@ what is different for sinks.
 | `dispose` | Implement both intents. Under `Erase`, remove exactly the destination-side state the sink owns (cursor rows, sender ledgers), idempotently. A sink that owns nothing declares `erases_owned_state` with a documented no-op. |
 | `handle` / `handle_batch` | Return `Ok` only when the declared completion is met (see below). A failure must leave the sink able to retry the same input without Stop and Start; never latch an "interrupted" flag. A handler holds no state outside its future, because the host cancels an in-flight handle by dropping it. |
 
+## Declared services
+
+A sink declares its Host services once, in `Capabilities::services`:
+`consumer` (the `Consumer/External` or transactional profile below),
+`sink_batching` (Host-collected batches), `output_snapshot_reads` and
+`activation_credentials` (with `Factory::activation_credentials`). Every bound
+service reaches `Factory::create` together in `ServiceBindings`. A consumer
+cannot also declare Host-owned batching; any other combination may be
+declared and bound together.
+
 ## Delivery profile
 
 Each sink declares exactly one delivery profile, documents its duplicate and
@@ -122,6 +132,14 @@ and replays carry the same identity and a receiver can deduplicate. It
 contains no transport or configuration identity. A template that fails to
 render never falls back silently to another body.
 
+**Templates.** A sink that renders templates uses
+`drasi-computation-template-common` ([semantics](../common/template/README.md)),
+never its own Handlebars registry: `Templates` for text and
+`ParameterTemplate` for parameter-bound SQL, compiled in `initialize` or at
+construction, with the shared helper set, strict rendering, no escaping and the
+`change_context` of the change. Only routing and the response to a render
+failure belong to the sink.
+
 ## Operator output and diagnostics
 
 Write diagnostics and operator-visible output with the `log` facade
@@ -146,6 +164,12 @@ security settings:
 - a connection cap, a subscriber cap and a header-read timeout;
 - optional TLS and mutual TLS;
 - a real pause gate.
+
+## Configuration
+
+As for sources: lowerCamelCase keys at every level, `deny_unknown_fields` on
+every nested type, published defaults equal to serde defaults, a schema
+generated from the parsed types, and top-level secrets.
 
 ## Management
 

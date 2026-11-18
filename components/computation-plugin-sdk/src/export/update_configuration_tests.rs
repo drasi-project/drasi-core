@@ -88,19 +88,22 @@ impl Factory for TestFactory {
             },
         }
     }
-    fn configuration_details(&self) -> Option<crate::ConfigDetails> {
-        self.publish_defaults.then(|| definition().details())
+    fn configuration_details(&self) -> crate::ConfigDetails {
+        let mut details = definition().details();
+        if !self.publish_defaults {
+            for field in details.fields.values_mut() {
+                field.default = None;
+                field.default_description = None;
+            }
+        }
+        details
     }
-    fn supports_update_planning(&self) -> bool {
-        true
-    }
-    fn assess(&self, _: &UpdateRequest) -> anyhow::Result<Assessment> {
-        Ok(in_place())
-    }
+
     fn create(
         &self,
         request: &CreateRequest,
         _: ControlSender,
+        _services: ServiceBindings,
     ) -> anyhow::Result<CreatedComponent> {
         Ok(Component::Source(Box::new(ParsedCounter {
             descriptor: self.metadata().descriptor(request.id.clone())?,
@@ -108,6 +111,15 @@ impl Factory for TestFactory {
             shared: self.shared.clone(),
         }))
         .into())
+    }
+    fn update_planner(&self) -> Option<&dyn crate::UpdatePlanner> {
+        Some(self)
+    }
+}
+
+impl crate::UpdatePlanner for TestFactory {
+    fn assess(&self, _: &UpdateRequest) -> anyhow::Result<Assessment> {
+        Ok(in_place())
     }
 }
 
@@ -226,6 +238,7 @@ impl Fixture {
             transport::take_status((*factory.vtable).create.unwrap()(
                 factory.state,
                 BorrowedBytes::new(&bytes),
+                &abi::services::ServiceBindingsV1::none(),
                 &mut component,
             ))?;
         }

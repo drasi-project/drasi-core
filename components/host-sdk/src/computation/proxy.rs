@@ -953,7 +953,6 @@ impl NativeComponentProxy {
         anyhow::ensure!(
             extension.version == abi::batching::VERSION
                 && extension.reserved == 0
-                && extension.factory.is_some()
                 && extension.policy.is_some()
                 && self.metadata.role == ComponentRole::Sink,
             "invalid native sink batching extension"

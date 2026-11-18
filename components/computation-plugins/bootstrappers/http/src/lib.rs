@@ -9,13 +9,13 @@ use anyhow::{Context, Result};
 use drasi_computation_contracts::{ComponentId, GraphChangeCodec, ImplementationIdentity};
 use drasi_computation_plugin_sdk::{
     BootstrapCompletionKind, BootstrapFactory, BootstrapFactoryMetadata,
-    BootstrapOutputDescription, BootstrapSession, ConfigSchema, ConfigType, CreateRequest,
-    ElementNamespace, NativeBootstrapProvider, NativeSourceProgress, PluginDefinition,
+    BootstrapOutputDescription, BootstrapSession, CreateRequest, ElementNamespace,
+    NativeBootstrapProvider, NativeSourceProgress, PluginDefinition,
 };
 use std::sync::Arc;
 
 pub use drasi_http_common::bootstrap::config as settings;
-pub use snapshot::{HttpBootstrapConfig, HttpBootstrapProvider};
+pub use snapshot::{definition, HttpBootstrapConfig, HttpBootstrapProvider};
 
 pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
 pub const HTTP_BOOTSTRAP: &str = "drasi.network/http-bootstrap";
@@ -41,15 +41,7 @@ impl BootstrapFactory for HttpBootstrapFactory {
             implementation: ImplementationIdentity::try_new(HTTP_BOOTSTRAP, "1")
                 .expect("constant implementation"),
             configuration_version: 1,
-            configuration: ConfigSchema::from_fields([
-                ("settings", ConfigType::Object, true),
-                ("nodeLabels", ConfigType::Array, false),
-                ("relationLabels", ConfigType::Array, false),
-                ("maxResponseBytes", ConfigType::Integer, false),
-                ("outputCapacity", ConfigType::Integer, false),
-                ("maxDurationMs", ConfigType::Integer, false),
-                ("shutdownTimeoutMs", ConfigType::Integer, false),
-            ]),
+            configuration: snapshot::definition().schema(),
             source_progress: false,
             pairing: None,
         }
@@ -59,6 +51,7 @@ impl BootstrapFactory for HttpBootstrapFactory {
     /// connected to.
     fn describe(&self, configuration: &serde_json::Value) -> Result<BootstrapOutputDescription> {
         self.metadata().configuration.validate(configuration)?;
+        HttpBootstrapConfig::from_value(configuration)?;
         Ok(BootstrapOutputDescription {
             completion: BootstrapCompletionKind::Quiescent,
             pairing: None,

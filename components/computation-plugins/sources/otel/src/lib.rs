@@ -75,14 +75,8 @@ impl Factory for OtelSourceFactory {
             drasi_computation_plugin_sdk::ProgressPersistence::Volatile,
         ))
     }
-    fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
-        Some(OtelSourceConfig::definition().details())
-    }
-    fn supports_update_planning(&self) -> bool {
-        true
-    }
-    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
-        component::assess(request)
+    fn configuration_details(&self) -> drasi_computation_plugin_sdk::ConfigDetails {
+        OtelSourceConfig::definition().details()
     }
 
     fn metadata(&self) -> FactoryMetadata {
@@ -117,6 +111,7 @@ impl Factory for OtelSourceFactory {
         &self,
         request: &CreateRequest,
         _control: ControlSender,
+        _services: drasi_computation_plugin_sdk::ServiceBindings,
     ) -> anyhow::Result<CreatedComponent> {
         Ok(Component::Source(Box::new(component::OtelSource::new(
             self.metadata().descriptor(request.id.clone())?,
@@ -124,6 +119,15 @@ impl Factory for OtelSourceFactory {
             request.scope.as_ref(),
         )?))
         .into())
+    }
+    fn update_planner(&self) -> Option<&dyn drasi_computation_plugin_sdk::UpdatePlanner> {
+        Some(self)
+    }
+}
+
+impl drasi_computation_plugin_sdk::UpdatePlanner for OtelSourceFactory {
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
+        component::assess(request)
     }
 }
 

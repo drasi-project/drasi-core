@@ -8,20 +8,23 @@ use drasi_computation_contracts::{
     GraphProducerIdentity, GraphProducerProgress, InputEnvelope, OutputEnvelope, OutputReaders,
     PortId, StreamId,
 };
+use drasi_computation_middleware_common::{Mode, Pipeline};
 use drasi_computation_plugin_sdk::lifecycle::{
     nothing_to_do, DisposeContext, InitializeContext, LifecycleResult, PauseContext, ResumeContext,
     StartContext, StopContext,
 };
-use drasi_computation_plugin_sdk::{NativeComponent, NativeTransformer};
+use drasi_computation_plugin_sdk::{
+    BootstrapInput, NativeBootstrapInput, NativeComponent, NativeTransformer,
+};
 use drasi_core_types::models::{SourceChange, SourceMiddlewareConfig};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::BTreeMap,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
 };
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -31,20 +34,6 @@ struct Configuration {
     pipeline: Vec<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     bootstrap: bool,
-}
-
-enum Processor {
-    Map(drasi_middleware::map::Map),
-    Relabel(drasi_middleware::relabel::RelabelMiddleware),
-}
-
-impl Processor {
-    async fn apply(&self, change: SourceChange) -> Result<Vec<SourceChange>> {
-        Ok(match self {
-            Self::Map(value) => value.apply(change).await?,
-            Self::Relabel(value) => value.apply(change).await?,
-        })
-    }
 }
 
 struct ProcessingGuard {
@@ -63,7 +52,7 @@ impl Drop for ProcessingGuard {
 pub(super) struct Middleware {
     descriptor: ComponentDescriptor,
     configuration: Configuration,
-    pipeline: Vec<Arc<Processor>>,
+    pipeline: Pipeline,
     identity: GraphProducerIdentity,
     sequence: u64,
     running: bool,
@@ -78,39 +67,11 @@ impl Middleware {
         scope: Option<&drasi_computation_plugin_sdk::Scope>,
     ) -> Result<Self> {
         let configuration: Configuration = serde_json::from_value(value)?;
-        let mut processors = BTreeMap::new();
-        for config in &configuration.middleware {
-            drasi_computation_contracts::data::validate_identifier("middleware", &config.name)?;
-            drasi_computation_contracts::data::validate_identifier(
-                "middleware kind",
-                &config.kind,
-            )?;
-            anyhow::ensure!(
-                !processors.contains_key(config.name.as_ref()),
-                "duplicate middleware name"
-            );
-            let processor = match config.kind.as_ref() {
-                "map" => Processor::Map(drasi_middleware::map::MapFactory::new().build(config)?),
-                "relabel" => Processor::Relabel(
-                    drasi_middleware::relabel::RelabelMiddlewareFactory::new().build(config)?,
-                ),
-                kind => anyhow::bail!("middleware kind {kind} is not registered"),
-            };
-            processors.insert(config.name.to_string(), Arc::new(processor));
-        }
-        let pipeline = configuration
-            .pipeline
-            .iter()
-            .map(|name| {
-                drasi_computation_contracts::data::validate_identifier(
-                    "middleware pipeline step",
-                    name,
-                )?;
-                processors.get(name).cloned().ok_or_else(|| {
-                    anyhow::anyhow!("pipeline references undeclared middleware {name}")
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let pipeline = Pipeline::new(
+            Mode::Events,
+            &configuration.middleware,
+            &configuration.pipeline,
+        )?;
         let identity = GraphProducerIdentity::volatile(
             scope
                 .filter(|_| configuration.bootstrap)
@@ -157,17 +118,9 @@ impl Middleware {
     async fn process(&self, input: &ChangeEnvelope) -> Result<Vec<SourceChange>> {
         let mut output = Vec::new();
         for change in GraphChangeCodec::decode_changes(input)? {
-            let mut changes = vec![change];
-            for processor in &self.pipeline {
-                let mut next = Vec::new();
-                for change in changes {
-                    next.extend(processor.apply(change).await.with_context(|| {
-                        format!("middleware pipeline failed in {}", self.descriptor.id())
-                    })?);
-                }
-                changes = next;
-            }
-            output.extend(changes);
+            output.extend(self.pipeline.apply(change).await.with_context(|| {
+                format!("middleware pipeline failed in {}", self.descriptor.id())
+            })?);
         }
         Ok(output)
     }
@@ -230,10 +183,44 @@ impl NativeComponent for Middleware {
 
 #[async_trait]
 impl NativeTransformer for Middleware {
-    fn quiescent_bootstrap_input(&self) -> Option<PortId> {
-        Some(PortId::try_new("in").expect("constant port"))
+    async fn delivery_completed(&mut self, _outputs: &[OutputEnvelope]) -> Result<()> {
+        self.check_running()
     }
 
+    async fn transform(&mut self, input: InputEnvelope) -> Result<Vec<OutputEnvelope>> {
+        self.check_running()?;
+        let mut guard = ProcessingGuard {
+            failed: self.failed.clone(),
+            complete: false,
+        };
+        anyhow::ensure!(input.port.as_str() == "in", "unknown middleware input port");
+        let sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("middleware output sequence exhausted"))?;
+        let output = self.process(&input.envelope).await?;
+        let mut envelope = GraphChangeCodec::derive_changes(
+            &input.envelope,
+            &output,
+            self.configuration.stream.clone(),
+            sequence,
+        )?;
+        GraphProducerProgress::annotate(&mut envelope, &self.identity, sequence)?;
+        self.output.apply(&output, sequence)?;
+        self.sequence = sequence;
+        guard.complete = true;
+        Ok(vec![OutputEnvelope {
+            port: PortId::try_new("out")?,
+            envelope,
+        }])
+    }
+    fn bootstrap_input(&mut self) -> Option<BootstrapInput<'_>> {
+        Some(BootstrapInput::Quiescent(self))
+    }
+}
+
+#[async_trait]
+impl NativeBootstrapInput for Middleware {
     fn bootstrap_status(&self) -> Result<BootstrapStatus> {
         Ok(BootstrapStatus {
             configured: self.configuration.bootstrap,
@@ -273,37 +260,5 @@ impl NativeTransformer for Middleware {
             "middleware initialization completed while not running"
         );
         self.output.activate()
-    }
-
-    async fn delivery_completed(&mut self, _outputs: &[OutputEnvelope]) -> Result<()> {
-        self.check_running()
-    }
-
-    async fn transform(&mut self, input: InputEnvelope) -> Result<Vec<OutputEnvelope>> {
-        self.check_running()?;
-        let mut guard = ProcessingGuard {
-            failed: self.failed.clone(),
-            complete: false,
-        };
-        anyhow::ensure!(input.port.as_str() == "in", "unknown middleware input port");
-        let sequence = self
-            .sequence
-            .checked_add(1)
-            .ok_or_else(|| anyhow::anyhow!("middleware output sequence exhausted"))?;
-        let output = self.process(&input.envelope).await?;
-        let mut envelope = GraphChangeCodec::derive_changes(
-            &input.envelope,
-            &output,
-            self.configuration.stream.clone(),
-            sequence,
-        )?;
-        GraphProducerProgress::annotate(&mut envelope, &self.identity, sequence)?;
-        self.output.apply(&output, sequence)?;
-        self.sequence = sequence;
-        guard.complete = true;
-        Ok(vec![OutputEnvelope {
-            port: PortId::try_new("out")?,
-            envelope,
-        }])
     }
 }

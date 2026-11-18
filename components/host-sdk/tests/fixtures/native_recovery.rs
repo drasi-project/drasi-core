@@ -22,6 +22,23 @@ use std::sync::Arc;
 struct SqliteFactory;
 
 impl Factory for SqliteFactory {
+    fn configuration_details(&self) -> sdk::ConfigDetails {
+        let describe = |description: &str| sdk::configuration::ConfigFieldDetails {
+            description: description.into(),
+            ..Default::default()
+        };
+        sdk::ConfigDetails {
+            fields: [
+                ("stream".to_string(), describe("Output stream.")),
+                ("settings".to_string(), describe("SQLite source settings.")),
+                (
+                    "coordinated_snapshot".to_string(),
+                    describe("Unsupported by this fixture."),
+                ),
+            ]
+            .into(),
+        }
+    }
     fn describe(
         &self,
         _request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
@@ -66,29 +83,24 @@ impl Factory for SqliteFactory {
             completion: None,
             capabilities: sdk::Capabilities {
                 control: true,
+                services: sdk::HostServices {
+                    source_progress: true,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         }
     }
 
-    fn supports_source_progress(&self) -> bool {
-        true
-    }
-
     fn create(
-        &self,
-        _: &sdk::CreateRequest,
-        _: sdk::ControlSender,
-    ) -> Result<sdk::CreatedComponent> {
-        anyhow::bail!("fixture SQLite replay requires the source_progress binding")
-    }
-
-    fn create_with_progress(
         &self,
         request: &sdk::CreateRequest,
         _: sdk::ControlSender,
-        progress: sdk::NativeSourceProgress,
+        services: sdk::ServiceBindings,
     ) -> Result<sdk::CreatedComponent> {
+        let progress = services.source_progress.ok_or_else(|| {
+            anyhow::anyhow!("fixture requires its declared source_progress binding")
+        })?;
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Configuration {

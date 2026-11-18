@@ -16,6 +16,9 @@ use std::sync::atomic::AtomicUsize;
 struct TestFactory(Arc<AtomicUsize>);
 
 impl Factory for TestFactory {
+    fn configuration_details(&self) -> crate::ConfigDetails {
+        Default::default()
+    }
     fn describe(
         &self,
         _request: &crate::wire::DescribeRequest,
@@ -51,6 +54,7 @@ impl Factory for TestFactory {
         &self,
         request: &CreateRequest,
         _: ControlSender,
+        _services: ServiceBindings,
     ) -> anyhow::Result<CreatedComponent> {
         Ok(Component::Transformer(Box::new(TestTransformer {
             descriptor: self.metadata().descriptor(request.id.clone())?,
@@ -197,6 +201,7 @@ fn raw_component(deletions: Arc<AtomicUsize>) -> anyhow::Result<RawComponent> {
         transport::take_status((*factory.vtable).create.expect("create")(
             factory.state,
             BorrowedBytes::new(&request),
+            &abi::services::ServiceBindingsV1::none(),
             &mut component,
         ))?;
         (*factory.vtable).release.expect("factory release")(factory.state);

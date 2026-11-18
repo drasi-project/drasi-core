@@ -30,7 +30,7 @@ use drasi_computation_contracts::{
 use drasi_computation_network_common::{durable, ingress, server, wire};
 use drasi_computation_plugin_sdk::{
     lifecycle::Assessment, Capabilities, Component, ControlSender, CreateRequest, CreatedComponent,
-    Factory, FactoryMetadata, NativeAdmission, PluginDefinition, UpdateRequest,
+    Factory, FactoryMetadata, PluginDefinition, ServiceBindings, UpdateRequest,
 };
 use std::sync::Arc;
 
@@ -66,19 +66,9 @@ impl Factory for HttpSourceFactory {
             drasi_computation_plugin_sdk::ProgressPersistence::Volatile,
         ))
     }
-    fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
-        Some(HttpSourceConfig::definition().details())
+    fn configuration_details(&self) -> drasi_computation_plugin_sdk::ConfigDetails {
+        HttpSourceConfig::definition().details()
     }
-    fn supports_source_admission(&self) -> bool {
-        true
-    }
-    fn supports_update_planning(&self) -> bool {
-        true
-    }
-    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
-        component::assess(request)
-    }
-
     fn metadata(&self) -> FactoryMetadata {
         FactoryMetadata {
             // Constant identifiers; validated by `metadata_is_valid`.
@@ -104,6 +94,10 @@ impl Factory for HttpSourceFactory {
                 erases_owned_state: true,
                 // Outputs carry a producer identity that is new on every construction
                 // (Host admission, when bound, publishes under its durable identity instead).
+                services: drasi_computation_plugin_sdk::HostServices {
+                    source_admission: true,
+                    ..Default::default()
+                },
                 ..Capabilities::default()
             },
         }
@@ -112,17 +106,10 @@ impl Factory for HttpSourceFactory {
     fn create(
         &self,
         request: &CreateRequest,
-        control: ControlSender,
-    ) -> anyhow::Result<CreatedComponent> {
-        self.create_with_admission(request, control, None)
-    }
-
-    fn create_with_admission(
-        &self,
-        request: &CreateRequest,
         _control: ControlSender,
-        admission: Option<NativeAdmission>,
+        services: ServiceBindings,
     ) -> anyhow::Result<CreatedComponent> {
+        let admission = services.admission;
         Ok(Component::Source(Box::new(component::HttpSource::new(
             self.metadata().descriptor(request.id.clone())?,
             HttpSourceConfig::from_value(request.configuration.clone())?,
@@ -130,6 +117,15 @@ impl Factory for HttpSourceFactory {
             admission,
         )?))
         .into())
+    }
+    fn update_planner(&self) -> Option<&dyn drasi_computation_plugin_sdk::UpdatePlanner> {
+        Some(self)
+    }
+}
+
+impl drasi_computation_plugin_sdk::UpdatePlanner for HttpSourceFactory {
+    fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
+        component::assess(request)
     }
 }
 
