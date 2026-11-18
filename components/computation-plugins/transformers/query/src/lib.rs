@@ -154,7 +154,7 @@ fn query_configuration_details() -> ConfigDetails {
             ("result", describe("Result dataset settings, such as its label.")),
             ("stream", describe("Output stream; defaults to <component>/out.")),
             (
-                "outbox_capacity",
+                "outboxCapacity",
                 describe("Retained output capacity; a positive count, one by default."),
             ),
             (
@@ -162,12 +162,12 @@ fn query_configuration_details() -> ConfigDetails {
                 describe("Initialize from the provider bound on the bootstrap input."),
             ),
             (
-                "source_transactions",
-                describe("Limits for complete source transactions (max_changes, max_bytes, max_duration_ms)."),
+                "sourceTransactions",
+                describe("Limits for complete source transactions (maxChanges, maxBytes, maxDurationMs)."),
             ),
             ("recovery", describe("Recovery policy: strict (default) or auto_reset.")),
             (
-                "reset_configuration",
+                "resetConfiguration",
                 describe("Request a reset of retained state for a changed configuration."),
             ),
         ]

@@ -846,6 +846,9 @@ fn reserved_metadata_is_rejected_at_construction() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn tls_and_mutual_tls_endpoints() -> Result<()> {
+    // A workspace build can enable both rustls providers, which leaves no
+    // process default; a loaded plugin library is built with ring only.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let server = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
     let identity = Identity::from_pem(server.cert.pem(), server.key_pair.serialize_pem());
     let receiver = Receiver::start(

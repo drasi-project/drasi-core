@@ -39,6 +39,7 @@ drasi-computation-plugin-sdk = { workspace = true, features = ["test-support"] }
 drasi-core-types = { workspace = true }
 chrono = "0.4"
 rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tokio = { version = "1", features = ["net", "rt", "rt-multi-thread", "macros", "sync"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 
