@@ -50,14 +50,17 @@ pub(crate) struct HttpLive {
 }
 
 impl HttpLive {
-    fn from_config(config: &HttpSourceConfig) -> Self {
-        Self {
+    /// Builds the per-request settings, resolving webhook secrets once.
+    fn resolve(config: &HttpSourceConfig) -> Result<Self> {
+        Ok(Self {
             max_batch_events: config.max_batch_events,
             webhooks: config
                 .webhooks
                 .clone()
-                .map(|webhooks| Arc::new(crate::webhook::Webhooks::new(webhooks))),
-        }
+                .map(crate::webhook::Webhooks::new)
+                .transpose()?
+                .map(Arc::new),
+        })
     }
 }
 
@@ -79,7 +82,7 @@ impl HttpSource {
         Ok(Self {
             runtime: SourceRuntime::new(descriptor, config.ingress()?, scope, admission)?
                 .with_adaptive(config.adaptive_settings()?)?,
-            http: Arc::new(Live::new(HttpLive::from_config(&config))),
+            http: Arc::new(Live::new(HttpLive::resolve(&config)?)),
             schema: Arc::new(Live::new(config.webhooks.as_ref().and_then(schema::derive))),
             config,
         })
@@ -198,10 +201,9 @@ impl NativeComponent for HttpSource {
     fn management(&mut self) -> Option<&mut dyn NativeManagement> {
         Some(self)
     }
-    /// Validates instance prerequisites without binding: webhook secrets
-    /// named by environment variable must be present.
+    /// Webhook secrets were resolved when the configuration was accepted;
+    /// there is nothing further to check before binding.
     async fn initialize(&mut self, _ctx: &InitializeContext) -> LifecycleResult {
-        self.config.validate_webhook_secrets()?;
         Ok(())
     }
     async fn start(&mut self, ctx: &mut StartContext) -> LifecycleResult {
@@ -233,15 +235,15 @@ impl NativeComponent for HttpSource {
                 move |listener, shared| async move {
                     let ingress = Arc::new(HttpIngress { shared, http });
                     let router = router(ingress.clone(), webhook_mode, cors.as_ref())?;
-                    let shutdown = ingress.shared.cancel.clone().cancelled_owned();
+                    let shutdown = ingress.shared.shutdown.clone().cancelled_owned();
                     server::serve(listener, router, shutdown, options).await
                 },
             )
             .await
     }
-    /// Refuses new admissions (HTTP 503 with `Retry-After`) and returns once
-    /// in-flight admissions settle. Health and producer-session metadata
-    /// routes stay available.
+    /// Refuses new data admissions (HTTP 503 with `Retry-After`) and returns
+    /// once in-flight admissions settle. Health and producer-session metadata
+    /// routes (register, status, receipt, retire) stay available.
     async fn pause(&mut self, ctx: &PauseContext) -> LifecycleResult {
         self.runtime.pause(ctx.cancellation(), ctx.deadline()).await
     }
@@ -267,8 +269,9 @@ impl NativeComponent for HttpSource {
 impl NativeManagement for HttpSource {
     fn assess(&self, request: &UpdateRequest) -> Result<Assessment> {
         let assessment = assess(request)?;
-        HttpSourceConfig::from_value(request.proposed.configuration.clone())?
-            .validate_exposure(self.runtime.is_durable())?;
+        let proposed = HttpSourceConfig::from_value(request.proposed.configuration.clone())?;
+        proposed.validate_exposure(self.runtime.is_durable())?;
+        HttpLive::resolve(&proposed)?;
         Ok(assessment)
     }
 
@@ -300,6 +303,7 @@ impl NativeManagement for HttpSource {
             .validate_exposure(self.runtime.is_durable())
             .map_err(refused)?;
         let ingress = proposed.ingress().map_err(refused)?;
+        let http = HttpLive::resolve(&proposed).map_err(refused)?;
         match ctx.boundary() {
             UpdateBoundary::Pause => {
                 if self.runtime.is_running() && !self.runtime.is_paused() {
@@ -316,7 +320,7 @@ impl NativeManagement for HttpSource {
             }
             UpdateBoundary::Replace => return Err(refused("Replace is not an instance update")),
         }
-        self.http.store(HttpLive::from_config(&proposed));
+        self.http.store(http);
         self.schema
             .store(proposed.webhooks.as_ref().and_then(schema::derive));
         self.config = proposed;
@@ -484,7 +488,7 @@ pub(crate) fn accepted_response(
 
 async fn health(State(ingress): State<Arc<HttpIngress>>) -> Response {
     let shared = &ingress.shared;
-    if shared.cancel.is_cancelled() {
+    if shared.shutdown.is_cancelled() {
         return rejection(&IngressError::stopped(), 0);
     }
     Json(serde_json::json!({
@@ -558,7 +562,7 @@ async fn request_scope(
     let (parts, body) = request.into_parts();
     let bytes = tokio::select! {
         biased;
-        _ = shared.cancel.cancelled() => return rejection(&IngressError::stopped(), 0),
+        _ = shared.shutdown.cancelled() => return rejection(&IngressError::stopped(), 0),
         bytes = tokio::time::timeout(live.timeout, axum::body::to_bytes(body, limit)) => match bytes {
             Ok(Ok(bytes)) => bytes,
             Ok(Err(error)) if is_length_limit(&error) => {

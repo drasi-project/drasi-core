@@ -381,6 +381,8 @@ pub struct ApplicationSource {
     enqueue_order: Arc<tokio::sync::Mutex<()>>,
     /// Handle to the WAL pruning background task (if running)
     prune_task: tokio::sync::RwLock<Option<tokio::task::JoinHandle<()>>>,
+    /// Wakes the pruning loop so stop never cancels in-flight WAL work.
+    prune_shutdown: std::sync::Mutex<Option<tokio::sync::watch::Sender<bool>>>,
 }
 
 struct ApplicationInput {
@@ -450,6 +452,7 @@ impl ApplicationSource {
             wal: shared_wal,
             enqueue_order,
             prune_task: tokio::sync::RwLock::new(None),
+            prune_shutdown: std::sync::Mutex::new(None),
         };
 
         Ok((source, handle))
@@ -653,10 +656,17 @@ impl Source for ApplicationSource {
         if let Some(wal) = wal_ref {
             let base = self.base.clone_shared();
             let source_id = self.base.id.clone();
+            let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
             drasi_lib::context::workers::spawn_owned_worker(&self.prune_task, async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(30));
                 loop {
-                    interval.tick().await;
+                    tokio::select! {
+                        biased;
+                        _ = shutdown_rx.wait_for(|stop| *stop) => break,
+                        _ = interval.tick() => {}
+                    }
+                    // Finish each iteration: cancelling a WAL future can detach
+                    // blocking database work that still owns the WAL files.
                     if let Some(confirmed) = base.compute_confirmed_position().await {
                         if confirmed > 0 {
                             match wal.prune_up_to(&drasi_lib::StorageScope::default(), &source_id, confirmed).await {
@@ -679,6 +689,10 @@ impl Source for ApplicationSource {
             })
             .await
             .with_context(|| format!("Application source '{}' WAL pruner registration", self.base.id))?;
+            *self
+                .prune_shutdown
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(shutdown_tx);
         }
 
         Ok(())
@@ -697,7 +711,17 @@ impl Source for ApplicationSource {
         if let Some(task) = self.base.task_handle.read().await.as_ref() {
             task.abort();
         }
-        drasi_lib::context::workers::cancel_owned_worker(
+        let prune_shutdown = self
+            .prune_shutdown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(shutdown) = prune_shutdown {
+            let _ = shutdown.send(true);
+        }
+        // Wake the pruning loop and join any in-flight database work. A timeout
+        // retains the worker for a later stop instead of detaching WAL work.
+        drasi_lib::context::workers::join_owned_worker_gracefully(
             &mut *self.prune_task.write().await,
             Duration::from_secs(5),
         )

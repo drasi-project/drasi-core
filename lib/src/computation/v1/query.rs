@@ -2171,13 +2171,26 @@ impl super::QueryAuthoring for ContinuousQueryFactory {
 #[async_trait]
 impl ComponentFactory for ContinuousQueryFactory {
     /// Outputs follow the durability the bound index provider declares.
+    ///
+    /// The query commits its source checkpoints in that provider, so a bound
+    /// `source_progress` resource that declares a different durability is a
+    /// false declaration and the query refuses it.
     fn describe(
         &self,
         context: &crate::computation::v1::ConstructionContext,
     ) -> anyhow::Result<crate::computation::v1::ComponentDescription> {
+        use drasi_computation_contracts::ResourceDurability;
+        let durability = bound_durability(context, "indexes");
+        let progress = bound_durability(context, "source_progress");
+        anyhow::ensure!(
+            progress == ResourceDurability::Undeclared || progress == durability,
+            "the query's source_progress resource declares {progress:?} durability but its \
+             index provider declares {durability:?}; the query stores its checkpoints in \
+             that provider"
+        );
         Ok(indexed_description(
             &context.specification.descriptor,
-            bound_durability(context, "indexes"),
+            durability,
         ))
     }
     fn supports_query_reconstruction(&self) -> bool {
@@ -2586,7 +2599,7 @@ mod profiling_tests {
             )
             .await
             .unwrap();
-            query.start().await.unwrap();
+            query.start(&lifecycle_contexts::start()).await.unwrap();
             let outbox = query
                 .query()
                 .unwrap()
@@ -2714,14 +2727,14 @@ mod profiling_tests {
                 live.profiling
             );
             drop(outbox);
-            query.stop().await.unwrap();
+            query.stop(&lifecycle_contexts::stop()).await.unwrap();
             drop(query);
 
             let mut recovered =
                 ContinuousQueryTransformer::new_with_options(definition, backend, options)
                     .await
                     .unwrap();
-            recovered.start().await.unwrap();
+            recovered.start(&lifecycle_contexts::start()).await.unwrap();
             let replay = recovered.results().replay(0).unwrap();
             assert_eq!(replay.len(), 1);
             assert_eq!(
@@ -2729,7 +2742,25 @@ mod profiling_tests {
                 saved.profiling,
                 "recovery preserves unknown completion times rather than fabricating them"
             );
-            recovered.stop().await.unwrap();
+            recovered.stop(&lifecycle_contexts::stop()).await.unwrap();
+        }
+    }
+
+    mod lifecycle_contexts {
+        use crate::computation::v1::{
+            CancellationToken, OperationScope, StartContext, StopContext, StopMode,
+        };
+
+        fn scope() -> OperationScope {
+            OperationScope::new("test", "component", 1, None, CancellationToken::new())
+        }
+
+        pub fn start() -> StartContext {
+            StartContext::new(scope())
+        }
+
+        pub fn stop() -> StopContext {
+            StopContext::new(scope(), StopMode::Drain)
         }
     }
 }

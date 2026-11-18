@@ -239,12 +239,19 @@ impl EnvelopeSource for InputSource {
 struct AdmissionOnly {
     descriptor: ComponentDescriptor,
     admission: Arc<SourceAdmission>,
+    /// The identity this fixture declares for its admission channel's output.
+    output: OutputDescription,
 }
 
 #[async_trait]
 impl ComputationComponent for AdmissionOnly {
     fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
-        drasi_lib::computation::v1::ComponentDescription::undeclared()
+        let progress = if self.output.identity == OutputIdentity::Durable {
+            ProgressPersistence::Durable
+        } else {
+            ProgressPersistence::Volatile
+        };
+        ComponentDescription::new(progress).with_outputs(&self.descriptor, self.output)
     }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
@@ -422,6 +429,7 @@ async fn durable_factories_use_real_acknowledged_pipes_and_preserve_complete_tra
             Box::new(AdmissionOnly {
                 descriptor: source_descriptor(schema)?,
                 admission: admission.clone(),
+                output: OutputDescription::DURABLE,
             }),
         )
         .component(
@@ -513,6 +521,100 @@ async fn durable_factories_use_real_acknowledged_pipes_and_preserve_complete_tra
     Ok(())
 }
 
+/// A durable sender keys its persisted mapping on the producer's durable
+/// identity, so the graph refuses a volatile producer when it binds the edge:
+/// the sender node carries a terminal binding failure and never receives
+/// input, instead of failing on the first delivery (BSA-1).
+#[tokio::test(flavor = "current_thread")]
+async fn durable_sender_refuses_a_volatile_producer_when_wired() -> Result<()> {
+    let directory = Directory::new()?;
+    let schema = PortableDelivery::CompleteTransactions;
+    let sink_config = configuration(&directory, false, Profile::Durable, schema);
+    let upstream = channel(
+        &directory.path().join("upstream"),
+        "sender/out",
+        "left",
+        "input",
+        "bridge-out",
+        4,
+    )
+    .await?;
+    let admission = SourceAdmission::new(upstream.clone(), PortId::try_new("out")?).await?;
+    let mut specification = sink_config.specification(ComponentRole::Sink)?;
+    specification
+        .dependencies
+        .insert("state".into(), vec![ResourceId::try_new("sender-mapping")?]);
+    let batch = ComponentBatch::builder()
+        .source(
+            ComponentName::try_new("volatile-producer")?,
+            Box::new(AdmissionOnly {
+                descriptor: source_descriptor(schema)?,
+                admission,
+                output: OutputDescription::VOLATILE,
+            }),
+        )
+        .component(
+            ComponentName::try_new("durable-sender")?,
+            specification,
+            crate::factories()[1].clone(),
+        )
+        .declare_resource(declaration("upstream", ResourceRole::StateStore))?
+        .provide_resource(ResourceId::try_new("upstream")?, upstream.resource())?
+        .declare_resource(declaration("sender-mapping", ResourceRole::IndexBackend))?
+        .provide_resource(
+            ResourceId::try_new("sender-mapping")?,
+            QueryIndexProviderResource::handle(
+                ResourceRole::IndexBackend,
+                provider(&directory.path().join("sender")),
+            ),
+        )?
+        .connect(
+            EdgeDefinition::new(endpoint("input", "out"), endpoint("bridge-out", "in")),
+            Box::new(
+                upstream
+                    .definition()
+                    .pipe(ResourceId::try_new("upstream")?, "bridge-out"),
+            ),
+        )
+        .bind_stream(endpoint("input", "out"), StreamId::try_new("sender/out")?)
+        .build()?;
+    let left = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
+        .with_id("left")
+        .with_components(batch)
+        .build()
+        .await?;
+    let _ = left.start().await;
+    let observed = left.computation_control()?.observed();
+    let sender = &observed.components[&sink_config.sender_endpoint];
+    let failure = sender.failure.as_ref().expect("sender binding failure");
+    assert_eq!(failure.phase, FailurePhase::Binding, "{failure:?}");
+    assert_eq!(failure.disposition, FailureDisposition::Terminal);
+    assert!(
+        matches!(
+            failure.cause.underlying(),
+            GraphError::Incompatible {
+                source: Incompatibility::ProducerIdentity {
+                    required: drasi_computation_contracts::DeliveryGuarantee::ExactlyOnce,
+                    identity: OutputIdentity::Volatile,
+                },
+                ..
+            }
+        ),
+        "{failure:?}"
+    );
+    assert!(
+        observed
+            .relationships
+            .values()
+            .any(|edge| edge.binding == BindingState::Failed),
+        "{observed:?}"
+    );
+    left.shutdown().await?;
+    upstream.shutdown().await?;
+    Ok(())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn full_volatile_queue_keeps_receipts_and_control_live_and_retries_fifo() -> Result<()> {
     let directory = Directory::new()?;
@@ -544,10 +646,7 @@ async fn full_volatile_queue_keeps_receipts_and_control_live_and_retries_fifo() 
     );
     let second = graph_input(99, 99)?;
     let error = sink.handle(input(second.clone())).await.unwrap_err();
-    assert_eq!(
-        error.downcast_ref::<BridgeError>().unwrap().code,
-        ErrorCode::Busy
-    );
+    assert_eq!(error.bridge_cause().unwrap().code, ErrorCode::Busy);
     let first_output = source.next().await?.unwrap().envelope;
     assert_eq!(first_output.system().sequence(), 1);
     assert_eq!(
@@ -680,7 +779,7 @@ async fn lost_wire_ack_and_real_two_sided_reopen_resolve_exact_persisted_mapping
     sink.start(&lifecycle_ctx::start()).await?;
     let error = sink.handle(input(original.clone())).await.unwrap_err();
     assert_eq!(
-        error.downcast_ref::<BridgeError>().unwrap().code,
+        error.bridge_cause().unwrap().code,
         ErrorCode::AcceptanceUnknown
     );
     let DataResponse::Receipt(remote_receipt) = tokio::time::timeout(DEADLINE, proxy).await???
@@ -741,7 +840,7 @@ async fn lost_wire_ack_and_real_two_sided_reopen_resolve_exact_persisted_mapping
         sink.handle(input(conflict))
             .await
             .unwrap_err()
-            .downcast_ref::<BridgeError>()
+            .bridge_cause()
             .unwrap()
             .code,
         ErrorCode::Conflict
@@ -790,7 +889,7 @@ async fn receiver_state_loss_and_missing_sender_state_never_create_fresh_input()
             .handle(input(original.clone()))
             .await
             .unwrap_err()
-            .downcast_ref::<BridgeError>()
+            .bridge_cause()
             .unwrap()
             .code,
         ErrorCode::StateLost
@@ -807,7 +906,7 @@ async fn receiver_state_loss_and_missing_sender_state_never_create_fresh_input()
         sink.handle(input(original))
             .await
             .unwrap_err()
-            .downcast_ref::<BridgeError>()
+            .bridge_cause()
             .unwrap()
             .code,
         ErrorCode::StateLost
@@ -1069,7 +1168,7 @@ async fn sealed_volatile_cut_requires_actual_queue_handoff_and_revokes_old_lifet
         sink.handle(input(graph_input(2, 2)?))
             .await
             .unwrap_err()
-            .downcast_ref::<BridgeError>()
+            .bridge_cause()
             .unwrap()
             .code,
         ErrorCode::Sealed

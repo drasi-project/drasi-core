@@ -453,7 +453,7 @@ fn normal_drasi_merger_recovers_after_child_death_at_persistence_and_handoff() {
             )
             .await
             .unwrap();
-            merger.start().await.unwrap();
+            merger.start(&lifecycle_contexts::start()).await.unwrap();
             let snapshot = merger.subscribe().borrow().clone();
             assert_eq!(
                 snapshot.buffered_events,
@@ -468,7 +468,7 @@ fn normal_drasi_merger_recovers_after_child_death_at_persistence_and_handoff() {
                 )),
                 "{phase}"
             );
-            merger.stop().await.unwrap();
+            merger.stop(&lifecycle_contexts::stop()).await.unwrap();
             drop(merger);
             let output = output_channel(directory.path(), Arc::new(Fault::default())).await;
             assert_eq!(

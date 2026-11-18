@@ -27,7 +27,10 @@ async fn create(path: &Path, config: SourceTimeMergeDefinition) -> SourceTimeMer
 
 async fn durable(path: &Path, config: SourceTimeMergeDefinition) -> SourceTimeMergeTransformer {
     let mut merger = create(path, config).await;
-    merger.start().await.expect("start durable merger");
+    merger
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("start durable merger");
     merger
 }
 
@@ -37,7 +40,7 @@ async fn buffered_inputs_and_admission_receipts_survive_reconstruction() {
     let mut merger = durable(directory.path(), definition()).await;
     merger.transform(input(event("a", 1, 90))).await.unwrap();
     merger.transform(input(event("b", 1, 10))).await.unwrap();
-    merger.stop().await.unwrap();
+    merger.stop(&lifecycle_contexts::stop()).await.unwrap();
     drop(merger);
     let mut merger = durable(directory.path(), definition()).await;
     assert_eq!(merger.subscribe().borrow().buffered_events, 2);
@@ -57,12 +60,12 @@ async fn buffered_inputs_and_admission_receipts_survive_reconstruction() {
             .collect::<Vec<_>>(),
         [10, 90]
     );
-    merger.stop().await.unwrap();
+    merger.stop(&lifecycle_contexts::stop()).await.unwrap();
     drop(merger);
     let mut merger = durable(directory.path(), definition()).await;
     assert_eq!(merger.subscribe().borrow().emitted, 2);
     assert_eq!(merger.subscribe().borrow().buffered_events, 0);
-    merger.stop().await.unwrap();
+    merger.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test(start_paused = true)]
@@ -83,7 +86,7 @@ async fn main_and_late_outboxes_replay_with_stable_producer_progress() {
             .unwrap()
             .unwrap();
         assert!(original.identity().persistent());
-        merger.stop().await.unwrap();
+        merger.stop(&lifecycle_contexts::stop()).await.unwrap();
         drop(merger);
         merger = durable(directory.path(), config.clone()).await;
         let replay = merger.continue_transform().await.unwrap();
@@ -106,7 +109,7 @@ async fn main_and_late_outboxes_replay_with_stable_producer_progress() {
         "late stream must not leave a main logical gap"
     );
     merger.delivery_completed(&batch).await.unwrap();
-    merger.stop().await.unwrap();
+    merger.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test(start_paused = true)]
@@ -118,11 +121,15 @@ async fn held_input_survives_restart_and_requires_explicit_loss_acknowledgement(
     let batch = merger.on_wakeup().await.unwrap();
     collect(&mut merger, batch).await;
     assert!(merger.transform(input(event("b", 1, 90))).await.is_err());
-    merger.stop().await.unwrap();
+    merger.stop(&lifecycle_contexts::stop()).await.unwrap();
     drop(merger);
     let mut merger = create(directory.path(), definition()).await;
     assert!(matches!(
-        merger.start().await.unwrap_err().downcast_ref(),
+        merger
+            .start(&lifecycle_contexts::start())
+            .await
+            .unwrap_err()
+            .downcast_ref(),
         Some(SourceTimeMergeError::Late { .. })
     ));
     assert_eq!(
@@ -137,12 +144,12 @@ async fn held_input_survives_restart_and_requires_explicit_loss_acknowledgement(
         Some(time(90))
     );
     merger.discard_held_event().await.unwrap();
-    merger.stop().await.unwrap();
+    merger.stop(&lifecycle_contexts::stop()).await.unwrap();
     drop(merger);
     let mut merger = durable(directory.path(), definition()).await;
     assert_eq!(merger.subscribe().borrow().discarded, 1);
     assert_eq!(merger.subscribe().borrow().buffered_events, 0);
-    merger.stop().await.unwrap();
+    merger.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 fn bindings(journal: uuid::Uuid) -> OutputBindings {
@@ -164,7 +171,7 @@ async fn buffered_work_pins_destination_membership_across_restart() {
     let mut merger = durable(directory.path(), definition()).await;
     merger.bind_output_destinations(&original).await.unwrap();
     merger.transform(input(event("a", 1, 10))).await.unwrap();
-    merger.stop().await.unwrap();
+    merger.stop(&lifecycle_contexts::stop()).await.unwrap();
     drop(merger);
     let mut merger = durable(directory.path(), definition()).await;
     assert!(merger.bind_output_destinations(&replacement).await.is_err());
@@ -173,7 +180,7 @@ async fn buffered_work_pins_destination_membership_across_restart() {
         .await
         .is_err());
     merger.bind_output_destinations(&original).await.unwrap();
-    merger.stop().await.unwrap();
+    merger.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 #[tokio::test]
@@ -195,13 +202,13 @@ async fn configuration_changes_and_volatile_producers_are_rejected() {
         merger.transform(input(derived)).await.is_err(),
         "derivation must not launder volatile ancestry"
     );
-    merger.stop().await.unwrap();
+    merger.stop(&lifecycle_contexts::stop()).await.unwrap();
     drop(merger);
     let mut changed = definition();
     changed.max_wait_ms += 1;
     let mut merger = create(directory.path(), changed).await;
-    assert!(merger.start().await.is_err());
-    merger.stop().await.unwrap();
+    assert!(merger.start(&lifecycle_contexts::start()).await.is_err());
+    merger.stop(&lifecycle_contexts::stop()).await.unwrap();
     assert!(SourceTimeMergeTransformer::new_durable(
         definition(),
         schema(),
@@ -273,7 +280,7 @@ async fn commit_errors_and_cancellation_fence_owner_and_recover_exact_admission(
         let mut merger = SourceTimeMergeTransformer::new_durable(definition(), schema(), injected)
             .await
             .unwrap();
-        merger.start().await.unwrap();
+        merger.start(&lifecycle_contexts::start()).await.unwrap();
         fault.mode.store(mode, Ordering::SeqCst);
         if mode == 3 {
             tokio::select! {
@@ -291,7 +298,7 @@ async fn commit_errors_and_cancellation_fence_owner_and_recover_exact_admission(
                 .downcast_ref(),
             Some(SourceTimeMergeError::RecoveryRequired)
         ));
-        merger.stop().await.unwrap();
+        merger.stop(&lifecycle_contexts::stop()).await.unwrap();
         drop(merger);
         let mut merger = durable(directory.path(), definition()).await;
         assert_eq!(
@@ -304,7 +311,7 @@ async fn commit_errors_and_cancellation_fence_owner_and_recover_exact_admission(
             merger.subscribe().borrow().replayed_inputs,
             u64::from(mode != 1)
         );
-        merger.stop().await.unwrap();
+        merger.stop(&lifecycle_contexts::stop()).await.unwrap();
     }
 }
 
@@ -314,7 +321,7 @@ async fn corrupted_retained_snapshots_fail_closed() {
         let directory = tempfile::tempdir().unwrap();
         let mut merger = durable(directory.path(), definition()).await;
         merger.transform(input(event("a", 1, 10))).await.unwrap();
-        merger.stop().await.unwrap();
+        merger.stop(&lifecycle_contexts::stop()).await.unwrap();
         drop(merger);
         {
             let indexes = provider(directory.path())
@@ -348,8 +355,11 @@ async fn corrupted_retained_snapshots_fail_closed() {
         }
 
         let mut merger = create(directory.path(), definition()).await;
-        assert!(merger.start().await.is_err(), "corrupt {field} accepted");
-        merger.stop().await.unwrap();
+        assert!(
+            merger.start(&lifecycle_contexts::start()).await.is_err(),
+            "corrupt {field} accepted"
+        );
+        merger.stop(&lifecycle_contexts::stop()).await.unwrap();
     }
 }
 
@@ -367,7 +377,7 @@ async fn output_commit_and_confirmation_failures_preserve_the_exact_obligation()
                 SourceTimeMergeTransformer::new_durable(definition(), schema(), injected)
                     .await
                     .unwrap();
-            merger.start().await.unwrap();
+            merger.start(&lifecycle_contexts::start()).await.unwrap();
             merger.transform(input(event("a", 1, 10))).await.unwrap();
             tokio::time::advance(Duration::from_millis(1000)).await;
             if confirming {
@@ -378,7 +388,7 @@ async fn output_commit_and_confirmation_failures_preserve_the_exact_obligation()
                 fault.mode.store(mode, Ordering::SeqCst);
                 assert!(merger.on_wakeup().await.is_err());
             }
-            merger.stop().await.unwrap();
+            merger.stop(&lifecycle_contexts::stop()).await.unwrap();
             drop(merger);
             let mut merger = durable(directory.path(), definition()).await;
             let pending = !(confirming && mode == 2);
@@ -393,7 +403,7 @@ async fn output_commit_and_confirmation_failures_preserve_the_exact_obligation()
                 assert_eq!(timestamp(&batch[0]), 10);
                 collect(&mut merger, batch).await;
             }
-            merger.stop().await.unwrap();
+            merger.stop(&lifecycle_contexts::stop()).await.unwrap();
         }
     }
 }
@@ -434,7 +444,7 @@ async fn persistent_qos_receipt_deduplicates_unconfirmed_merger_output_after_reo
     let batch = merger.on_wakeup().await.unwrap();
     channel.publish(&batch[0].envelope).await.unwrap();
     assert_eq!(channel.progress().await.unwrap().accepted, 1);
-    merger.stop().await.unwrap();
+    merger.stop(&lifecycle_contexts::stop()).await.unwrap();
     drop(merger);
     let mut merger = durable(directory.path(), definition()).await;
     let replay = merger.continue_transform().await.unwrap();
@@ -445,7 +455,7 @@ async fn persistent_qos_receipt_deduplicates_unconfirmed_merger_output_after_reo
         1,
         "replay must not append twice"
     );
-    merger.stop().await.unwrap();
+    merger.stop(&lifecycle_contexts::stop()).await.unwrap();
     channel.shutdown().await.unwrap();
 }
 
@@ -484,6 +494,6 @@ async fn chained_persistent_producers_reject_gaps_but_accept_consecutive_logical
             .unwrap()
             .is_empty());
     }
-    follower.stop().await.unwrap();
-    producer.stop().await.unwrap();
+    follower.stop(&lifecycle_contexts::stop()).await.unwrap();
+    producer.stop(&lifecycle_contexts::stop()).await.unwrap();
 }

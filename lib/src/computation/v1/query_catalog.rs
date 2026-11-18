@@ -67,12 +67,79 @@ struct DeliveryConfiguration {
 }
 #[derive(Clone)]
 enum Subscriber {
-    Channel(tokio::sync::mpsc::Sender<ChangeEnvelope>),
+    Channel {
+        sender: tokio::sync::mpsc::Sender<ChangeEnvelope>,
+        lag: Arc<ChannelLag>,
+    },
     Broadcast(tokio::sync::broadcast::Sender<ChangeEnvelope>),
 }
 enum SubscriberReceiver {
-    Channel(tokio::sync::mpsc::Receiver<ChangeEnvelope>),
+    Channel {
+        receiver: tokio::sync::mpsc::Receiver<ChangeEnvelope>,
+        lag: Arc<ChannelLag>,
+    },
     Broadcast(tokio::sync::broadcast::Receiver<ChangeEnvelope>),
+}
+
+/// Publications a bounded (Channel) subscriber missed while its query's
+/// observers were released for a stop. Once a subscriber lags, it receives
+/// nothing more until it has read its buffer and been told the gap, so the
+/// reported gap is always in order.
+#[derive(Default)]
+struct ChannelLag {
+    skipped: std::sync::atomic::AtomicU64,
+    reported: tokio::sync::Notify,
+}
+
+impl ChannelLag {
+    /// Records the publication as skipped when the subscriber already lags.
+    fn skip_while_lagging(&self) -> bool {
+        self.skipped
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |skipped| (skipped > 0).then(|| skipped.saturating_add(1)),
+            )
+            .is_ok()
+    }
+
+    fn skip(&self) {
+        self.skipped
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.reported.notify_one();
+    }
+}
+
+/// Whether a query's live result observers are released for a stop. Released
+/// observers never hold a publication: a subscriber without capacity lags.
+pub(super) struct ObserverGate(watch::Sender<bool>);
+
+impl ObserverGate {
+    fn new() -> Self {
+        Self(watch::channel(false).0)
+    }
+
+    async fn released(&self) {
+        let mut released = self.0.subscribe();
+        if released.wait_for(|released| *released).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+impl ObserverDelivery for ObserverGate {
+    fn release_observers(&self) {
+        self.0.send_replace(true);
+    }
+    fn reclaim_observers(&self) {
+        self.0.send_replace(false);
+    }
+}
+
+enum Delivered {
+    Sent,
+    Lagged,
+    Closed,
 }
 pub(crate) struct CatalogSubscription {
     receiver: SubscriberReceiver,
@@ -103,12 +170,36 @@ impl CatalogSubscription {
             .ok_or_else(|| anyhow::anyhow!("subscription has no captured query head"))
     }
 
+    /// Receives the next publication. A bounded subscriber that missed
+    /// publications while its query's observers were released for a stop
+    /// receives its buffered publications first and then the same typed
+    /// `RecvError::Lagged` gap that a broadcast subscriber reports.
     pub(crate) async fn receive(&mut self) -> anyhow::Result<ChangeEnvelope> {
         match &mut self.receiver {
-            SubscriberReceiver::Channel(receiver) => receiver
-                .recv()
-                .await
-                .ok_or_else(|| anyhow::anyhow!("query output subscription closed")),
+            SubscriberReceiver::Channel { receiver, lag } => loop {
+                use tokio::sync::mpsc::error::TryRecvError;
+                let disconnected = match receiver.try_recv() {
+                    Ok(envelope) => return Ok(envelope),
+                    Err(TryRecvError::Empty) => false,
+                    Err(TryRecvError::Disconnected) => true,
+                };
+                let skipped = lag.skipped.swap(0, std::sync::atomic::Ordering::AcqRel);
+                if skipped > 0 {
+                    return Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped).into());
+                }
+                if disconnected {
+                    anyhow::bail!("query output subscription closed");
+                }
+                tokio::select! {
+                    biased;
+                    envelope = receiver.recv() => {
+                        if let Some(envelope) = envelope {
+                            return Ok(envelope);
+                        }
+                    }
+                    () = lag.reported.notified() => {}
+                }
+            },
             SubscriberReceiver::Broadcast(receiver) => receiver.recv().await.map_err(Into::into),
         }
     }
@@ -207,7 +298,19 @@ impl QueryResultsCatalog {
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<ChangeEnvelope> {
         self.0.events.subscribe()
     }
+    #[cfg(test)]
     pub(super) async fn publish(&self, envelope: ChangeEnvelope) -> anyhow::Result<()> {
+        self.publish_observed(envelope, &ObserverGate::new()).await
+    }
+
+    /// Publishes to every current subscriber. A bounded subscriber without
+    /// capacity backpressures publication until `observers` is released for a
+    /// stop; it then lags instead (see [`CatalogSubscription::receive`]).
+    pub(super) async fn publish_observed(
+        &self,
+        envelope: ChangeEnvelope,
+        observers: &ObserverGate,
+    ) -> anyhow::Result<()> {
         let id = QueryChangeCodec::metadata(&envelope)?.query_id;
         if self.get(&id)?.is_none() {
             anyhow::bail!("query publication is not registered in this catalogue");
@@ -225,15 +328,49 @@ impl QueryResultsCatalog {
         let deliveries = subscribers.into_iter().map(|(key, subscriber)| {
             let envelope = envelope.clone();
             async move {
-                let closed = match subscriber {
-                    Subscriber::Channel(sender) => sender.send(envelope).await.is_err(),
-                    Subscriber::Broadcast(sender) => sender.send(envelope).is_err(),
+                let delivered = match subscriber {
+                    Subscriber::Channel { sender, lag } => {
+                        use tokio::sync::mpsc::error::TrySendError;
+                        if lag.skip_while_lagging() {
+                            Delivered::Lagged
+                        } else {
+                            // Reserving is cancellation-safe: a release drops
+                            // the wait without consuming capacity.
+                            let permit = tokio::select! {
+                                biased;
+                                permit = sender.reserve() => permit.map(Some).map_err(|_| ()),
+                                () = observers.released() => match sender.try_reserve() {
+                                    Ok(permit) => Ok(Some(permit)),
+                                    Err(TrySendError::Full(())) => Ok(None),
+                                    Err(TrySendError::Closed(())) => Err(()),
+                                },
+                            };
+                            match permit {
+                                Ok(Some(permit)) => {
+                                    permit.send(envelope);
+                                    Delivered::Sent
+                                }
+                                Ok(None) => {
+                                    lag.skip();
+                                    Delivered::Lagged
+                                }
+                                Err(()) => Delivered::Closed,
+                            }
+                        }
+                    }
+                    Subscriber::Broadcast(sender) => match sender.send(envelope) {
+                        Ok(_) => Delivered::Sent,
+                        Err(_) => Delivered::Closed,
+                    },
                 };
-                (key, closed)
+                (key, delivered)
             }
         });
-        for (key, closed) in futures::future::join_all(deliveries).await {
-            if closed {
+        for (key, delivered) in futures::future::join_all(deliveries).await {
+            if matches!(delivered, Delivered::Lagged) {
+                log::debug!("A released query result subscriber without capacity lagged");
+            }
+            if matches!(delivered, Delivered::Closed) {
                 self.0
                     .state
                     .lock()
@@ -387,9 +524,13 @@ impl QueryResultsCatalog {
         let (subscriber, receiver) = match configuration.mode {
             crate::DispatchMode::Channel => {
                 let (sender, receiver) = tokio::sync::mpsc::channel(configuration.capacity);
+                let lag = Arc::new(ChannelLag::default());
                 (
-                    Subscriber::Channel(sender),
-                    SubscriberReceiver::Channel(receiver),
+                    Subscriber::Channel {
+                        sender,
+                        lag: lag.clone(),
+                    },
+                    SubscriberReceiver::Channel { receiver, lag },
                 )
             }
             crate::DispatchMode::Broadcast => {
@@ -455,6 +596,7 @@ impl QueryResultsCatalog {
 pub struct QueryResultsOutlet {
     descriptor: ComponentDescriptor,
     catalog: QueryResultsCatalog,
+    observers: Arc<ObserverGate>,
 }
 
 fn outlet_descriptor(id: ComponentId) -> GraphResult<ComponentDescriptor> {
@@ -474,6 +616,7 @@ impl QueryResultsOutlet {
         Self {
             descriptor: outlet_descriptor(id).expect("outlet"),
             catalog,
+            observers: Arc::new(ObserverGate::new()),
         }
     }
 }
@@ -492,8 +635,15 @@ impl EnvelopeSink for QueryResultsOutlet {
     fn completion(&self) -> SinkCompletion {
         SinkCompletion::Handled
     }
+    fn observer_delivery(&self) -> Option<Arc<dyn ObserverDelivery>> {
+        // Live result subscribers are observers, not delivery obligations:
+        // durable consumers recover gaps from the query's outbox.
+        Some(self.observers.clone())
+    }
     async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
-        self.catalog.publish(input.envelope).await
+        self.catalog
+            .publish_observed(input.envelope, &self.observers)
+            .await
     }
 }
 
@@ -968,6 +1118,63 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(1), subscription.receive_after_head())
                 .await??;
         assert_eq!(QueryChangeCodec::query_sequence(&delivered)?, 1);
+        query.stop(&lifecycle_contexts::stop()).await?;
+        Ok(())
+    }
+
+    /// Released observers never hold a publication: a full bounded subscriber
+    /// lags instead, reads its buffer, then the typed gap, and receives nothing
+    /// after the gap until it has observed it; a reading subscriber loses nothing.
+    #[tokio::test]
+    async fn released_observers_lag_a_full_subscriber_in_order() -> anyhow::Result<()> {
+        let (mut query, catalog, _api, provider) = asynchronous_catalog().await?;
+        provider.pause_head.store(false, Ordering::Release);
+        let query_id = crate::test_helpers::component_id(46);
+        let (mut full, _) = catalog.subscribe_query_at_head(&query_id).await?;
+        let (mut reading, _) = catalog.subscribe_query_at_head(&query_id).await?;
+        let observers = ObserverGate::new();
+        let first = first_output(&mut query).await?;
+        let second = first.clone();
+        catalog.publish_observed(first.clone(), &observers).await?;
+        reading.receive().await?;
+
+        // Unreleased, the full subscriber backpressures publication; a release
+        // wakes that same publication without waiting for the reader.
+        let mut blocked = Box::pin(catalog.publish_observed(second.clone(), &observers));
+        tokio::select! {
+            result = &mut blocked => anyhow::bail!("publication did not backpressure: {result:?}"),
+            () = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+        observers.release_observers();
+        tokio::time::timeout(Duration::from_secs(1), blocked).await??;
+        reading.receive().await?;
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            catalog.publish_observed(second.clone(), &observers),
+        )
+        .await??;
+        reading.receive().await?;
+        observers.reclaim_observers();
+        // Still lagging: skipped (not delivered after the gap) without waiting.
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            catalog.publish_observed(second.clone(), &observers),
+        )
+        .await??;
+        reading.receive().await?;
+
+        full.receive().await?;
+        let gap = full
+            .receive()
+            .await
+            .expect_err("the gap is reported after the buffer");
+        assert!(matches!(
+            gap.downcast_ref::<tokio::sync::broadcast::error::RecvError>(),
+            Some(tokio::sync::broadcast::error::RecvError::Lagged(3))
+        ));
+        catalog.publish_observed(second, &observers).await?;
+        full.receive().await?;
+        reading.receive().await?;
         query.stop(&lifecycle_contexts::stop()).await?;
         Ok(())
     }

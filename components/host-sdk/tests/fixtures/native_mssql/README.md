@@ -131,7 +131,7 @@ dynamic libraries under both current-thread and multi-thread Tokio runtimes:
   aggregation contexts, exact `u64::MAX` decimal binding, `i64::MIN`, bool, float,
   NULL, Unicode/quotes and JSON object/array effects. Successful procedures emit
   multiple result sets. Each operation runs in its own transaction together with
-  its row in `<schema>.DrasiDeliveryProgress` (pre-created by `setup.sql` and
+  its row in `<schema>.drasi_delivery_progress` and its dead-letter table (pre-created by `setup.sql` and
   granted to the application login): a procedure that emits two result sets
   then THROWs rolls back with its cursor row, so no effect is recorded, later
   operations of that input do not run, and a retry resumes at that operation.

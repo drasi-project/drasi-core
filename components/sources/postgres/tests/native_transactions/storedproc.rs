@@ -140,8 +140,8 @@ async fn insert_row(database: &Database, owner: &str, stream: &str) -> Result<()
         .client()
         .execute(
             &format!(
-                "INSERT INTO {PROGRESS} (owner, stream_key, version, sequence, digest, operations, completed, epoch)
-                 VALUES ($1, $2, 3, '1', decode(repeat('00', 32), 'hex'), 1, 1, '')"
+                "INSERT INTO {PROGRESS} (owner, stream_key, version, sequence, digest, operations, completed, epoch, generation, pending)
+                 VALUES ($1, $2, 4, '1', decode(repeat('00', 32), 'hex'), 1, 1, '', 0, -1)"
             ),
             &[&owner, &stream],
         )
@@ -286,7 +286,7 @@ async fn native_storedproc_stream_capacity_is_per_owner_and_recovers_without_res
         .await?;
     let error = consumer.handle(input(&outputs[1])).await.unwrap_err();
     assert!(
-        format!("{error:#}").contains("capacity is exhausted"),
+        format!("{error:#}").contains("stream capacity (1) is exhausted"),
         "{error:#}"
     );
     assert_eq!(count(&database).await?, 1, "a refused stream has no effect");
@@ -413,7 +413,8 @@ async fn native_storedproc_least_privilege_role_uses_a_precreated_progress_table
              CREATE ROLE sink_role LOGIN PASSWORD 'sink-password';
              REVOKE CREATE ON SCHEMA public FROM PUBLIC;
              GRANT USAGE ON SCHEMA drasi TO sink_role;
-             GRANT SELECT, INSERT, UPDATE, DELETE ON drasi.progress TO sink_role;
+             GRANT SELECT, INSERT, UPDATE, DELETE ON drasi.progress, drasi.progress_dead_letter
+                 TO sink_role;
              GRANT SELECT ON drasi.readonly TO sink_role;
              GRANT SELECT, INSERT, UPDATE, DELETE ON mirrored, calls TO sink_role;
              GRANT SELECT ON failure_gate TO sink_role;",
@@ -579,9 +580,16 @@ async fn native_storedproc_delivers_in_memory_queries_only_at_least_once_by_opt_
         sink_settings(&database),
     )
     .await?;
+    // The graph refuses this edge when it binds it (the exactly-once input
+    // declaration against the producer's volatile identity); driven
+    // directly, the host refuses the envelope as a permanent typed failure.
     let error = strict.handle(first.clone()).await.unwrap_err();
+    assert_eq!(
+        drasi_lib::computation::v1::delivery_failure_class(&error),
+        Some(drasi_lib::computation::v1::DeliveryFailureClass::Permanent)
+    );
     assert!(
-        format!("{error:#}").contains("output identity is Volatile"),
+        format!("{error:#}").contains("lacks the producer identity"),
         "{error:#}"
     );
     assert_eq!(count(&database).await?, 0);

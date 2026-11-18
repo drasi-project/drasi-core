@@ -739,9 +739,16 @@ macro_rules! export_plugin {
         }
 
         // ── Plugin metadata ──
+        #[used]
+        static __PLUGIN_ABI_VERSION_MARKER: [u8; $crate::ffi::metadata::FFI_ABI_VERSION_MARKER.len()] =
+            $crate::ffi::metadata::FFI_ABI_VERSION_MARKER;
+
         static __PLUGIN_METADATA: $crate::ffi::PluginMetadata = $crate::ffi::PluginMetadata {
             sdk_version: $crate::ffi::FfiStr {
-                ptr: $crate::ffi::FFI_SDK_VERSION.as_ptr() as *const ::std::os::raw::c_char,
+                ptr: __PLUGIN_ABI_VERSION_MARKER
+                    .as_ptr()
+                    .wrapping_add($crate::ffi::metadata::FFI_ABI_VERSION_OFFSET)
+                    as *const ::std::os::raw::c_char,
                 len: $crate::ffi::FFI_SDK_VERSION.len(),
             },
             core_version: $crate::ffi::FfiStr {
@@ -874,6 +881,21 @@ mod tests {
 
         assert!(!drasi_plugin_init().is_null());
         assert!(PROVIDER_INSTALLED_BEFORE_REGISTRATION.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn binary_abi_marker_and_exported_metadata_share_the_same_version() {
+        let abi = drasi_ffi_primitives::read_plugin_abi_version(&__PLUGIN_ABI_VERSION_MARKER)
+            .expect("plugin ABI marker");
+        let metadata = unsafe { &*drasi_plugin_metadata() };
+        assert_eq!(abi, ffi::FFI_SDK_VERSION);
+        assert_eq!(abi, unsafe { metadata.sdk_version.to_string() });
+        assert_eq!(
+            metadata.sdk_version.ptr.cast::<u8>(),
+            __PLUGIN_ABI_VERSION_MARKER
+                .as_ptr()
+                .wrapping_add(ffi::metadata::FFI_ABI_VERSION_OFFSET)
+        );
     }
 
     #[test]

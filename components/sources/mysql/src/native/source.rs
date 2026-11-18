@@ -187,6 +187,13 @@ impl MySqlSource {
     }
 }
 
+impl MySqlSource {
+    #[cfg(test)]
+    pub(crate) fn set_idle_progress(&mut self, interval: std::time::Duration) {
+        self.inner.set_idle_progress(interval);
+    }
+}
+
 fn source_error(error: anyhow::Error) -> anyhow::Error {
     if let Some(NativeSourceError::PositionUnavailable {
         source_id,

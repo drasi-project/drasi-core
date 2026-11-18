@@ -308,11 +308,14 @@ async fn graph_preserves_callback_errors_panics_and_receiver_closure() {
         assert_eq!(*operation, "handle");
         match expected {
             "failed" => assert!(source.is::<ApplicationFailure>()),
-            "panicked" => assert!(matches!(
-                source.downcast_ref(),
-                Some(ApplicationReactionError::CallbackPanicked(message))
-                    if message == "actual application panic"
-            )),
+            "panicked" => assert!(
+                source.chain().any(|cause| matches!(
+                    cause.downcast_ref(),
+                    Some(ApplicationReactionError::CallbackPanicked(message))
+                        if message == "actual application panic"
+                )),
+                "{source:?}"
+            ),
             "closed" => assert!(matches!(
                 source.downcast_ref(),
                 Some(ApplicationReactionError::ReceiverClosed)

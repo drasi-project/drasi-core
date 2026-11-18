@@ -167,7 +167,10 @@ async fn increasing_transaction_limit_resumes_without_losing_committed_state_or_
     );
     {
         let mut query = query(directory.path(), 1).await;
-        query.start().await.expect("start");
+        query
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("start");
         assert_eq!(
             query
                 .transform(input(first.clone()))
@@ -192,12 +195,15 @@ async fn increasing_transaction_limit_resumes_without_losing_committed_state_or_
             1
         );
         assert_eq!(names(&query), ["initial"]);
-        query.stop().await.expect("cleanup");
+        query
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("cleanup");
     }
     {
         let mut query = query(directory.path(), 2).await;
         query
-            .start()
+            .start(&lifecycle_contexts::start())
             .await
             .expect("increase is not a semantic reset");
         assert_eq!(names(&query), ["initial"]);
@@ -223,20 +229,26 @@ async fn increasing_transaction_limit_resumes_without_losing_committed_state_or_
             .await
             .expect("whole-group duplicate")
             .is_empty());
-        query.stop().await.expect("cleanup");
+        query
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("cleanup");
     }
     let mut ordinary = ContinuousQueryTransformer::new(definition(), provider(directory.path()))
         .await
         .expect("ordinary construction");
     assert!(matches!(
         ordinary
-            .start()
+            .start(&lifecycle_contexts::start())
             .await
             .expect_err("group mode cannot silently change")
             .downcast_ref::<QueryRecoveryError>(),
         Some(QueryRecoveryError::ConfigurationChanged)
     ));
-    ordinary.stop().await.expect("cleanup");
+    ordinary
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("cleanup");
 }
 
 #[tokio::test]
@@ -272,7 +284,10 @@ async fn transaction_mode_rejects_non_atomic_resources_and_unframed_input() {
         .ports()
         .iter()
         .all(|port| { port.schema() == GraphChangeCodec::schema().descriptor() }));
-    query.start().await.expect("start");
+    query
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("start");
     let raw = GraphChangeCodec::encode_changes(
         &[change("one", "one", false, 1000), change("two", "two", false, 1100)],
         StreamId::try_new("source-output").expect("stream"),
@@ -300,7 +315,10 @@ async fn transaction_mode_rejects_non_atomic_resources_and_unframed_input() {
     .expect("derived");
     assert!(query.transform(input(transformed)).await.is_err());
     assert!(names(&query).is_empty());
-    query.stop().await.expect("cleanup");
+    query
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("cleanup");
 }
 
 struct WaitFactory(Arc<tokio::sync::Notify>);
@@ -348,14 +366,20 @@ async fn event_mode_keeps_per_event_results_while_transaction_mode_publishes_the
 
     let atomic_directory = tempfile::tempdir().expect("directory");
     let mut atomic = query(atomic_directory.path(), 3).await;
-    atomic.start().await.expect("start");
+    atomic
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("start");
     let net = atomic
         .transform(input(envelope(1, changes())))
         .await
         .expect("complete transaction");
     assert_eq!(operations(&net), 1, "one net result change");
     assert_eq!(names(&atomic), ["last"]);
-    atomic.stop().await.expect("cleanup");
+    atomic
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("cleanup");
 
     // The identical standard records without a marker, in ordinary event mode,
     // keep each event's own result change.
@@ -369,7 +393,10 @@ async fn event_mode_keeps_per_event_results_while_transaction_mode_publishes_the
     )
     .await
     .expect("event query");
-    event.start().await.expect("start");
+    event
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("start");
     let batch = GraphChangeCodec::encode_changes(
         &changes(),
         StreamId::try_new("source-output").expect("stream"),
@@ -380,7 +407,10 @@ async fn event_mode_keeps_per_event_results_while_transaction_mode_publishes_the
     let each = event.transform(input(batch)).await.expect("event batch");
     assert_eq!(operations(&each), 3, "an add and two updates");
     assert_eq!(names(&event), ["last"]);
-    event.stop().await.expect("cleanup");
+    event
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("cleanup");
 }
 
 #[tokio::test]
@@ -415,7 +445,10 @@ async fn transaction_applies_removal_replacement_and_updates_in_commit_order() {
             .collect::<Vec<_>>()
     };
     let mut query = query(directory.path(), 4).await;
-    query.start().await.expect("start");
+    query
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("start");
     let steps = [
         (
             vec![change("one", "a", false, 1000)],
@@ -453,7 +486,10 @@ async fn transaction_applies_removal_replacement_and_updates_in_commit_order() {
             .expect("group");
         assert_eq!(values(&query), [expected], "after transaction {sequence}");
     }
-    query.stop().await.expect("cleanup");
+    query
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("cleanup");
 }
 
 #[tokio::test]
@@ -502,7 +538,10 @@ async fn transaction_deadline_fences_cancelled_evaluation_and_retry_uses_the_who
             .bind_inputs(&bindings)
             .await
             .expect("source input binding");
-        query.start().await.expect("start");
+        query
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("start");
         let error = query
             .transform(input(event.clone()))
             .await
@@ -517,7 +556,7 @@ async fn transaction_deadline_fences_cancelled_evaluation_and_retry_uses_the_who
             "failed owner must not be reused"
         );
         query
-            .stop()
+            .stop(&lifecycle_contexts::stop())
             .await
             .expect("await cancelled storage ownership");
     }
@@ -536,7 +575,7 @@ async fn transaction_deadline_fences_cancelled_evaluation_and_retry_uses_the_who
         .await
         .expect("replacement source input binding");
     query
-        .start()
+        .start(&lifecycle_contexts::start())
         .await
         .expect("recover unchanged semantic configuration");
     gate.notify_one();
@@ -549,7 +588,10 @@ async fn transaction_deadline_fences_cancelled_evaluation_and_retry_uses_the_who
         1
     );
     assert_eq!(names(&query), ["one"]);
-    query.stop().await.expect("cleanup");
+    query
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("cleanup");
 }
 
 #[tokio::test]
@@ -582,7 +624,7 @@ async fn transaction_replay_advances_transport_without_reapplying_committed_logi
             .await
             .with_source_progress(progress.clone())
             .unwrap();
-        query.start().await.unwrap();
+        query.start(&lifecycle_contexts::start()).await.unwrap();
         assert_eq!(query.transform(input(replay(1))).await.unwrap().len(), 1);
         assert!(query.transform(input(replay(2))).await.unwrap().is_empty());
         assert_eq!(names(&query), ["final"]);
@@ -596,20 +638,20 @@ async fn transaction_replay_advances_transport_without_reapplying_committed_logi
             snapshot.transport_sequences[&StreamId::try_new("source-output").unwrap()],
             2
         );
-        query.stop().await.unwrap();
+        query.stop(&lifecycle_contexts::stop()).await.unwrap();
     }
     let mut query = query(directory.path(), 2)
         .await
         .with_source_progress(progress.clone())
         .unwrap();
-    query.start().await.unwrap();
+    query.start(&lifecycle_contexts::start()).await.unwrap();
     assert!(query.transform(input(replay(3))).await.unwrap().is_empty());
     assert_eq!(names(&query), ["final"]);
     assert_eq!(
         progress.snapshot().transport_sequences[&StreamId::try_new("source-output").unwrap()],
         3
     );
-    query.stop().await.unwrap();
+    query.stop(&lifecycle_contexts::stop()).await.unwrap();
 }
 
 struct Source {
@@ -804,5 +846,47 @@ async fn actual_graph_delivers_one_final_update_through_typed_transaction_and_re
             QueryChangeCodec::row_values_to_json(&row.values),
             serde_json::json!({"name": "last"})
         );
+    }
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
     }
 }

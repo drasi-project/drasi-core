@@ -17,11 +17,16 @@
 //! Supports:
 //! - HMAC signature verification (SHA1, SHA256) for GitHub, Shopify, etc.
 //! - Bearer token verification
+//!
+//! Secrets are named by environment variable in configuration. They are
+//! resolved once, when a configuration is accepted ([`ResolvedAuth::resolve`]),
+//! so a missing secret is a configuration error and requests never read the
+//! process environment.
 
 use super::config::{
     AuthConfig, BearerConfig, SignatureAlgorithm, SignatureConfig, SignatureEncoding,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, ensure, Result};
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
 use sha2::Sha256;
@@ -46,9 +51,83 @@ impl AuthResult {
     }
 }
 
-/// Verify authentication for a webhook request
-///
-/// If both signature and bearer token are configured, both must pass.
+/// A route's authentication with its secrets resolved.
+pub struct ResolvedAuth {
+    signature: Option<(SignatureConfig, Secret)>,
+    bearer: Option<Secret>,
+}
+
+/// A resolved secret value; never printed.
+struct Secret(String);
+
+impl std::fmt::Debug for ResolvedAuth {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResolvedAuth")
+            .field(
+                "signature",
+                &self.signature.as_ref().map(|(config, _)| config),
+            )
+            .field("bearer", &self.bearer.is_some())
+            .finish()
+    }
+}
+
+fn resolve_secret(name: &str, purpose: &str) -> Result<Secret> {
+    let value = env::var(name)
+        .map_err(|_| anyhow!("environment variable {name} for the {purpose} is not set"))?;
+    ensure!(
+        !value.is_empty(),
+        "environment variable {name} for the {purpose} is empty"
+    );
+    Ok(Secret(value))
+}
+
+impl ResolvedAuth {
+    /// Reads every secret the configuration names. Fails when one is unset
+    /// or empty.
+    pub fn resolve(config: &AuthConfig) -> Result<Self> {
+        Ok(Self {
+            signature: config
+                .signature
+                .as_ref()
+                .map(|signature| {
+                    resolve_secret(&signature.secret_env, "signature secret")
+                        .map(|secret| (signature.clone(), secret))
+                })
+                .transpose()?,
+            bearer: config
+                .bearer
+                .as_ref()
+                .map(|bearer: &BearerConfig| resolve_secret(&bearer.token_env, "bearer token"))
+                .transpose()?,
+        })
+    }
+
+    /// Verifies a request. If both signature and bearer token are
+    /// configured, both must pass.
+    pub fn verify(&self, headers: &axum::http::HeaderMap, body: &[u8]) -> AuthResult {
+        if let Some((config, secret)) = &self.signature {
+            if let Err(e) = verify_signature(config, secret, headers, body) {
+                return AuthResult::Failed(format!("Signature verification failed: {e}"));
+            }
+        }
+        if let Some(token) = &self.bearer {
+            if let Err(e) = verify_bearer(token, headers) {
+                return AuthResult::Failed(format!("Bearer token verification failed: {e}"));
+            }
+        }
+        if self.signature.is_some() || self.bearer.is_some() {
+            AuthResult::Success
+        } else {
+            AuthResult::NotConfigured
+        }
+    }
+}
+
+/// Resolves the configuration's secrets and verifies one request, reading the
+/// environment on every call. Used by the ordinary (legacy) HTTP source; the
+/// native source resolves once per configuration with [`ResolvedAuth`].
 pub fn verify_auth(
     auth_config: Option<&AuthConfig>,
     headers: &axum::http::HeaderMap,
@@ -57,44 +136,20 @@ pub fn verify_auth(
     let Some(config) = auth_config else {
         return AuthResult::NotConfigured;
     };
-
-    // Check signature if configured
-    if let Some(ref sig_config) = config.signature {
-        match verify_signature(sig_config, headers, body) {
-            Ok(()) => {}
-            Err(e) => return AuthResult::Failed(format!("Signature verification failed: {e}")),
-        }
-    }
-
-    // Check bearer token if configured
-    if let Some(ref bearer_config) = config.bearer {
-        match verify_bearer(bearer_config, headers) {
-            Ok(()) => {}
-            Err(e) => return AuthResult::Failed(format!("Bearer token verification failed: {e}")),
-        }
-    }
-
-    // If we get here, all configured auth methods passed
-    if config.signature.is_some() || config.bearer.is_some() {
-        AuthResult::Success
-    } else {
-        AuthResult::NotConfigured
+    match ResolvedAuth::resolve(config) {
+        Ok(auth) => auth.verify(headers, body),
+        Err(error) => AuthResult::Failed(error.to_string()),
     }
 }
 
 /// Verify HMAC signature
 fn verify_signature(
     config: &SignatureConfig,
+    secret: &Secret,
     headers: &axum::http::HeaderMap,
     body: &[u8],
 ) -> Result<()> {
-    // Get the secret from environment variable
-    let secret = env::var(&config.secret_env).map_err(|_| {
-        anyhow!(
-            "Environment variable '{}' not set for signature secret",
-            config.secret_env
-        )
-    })?;
+    let secret = &secret.0;
 
     // Get the signature from header
     let signature_header = headers
@@ -162,14 +217,8 @@ fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Verify bearer token
-fn verify_bearer(config: &BearerConfig, headers: &axum::http::HeaderMap) -> Result<()> {
-    // Get the expected token from environment variable
-    let expected_token = env::var(&config.token_env).map_err(|_| {
-        anyhow!(
-            "Environment variable '{}' not set for bearer token",
-            config.token_env
-        )
-    })?;
+fn verify_bearer(expected: &Secret, headers: &axum::http::HeaderMap) -> Result<()> {
+    let expected_token = &expected.0;
 
     // Get the Authorization header
     let auth_header = headers
@@ -206,6 +255,23 @@ mod tests {
             );
         }
         map
+    }
+
+    #[test]
+    fn secrets_are_resolved_once_and_missing_ones_are_refused() {
+        let config = AuthConfig {
+            signature: None,
+            bearer: Some(BearerConfig {
+                token_env: "TEST_RESOLVED_ONCE_TOKEN".to_string(),
+            }),
+        };
+        assert!(ResolvedAuth::resolve(&config).is_err(), "unset secret");
+        env::set_var("TEST_RESOLVED_ONCE_TOKEN", "first-token");
+        let auth = ResolvedAuth::resolve(&config).unwrap();
+        env::set_var("TEST_RESOLVED_ONCE_TOKEN", "second-token");
+        let headers = create_headers(&[("authorization", "Bearer first-token")]);
+        assert_eq!(auth.verify(&headers, b""), AuthResult::Success);
+        env::remove_var("TEST_RESOLVED_ONCE_TOKEN");
     }
 
     #[test]

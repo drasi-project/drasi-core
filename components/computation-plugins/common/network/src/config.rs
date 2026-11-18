@@ -281,43 +281,6 @@ pub fn ingress_options(
     ]
 }
 
-#[cfg(any(feature = "http-sink", feature = "grpc-sink"))]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum FailurePolicy {
-    #[default]
-    Strict,
-    Skip,
-}
-
-#[cfg(any(feature = "http-sink", feature = "grpc-sink"))]
-impl FailurePolicy {
-    /// Applies the policy to one delivery's outcome. Under `skip` the failure
-    /// is logged (sanitized) and the input completes; under `strict` the
-    /// failure is returned so the host retries the input.
-    pub fn delivery(
-        self,
-        result: Result<()>,
-        component: &ComponentId,
-        output: &str,
-        sequence: u64,
-    ) -> Result<()> {
-        match (self, result) {
-            (_, Ok(())) => Ok(()),
-            (Self::Strict, Err(error)) => Err(error),
-            (Self::Skip, Err(error)) => {
-                crate::diag!(
-                    Warn,
-                    "deliberate delivery skip: component={component} output={} sequence={sequence} error={}",
-                    sanitize(output),
-                    sanitize(&format!("{error:#}"))
-                );
-                Ok(())
-            }
-        }
-    }
-}
-
 /// Upper bound on one logged field, so logs never carry whole bodies.
 #[cfg(feature = "sink")]
 pub const MAX_LOG_FIELD_LEN: usize = 512;

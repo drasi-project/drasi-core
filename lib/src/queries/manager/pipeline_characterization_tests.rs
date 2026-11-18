@@ -1316,12 +1316,24 @@ impl crate::BootstrapProvider for CountingBootstrap {
     async fn bootstrap(
         &self,
         _: crate::bootstrap::BootstrapRequest,
-        _: &crate::bootstrap::BootstrapContext,
-        _: crate::channels::BootstrapEventSender,
+        context: &crate::bootstrap::BootstrapContext,
+        events: crate::channels::BootstrapEventSender,
         _: Option<&crate::SourceSubscriptionSettings>,
     ) -> anyhow::Result<crate::bootstrap::BootstrapResult> {
         self.0.fetch_add(1, Ordering::AcqRel);
-        Ok(crate::bootstrap::BootstrapResult::default())
+        // A cursorless snapshot that incorporates data confirms no boundary.
+        events
+            .send(crate::channels::BootstrapEvent {
+                source_id: context.source_id.clone(),
+                change: person_insert("snapshot", "Snapshot", 1),
+                timestamp: chrono::Utc::now(),
+                sequence: 0,
+            })
+            .await?;
+        Ok(crate::bootstrap::BootstrapResult {
+            event_count: 1,
+            source_position: None,
+        })
     }
 }
 
@@ -1794,13 +1806,17 @@ async fn committed_input_has_no_recoverable_output_when_persistence_fails() {
             .is_none(),
         "core element state must roll back with output"
     );
-    assert_eq!(
+    // Only the bootstrap handover's sequence-zero boundary (the source
+    // contributed no snapshot) may remain; the failed input's progress may not.
+    assert!(
         backend
             .checkpoint_store
             .read_checkpoint(&source_checkpoint_key())
             .await
-            .unwrap(),
-        None,
+            .unwrap()
+            .is_none_or(
+                |checkpoint| checkpoint.sequence == 0 && checkpoint.source_position.is_none()
+            ),
         "source progress must not commit without its output"
     );
     assert!(

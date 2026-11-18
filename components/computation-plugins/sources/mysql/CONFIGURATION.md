@@ -42,7 +42,7 @@ explicit `@N` `tableKeys`.
 | `heartbeatIntervalMs` | integer | `30000` | ≥ 1 | | restart |
 | `tables` | array of names | `[]` (all supported base tables) | distinct, 1-64 chars | | unsupported |
 | `tableKeys` | `[{table, keyColumns}]` | `[]` | | | unsupported |
-| `startFrom` | `end`, `beginning`, `gtid`, `position`, `snapshot` | `end` | | | restart (untracked, or before the first checkpoint) |
+| `startFrom` | `end`, `beginning`, `gtid`, `position`, `snapshot` | `end` | | | restart (untracked, or before the first checkpoint; a fresh row group's `end` is committed as its origin first) |
 | `startGtidSet` | string | none | `startFrom: gtid` | | as `startFrom` |
 | `startBinlogFile` / `startBinlogPosition` | string / integer | none | `startFrom: position`, position ≥ 4 | | as `startFrom` |
 | `snapshotLockTimeoutMs` | integer | `10000` | ≥ 1 | | restart |

@@ -15,6 +15,8 @@ pub mod batching;
 pub mod config;
 #[cfg(feature = "ingress")]
 pub mod durable;
+#[cfg(feature = "grpc-listener")]
+pub mod grpc_incoming;
 #[cfg(feature = "ingress")]
 pub mod ingress;
 #[cfg(feature = "sink")]
@@ -28,6 +30,10 @@ pub mod wire;
 
 #[doc(hidden)]
 pub use log;
+/// The TLS acceptor used by the shared listener, for transports that run
+/// their own accept loop with the same rustls configuration.
+#[cfg(feature = "listener")]
+pub use tokio_rustls;
 
 pub mod proto {
     #[cfg(feature = "grpc-sink")]

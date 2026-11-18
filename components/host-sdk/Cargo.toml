@@ -75,6 +75,7 @@ drasi-computation-network-common = { workspace = true, features = ["http-source"
 drasi-computation-source-grpc = { workspace = true }
 drasi-computation-source-http = { workspace = true }
 drasi-computation-source-mysql = { workspace = true }
+drasi-computation-source-otel = { workspace = true }
 drasi-computation-source-postgres = { workspace = true }
 drasi-computation-source-sqlite = { workspace = true }
 drasi-computation-sink-http = { workspace = true }
@@ -88,6 +89,7 @@ drasi-reaction-grpc = { workspace = true }
 drasi-source-sqlite = { path = "../sources/sqlite" }
 drasi-index-rocksdb = { workspace = true, features = ["computation"] }
 drasi-state-store-redb = { workspace = true, features = ["configuration"] }
+drasi-wal-redb = { workspace = true }
 tempfile = "3"
 libloading = "0.8"
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -98,6 +100,7 @@ serial_test = "3"
 tokio-stream = { version = "0.1", features = ["net"] }
 async-stream = "0.3"
 axum = "0.7"
+prost = "0.14"
 prost-types = "0.14"
 tonic = "0.14"
 drasi-computation-transformer-query = { path = "../computation-plugins/transformers/query" }

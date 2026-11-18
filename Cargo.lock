@@ -1392,6 +1392,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "bindgen"
+version = "0.72.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
+dependencies = [
+ "bitflags 2.13.2",
+ "cexpr",
+ "clang-sys",
+ "itertools 0.13.0",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash 2.1.3",
+ "shlex 1.3.0",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3104,6 +3122,7 @@ name = "drasi-computation-network-common"
 version = "0.11.3"
 dependencies = [
  "anyhow",
+ "async-stream",
  "axum 0.7.9",
  "chrono",
  "drasi-computation-contracts",
@@ -3126,6 +3145,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-util",
+ "tonic",
  "tower 0.4.13",
 ]
 
@@ -3145,6 +3165,7 @@ dependencies = [
  "drasi-core-types",
  "futures-core",
  "futures-util",
+ "log",
  "rmp-serde",
  "serde",
  "serde_bytes",
@@ -3175,6 +3196,7 @@ dependencies = [
  "async-trait",
  "drasi-computation-contracts",
  "drasi-computation-plugin-sdk",
+ "drasi-core-types",
  "serde",
  "serde_json",
  "tokio",
@@ -3291,6 +3313,7 @@ dependencies = [
  "async-trait",
  "drasi-computation-contracts",
  "drasi-computation-plugin-sdk",
+ "drasi-computation-storedproc-common",
  "drasi-core-types",
  "drasi-mssql-common",
  "drasi-reaction-common",
@@ -3311,12 +3334,15 @@ dependencies = [
  "async-trait",
  "drasi-computation-contracts",
  "drasi-computation-plugin-sdk",
+ "drasi-computation-storedproc-common",
  "drasi-core-types",
  "drasi-mysql-common",
  "drasi-reaction-common",
  "log",
+ "mysql_common",
  "serde",
  "serde_json",
+ "testcontainers",
  "tokio",
 ]
 
@@ -3328,6 +3354,7 @@ dependencies = [
  "async-trait",
  "drasi-computation-contracts",
  "drasi-computation-plugin-sdk",
+ "drasi-computation-storedproc-common",
  "drasi-postgres-common",
  "drasi-reaction-common",
  "log",
@@ -3336,6 +3363,7 @@ dependencies = [
  "postgres-native-tls",
  "serde",
  "serde_json",
+ "testcontainers",
  "tokio",
  "tokio-postgres",
 ]
@@ -3446,12 +3474,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "drasi-computation-source-otel"
+version = "0.11.3"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.7.9",
+ "bytes",
+ "chrono",
+ "drasi-computation-contracts",
+ "drasi-computation-network-common",
+ "drasi-computation-plugin-sdk",
+ "drasi-core-types",
+ "flate2",
+ "ordered-float 3.9.2",
+ "prost 0.14.4",
+ "prost-build",
+ "protoc-bin-vendored",
+ "rcgen",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+]
+
+[[package]]
 name = "drasi-computation-source-postgres"
 version = "0.11.3"
 dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
+ "chrono",
  "drasi-computation-contracts",
  "drasi-computation-plugin-sdk",
  "drasi-core-types",
@@ -3483,6 +3540,22 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid 1.26.1",
+]
+
+[[package]]
+name = "drasi-computation-storedproc-common"
+version = "0.11.3"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "drasi-computation-contracts",
+ "drasi-reaction-common",
+ "log",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]
@@ -3738,6 +3811,7 @@ dependencies = [
  "drasi-computation-source-http",
  "drasi-computation-source-mssql",
  "drasi-computation-source-mysql",
+ "drasi-computation-source-otel",
  "drasi-computation-source-postgres",
  "drasi-computation-source-sqlite",
  "drasi-computation-transformer-query",
@@ -3754,6 +3828,7 @@ dependencies = [
  "drasi-source-http",
  "drasi-source-sqlite",
  "drasi-state-store-redb",
+ "drasi-wal-redb",
  "futures-util",
  "imbl",
  "indexmap 2.14.2",
@@ -3766,6 +3841,7 @@ dependencies = [
  "p256",
  "p384",
  "pem",
+ "prost 0.14.4",
  "prost-types 0.14.4",
  "reqwest 0.12.28",
  "rmp-serde",
@@ -4087,6 +4163,7 @@ dependencies = [
  "bytes",
  "chrono",
  "drasi-computation-contracts",
+ "drasi-computation-storedproc-common",
  "drasi-core-types",
  "drasi-reaction-common",
  "encoding_rs",
@@ -4106,6 +4183,7 @@ dependencies = [
  "sha2 0.10.9",
  "testcontainers",
  "testcontainers-modules",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-native-tls",
  "utoipa",
@@ -4183,6 +4261,7 @@ dependencies = [
  "bytes",
  "chrono",
  "drasi-computation-contracts",
+ "drasi-computation-storedproc-common",
  "drasi-core-types",
  "drasi-reaction-common",
  "handlebars 5.1.2",
@@ -7676,6 +7755,7 @@ dependencies = [
  "bytes",
  "chrono",
  "drasi-bootstrap-application",
+ "drasi-bootstrap-noop",
  "drasi-bootstrap-sqlite",
  "drasi-computation-contracts",
  "drasi-computation-plugin-sdk",
@@ -7691,6 +7771,9 @@ dependencies = [
  "drasi-reaction-grpc",
  "drasi-reaction-http",
  "drasi-source-application",
+ "drasi-source-grpc",
+ "drasi-source-http",
+ "drasi-source-otel",
  "drasi-source-postgres",
  "drasi-source-sqlite",
  "drasi-state-store-redb",
@@ -7746,14 +7829,13 @@ dependencies = [
 
 [[package]]
 name = "librocksdb-sys"
-version = "0.16.0+8.10.0"
+version = "0.17.3+10.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce3d60bc059831dc1c83903fb45c103f75db65c5a7bf22272764d9cc683e348c"
+checksum = "cef2a00ee60fe526157c9023edab23943fae1ce2ab6f4abb2a807c1746835de9"
 dependencies = [
- "bindgen",
+ "bindgen 0.72.1",
  "bzip2-sys",
  "cc",
- "glob",
  "libc",
  "libz-sys",
  "lz4-sys",
@@ -7766,7 +7848,7 @@ version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e99fb7a497b1e3339bc746195567ed8d3e24945ecd636e3619d20b9de9e9149"
 dependencies = [
- "bindgen",
+ "bindgen 0.69.5",
  "cc",
  "pkg-config",
  "vcpkg",
@@ -10512,9 +10594,9 @@ checksum = "4e27ee8bb91ca0adcf0ecb116293afa12d393f9c2b9b9cd54d33e8078fe19839"
 
 [[package]]
 name = "rocksdb"
-version = "0.22.0"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bd13e55d6d7b8cd0ea569161127567cd587676c99f4472f779a0279aa60a7a7"
+checksum = "ddb7af00d2b17dbd07d82c0063e25411959748ff03e8d4f96134c2ff41fce34f"
 dependencies = [
  "libc",
  "librocksdb-sys",
@@ -13443,11 +13525,13 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "drasi-computation-plugin-abi",
  "drasi-ffi-primitives",
  "oci-client",
  "oci-spec 0.8.4",
  "proc-macro2",
  "quote",
+ "semver",
  "serde",
  "serde_json",
  "syn 2.0.119",

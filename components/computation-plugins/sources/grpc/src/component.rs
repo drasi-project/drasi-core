@@ -95,6 +95,11 @@ pub(crate) fn plan(current: &GrpcSourceConfig, proposed: &GrpcSourceConfig) -> A
         Stop,
     );
     planner.field(
+        "headerReadTimeoutMs",
+        c.header_read_timeout_ms != p.header_read_timeout_ms,
+        Stop,
+    );
+    planner.field(
         "maxConcurrentStreams",
         c.max_concurrent_streams != p.max_concurrent_streams,
         Stop,
@@ -171,21 +176,19 @@ impl NativeComponent for GrpcSource {
     }
     async fn start(&mut self, ctx: &mut StartContext) -> LifecycleResult {
         let ingress = self.config.ingress()?;
-        let tls = ingress.security.tls.as_ref().map(|tls| {
-            let mut config = tonic::transport::ServerTlsConfig::new().identity(
-                tonic::transport::Identity::from_pem(
-                    &tls.certificate_pem,
-                    tls.private_key_pem.expose(),
-                ),
-            );
-            if let Some(ca) = &tls.client_ca_pem {
-                config = config.client_ca_root(tonic::transport::Certificate::from_pem(ca));
-            }
-            config
-        });
+        // The same rustls configuration as the HTTP listener, offering HTTP/2.
+        let tls = ingress
+            .security
+            .tls
+            .as_ref()
+            .map(|tls| tls.server_config(vec![b"h2".to_vec()]))
+            .transpose()?;
         let options = ServeOptions {
-            tls,
-            max_connections: self.config.max_connections,
+            incoming: drasi_computation_network_common::grpc_incoming::IncomingOptions {
+                tls,
+                max_connections: self.config.max_connections,
+                header_read_timeout: Duration::from_millis(self.config.header_read_timeout_ms),
+            },
             max_concurrent_streams: self.config.max_concurrent_streams,
             timeout: transport_timeout(ingress.timeout()),
             grpc: self.grpc.clone(),
@@ -317,7 +320,7 @@ pub(crate) struct Services {
 impl Services {
     /// Reserves a streaming-RPC slot, failing fast when none is free.
     pub fn stream_permit(&self) -> Result<tokio::sync::OwnedSemaphorePermit, Status> {
-        if self.ingress.cancel.is_cancelled() {
+        if self.ingress.shutdown.is_cancelled() {
             return Err(Status::unavailable("source stopped"));
         }
         if self.ingress.is_paused() {
@@ -338,7 +341,7 @@ impl Services {
         let idle = self.grpc.load().stream_idle_timeout;
         tokio::select! {
             biased;
-            _ = self.ingress.cancel.cancelled() => Err(Status::unavailable("source stopped")),
+            _ = self.ingress.shutdown.cancelled() => Err(Status::unavailable("source stopped")),
             result = tokio::time::timeout(idle, input.message()) =>
                 result.map_err(|_| Status::deadline_exceeded("stream idle timeout")).and_then(|value| value),
         }
@@ -441,7 +444,7 @@ impl source::source_service_server::SourceService for SourceService {
         _: Request<()>,
     ) -> std::result::Result<Response<source::HealthCheckResponse>, Status> {
         let ingress = &self.0.ingress;
-        if ingress.cancel.is_cancelled() {
+        if ingress.shutdown.is_cancelled() {
             return Err(Status::unavailable("source stopped"));
         }
         let admission = if ingress.durable().is_some() {
@@ -469,8 +472,7 @@ impl source::source_service_server::SourceService for SourceService {
 }
 
 pub(crate) struct ServeOptions {
-    tls: Option<tonic::transport::ServerTlsConfig>,
-    max_connections: usize,
+    incoming: drasi_computation_network_common::grpc_incoming::IncomingOptions,
     max_concurrent_streams: usize,
     timeout: Duration,
     grpc: Arc<Live<GrpcLive>>,
@@ -494,7 +496,7 @@ impl tonic::service::Interceptor for Access {
 }
 
 async fn serve(listener: TcpListener, ingress: Arc<Ingress>, options: ServeOptions) -> Result<()> {
-    let cancel = ingress.cancel.clone();
+    let cancel = ingress.shutdown.clone();
     let services = Services {
         ingress: ingress.clone(),
         streams: Arc::new(Semaphore::new(options.max_concurrent_streams)),
@@ -509,18 +511,14 @@ async fn serve(listener: TcpListener, ingress: Arc<Ingress>, options: ServeOptio
     )
     .max_decoding_message_size(max_message_bytes);
     let access = Access(ingress.clone());
-    let mut builder = tonic::transport::Server::builder();
-    if let Some(tls) = options.tls {
-        builder = builder.tls_config(tls).context("configure gRPC TLS")?;
-    }
-    builder
+    tonic::transport::Server::builder()
         .timeout(options.timeout)
         .http2_keepalive_interval(Some(Duration::from_secs(30)))
         .http2_keepalive_timeout(Some(Duration::from_secs(20)))
         .add_service(InterceptedService::new(source, access.clone()))
         .add_service(InterceptedService::new(admission, access))
         .serve_with_incoming_shutdown(
-            crate::incoming::limited(listener, options.max_connections),
+            drasi_computation_network_common::grpc_incoming::limited(listener, options.incoming),
             cancel.cancelled_owned(),
         )
         .await?;

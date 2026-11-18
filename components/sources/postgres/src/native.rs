@@ -95,10 +95,23 @@ impl PostgresTransactionSource {
     }
 }
 
+/// `drasi/postgres-transactions` as the loaded plugin declares it.
+fn transactions_description(
+    descriptor: &ComponentDescriptor,
+) -> drasi_lib::computation::v1::ComponentDescription {
+    drasi_computation_source_postgres::description(
+        drasi_computation_source_postgres::config::Mode::Transactions,
+        true,
+        descriptor,
+    )
+}
+
 #[async_trait]
 impl ComputationComponent for PostgresTransactionSource {
+    /// The loaded plugin's declaration for the same mode: whole commits
+    /// whose cursors require durable query progress.
     fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
-        drasi_lib::computation::v1::ComponentDescription::undeclared()
+        transactions_description(self.inner.descriptor())
     }
     fn descriptor(&self) -> &ComponentDescriptor {
         self.inner.descriptor()

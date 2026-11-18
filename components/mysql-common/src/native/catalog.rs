@@ -439,22 +439,16 @@ pub fn key_columns(config: &MySqlConfig, table: &str, columns: &[Column]) -> Res
     if let Some(keys) = config.table_keys.iter().find(|key| key.table == table) {
         return Ok(keys.key_columns.clone());
     }
-    let mut keys = columns
+    // Identity comes only from a declared primary key or tableKeys; a column
+    // name such as `id` is never taken as proof of uniqueness.
+    let keys = columns
         .iter()
         .filter(|column| column.key)
         .map(|column| column.name.clone())
         .collect::<Vec<_>>();
-    if keys.is_empty() {
-        if let Some(column) = columns
-            .iter()
-            .find(|column| column.name.eq_ignore_ascii_case("id"))
-        {
-            keys.push(column.name.clone());
-        }
-    }
     anyhow::ensure!(
         !keys.is_empty(),
-        "MySQL table {table} needs a primary key, id column or explicit table_keys"
+        "MySQL table {table} has no primary key; add a tableKeys entry"
     );
     Ok(keys)
 }
@@ -674,6 +668,29 @@ fn wire_types(sql_type: &str) -> Result<&'static [mysql_common::constants::Colum
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identity_is_declared_never_inferred_from_an_id_column() {
+        let column = |name: &str, key: bool| Column {
+            name: name.into(),
+            sql_type: "int".into(),
+            key,
+            nullable: false,
+            charset: None,
+            collation: None,
+        };
+        let mut config = super::super::tests::config(3306, super::super::MySqlOutput::Changes);
+        let keyless = [column("id", false), column("value", false)];
+        let error = key_columns(&config, "items", &keyless).unwrap_err();
+        assert!(error.to_string().contains("tableKeys"), "{error:#}");
+        let keyed = [column("id", false), column("code", true)];
+        assert_eq!(key_columns(&config, "items", &keyed).unwrap(), ["code"]);
+        config.table_keys.push(crate::TableKeyConfig {
+            table: "items".into(),
+            key_columns: vec!["id".into()],
+        });
+        assert_eq!(key_columns(&config, "items", &keyless).unwrap(), ["id"]);
+    }
 
     #[test]
     fn retention_disables_both_legacy_and_current_expiry_settings() {

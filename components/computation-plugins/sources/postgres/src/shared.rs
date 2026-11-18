@@ -46,7 +46,7 @@ impl InputPositionComparator for TransactionPositionComparator {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SharedMode {
     Rows,
     Transactions,
@@ -176,24 +176,6 @@ impl SharedBinding {
             history: Arc::default(),
         })
     }
-
-    pub fn retained_origin(
-        &self,
-        snapshot: &ConsumerProgressSnapshot,
-        source: &ComponentId,
-    ) -> Result<Option<u64>> {
-        let mut history = self
-            .history
-            .lock()
-            .map_err(|_| anyhow::anyhow!("PostgreSQL consumer history poisoned"))?;
-        match history.as_mut() {
-            Some(history) => {
-                history.restart(snapshot, source)?;
-                Ok(history.fresh_lsn)
-            }
-            None => Ok(None),
-        }
-    }
 }
 
 pub(crate) struct SharedObservation {
@@ -208,7 +190,6 @@ pub(crate) struct SharedObservation {
 pub(crate) fn validate_members(
     snapshot: &ConsumerProgressSnapshot,
     expected: &BTreeSet<ComponentId>,
-    persistent: bool,
 ) -> Result<bool> {
     anyhow::ensure!(
         !expected.is_empty() && snapshot.consumers.keys().eq(expected.iter()),
@@ -219,96 +200,54 @@ pub(crate) fn validate_members(
         if let Some(failure) = &state.failure {
             anyhow::bail!("PostgreSQL consumer {id} is fenced: {failure}");
         }
-        anyhow::ensure!(
-            !persistent || state.persistent,
-            "PostgreSQL consumer {id} has no persistent progress"
-        );
         ready &= state.ready && state.recovered && state.admitting;
     }
     Ok(ready)
 }
 
-/// Only an entirely fresh, streaming-only binding may select its initial slot
-/// boundary. An existing binding can retain that origin while its first inputs
-/// are pending, but cannot choose a new origin for a missing consumer.
-pub(crate) fn fresh_group(
-    snapshot: &ConsumerProgressSnapshot,
-    expected: &BTreeSet<ComponentId>,
-    source: &ComponentId,
-    stream: &StreamId,
-    persistent: bool,
-    retained_origin: Option<u64>,
-) -> Result<bool> {
-    fresh_group_mode(
-        snapshot,
-        expected,
-        source,
-        stream,
-        persistent,
-        retained_origin,
-        SharedMode::Rows,
-    )
+/// How a consumer group starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Initialization {
+    /// No member has a cursor: the group starts at a fresh origin.
+    pub fresh: bool,
+    /// Some member has no cursor: it joins at the group's minimum (or the
+    /// origin), committed through a join record before changes flow.
+    pub missing: bool,
 }
 
-pub(crate) fn fresh_transactions(
+/// Classifies a starting group. A member without a cursor may join only if
+/// it has neither bootstrapped nor consumed this stream, so joining loses
+/// nothing it had.
+pub(crate) fn initialization(
     snapshot: &ConsumerProgressSnapshot,
     expected: &BTreeSet<ComponentId>,
     source: &ComponentId,
     stream: &StreamId,
-    retained_origin: Option<u64>,
-) -> Result<bool> {
-    fresh_group_mode(
-        snapshot,
-        expected,
-        source,
-        stream,
-        true,
-        retained_origin,
-        SharedMode::Transactions,
-    )
-}
-
-fn fresh_group_mode(
-    snapshot: &ConsumerProgressSnapshot,
-    expected: &BTreeSet<ComponentId>,
-    source: &ComponentId,
-    stream: &StreamId,
-    persistent: bool,
-    retained_origin: Option<u64>,
     mode: SharedMode,
-) -> Result<bool> {
+) -> Result<Initialization> {
     anyhow::ensure!(
-        validate_members(snapshot, expected, persistent)?,
+        validate_members(snapshot, expected)?,
         "PostgreSQL consumers are not ready for initialization"
     );
     let mut present = 0;
     for state in snapshot.consumers.values() {
         if mode.cursor(state, source, None)?.is_some() {
             present += 1;
+        } else {
+            anyhow::ensure!(
+                !state.bootstrap_complete
+                    && !state.transport_sequences.contains_key(stream)
+                    && !state
+                        .checkpoints
+                        .contains_key(&SourceProgressKey::Stream(stream.clone())),
+                "PostgreSQL shared source has missing bootstrap or replay initialization"
+            );
         }
     }
-    anyhow::ensure!(
-        present == 0 || present == expected.len() || retained_origin.is_some(),
-        "PostgreSQL shared consumers have mixed missing initialization"
-    );
-    if present != expected.len() {
-        anyhow::ensure!(
-            snapshot.consumers.values().all(|state| {
-                state
-                    .checkpoints
-                    .contains_key(&SourceProgressKey::Source(source.clone()))
-                    || (!state.bootstrap_complete
-                        && !state.transport_sequences.contains_key(stream)
-                        && !state
-                            .checkpoints
-                            .contains_key(&SourceProgressKey::Stream(stream.clone())))
-            }),
-            "PostgreSQL shared source has missing bootstrap or replay initialization"
-        );
-        Ok(true)
-    } else {
-        Ok(false)
-    }
+    Ok(Initialization {
+        fresh: present == 0,
+        missing: present != expected.len(),
+    })
 }
 
 pub(crate) fn observe(
@@ -317,9 +256,8 @@ pub(crate) fn observe(
     source: &ComponentId,
     stream: &StreamId,
     binding: [u8; 32],
-    persistent: bool,
 ) -> Result<SharedObservation> {
-    let ready = validate_members(snapshot, expected, persistent)?;
+    let ready = validate_members(snapshot, expected)?;
     let minimum = minimum_row_checkpoint(snapshot, expected, source, binding)?;
     let mut max_counter = 0;
     let mut max_lsn = 0;
@@ -361,7 +299,6 @@ pub(crate) struct SharedUpdates {
     pub updates: Box<dyn ConsumerProgressUpdates>,
     pub expected: BTreeSet<ComponentId>,
     history: Arc<Mutex<Option<SharedHistory>>>,
-    fresh_lsn: Option<u64>,
     unready: bool,
     mode: SharedMode,
 }
@@ -370,7 +307,6 @@ struct SharedHistory {
     binding: [u8; 32],
     generations: BTreeMap<ComponentId, u64>,
     initialized: BTreeSet<ComponentId>,
-    fresh_lsn: Option<u64>,
     mode: SharedMode,
 }
 
@@ -412,7 +348,7 @@ impl SharedHistory {
                 self.initialized.insert(id.clone());
             } else {
                 anyhow::ensure!(
-                    !self.initialized.contains(id) && self.fresh_lsn.is_some(),
+                    !self.initialized.contains(id),
                     "PostgreSQL consumer {id} lost its handled input cursor"
                 );
                 anyhow::ensure!(
@@ -431,7 +367,6 @@ impl SharedUpdates {
         initial: &ConsumerProgressSnapshot,
         source: &ComponentId,
         database_binding: [u8; 32],
-        fresh_lsn: Option<u64>,
     ) -> Result<Self> {
         {
             let mut history = binding
@@ -446,7 +381,6 @@ impl SharedUpdates {
                     .map(|(id, state)| (id.clone(), state.reset_generation))
                     .collect(),
                 initialized: BTreeSet::new(),
-                fresh_lsn,
                 mode: binding.mode,
             });
             anyhow::ensure!(
@@ -459,7 +393,6 @@ impl SharedUpdates {
             updates: binding.reader.subscribe()?,
             expected: binding.expected.clone(),
             history: binding.history.clone(),
-            fresh_lsn,
             unready: false,
             mode: binding.mode,
         })
@@ -470,21 +403,13 @@ impl SharedUpdates {
         source: &ComponentId,
         stream: &StreamId,
         binding: [u8; 32],
-        persistent: bool,
     ) -> Result<SharedObservation> {
         anyhow::ensure!(
             self.mode == SharedMode::Rows,
             "PostgreSQL progress mode is not rows"
         );
         let snapshot = self.updates.snapshot()?;
-        let observed = observe(
-            &snapshot,
-            &self.expected,
-            source,
-            stream,
-            binding,
-            persistent,
-        )?;
+        let observed = observe(&snapshot, &self.expected, source, stream, binding)?;
         self.observe_history(&snapshot, source, observed.ready)?;
         Ok(observed)
     }
@@ -523,11 +448,6 @@ impl SharedUpdates {
             .context("PostgreSQL shared history is missing")?
             .observe(snapshot, source)
     }
-
-    pub fn initial_lsn(&self) -> Result<u64> {
-        self.fresh_lsn
-            .context("PostgreSQL consumer initialization has no retained streaming origin")
-    }
 }
 
 pub(crate) struct SharedTransactionObservation {
@@ -545,7 +465,7 @@ pub(crate) fn observe_transactions(
     stream: &StreamId,
     binding: [u8; 32],
 ) -> Result<SharedTransactionObservation> {
-    let ready = validate_members(snapshot, expected, true)?;
+    let ready = validate_members(snapshot, expected)?;
     let minimum = transactions::minimum_checkpoint(snapshot, expected, source, binding)?;
     let mut max_counter = 0;
     let mut max_lsn = 0;

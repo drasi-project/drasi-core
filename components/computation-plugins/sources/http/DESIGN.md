@@ -102,21 +102,33 @@ locally. There are two producer models:
 A durable webhook request that carries `x-drasi-producer-session` and
 `x-drasi-first-sequence` uses the session protocol. Every mapping must then
 define `effectiveFrom`, so a retried request maps to identical events. Without
-those headers the request uses the server-sequenced producer.
+those headers the request uses the server-sequenced producer. A volatile source
+refuses requests that carry these headers with 409 `NotEnabled`, because it
+cannot honour the idempotency they ask for.
 
-In both models a batch is admitted event by event. On failure the response
-reports the committed prefix. The durable path never acknowledges a subset of a
-webhook's mapped events under a skip policy.
+Both models admit with back-pressure: when the graph mailbox or the journal is
+momentarily full, the request waits (bounded by `timeoutMs`) instead of
+failing part-way through a batch.
+
+**Batches are not atomic; the response states the committed prefix exactly.**
+Each event is committed on its own. Standard and webhook responses carry
+`events_processed`, the number of leading events committed; session-protocol
+responses list one receipt per committed event. When the error is uncertain,
+only the event after that prefix may also have been committed. A batch stops
+early only on Pause (at an event boundary), an aborting Stop, the request
+deadline, or a definite rejection such as an invalid event. The gRPC source
+reports prefixes the same way. The durable path never acknowledges a subset of
+a webhook's mapped events under a skip policy.
 
 ## Lifecycle
 
 | Hook | Behaviour |
 |---|---|
-| `initialize` | Checks that every environment variable named by webhook authentication is set. Binds nothing. |
+| `initialize` | Binds nothing. Webhook secrets were already resolved when the configuration was accepted (see Management). |
 | `start` | Binds the listener, observing the hook's cancellation and deadline, then starts serving. Nothing is left running if binding fails or is cancelled. A second Start while running is refused. |
-| `pause` | Sets the pause gate. New admissions are refused with 503 and `Retry-After`. A volatile batch blocked on queue capacity is interrupted; its accepted prefix stays accepted. A durable batch stops at the next event boundary. Pause returns once in-flight admissions settle. If cancelled or past its deadline, it reopens admission and reports the failure. `/health` reports `paused`. Session metadata routes (register, status, receipt, retire) stay available. |
+| `pause` | Sets the pause gate. New data admissions are refused: 503 with `Retry-After` on standard and webhook routes, 429 `Busy` on session-protocol event routes. A volatile batch blocked on queue capacity is interrupted; its accepted prefix stays accepted. A durable batch stops at the next event boundary. Pause returns once in-flight admissions settle. If cancelled or past its deadline, it reopens admission and reports the failure. `/health` reports `paused`. Session metadata routes (register, status, receipt, retire) stay available, so a client can resolve an uncertain outcome during a managed-update Pause. |
 | `resume` | Reopens admission. |
-| `stop` | `Drain`: stops accepting connections and lets in-flight requests finish. The header-read timeout bounds clients that never send a request. `Abort`: also aborts the listener and every connection task. In both cases the listener is joined within the hook's deadline (or `timeoutMs + 5s`). On expiry the error is retryable, ownership is kept, and a later Stop or Abort completes the cleanup. |
+| `stop` | `Drain`: stops accepting connections and refuses new requests and admissions, but lets admissions already in flight finish. A durable commit in flight completes and its client receives the real outcome (success or receipt), so a graceful stop or restart never turns a committed event into a retry. The header-read timeout bounds clients that never send a request; `timeoutMs` bounds each admission. `Abort`: also interrupts in-flight admissions, which answer that their outcome is uncertain, and aborts the listener and every connection task. In both cases the listener is joined within the hook's deadline (or `timeoutMs + 5s`). On expiry the error is retryable, ownership is kept, and a later Stop or Abort completes the cleanup. |
 | `dispose` | The source owns no persistent state: volatile events live only in the activation, and durable journals belong to the host's QoS channel. Both `Preserve` and `Erase` are idempotent no-ops. Dispose is refused while the source is running. |
 
 All listener and connection work is owned by one task, held in the runtime's
@@ -188,7 +200,7 @@ stopped source. A refused apply leaves the object unchanged.
 | Client disconnects mid-body | 400; nothing is admitted. |
 | Queue full (volatile) | The request waits up to `timeoutMs`, then gets 503 with the accepted prefix count. |
 | Durable write outcome unknown | 503 stating the event may have been committed. The source resynchronizes before the next admission. |
-| Host admission busy or full | 503 (standard routes) or 429 (session protocol). Retry later. |
+| Host admission busy or journal full | The request waits for capacity up to `timeoutMs`. If the deadline passes, the outcome of the waiting event is reported as uncertain, with the committed prefix. |
 
 ## Data mapping
 
@@ -220,7 +232,10 @@ rejections cannot flood the logs.
 ## Known limitations
 
 - Webhook secrets come from environment variables, not host secret references,
-  because references resolve only for top-level fields.
+  because references resolve only for top-level fields. They are read once,
+  when a configuration is accepted (construction, assess and apply), so an
+  unset variable refuses the configuration or update rather than failing each
+  delivery. Changing the variable takes effect with the next configuration.
 - There are no metrics yet beyond logs and the health route.
 - The listener does not report readiness through the control interface. Start
   returns once the socket is bound.

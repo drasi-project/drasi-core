@@ -161,6 +161,11 @@ pub struct DeliveryBatchIdentity {
     /// Version 2 only: the volatile producer epoch of an at-least-once batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     epoch: Option<String>,
+    /// Version 1 only: the output generation of a durable query producer.
+    /// Its stream key excludes the generation, so a query reset reuses the
+    /// stream (and its destination cursor row) instead of adding one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generation: Option<u64>,
 }
 
 impl DeliveryBatchIdentity {
@@ -199,6 +204,11 @@ impl DeliveryBatchIdentity {
         self.epoch.as_deref()
     }
 
+    /// The durable query producer's output generation, if any.
+    pub fn generation(&self) -> Option<u64> {
+        self.generation
+    }
+
     pub fn stream(&self) -> &str {
         &self.stream
     }
@@ -234,6 +244,7 @@ impl DeliveryItem<'_> {
             operations: self.position.operations,
             digest: self.content_digest,
             epoch: self.position.epoch.clone(),
+            generation: self.position.generation,
         })
     }
 }
@@ -244,6 +255,18 @@ pub fn batch_identity(
     candidate: &Candidate,
 ) -> anyhow::Result<DeliveryBatchIdentity> {
     let stream = match (&candidate.epoch, &candidate.producer) {
+        // Durable query producers: the key excludes the output generation
+        // (carried by the position), so each reset or recreation of the query
+        // reuses its stream instead of adding one.
+        (None, crate::output_identity::Producer::Query { identity, .. }) => serde_json::to_vec(&(
+            "drasi.delivery-stream.query.v1",
+            scope,
+            &input.port,
+            input.envelope.system().stream(),
+            identity.construction_scope(),
+            identity.graph_id(),
+            identity.query_id(),
+        ))?,
         (None, producer) => serde_json::to_vec(&(
             "drasi.delivery-stream.v1",
             scope,
@@ -286,6 +309,7 @@ pub fn batch_identity(
         operations: input.envelope.changes().operations().len(),
         digest: candidate.digest,
         epoch: candidate.epoch.clone(),
+        generation: candidate.generation(),
     })
 }
 
@@ -304,6 +328,11 @@ pub struct DeliveryPosition {
     /// absent; strict (version 1) positions never carry an epoch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     epoch: Option<String>,
+    /// Version 1 only: the output generation of a durable query producer. A
+    /// destination cursor rolls its row over to a newer generation and
+    /// refuses an older one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generation: Option<u64>,
 }
 
 impl DeliveryPosition {
@@ -323,13 +352,18 @@ impl DeliveryPosition {
     pub fn epoch(&self) -> Option<&str> {
         self.epoch.as_deref()
     }
+    /// The durable query producer's output generation, if any.
+    pub fn generation(&self) -> Option<u64> {
+        self.generation
+    }
 
     pub fn validate(&self) -> anyhow::Result<()> {
         const PREFIX: &str = "drasi-delivery-stream-v1-";
         anyhow::ensure!(
-            match (self.version, &self.epoch) {
-                (1, None) => true,
-                (2, Some(epoch)) => valid_epoch(epoch),
+            match (self.version, &self.epoch, self.generation) {
+                (1, None, generation) =>
+                    generation.is_none_or(|generation| generation <= i64::MAX as u64),
+                (2, Some(epoch), None) => valid_epoch(epoch),
                 _ => false,
             } && self.sequence > 0
                 && self.operation < self.operations
@@ -345,14 +379,13 @@ impl DeliveryPosition {
 }
 
 /// Success must mean this operation actually completed, never merely queued.
-/// A handler may receive the same ID again after cancellation or a failed local
-/// progress commit. Ordinary destinations therefore remain at-least-once.
+/// A handler may receive the same ID again after cancellation, a failed local
+/// progress commit or a retried failure. Ordinary destinations therefore remain
+/// at-least-once. Classify failures with [`crate::DeliveryFailure`]: the graph
+/// retries a transient failure in place and applies the sink's declared
+/// [`crate::PermanentFailurePolicy`] to a permanent one.
 #[async_trait]
 pub trait DeliveryHandler: Send + Sync {
-    fn retryable(&self, _error: &anyhow::Error) -> bool {
-        false
-    }
-
     /// The handler's configured guarantee. Only an `AtLeastOnce` handler may
     /// receive items carrying a volatile producer epoch.
     fn delivery_guarantee(&self) -> DeliveryGuarantee {
@@ -507,6 +540,7 @@ pub fn delivery_item<'a>(
             operation: index,
             operations: input.envelope.changes().operations().len(),
             epoch: candidate.epoch.clone(),
+            generation: candidate.generation(),
         },
         port: &input.port,
         envelope: &input.envelope,

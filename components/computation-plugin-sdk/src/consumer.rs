@@ -56,9 +56,6 @@ impl<T: ComputationComponent + DeliveryHandler> NativeConsumer for T {}
 /// No independent writes, external effects, workers or commit operation.
 #[async_trait]
 pub trait NativeTransactionalConsumer: ComputationComponent {
-    fn retryable(&self, _error: &anyhow::Error) -> bool {
-        false
-    }
     async fn handle(
         &self,
         item: DeliveryItem<'_>,
@@ -147,7 +144,11 @@ impl ConsumerState {
             ));
         }
         if self.interrupted.load(Ordering::Acquire) {
-            return Err(Failure::failed(
+            // Closed, not failed: the activation must be restarted before it
+            // can deliver again, so the graph fails the node instead of
+            // retrying the input.
+            return Err(Failure::new(
+                abi::status::CLOSED,
                 "native consumer requires completed cleanup",
             ));
         }
@@ -266,16 +267,11 @@ impl ConsumerState {
                 "native consumer operation identity mismatch",
             ));
         }
-        let (result, retryable) = match component {
+        let result = match component {
             Component::Consumer(handler)
                 if self.mode == ConsumerMode::External && context.is_none() =>
             {
-                let result = handler.handle(item).await;
-                let retryable = result
-                    .as_ref()
-                    .err()
-                    .is_some_and(|error| handler.retryable(error));
-                (result, retryable)
+                handler.handle(item).await
             }
             Component::TransactionalConsumer(handler)
                 if self.mode == ConsumerMode::Transactional =>
@@ -283,21 +279,11 @@ impl ConsumerState {
                 let context = context.ok_or_else(|| {
                     Failure::protocol("native consumer requires the host transaction")
                 })?;
-                let result = handler.handle(item, context).await;
-                let retryable = result
-                    .as_ref()
-                    .err()
-                    .is_some_and(|error| handler.retryable(error));
-                (result, retryable)
+                handler.handle(item, context).await
             }
             _ => return Err(Failure::protocol("native consumer handling mode mismatch")),
         };
-        match result {
-            Ok(()) => Ok(Vec::new()),
-            Err(error) if retryable => {
-                Err(Failure::new(abi::consumer::RETRYABLE, format!("{error:#}")))
-            }
-            Err(error) => Err(Failure::from(error)),
-        }
+        // A `DeliveryFailure` in the error keeps its class across the ABI.
+        result.map(|()| Vec::new()).map_err(Failure::from)
     }
 }

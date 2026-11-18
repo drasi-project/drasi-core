@@ -68,8 +68,10 @@ pub(super) struct InstanceSlot {
     uses_volatile_input_progress: std::sync::atomic::AtomicBool,
     damaged: Mutex<Option<Arc<GraphError>>>,
     handler: Mutex<Option<Arc<dyn crate::computation::v1::ControlHandler>>>,
+    observers: Mutex<Option<Arc<dyn crate::computation::v1::ObserverDelivery>>>,
     requires_readiness: std::sync::atomic::AtomicBool,
     pub(super) processing_ready: std::sync::atomic::AtomicBool,
+    delivery: Arc<super::sink_delivery::SinkDeliveryStatus>,
 }
 
 struct Instance {
@@ -94,6 +96,10 @@ struct Instance {
 }
 
 impl InstanceSlot {
+    pub(super) fn delivery(&self) -> &super::sink_delivery::SinkDeliveryStatus {
+        &self.delivery
+    }
+
     /// Ask an idle live object to assess a change. `None` means the object is
     /// busy, unconstructed or defers to its factory planner.
     pub(super) fn assess_update(
@@ -142,6 +148,11 @@ impl InstanceSlot {
         metadata_changes: super::registry::MetadataChanges,
     ) -> Arc<Self> {
         let slot = Arc::new(Self {
+            delivery: Arc::new(super::sink_delivery::SinkDeliveryStatus::new(
+                id.clone(),
+                generation,
+                metadata_changes.clone(),
+            )),
             id,
             generation,
             description: Mutex::new(component.description()),
@@ -159,6 +170,7 @@ impl InstanceSlot {
             uses_volatile_input_progress: std::sync::atomic::AtomicBool::new(false),
             damaged: Mutex::new(None),
             handler: Mutex::new(None),
+            observers: Mutex::new(None),
             requires_readiness: std::sync::atomic::AtomicBool::new(false),
             processing_ready: std::sync::atomic::AtomicBool::new(true),
             value: Mutex::new(Some(Instance {
@@ -341,6 +353,23 @@ impl InstanceSlot {
         damaged.get_or_insert_with(|| Arc::new(error)).clone()
     }
 
+    /// Releases (on a requested stop) or reclaims (on start or a withdrawn
+    /// stop) this component's observer-only deliveries.
+    fn set_observers_released(&self, released: bool) {
+        let observers = self
+            .observers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(observers) = observers {
+            if released {
+                observers.release_observers();
+            } else {
+                observers.reclaim_observers();
+            }
+        }
+    }
+
     pub(super) fn damage(&self) -> Option<Arc<GraphError>> {
         self.damaged
             .lock()
@@ -494,6 +523,11 @@ impl InstanceLease {
             .handler
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = self.component.control_handler();
+        *self
+            .slot
+            .observers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = self.component.observer_delivery();
         self.slot.requires_readiness.store(
             self.component.requires_readiness_confirmation(),
             std::sync::atomic::Ordering::Release,
@@ -1385,6 +1419,7 @@ pub(super) fn initial_observations(snapshot: &GraphSnapshot) -> ObservedGraph {
                         exhausted: false,
                         started: false,
                         lifecycle_requested: false,
+                        skipped_inputs: 0,
                         transition_time: now,
                     },
                 )
@@ -3574,6 +3609,9 @@ impl Operations {
         self.suspended_starts.extend(&selected);
         if matches!(reply, DrainReply::Stop(_)) {
             for index in &selected {
+                // Observers are not delivery obligations: the drain must not
+                // wait for one that is not reading.
+                graph.components[*index].set_observers_released(true);
                 self.pending_auto_start.remove(index);
                 self.supersede_queued_starts(graph.nodes[*index].descriptor.id());
             }
@@ -3649,6 +3687,9 @@ impl Operations {
         }
         for index in &group.selected {
             self.suspended_starts.remove(index);
+            if matches!(group.reply, DrainReply::Stop(_)) {
+                graph.components[*index].set_observers_released(false);
+            }
         }
         self.resume_quiescing(graph, &group.selected);
         let ids = group
@@ -3716,13 +3757,21 @@ impl Operations {
         for mut group in std::mem::take(&mut self.draining) {
             // A failed consumer cannot satisfy an already installed handled
             // drain. Retain its actual cause instead of waiting for the deadline.
+            // A rejected control notification that did not damage the
+            // generation only degrades the component; it does not prevent the
+            // drain. Any other recorded failure does.
             if let Some(cause) = group.selected.iter().find_map(|index| {
                 if group.feedback.is_none() && !group.waiting.contains_key(index) {
                     return None;
                 }
-                graph.observed().components[graph.nodes[*index].descriptor.id()]
-                    .failure
+                let observed = graph.observed();
+                let node = &observed.components[graph.nodes[*index].descriptor.id()];
+                node.failure
                     .as_ref()
+                    .filter(|failure| {
+                        node.lifecycle == ComponentLifecycle::Failed
+                            || failure.phase != FailurePhase::Control
+                    })
                     .map(|failure| failure.cause.clone())
             }) {
                 self.fail_drain(graph, group, GraphError::Reported { cause });
@@ -4971,6 +5020,7 @@ impl Operations {
                         return Err(topology("unfinished activation must be stopped before reactivation"));
                     }
                     lease.attempted = true;
+                    lease.slot.set_observers_released(false);
                     if let Some(control) = peer_control {
                         lease.component.bind_control(control);
                     }
@@ -5125,6 +5175,7 @@ impl Operations {
                         &admission_snapshot,
                     )?;
                     super::bind_inputs(&mut lease.component, &node, &admission_snapshot).await?;
+                    let delivery = lease.slot.delivery.clone();
                     let Instance {
                         component,
                         sequences,
@@ -5160,6 +5211,7 @@ impl Operations {
                             &budget,
                             sink_batch,
                             input_progress,
+                            &delivery,
                             startup_work,
                         ));
                     let result = if let Some(feedback) = &feedback {
@@ -7169,7 +7221,7 @@ pub(super) async fn run(
         let deadline = operations.next_drain_deadline();
         tokio::select! {
             _ = cancelled(cancel) => return Err(GraphError::Cancelled),
-            _ = metadata_changes.notified() => super::registry::publish(graph),
+            _ = metadata_changes.notified() => super::sink_delivery::publish(graph),
             job = graph.tasks.resources.next(), if !graph.tasks.resources.is_empty() => {
                 if let Err(error) = super::resource_tasks::complete(graph, &job) {
                     log::debug!("Resource callback completed with a retained failure: {error}");
@@ -7471,7 +7523,9 @@ fn handle_command<'a>(
                         let observed = graph.observed();
                         for node in &desired.components {
                             if observed.components.get(node.descriptor.id()).is_some_and(|node| {
-                                node.failure.as_ref().is_some_and(|failure| failure.disposition == FailureDisposition::Retryable)
+                                // A running sink retrying a delivery in place recovers by itself.
+                                node.failure.as_ref().is_some_and(|failure| failure.disposition == FailureDisposition::Retryable
+                                    && !(failure.phase == FailurePhase::Processing && node.lifecycle == ComponentLifecycle::Running))
                                     || node.realization == RealizationState::CreationFailed && node.failure.is_none()
                             }) {
                                 changes.push(reconcile::DesiredMutation::Retry(GraphSelection::Exact(vec![node.descriptor.id().clone()])));

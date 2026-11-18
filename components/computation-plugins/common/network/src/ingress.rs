@@ -176,7 +176,14 @@ struct PauseState {
 pub struct Ingress {
     pub config: IngressConfig,
     pub source_id: ComponentId,
-    pub cancel: CancellationToken,
+    /// Fired by every Stop: the listener stops accepting, new requests and
+    /// admissions are refused and open streams end. Admissions already in
+    /// flight keep running and are answered with their real outcome.
+    pub shutdown: CancellationToken,
+    /// Fired only by an aborting Stop (or when the activation is dropped):
+    /// in-flight admissions stop waiting and answer that their outcome is
+    /// uncertain.
+    pub(crate) abort: CancellationToken,
     live: Arc<Live<LiveSettings>>,
     sender: Option<mpsc::Sender<OutputEnvelope>>,
     mode: AdmissionMode,
@@ -257,13 +264,12 @@ impl Ingress {
     }
 
     /// Reserves one of `ingressCapacity` request slots, failing fast when the
-    /// source is stopped, paused or saturated.
+    /// source is stopping or saturated. Pause does not refuse the slot: it
+    /// gates data admission only (see [`Self::enter_admission`]), so health
+    /// and producer-session metadata requests are answered while paused.
     pub fn request_permit(&self) -> Result<OwnedSemaphorePermit, IngressError> {
-        if self.cancel.is_cancelled() {
+        if self.shutdown.is_cancelled() {
             return Err(IngressError::stopped());
-        }
-        if self.is_paused() {
-            return Err(IngressError::paused());
         }
         self.requests.clone().try_acquire_owned().map_err(|_| {
             IngressError::new(
@@ -276,7 +282,7 @@ impl Ingress {
     /// Enters the admission section. Rejects immediately while paused; the
     /// guard keeps a concurrent Pause waiting until this admission settles.
     pub(crate) async fn enter_admission(&self) -> Result<RwLockReadGuard<'_, ()>, IngressError> {
-        if self.cancel.is_cancelled() {
+        if self.shutdown.is_cancelled() {
             return Err(IngressError::stopped());
         }
         if self.is_paused() {
@@ -340,6 +346,83 @@ impl Ingress {
         }
     }
 
+    /// Admits `changes` all-or-nothing, in order, with consecutive sequences.
+    ///
+    /// Queue capacity for every change is reserved before any sequence is
+    /// assigned, so a refusal, timeout, Pause or Stop leaves none of them
+    /// queued and the caller can undo whatever state produced them. A group
+    /// larger than `ingressCapacity` can never be reserved and is refused as
+    /// invalid. Available only in volatile mode: durable producer admission
+    /// commits each change separately.
+    pub async fn admit_all(&self, changes: Vec<SourceChange>) -> Result<(), IngressError> {
+        let AdmissionMode::Volatile { sequence, identity } = &self.mode else {
+            return Err(IngressError::new(
+                IngressErrorKind::Failed,
+                "all-or-nothing admission requires volatile ingress",
+            ));
+        };
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let count = changes.len();
+        if count > self.config.ingress_capacity {
+            return Err(IngressError::invalid(format!(
+                "{count} changes exceed ingressCapacity {}",
+                self.config.ingress_capacity
+            )));
+        }
+        let _admission = self.enter_admission().await?;
+        let sender = self.sender.as_ref().ok_or_else(|| {
+            IngressError::new(IngressErrorKind::Failed, "volatile ingress is unavailable")
+        })?;
+        let submit = async {
+            let mut sequence = sequence.lock().await;
+            let first = *sequence;
+            first.checked_add(count as u64).ok_or_else(|| {
+                IngressError::new(IngressErrorKind::Failed, "ingress sequence exhausted")
+            })?;
+            let timestamp = Some(chrono::Utc::now());
+            let mut envelopes = Vec::with_capacity(count);
+            for (offset, change) in changes.into_iter().enumerate() {
+                let next = first + offset as u64 + 1;
+                let mut envelope = GraphChangeCodec::encode_change(
+                    change,
+                    self.config.stream.clone(),
+                    next,
+                    timestamp,
+                )
+                .map_err(IngressError::invalid)?;
+                GraphProducerProgress::annotate(&mut envelope, identity, next).map_err(
+                    |error| IngressError::new(IngressErrorKind::Failed, error.to_string()),
+                )?;
+                envelopes.push(envelope);
+            }
+            let permits = sender
+                .reserve_many(count)
+                .await
+                .map_err(|_| IngressError::stopped())?;
+            // No await between sequence assignment and enqueue: cancellation
+            // while waiting for capacity cannot consume a sequence or queue a
+            // partial group.
+            *sequence = first + count as u64;
+            for (permit, envelope) in permits.zip(envelopes) {
+                permit.send(OutputEnvelope {
+                    port: output_port().clone(),
+                    envelope,
+                });
+            }
+            Ok::<(), IngressError>(())
+        };
+        let timeout = self.live().timeout;
+        tokio::select! {
+            biased;
+            _ = self.shutdown.cancelled() => Err(IngressError::stopped()),
+            _ = self.pause_requested() => Err(IngressError::paused()),
+            result = tokio::time::timeout(timeout, submit) => result
+                .unwrap_or_else(|_| Err(IngressError::new(IngressErrorKind::Timeout, "ingress capacity/admission timeout"))),
+        }
+    }
+
     async fn admit_volatile(
         &self,
         sequence: &Mutex<u64>,
@@ -388,7 +471,7 @@ impl Ingress {
         let timeout = self.live().timeout;
         let result = tokio::select! {
             biased;
-            _ = self.cancel.cancelled() => Err(IngressError::stopped()),
+            _ = self.shutdown.cancelled() => Err(IngressError::stopped()),
             _ = self.pause_requested() => Err(IngressError::paused()),
             result = tokio::time::timeout(timeout, submit) => result
                 .unwrap_or_else(|_| Err(IngressError::new(IngressErrorKind::Timeout, "ingress capacity/admission timeout"))),
@@ -407,12 +490,13 @@ async fn sleep_until(deadline: Option<Instant>) {
 }
 
 struct Running {
-    cancel: CancellationToken,
+    shutdown: CancellationToken,
     ingress: Arc<Ingress>,
     receiver: Option<mpsc::Receiver<OutputEnvelope>>,
     listener: RwLock<Option<JoinHandle<Result<()>>>>,
     adaptive: Option<AdaptiveRead>,
     address: SocketAddr,
+    addresses: Vec<SocketAddr>,
 }
 
 struct AdaptiveRead {
@@ -478,7 +562,8 @@ impl Running {
 
 impl Drop for Running {
     fn drop(&mut self) {
-        self.cancel.cancel();
+        self.shutdown.cancel();
+        self.ingress.abort.cancel();
         if let Some(receiver) = &mut self.receiver {
             receiver.close();
         }
@@ -496,6 +581,7 @@ pub struct SourceRuntime {
     mode: AdmissionMode,
     running: Option<Running>,
     adaptive: Option<AdaptiveBatchConfig>,
+    discarded: Vec<OutputEnvelope>,
 }
 
 impl SourceRuntime {
@@ -536,6 +622,7 @@ impl SourceRuntime {
             mode,
             running: None,
             adaptive: None,
+            discarded: Vec::new(),
         })
     }
 
@@ -568,9 +655,24 @@ impl SourceRuntime {
         self.running.is_some()
     }
 
+    /// Takes the acknowledged but undelivered envelopes the last Stop
+    /// discarded, oldest first, so a source can reconcile state that assumed
+    /// they would be delivered. They are dropped at the next Start.
+    pub fn take_discarded(&mut self) -> Vec<OutputEnvelope> {
+        std::mem::take(&mut self.discarded)
+    }
+
     /// The bound listener address while running; useful when `port` is zero.
     pub fn local_address(&self) -> Option<SocketAddr> {
         self.running.as_ref().map(|running| running.address)
+    }
+
+    /// Every bound listener address while running, in the order the ports
+    /// were given to [`Self::start_listeners`].
+    pub fn local_addresses(&self) -> Vec<SocketAddr> {
+        self.running
+            .as_ref()
+            .map_or_else(Vec::new, |running| running.addresses.clone())
     }
 
     /// The live per-request settings shared with running handlers.
@@ -628,27 +730,65 @@ impl SourceRuntime {
         F: FnOnce(TcpListener, Arc<Ingress>) -> Work + Send,
         Work: Future<Output = Result<()>> + Send + 'static,
     {
+        let port = self.config.port;
+        self.start_listeners(
+            cancellation,
+            deadline,
+            &[port],
+            move |mut listeners, ingress| serve(listeners.remove(0), ingress),
+        )
+        .await
+    }
+
+    /// Binds one listener per port on the configured host, in order, and
+    /// starts serving them as one activation sharing one [`Ingress`]. The
+    /// first port is the primary [`Self::local_address`]. Every bind observes
+    /// cancellation and the deadline; a failed bind closes the listeners
+    /// already bound, so nothing is left running.
+    pub async fn start_listeners<F, Work>(
+        &mut self,
+        cancellation: &LifecycleCancellation,
+        deadline: Option<Instant>,
+        ports: &[u16],
+        serve: F,
+    ) -> LifecycleResult
+    where
+        F: FnOnce(Vec<TcpListener>, Arc<Ingress>) -> Work + Send,
+        Work: Future<Output = Result<()>> + Send + 'static,
+    {
         if self.running.is_some() {
             return Err(
                 anyhow::anyhow!("native source is already started or still needs cleanup").into(),
             );
         }
-        let address = SocketAddr::new(self.config.ip()?, self.config.port);
-        let listener = tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => return Err(LifecycleError::cancelled()),
-            _ = sleep_until(deadline) => return Err(LifecycleError::retryable(anyhow::anyhow!("listener bind did not complete before the start deadline"))),
-            listener = TcpListener::bind(address) => listener
-                .with_context(|| format!("bind native source to {address}"))?,
-        };
-        let address = listener
-            .local_addr()
-            .context("read bound listener address")?;
-        crate::diag!(
-            Info,
-            "listener started: component={} address={address}",
-            self.descriptor.id()
-        );
+        self.discarded.clear();
+        if ports.is_empty() {
+            return Err(anyhow::anyhow!("a native source needs at least one listener").into());
+        }
+        let ip = self.config.ip()?;
+        let mut listeners = Vec::with_capacity(ports.len());
+        let mut addresses = Vec::with_capacity(ports.len());
+        for port in ports {
+            let address = SocketAddr::new(ip, *port);
+            let listener = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err(LifecycleError::cancelled()),
+                _ = sleep_until(deadline) => return Err(LifecycleError::retryable(anyhow::anyhow!("listener bind did not complete before the start deadline"))),
+                listener = TcpListener::bind(address) => listener
+                    .with_context(|| format!("bind native source to {address}"))?,
+            };
+            let address = listener
+                .local_addr()
+                .context("read bound listener address")?;
+            crate::diag!(
+                Info,
+                "listener started: component={} address={address}",
+                self.descriptor.id()
+            );
+            listeners.push(listener);
+            addresses.push(address);
+        }
+        let address = addresses[0];
         let (sender, receiver) = match &self.mode {
             AdmissionMode::Volatile { .. } => {
                 let (sender, receiver) = mpsc::channel(self.config.ingress_capacity);
@@ -656,12 +796,13 @@ impl SourceRuntime {
             }
             AdmissionMode::Durable(_) => (None, None),
         };
-        let cancel = CancellationToken::new();
+        let shutdown = CancellationToken::new();
         let ingress = Arc::new(Ingress {
             config: self.config.clone(),
             source_id: self.descriptor.id().clone(),
             sender,
-            cancel: cancel.clone(),
+            shutdown: shutdown.clone(),
+            abort: CancellationToken::new(),
             live: self.live.clone(),
             mode: self.mode.clone(),
             requests: Arc::new(Semaphore::new(self.config.ingress_capacity)),
@@ -671,12 +812,12 @@ impl SourceRuntime {
             },
             implicit: Mutex::new(None),
         });
-        let stopped = cancel.clone();
+        let stopped = shutdown.clone();
         let admission = ingress.durable().cloned();
         let component = self.descriptor.id().clone();
-        let work = serve(listener, ingress.clone());
+        let work = serve(listeners, ingress.clone());
         let running = self.running.insert(Running {
-            cancel,
+            shutdown,
             ingress,
             receiver,
             listener: RwLock::new(None),
@@ -688,6 +829,7 @@ impl SourceRuntime {
                 target: 1,
             }),
             address,
+            addresses,
         });
         spawn_owned_worker(&running.listener, async move {
             let _cancel = stopped.clone().drop_guard();
@@ -772,7 +914,7 @@ impl SourceRuntime {
             .context("durable source is driven by graph admission, not next")?;
         tokio::select! {
             biased;
-            _ = running.cancel.cancelled() => {
+            _ = running.shutdown.cancelled() => {
                 running.join(Duration::MAX).await.map_err(LifecycleError::into_source)?;
                 anyhow::bail!("native source listener closed");
             }
@@ -786,20 +928,27 @@ impl SourceRuntime {
         }
     }
 
-    /// Settles the activation. `Drain` stops accepting connections and lets
-    /// in-flight requests finish; `Abort` also aborts the listener and its
-    /// connections. The listener is joined within the deadline (or the
-    /// configured timeout); on expiry ownership is retained for a retry.
+    /// Settles the activation.
+    ///
+    /// `Drain` stops accepting connections, requests and new admissions, and
+    /// lets admissions already in flight finish: a durable commit completes
+    /// and its client receives the real outcome (bounded by `timeoutMs`).
+    /// `Abort` also interrupts in-flight admissions, which answer that their
+    /// outcome is uncertain, and aborts the listener and its connections.
+    /// The listener is joined within the deadline (or the configured timeout);
+    /// on expiry ownership is retained, and a later Drain keeps waiting while
+    /// a later Abort interrupts.
     pub async fn stop(&mut self, mode: StopMode, deadline: Option<Instant>) -> LifecycleResult {
         let Some(running) = &mut self.running else {
             return Ok(());
         };
-        running.cancel.cancel();
+        running.shutdown.cancel();
         running.ingress.resume_admission();
         if let Some(receiver) = &mut running.receiver {
             receiver.close();
         }
         if mode == StopMode::Abort {
+            running.ingress.abort.cancel();
             if let Some(listener) = running.listener.get_mut() {
                 listener.abort();
             }
@@ -811,16 +960,16 @@ impl SourceRuntime {
         // Keep the handle on self until the join completes: a cancelled or
         // timed-out stop retains cleanup responsibility for the next attempt.
         running.join(budget).await?;
-        let mut discarded = running.adaptive.as_mut().map_or(0, |batch| {
-            let count = batch.pending.len();
-            batch.pending.clear();
-            count
-        });
+        let discarded_before = self.discarded.len();
+        if let Some(batch) = running.adaptive.as_mut() {
+            self.discarded.extend(batch.pending.drain(..));
+        }
         if let Some(receiver) = &mut running.receiver {
-            while receiver.try_recv().is_ok() {
-                discarded += 1;
+            while let Ok(envelope) = receiver.try_recv() {
+                self.discarded.push(envelope);
             }
         }
+        let discarded = self.discarded.len() - discarded_before;
         if discarded > 0 {
             crate::diag!(
                 Warn,
@@ -915,7 +1064,7 @@ mod tests {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         runtime
             .start(&token(), None, move |_listener, ingress| async move {
-                let cancel = ingress.cancel.clone();
+                let cancel = ingress.shutdown.clone();
                 let _ = sender.send(ingress);
                 cancel.cancelled().await;
                 Ok(())
@@ -923,6 +1072,142 @@ mod tests {
             .await
             .map_err(LifecycleError::into_source)?;
         Ok(receiver.await?)
+    }
+
+    fn sequence_of(envelope: &OutputEnvelope) -> u64 {
+        envelope.envelope.system().sequence()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn admit_all_queues_a_group_with_consecutive_sequences() -> Result<()> {
+        let mut runtime = runtime()?;
+        let ingress = started(&mut runtime).await?;
+        ingress
+            .admit(vec![change("a")])
+            .await
+            .map_err(|failure| failure.error)?;
+        ingress
+            .admit_all(vec![change("b"), change("c"), change("d")])
+            .await?;
+        let mut sequences = Vec::new();
+        for _ in 0..4 {
+            sequences.push(sequence_of(&runtime.next().await?.context("envelope")?));
+        }
+        assert_eq!(sequences, vec![1, 2, 3, 4]);
+        ingress.admit_all(Vec::new()).await?;
+        runtime.stop(StopMode::Drain, None).await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn admit_all_refuses_groups_larger_than_capacity_without_queueing() -> Result<()> {
+        let mut runtime = SourceRuntime::new(descriptor()?, config(2)?, None, None)?;
+        let ingress = started(&mut runtime).await?;
+        let error = ingress
+            .admit_all(vec![change("a"), change("b"), change("c")])
+            .await
+            .expect_err("oversized group");
+        assert_eq!(error.kind, IngressErrorKind::Invalid);
+        ingress.admit_all(vec![change("d"), change("e")]).await?;
+        assert_eq!(sequence_of(&runtime.next().await?.context("first")?), 1);
+        assert_eq!(sequence_of(&runtime.next().await?.context("second")?), 2);
+        runtime.stop(StopMode::Drain, None).await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn admit_all_times_out_whole_when_the_queue_cannot_hold_the_group() -> Result<()> {
+        let mut config = config(2)?;
+        config.timeout_ms = 50;
+        let mut runtime = SourceRuntime::new(descriptor()?, config, None, None)?;
+        let ingress = started(&mut runtime).await?;
+        ingress.admit_all(vec![change("a")]).await?;
+        // One free slot cannot take a group of two: nothing is queued.
+        let error = ingress
+            .admit_all(vec![change("b"), change("c")])
+            .await
+            .expect_err("group cannot fit");
+        assert_eq!(error.kind, IngressErrorKind::Timeout);
+        assert_eq!(sequence_of(&runtime.next().await?.context("first")?), 1);
+        // The refused group consumed no sequence numbers.
+        ingress.admit_all(vec![change("d"), change("e")]).await?;
+        assert_eq!(sequence_of(&runtime.next().await?.context("d")?), 2);
+        assert_eq!(sequence_of(&runtime.next().await?.context("e")?), 3);
+        runtime.stop(StopMode::Drain, None).await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn admit_all_is_refused_while_paused_and_after_stop() -> Result<()> {
+        let mut runtime = runtime()?;
+        let ingress = started(&mut runtime).await?;
+        runtime.pause(&token(), None).await?;
+        let error = ingress
+            .admit_all(vec![change("a")])
+            .await
+            .expect_err("paused");
+        assert_eq!(error.kind, IngressErrorKind::Paused);
+        runtime.resume()?;
+        ingress.admit_all(vec![change("b")]).await?;
+        assert_eq!(sequence_of(&runtime.next().await?.context("b")?), 1);
+        runtime.stop(StopMode::Drain, None).await?;
+        let error = ingress
+            .admit_all(vec![change("c")])
+            .await
+            .expect_err("stopped");
+        assert_eq!(error.kind, IngressErrorKind::Stopped);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn start_listeners_binds_every_port_and_releases_them_on_stop() -> Result<()> {
+        let mut runtime = runtime()?;
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        runtime
+            .start_listeners(
+                &token(),
+                None,
+                &[0, 0],
+                move |listeners, ingress| async move {
+                    let _ = sender.send(listeners.len());
+                    ingress.shutdown.cancelled().await;
+                    drop(listeners);
+                    Ok(())
+                },
+            )
+            .await
+            .map_err(LifecycleError::into_source)?;
+        assert_eq!(receiver.await?, 2);
+        let addresses = runtime.local_addresses();
+        assert_eq!(addresses.len(), 2);
+        assert_ne!(addresses[0].port(), addresses[1].port());
+        assert_eq!(runtime.local_address(), Some(addresses[0]));
+        runtime.stop(StopMode::Drain, None).await?;
+        assert!(runtime.local_addresses().is_empty());
+        for address in addresses {
+            TcpListener::bind(address).await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_failed_second_bind_leaves_nothing_running() -> Result<()> {
+        let occupied = TcpListener::bind("127.0.0.1:0").await?;
+        let port = occupied.local_addr()?.port();
+        let mut runtime = runtime()?;
+        let error = runtime
+            .start_listeners(&token(), None, &[0, port], |_, _| async { Ok(()) })
+            .await
+            .expect_err("second port is occupied");
+        assert!(format!("{:#}", error.source_error()).contains("bind native source"));
+        assert!(!runtime.is_running());
+        runtime
+            .start_listeners(&token(), None, &[], |_, _| async { Ok(()) })
+            .await
+            .expect_err("no listeners");
+        started(&mut runtime).await?;
+        runtime.stop(StopMode::Drain, None).await?;
+        Ok(())
     }
 
     #[test]
@@ -958,7 +1243,7 @@ mod tests {
                 .running
                 .as_ref()
                 .expect("running owner")
-                .cancel
+                .shutdown
                 .cancelled()
                 .await;
             let error = runtime
@@ -997,7 +1282,7 @@ mod tests {
         let worker_resume = resume.clone();
         runtime
             .start(&token(), None, move |_listener, ingress| async move {
-                ingress.cancel.cancelled().await;
+                ingress.shutdown.cancelled().await;
                 worker_entered.notify_one();
                 worker_resume.notified().await;
                 Ok(())
@@ -1089,10 +1374,9 @@ mod tests {
             .expect_err("paused admission");
         assert_eq!(failure.error.kind, IngressErrorKind::Paused);
         assert_eq!(failure.accepted, 0);
-        assert_eq!(
-            ingress.request_permit().expect_err("paused permit").kind,
-            IngressErrorKind::Paused
-        );
+        // Pause gates data admission only; request slots stay available for
+        // health and producer-session metadata.
+        drop(ingress.request_permit().expect("paused metadata permit"));
         // The event accepted before Pause is still delivered.
         assert!(runtime.next().await?.is_some());
         runtime.resume()?;

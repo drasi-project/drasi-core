@@ -119,10 +119,6 @@ pub(in crate::computation) fn options() -> DeliveryOptions {
         scope: RecoveryScope::Failure(FailureMode::ProcessRestart),
         max_streams: NonZeroUsize::new(2).unwrap(),
         receipts_per_stream: NonZeroUsize::new(2).unwrap(),
-        retry: DeliveryRetryPolicy {
-            max_attempts: NonZeroUsize::new(2).unwrap(),
-            delay: Duration::ZERO,
-        },
     }
 }
 pub(in crate::computation) fn provider(
@@ -254,7 +250,18 @@ async fn external_reconstruction(plugin: &NativePlugin) -> anyhow::Result<()> {
         consumer
             .start(&crate::computation::test_hooks::start_ctx())
             .await?;
-        let result = consumer.handle(batch()?).await;
+        let mut result = consumer.handle(batch()?).await;
+        if mode == "retry-once" {
+            // The transient failure crosses the ABI classified; delivering
+            // the same input again, as the graph does, resumes after the
+            // completed prefix with the same operation keys.
+            let error = result.expect_err("transient first attempt");
+            assert!(matches!(
+                drasi_computation_contracts::delivery_failure_class(&error),
+                Some(drasi_computation_contracts::DeliveryFailureClass::Transient { .. })
+            ));
+            result = consumer.handle(batch()?).await;
+        }
         let progress = consumer.progress().await?;
         if mode == "fail-second" {
             assert!(result.is_err());
@@ -305,6 +312,73 @@ async fn transactional_reconstruction(plugin: &NativePlugin) -> anyhow::Result<(
             count(provider.as_ref()).await?,
             Some(ElementValue::Integer(expected as i64))
         );
+    }
+    Ok(())
+}
+
+/// `onPermanentFailure: skip` across the ABI: a settled skip advances the
+/// runner's ledger and reports the input as permanently failed (the graph
+/// then acknowledges and counts it); a replay repeats nothing. A consumer
+/// that settles a skip while declaring `stall`, or cannot settle under
+/// `skip`, fails the node instead of leaving unfinished progress behind.
+#[tokio::test(flavor = "current_thread")]
+async fn native_consumer_skip_is_settled_once_and_enforced_against_the_declaration(
+) -> anyhow::Result<()> {
+    use drasi_computation_contracts::lifecycle::{lifecycle_error_kind, LifecycleErrorKind};
+    let plugin = plugin()?;
+    let factory = factory(plugin.as_ref(), sdk::ConsumerMode::External);
+    for (policy, mode, settled) in [
+        ("skip", "skip-second", true),
+        ("stall", "skip-second", false),
+        ("skip", "fail-second", false),
+    ] {
+        let directory = tempfile::tempdir()?;
+        let destination = directory.path().join("effects.db");
+        let mut consumer = initialized_consumer(
+            factory.as_ref(),
+            id(423),
+            json!({"path": destination, "mode": mode, "onPermanentFailure": policy}),
+            scope(),
+            provider(&directory.path().join("progress"))?,
+            options(),
+        )
+        .await?;
+        consumer
+            .start(&crate::computation::test_hooks::start_ctx())
+            .await?;
+        let error = consumer.handle(batch()?).await.unwrap_err();
+        if settled {
+            assert_eq!(
+                drasi_computation_contracts::delivery_failure_class(&error),
+                Some(drasi_computation_contracts::DeliveryFailureClass::Permanent)
+            );
+            assert!(error.chain().any(|cause| matches!(
+                cause.downcast_ref::<DeliveryError>(),
+                Some(DeliveryError::Skipped { skipped: 1, .. })
+            )));
+            let progress = consumer.progress().await?;
+            assert_eq!(progress[0].completed_operations, 3);
+            assert_eq!(progress[0].handled_sequence, 1);
+            consumer.handle(batch()?).await?;
+            assert_eq!(
+                effects(&destination)?.0,
+                2,
+                "operations 0 and 2 applied once"
+            );
+        } else {
+            assert_eq!(
+                lifecycle_error_kind(&error),
+                Some(LifecycleErrorKind::Terminal),
+                "{policy}/{mode}: {error:#}"
+            );
+            assert!(
+                consumer.handle(batch()?).await.is_err(),
+                "the node is fenced"
+            );
+        }
+        consumer
+            .stop(&crate::computation::test_hooks::stop_ctx())
+            .await?;
     }
     Ok(())
 }
@@ -1093,8 +1167,9 @@ async fn native_consumer_delivers_volatile_queries_only_at_least_once_by_opt_in(
     let plugin = plugin()?;
     let factory = factory(plugin.as_ref(), sdk::ConsumerMode::External);
     let destination = directory.path().join("effects.db");
-    // Without opt-in the plugin refuses the volatile identity permanently;
-    // the refused begin leaves no cleanup requirement.
+    // Declared exactly-once: an envelope without a durable producer identity
+    // is a permanent, typed failure, never a silent at-least-once downgrade
+    // (SPA-7). Nothing was opened, so no cleanup is required.
     let mut strict = initialized_consumer(
         factory.as_ref(),
         id(431),
@@ -1112,8 +1187,13 @@ async fn native_consumer_delivers_volatile_queries_only_at_least_once_by_opt_in(
         .await
         .err()
         .ok_or_else(|| anyhow::anyhow!("the volatile input must be refused"))?;
+    assert_eq!(
+        drasi_computation_contracts::delivery_failure_class(&error),
+        Some(drasi_computation_contracts::DeliveryFailureClass::Permanent),
+        "{error:#}"
+    );
     assert!(
-        format!("{error:#}").contains("output identity is Volatile"),
+        format!("{error:#}").contains("lacks the producer identity that ExactlyOnce"),
         "{error:#}"
     );
     strict.handle(batch()?).await?;
@@ -1126,7 +1206,8 @@ async fn native_consumer_delivers_volatile_queries_only_at_least_once_by_opt_in(
         "only the persistent batch ran"
     );
 
-    // With opt-in it is delivered without the host ledger, in order.
+    // Declared at-least-once: every input is delivered without the host
+    // ledger, in order, whatever identity the producer carries.
     let opted_destination = directory.path().join("opted.db");
     let mut opted = initialized_consumer(
         factory.as_ref(),
@@ -1143,9 +1224,10 @@ async fn native_consumer_delivers_volatile_queries_only_at_least_once_by_opt_in(
     opted.handle(volatile_batch(RUN)?).await?;
     opted.handle(volatile_batch(RUN)?).await?;
     assert!(opted.progress().await?.is_empty(), "no host-local ledger");
-    // Persistent producers still use the exactly-once runner.
+    // The declared guarantee alone selects the mode: a durable producer's
+    // input is also delivered at least once, deduplicated by the destination.
     opted.handle(batch()?).await?;
-    assert_eq!(opted.progress().await?.len(), 1);
+    assert!(opted.progress().await?.is_empty(), "no host-local ledger");
     opted
         .stop(&crate::computation::test_hooks::stop_ctx())
         .await?;

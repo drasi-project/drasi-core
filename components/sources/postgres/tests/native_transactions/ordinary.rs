@@ -171,10 +171,16 @@ async fn row_graph(
         })?
         .provide_resource(
             owner,
+            // As durable as the query's indexes.
             ResourceHandle::new(
                 ResourceRole::Checkpoint,
                 Arc::new(QuerySourceProgressResource(progress.clone())),
-            ),
+            )
+            .with_capabilities(if persistent.is_some() {
+                ResourceCapabilities::DURABLE
+            } else {
+                ResourceCapabilities::VOLATILE
+            }),
         )?
         .declare_resource(ResourceSpecification {
             id: settings.clone(),

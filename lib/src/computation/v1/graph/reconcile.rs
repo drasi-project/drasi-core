@@ -2266,7 +2266,7 @@ async fn drive_with_deadline<T>(
             completion = operations.futures.next(), if !operations.futures.is_empty() => {
                 if let Some(completion) = completion { operations.complete(graph, completion, controls)?; }
             }
-            _ = metadata_changes.notified() => super::super::registry::publish(graph),
+            _ = metadata_changes.notified() => super::super::sink_delivery::publish(graph),
         }
     }
 }
@@ -2325,7 +2325,7 @@ async fn drive_reconciliation<T>(
                 handle_command(graph, operations, controls, cancel,
                     command.ok_or(GraphError::ControllerClosed)?, commands).await?;
             }
-            _ = metadata_changes.notified() => super::super::registry::publish(graph),
+            _ = metadata_changes.notified() => super::super::sink_delivery::publish(graph),
         }
     }
 }
@@ -2561,7 +2561,7 @@ async fn pause(
                 completion = operations.futures.next() => {
                     if let Some(completion) = completion { operations.complete(graph, completion, controls)?; }
                 }
-                _ = metadata_changes.notified() => super::super::registry::publish(graph),
+                _ = metadata_changes.notified() => super::super::sink_delivery::publish(graph),
             }
         }
     }
@@ -2735,7 +2735,7 @@ async fn pause_control(
                 handle_command(graph, operations, controls, cancel,
                     command.ok_or(GraphError::ControllerClosed)?, commands).await?;
             }
-            _ = metadata_changes.notified() => super::super::registry::publish(graph),
+            _ = metadata_changes.notified() => super::super::sink_delivery::publish(graph),
         }
     }
     Ok(())
@@ -2902,7 +2902,7 @@ async fn execute_reserved(
                         handle_command(graph, operations, controls, cancel,
                             command.ok_or(GraphError::ControllerClosed)?, commands).await?;
                     }
-                    _ = metadata_changes.notified() => super::super::registry::publish(graph),
+                    _ = metadata_changes.notified() => super::super::sink_delivery::publish(graph),
                 }
             }
         }
@@ -3438,7 +3438,7 @@ async fn settle(
                 handle_command(graph, operations, controls, cancel,
                     command.ok_or(GraphError::ControllerClosed)?, commands).await?;
             }
-            _ = metadata_changes.notified() => super::super::registry::publish(graph),
+            _ = metadata_changes.notified() => super::super::sink_delivery::publish(graph),
         }
     }
     Ok(())
@@ -3972,6 +3972,7 @@ fn commit_desired(
                     exhausted: false,
                     started: false,
                     lifecycle_requested: stopped_requested,
+                    skipped_inputs: 0,
                     transition_time: Utc::now(),
                 },
             );
@@ -4237,7 +4238,7 @@ async fn realize_component(
                 handle_command(graph, operations, controls, cancel,
                     command.ok_or(GraphError::ControllerClosed)?, commands).await?;
             }
-            _ = metadata_changes.notified() => super::super::registry::publish(graph),
+            _ = metadata_changes.notified() => super::super::sink_delivery::publish(graph),
         }
     }
     let observed = graph.observed();

@@ -7,16 +7,15 @@
 
 use crate::{
     config::MsSqlStoredProcConfig,
-    delivery::{classify, Delivery, Position},
+    delivery::classify,
     management,
     session::{Authentication, TiberiusConnector},
 };
 use anyhow::{bail, ensure, Context, Result};
 use async_trait::async_trait;
 use drasi_computation_contracts::{
-    ChangeRoute, ComponentDescriptor, ComponentId, DeliveryHandler, DeliveryItem, GraphChangeBatch,
-    GraphChangeCodec, InputBinding, PipeRequirements, PortDescriptor, PortDirection, PortId,
-    SinkOutputs,
+    ComponentDescriptor, ComponentId, DeliveryHandler, DeliveryItem, GraphChangeCodec,
+    InputBinding, PipeRequirements, PortDescriptor, PortDirection, PortId, SinkOutputs,
 };
 use drasi_computation_plugin_sdk::lifecycle::{
     nothing_to_do, ApplyContext, ApplyError, Assessment, DisposeContext, InitializeContext,
@@ -26,14 +25,12 @@ use drasi_computation_plugin_sdk::lifecycle::{
 use drasi_computation_plugin_sdk::{
     ActivationCredentials, ApplyUpdateRequest, NativeComponent, NativeManagement, UpdateRequest,
 };
+use drasi_computation_storedproc_common::{
+    driver::Delivery, ErrorClass, OperationContext, Position,
+};
 use drasi_mssql_common::sql::{CommandTemplate, RenderedCommand};
-use drasi_reaction_common::OperationType;
 use serde_json::Value;
 use std::{collections::HashMap, future::Future, time::Duration};
-
-/// Upper bound on a graceful connection close during Stop or Dispose when the
-/// host gives no deadline.
-const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Compiled templates keyed by their source text.
 pub(crate) fn compile_templates(
@@ -96,7 +93,7 @@ impl MsSqlStoredProcSink {
         let outputs = SinkOutputs::from_inputs(inputs, &config.outputs)?;
         config.validate_outputs(&outputs)?;
         let templates = compile_templates(&config)?;
-        let owner = crate::delivery::owner(graph_id, id.as_str());
+        let owner = drasi_computation_storedproc_common::owner(graph_id, id.as_str());
         Ok(Self {
             descriptor: Self::describe(id)?,
             config,
@@ -180,26 +177,15 @@ impl MsSqlStoredProcSink {
         templates: &mut HashMap<String, CommandTemplate>,
         item: &DeliveryItem<'_>,
     ) -> Result<Option<RenderedCommand>> {
-        let output = outputs.output_for(item.envelope.system().stream())?;
-        let notification =
-            GraphChangeBatch::operation_notification(item.envelope, item.operation, output)?;
-        let operation = match notification.change().route() {
-            ChangeRoute::Added => OperationType::Add,
-            ChangeRoute::Updated => OperationType::Update,
-            ChangeRoute::Deleted => OperationType::Delete,
-        };
-        let Some(source) = config.template_for(output.alias, operation) else {
+        let input = OperationContext::new(item, outputs)?;
+        let Some(source) = config.template_for(&input.alias, input.operation) else {
             return Ok(None);
         };
         let Some(template) = templates.get_mut(source) else {
             // An empty template is not compiled: the operation is ignored.
             return Ok(None);
         };
-        let Value::Object(mut context) = notification.to_json()? else {
-            bail!("the change context is not an object");
-        };
-        context.insert("deliveryId".into(), Value::String(item.id.to_string()));
-        template.render(&context)
+        template.render(input.object())
     }
 
     /// Renders one delivery item with this sink's templates.
@@ -211,8 +197,12 @@ impl MsSqlStoredProcSink {
         Self::render(&self.config, &self.outputs, &mut self.templates, item)
     }
 
-    fn connector(&self, authentication: &Authentication) -> Result<TiberiusConnector> {
-        TiberiusConnector::new(&self.config, authentication)
+    fn delivery(&self, authentication: &Authentication) -> Result<Delivery<TiberiusConnector>> {
+        Ok(Delivery::new(
+            TiberiusConnector::new(&self.config, authentication, self.owner.clone())?,
+            self.config.max_streams,
+            self.config.on_permanent_failure,
+        ))
     }
 
     fn warn_about_transport(&self) {
@@ -230,12 +220,7 @@ impl MsSqlStoredProcSink {
         }
         let authentication = self.authentication(ctx.take_credentials())?;
         self.warn_about_transport();
-        let mut delivery = Delivery::new(
-            self.connector(&authentication)?,
-            self.owner.clone(),
-            self.config.max_streams,
-            self.config.retry_budget(),
-        );
+        let mut delivery = self.delivery(&authentication)?;
         let prepared = bounded(ctx.cancellation(), ctx.deadline(), delivery.prepare()).await;
         match prepared {
             Ok(()) => {
@@ -256,7 +241,8 @@ impl MsSqlStoredProcSink {
         if ctx.mode() == StopMode::Drain && !ctx.cancellation().is_cancelled() {
             // The host never runs `handle` concurrently with Stop, so there is
             // no in-flight statement: Drain only closes the idle connection.
-            let timeout = remaining(ctx.deadline()).map_or(CLOSE_TIMEOUT, |r| r.min(CLOSE_TIMEOUT));
+            let limit = self.config.shutdown_timeout();
+            let timeout = remaining(ctx.deadline()).map_or(limit, |r| r.min(limit));
             if let Err(error) = delivery.close(timeout).await {
                 log::debug!("SQL Server sink connection close: {error:#}");
             }
@@ -274,22 +260,17 @@ impl MsSqlStoredProcSink {
                 "erasing this sink's cursor rows needs the activation identity, which is \
                  only available after a start in this process; delete them manually with \
                  DELETE FROM {} WHERE owner = N'{}'",
-                self.config.progress_table()?.quoted(),
+                crate::session::quoted(&self.config.progress_table()?),
                 self.owner
             ),
         };
-        let mut delivery = Delivery::new(
-            self.connector(&authentication)?,
-            self.owner.clone(),
-            self.config.max_streams,
-            self.config.retry_budget(),
-        );
+        let mut delivery = self.delivery(&authentication)?;
         let erased = bounded(ctx.cancellation(), ctx.deadline(), delivery.erase()).await?;
         log::info!(
             "SQL Server sink erased {erased} cursor row(s) for owner {}",
             self.owner
         );
-        let _ = delivery.close(CLOSE_TIMEOUT).await;
+        let _ = delivery.close(self.config.shutdown_timeout()).await;
         Ok(())
     }
 }
@@ -333,7 +314,7 @@ impl std::error::Error for Cancelled {}
 fn lifecycle_error(error: anyhow::Error) -> LifecycleError {
     if error.downcast_ref::<Cancelled>().is_some() {
         LifecycleError::cancelled()
-    } else if classify(&error).is_retryable() {
+    } else if matches!(classify(&error), ErrorClass::Transient { .. }) {
         LifecycleError::retryable(error)
     } else {
         error.into()
@@ -391,10 +372,6 @@ impl NativeComponent for MsSqlStoredProcSink {
 
 #[async_trait]
 impl DeliveryHandler for MsSqlStoredProcSink {
-    fn retryable(&self, error: &anyhow::Error) -> bool {
-        classify(error).is_retryable()
-    }
-
     fn delivery_guarantee(&self) -> drasi_computation_contracts::DeliveryGuarantee {
         self.config.delivery_guarantee
     }
@@ -427,8 +404,9 @@ impl DeliveryHandler for MsSqlStoredProcSink {
             .as_mut()
             .context("SQL Server sink is not running")?;
         let mut render = || Self::render(config, outputs, templates, &item);
-        delivery.deliver(&position, &mut render).await?;
-        Ok(())
+        // One attempt through the shared protocol, already classified for
+        // the graph (which retries transient failures).
+        delivery.deliver(&position, &mut render).await.map(drop)
     }
 }
 
@@ -493,11 +471,14 @@ impl NativeManagement for MsSqlStoredProcSink {
                 if let (Some(delivery), Some(authentication)) =
                     (self.delivery.as_mut(), self.last_authentication.as_ref())
                 {
-                    delivery.set_options(proposed.max_streams, proposed.retry_budget());
+                    delivery.set_max_streams(proposed.max_streams);
                     if reconnect {
-                        delivery.replace_connector(
-                            TiberiusConnector::new(&proposed, authentication).map_err(refused)?,
-                        );
+                        // The idle connection closes; the next operation
+                        // reconnects with the new timeouts.
+                        let _ = delivery.close(self.config.shutdown_timeout()).await;
+                        *delivery.connector_mut() =
+                            TiberiusConnector::new(&proposed, authentication, self.owner.clone())
+                                .map_err(refused)?;
                     }
                 }
             }

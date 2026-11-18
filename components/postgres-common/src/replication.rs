@@ -35,12 +35,12 @@ pub mod schema;
 pub mod settings;
 pub mod shared_transactions;
 pub mod transaction;
-pub use error::{is_permanent, is_transient, PostgresCdcError};
+pub use error::{is_permanent, is_transient, AddressUnresolved, PostgresCdcError};
 pub use settings::{
     quote_identifier, quote_literal, validate_slot_name, PostgresTableKey,
     PostgresTransactionConfig, SlotIdentity, SlotOwnership,
 };
-pub use transaction::{row_element, Transactions};
+pub use transaction::{row_element, Changes, Decoded, Transactions};
 pub type TableKeys = BTreeMap<(String, String), Vec<String>>;
 
 pub trait ReplicationIo: AsyncRead + AsyncWrite + Unpin + Send + Sync {}
@@ -184,7 +184,21 @@ pub async fn connect_with_options(
     settings: ConnectionOptions<'_>,
     replication: bool,
 ) -> Result<Connection> {
-    let mut stream = TcpStream::connect((settings.host, settings.port)).await?;
+    let addresses = tokio::net::lookup_host((settings.host, settings.port))
+        .await
+        .map_err(|source| error::AddressUnresolved {
+            host: settings.host.to_owned(),
+            source,
+        })?
+        .collect::<Vec<_>>();
+    if addresses.is_empty() {
+        return Err(error::AddressUnresolved {
+            host: settings.host.to_owned(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "no addresses"),
+        }
+        .into());
+    }
+    let mut stream = TcpStream::connect(addresses.as_slice()).await?;
     stream.set_nodelay(true)?;
     let stream: Box<dyn ReplicationIo> = if settings.ssl_mode == SslMode::Disable {
         Box::new(stream)

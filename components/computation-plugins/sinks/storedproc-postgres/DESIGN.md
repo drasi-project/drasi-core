@@ -29,31 +29,28 @@ the task that drives it. It runs no other worker and opens no listener.
 
 ```
                  ┌──────────────────── PostgresStoredProcSink ─────────────────┐
- DeliveryRunner ►│ handle(item)  (one operation of one input)                  │
- (host: local    │   loop within reconnectBudgetMs (jittered backoff):         │
-  progress,      │     connection usable? else discard + Connection::connect   │
-  retention)     │     Connection::ready (prepared cursor statements,          │
-                 │                        statement_timeout sync)              │
-                 │     ProgressStore::deliver ── one READ COMMITTED transaction│
+ DeliveryRunner ►│ handle(item)  (one operation of one input, one attempt)     │
+ (host: local    │   Delivery::deliver (storedproc-common, shared protocol)    │
+  progress,      │     session healthy and idle? else discard + reconnect      │
+  retention)     │     one READ COMMITTED transaction over PgSession:          │
                  │        read/lock cursor row (owner, stream_key) FOR UPDATE  │
                  │        admit stream (per-owner maxStreams) / roll over      │
-                 │        ProcedureEffect: route ─► render ─► CALL $1..$n      │
-                 │        SET LOCAL synchronous_commit = on; advance cursor    │
-                 │        COMMIT                                               │
-                 │     classify: Retry / Reconnect / Permanent                 │
+                 │        mark pending ─► route ─► render ─► CALL $1..$n       │
+                 │        advance cursor; COMMIT (synchronous_commit = on)     │
+                 │     classify: transient / permanent / skipped               │
                  └─────────────────────────────────────────────────────────────┘
 ```
 
 | Piece | Location | Responsibility |
 |---|---|---|
-| Factory | `src/lib.rs` | Metadata, published configuration details, assess, activation credentials, construction without I/O |
+| Factory | `src/lib.rs` | Metadata, published configuration details, describe (guarantee and `onPermanentFailure`), assess, activation credentials, construction without I/O |
 | `PostgresStoredProcConfig`, `Commands` | `src/config.rs` | Fields, defaults, validation, template compilation and routing |
-| `PostgresStoredProcSink` | `src/component.rs` | Lifecycle hooks, management apply, `DeliveryHandler`, the procedure effect |
-| `Connection` | `src/connection.rs` | One connection attempt (TLS, timeouts), the owned driver task, graceful close and discard |
+| `PostgresStoredProcSink` | `src/component.rs` | Lifecycle hooks, management apply, `DeliveryHandler`, command rendering |
+| `PgConnector` | `src/connection.rs` | One connection attempt (TLS, timeouts) producing a `PgSession` |
 | Planning | `src/management.rs` | Field-by-field update classification |
-| `Backoff` | `src/retry.rs` | Full-jitter exponential backoff (100 ms doubling to 5 s) within a budget |
-| `ProgressStore`, `DeliveryOwner`, `ProgressTable`, `DeliveryError` | `postgres-common/src/delivery/progress.rs` | Format-3 cursor protocol, table preparation, Erase, typed error classification |
-| `CompiledTemplate`, `build_native_render_input`, `SqlParam` | `postgres-common/src/sql.rs` | Parameter-only rendering, the change context, typed binding |
+| `PgSession`, `ProgressTable`, SQLSTATE classification | `postgres-common/src/delivery/progress.rs` | The PostgreSQL `Session` of the shared protocol: format-4 cursor and dead-letter SQL, table preparation, Erase, commit-outcome and transaction-control detection |
+| `Delivery`, `decide`, `OperationContext` | `computation-plugins/common/storedproc` | The cursor protocol, failure rules and atomic skip shared by the three stored-procedure sinks ([README](../../common/storedproc/README.md)) |
+| `CompiledTemplate`, `SqlParam` | `postgres-common/src/sql.rs` | Parameter-only rendering and typed binding |
 | Parameter-only rule | `reaction-common/src/sql_template.rs` | The single validator shared by the stored-procedure sinks |
 
 ## Input decoding and change projection
@@ -62,11 +59,13 @@ The host `DeliveryRunner` splits every input into operations and calls `handle`
 once per operation with a `DeliveryItem` (stable identity, position and the
 canonical batch digest). The sink checks the `in` port, maps the envelope's
 stream to its configured output alias and builds the truthful change context
-(`build_native_render_input`): `operation` (`ADD`, `REPLACE`, `PATCH`,
-`DELETE`), `output` (`alias`, `component`, `port`), `sequence`, `timestamp`
-(only when the envelope has one), `identity` (`namespace`, `id`) and only the
-`element`, `before`, `after`, `removedProperties` and `effectiveFrom` that the
-record carries. Routing uses `added` for `ADD`, `updated` for `REPLACE` and
+(`OperationContext`, shared by the stored-procedure sinks): `operation`
+(`ADD`, `REPLACE`, `PATCH`, `DELETE`), `output` (`alias`, `component`,
+`port`), `sequence`, `timestamp` (only when the envelope has one), `identity`
+(`namespace`, `id`), only the `element`, `before`, `after`,
+`removedProperties` and `effectiveFrom` that the record carries, and
+`deliveryId`: the host's stable operation identity, the same across retries
+and replays, for procedures that must deduplicate an external effect. Routing uses `added` for `ADD`, `updated` for `REPLACE` and
 `PATCH`, and `deleted` for `DELETE`. A scheduling control or recovery frame
 fails the input.
 
@@ -81,9 +80,10 @@ that
    stream, takes the owner's advisory lock, checks `maxStreams` and inserts the
    row;
 2. validates the operation against the cursor (see the cursor protocol);
-3. renders and executes the command;
-4. sets `synchronous_commit = on` for this transaction and advances the cursor's
-   completed count;
+3. marks the operation pending, renders and executes the command, and checks
+   that the transaction is still the delivery transaction;
+4. advances the cursor's completed count (clearing the pending mark), with
+   `synchronous_commit = on` for this transaction;
 5. commits.
 
 The procedure's effect and the cursor advance therefore commit or roll back
@@ -102,17 +102,20 @@ An operation's effect happens exactly once when all of these hold:
 - the component keeps its identity (graph and component ID) and its
   `progressTable`.
 
-**Procedures that commit internally downgrade to at-least-once.** A procedure
-that issues `COMMIT` (PostgreSQL 11+ procedures may) makes its own effect
-durable before the cursor advance. If the attempt then fails, the retry
-repeats the effect. The same applies to effects outside PostgreSQL.
+**Procedures that control the transaction are refused.** PostgreSQL forbids
+`COMMIT` or `ROLLBACK` in a procedure `CALL`ed inside a transaction block
+(SQLSTATE `2D000`), so such a procedure fails every attempt with a permanent
+error and nothing is committed; a template that issues `COMMIT` itself is
+caught by the transaction-ID check and refused before the cursor advance
+(see the shared protocol's transaction-control rule). Effects outside
+PostgreSQL remain at-least-once; bind `deliveryId` to deduplicate them.
 
 ### Exact duplicate windows
 
 With the conditions above, there is none: a retry after an unknown outcome
 (timeout, lost connection, failed commit reply, process crash after the commit,
 a lost local receipt) finds the advanced cursor and completes without an
-effect. Without them (internal commits, external effects), every retried
+effect. Without them (external effects), every retried
 attempt of an operation whose first attempt reached the effect can repeat it:
 
 1. a retry after a rolled-back attempt (serialization failure, deadlock,
@@ -131,37 +134,19 @@ attempt of an operation whose first attempt reached the effect can repeat it:
   re-created with the same identity starts without destination receipts, so a
   replayed input is applied again (a duplicate, not a loss).
 
-### Cursor protocol (format 3)
+### Cursor protocol (format 4)
 
-One row per (owner, producer/consumer stream):
-
-| Column | Meaning |
-|---|---|
-| `owner` | Lowercase hex SHA-256 of `"drasi.storedproc/owner/v1\0" + graph_id + "\0" + component_id` (64 characters) |
-| `stream_key` | The runner's stable stream key (`drasi-delivery-stream-v1-<64 hex>`) |
-| `version` | `3` |
-| `sequence` | Decimal producer sequence of the latest batch (`[1-9][0-9]{0,19}`) |
-| `digest` | The batch's canonical 32-byte content digest |
-| `operations` | Operations in that batch (> 0) |
-| `completed` | Completed prefix (0..=`operations`) |
-| `epoch` | Empty for exactly-once streams; otherwise the at-least-once producer epoch (64 hex) |
-
-Primary key `(owner, stream_key)`. For an operation at index `i` of batch
-`(sequence, digest, operations)`:
-
-- same sequence: the digest and operation count must match ("payload conflicts
-  with its receipt" otherwise); `i < completed` is an already committed
-  operation and completes without an effect; `i == completed` is applied;
-  `i > completed` is an operation gap;
-- higher sequence: the previous batch must be complete and `i` must be `0`
-  (otherwise "unfinished operations or a missing batch prefix"); the row rolls
-  over to the new batch;
-- lower sequence: the receipt expired; rejected;
-- no row: `i` must be `0`; the owner's row count must be below `maxStreams`;
-- different non-empty epoch: the row is treated as absent and overwritten
-  (`i` must be `0`); an empty epoch on exactly one side is rejected.
-
-Format-2 tables are refused at Start, not migrated.
+The cursor and dead-letter tables, the per-operation decision, the failure
+classes and the atomic skip are the shared protocol of the stored-procedure
+sinks, documented once in the
+[storedproc-common README](../../common/storedproc/README.md). In brief: one
+row per `(owner, stream_key)` holds the current batch (`sequence`, `digest`,
+`operations`), its completed prefix, the at-least-once `epoch`, the durable
+query output `generation` and the `pending` mark; a duplicate completes
+without an effect, a gap, conflict, expired receipt, unfinished prefix or
+superseded generation is refused, and a newer generation (a query reset) or
+epoch overwrites the row instead of adding one. Earlier formats are refused
+at Start, not migrated.
 
 ### Delivery guarantee and producer epochs
 
@@ -192,8 +177,9 @@ epoch deduplicates exactly as before. Exactly-once items (empty epoch) never
 match an at-least-once row, nor the reverse (a permanent receipt conflict).
 
 
-Rejections are permanent (`DeliveryError::Rejected`), never silently skipped.
-A damaged row (wrong version, invalid sequence or digest) is rejected.
+Cursor rejections are permanent and never skipped, even under
+`onPermanentFailure: skip`. A damaged row (wrong version, invalid sequence or
+digest) is rejected.
 
 The `owner` column lets many consumers share one table: each owner's stream
 limit counts only its own rows, and Erase deletes only its own rows. The
@@ -203,39 +189,39 @@ through `PostgresDeliveryHandler`; the formats never share a table.
 ## Retry and classification
 
 Classification is by SQLSTATE and error type, never by message text
-(`postgres-common::delivery::progress`):
+(`postgres-common::delivery::progress::classify`), and the failure rules are
+the shared protocol's:
 
-| Failure | Disposition | Action |
-|---|---|---|
-| `40001` serialization, `40P01` deadlock, `55P03` lock not available, `57014` statement timeout, class `53` (except `53300`) | Retry | rolled back; retry on the same connection |
-| Class `08`, `57P01` (`pg_terminate_backend`), `57P02`, `57P03`, `53300`, closed connection, I/O | Reconnect | discard the connection, reconnect, retry |
-| Client-side command timeout (`commandTimeoutMs` + 5 s) | Reconnect | the connection state is unknown |
-| Commit failure or commit timeout (`CommitUnknown`) | Reconnect | **safe to retry**: the cursor recognises a committed operation |
-| Rollback failure | Reconnect (Permanent if the original failure was) | the connection is discarded either way |
-| Connection refused, unreachable, TLS I/O, connect timeout | Retry (reconnect) | |
-| Authentication (`28xxx`), unknown database (`3D000`), `42501` at connect | Permanent | |
-| Any other SQLSTATE (procedure exception, constraint, type, privilege), parameter conversion, render failure, cursor rejection, stream capacity | Permanent | |
+| Failure | Class |
+|---|---|
+| `40001` serialization, `40P01` deadlock, `55P03` lock not available, `57014` statement timeout, class `53` (except `53300`) | transient; rolled back, the connection is kept |
+| Class `08`, `57P01` (`pg_terminate_backend`), `57P02`, `57P03`, `53300`, closed connection, I/O, client-side command timeout (`commandTimeoutMs` + 5 s) | transient; the connection is discarded |
+| COMMIT reply lost or timed out | transient, outcome unknown; the next attempt resolves it from the cursor |
+| COMMIT answered with a SQLSTATE on a live connection (a deferred constraint, `40001` at commit) | the SQLSTATE's class (a constraint is permanent): a definite rollback, never "outcome unknown" |
+| `2D000` (a procedure ran `COMMIT`/`ROLLBACK`), a template that committed | permanent |
+| Connection refused, unreachable, TLS I/O, connect timeout | transient |
+| Authentication (`28xxx`), unknown database (`3D000`), `42501` at connect | permanent |
+| Any other SQLSTATE (procedure exception, constraint, type, privilege), parameter conversion, render failure | permanent |
+| Cursor rejection, stream capacity | permanent, never skipped |
 
-Inside one `handle`, Retry and Reconnect dispositions are retried with
-full-jitter exponential backoff (100 ms doubling to 5 s) until
-`reconnectBudgetMs` is spent; `0` makes one attempt. The backoff wait holds no
-state outside the `handle` future, so a pause, an Abort or a deadline that
-drops the future ends it at once. When the budget is spent the last error is
-returned and `retryable` reports its classification, so the host runner's own
-`DeliveryOptions.retry` may call `handle` again (each call has a fresh budget).
+**One retry model.** `handle` makes one attempt and never sleeps: a transient
+failure is returned as a transient `DeliveryFailure` and the graph retries
+the same input with its bounded backoff (200 ms doubling to 30 s); the
+destination cursor makes every retry idempotent. The only immediate retry is a
+reconnect when the idle connection turned out to be dead before its
+transaction began. There is no in-plugin retry budget.
 
-A permanent failure fails the input. The sink keeps no latched state: the next
-`handle` (the host's replay of the same input, or another input) runs normally,
-so a fixed procedure or template, a restored grant or a freed stream slot
-recovers delivery without Stop and Start.
+A permanent failure follows `onPermanentFailure`: `stall` (default) returns it
+and the graph stalls the node; `skip` settles a content failure (procedure,
+commit, template or transaction control) by recording it in
+`<progressTable>_dead_letter` and advancing the cursor in one transaction,
+and reports it as skipped; the host's `DeliveryRunner` records the operation
+as completed and the graph counts the skip. A replay never repeats it. The
+sink keeps no latched state: after a fix (procedure, template, grant, a freed
+stream slot) the next `handle` runs normally without Stop and Start.
 
-A render failure (for example a template that reads an absent field under
-strict mode) is permanent (decision D-5): it is never retried by the sink or the
-runner and never skipped. Fix the template with an in-place update; the host's
-replay then succeeds.
-
-If the host drops an in-flight `handle` (cancellation), the connection is left
-marked in flight. The next `handle` discards it (aborting its driver) and
+If the host drops an in-flight `handle` (cancellation), the session is left
+marked busy. The next `handle` discards it (aborting its driver) and
 reconnects, because its transaction state is unknown; PostgreSQL rolls the
 abandoned transaction back.
 
@@ -261,8 +247,8 @@ input.
 
 | State | Owner | Erase |
 |---|---|---|
-| Rows `WHERE owner = <this owner>` in `progressTable` | this sink | deleted |
-| The progress table itself | shared (created by the first sink if permitted) | never dropped |
+| Rows `WHERE owner = <this owner>` in `progressTable` and its dead-letter table | this sink | deleted |
+| The progress and dead-letter tables themselves | shared (created by the first sink if permitted) | never dropped |
 | Rows of other owners | other sinks | untouched |
 | Business tables and procedures | the operator | untouched |
 | Local delivery progress (`DeliveryRunner`) | the host | the host's own retirement |
@@ -272,25 +258,26 @@ input.
 | Hook | Behaviour |
 |---|---|
 | `initialize` | Nothing to open: templates, routes, TLS material and the progress-table name were validated at construction. |
-| `start` | Takes activation credentials if present, connects (bounded by `connectTimeoutMs` and `ctx.deadline()`), prepares the progress table (see below) and the cursor statements (each command bounded by `commandTimeoutMs` + 5 s and the deadline). Observes `ctx.cancellation()` throughout. A cancelled or failed start discards the connection, joins its driver and leaves the sink startable; connection failures are retryable, privilege and configuration failures terminal. A second start is refused; a start while a previous driver has not finished closing is refused retryably. |
+| `start` | Takes activation credentials if present, connects (one attempt bounded by `connectTimeoutMs` and `ctx.deadline()`), prepares the progress and dead-letter tables (see below) and the cursor statements (each command bounded by `commandTimeoutMs` + 5 s). Observes `ctx.cancellation()` throughout. A cancelled or failed start discards the connection and leaves the sink startable; connection failures are retryable (the host's lifecycle retry policy decides), privilege and configuration failures terminal. A second start is refused. |
 | `pause` | Host-driven (D-6): the runner calls no `handle` while paused and awaits or drops the in-flight one. The connection driver only answers the sink's own commands and produces no work, so nothing needs gating. In-place updates require a completed pause. |
 | `resume` | Clears the pause flag. |
-| `stop` | `Drain`: closes the client gracefully; the driver finishes after the server answers any command still running (bounded by `statement_timeout`) and the deadline. `Abort`: drops the socket at once (PostgreSQL rolls back). Waits at most `min(ctx.deadline(), shutdownTimeoutMs)`; on expiry it returns a retryable error and keeps the driver, so a later Stop or Dispose joins it. An earlier connection failure is never reported as a Stop failure. |
-| `dispose` | `Erase` first deletes `WHERE owner = <this owner>` over a fresh connection (idempotent: a missing table or no rows succeeds), using the last activation's login if one was supplied; failures are retryable and the host retries with the same intent. Then (both intents) any remaining connection and driver are released. |
+| `stop` | `Drain`: closes the idle connection gracefully within `min(ctx.deadline(), shutdownTimeoutMs)`. `Abort` or an expired close drops the socket (PostgreSQL rolls back anything open). Nothing outlives Stop. An earlier connection failure is never reported as a Stop failure. |
+| `dispose` | `Erase` first deletes `WHERE owner = <this owner>` from the progress and dead-letter tables over a fresh connection (idempotent: missing tables or no rows succeed), using the last activation's login if one was supplied; failures are retryable and the host retries with the same intent. Then (both intents) the connection is released. |
 
-The connection driver task is owned by the activation: it is created by start
-or by a reconnect inside `handle`, discarded (aborted and joined) on reconnect,
-and joined by stop or dispose.
+The connection driver task belongs to the session: it is created by start or
+by a reconnect inside `handle` and aborted when the session is discarded or
+dropped.
 
 ### Progress-table preparation
 
 At start, in one transaction under advisory lock `(1146241363, 2)`:
 
 1. the schema must exist and the role must have `USAGE` on it;
-2. if the table exists, the role must have `SELECT`, `INSERT`, `UPDATE` and
-   `DELETE` on it, and it must have the format-3 columns;
-3. if it does not exist, the role must have `CREATE` on the schema; the sink
-   then runs `CREATE TABLE IF NOT EXISTS`.
+2. for each of the progress and dead-letter tables that exists, the role must
+   have `SELECT`, `INSERT`, `UPDATE` and `DELETE` on it, and it must have the
+   format-4 columns;
+3. if either does not exist, the role must have `CREATE` on the schema; the
+   sink then runs the documented `CREATE TABLE IF NOT EXISTS` statements.
 
 Every failure names the missing object or privilege, for example
 `role "sink" lacks CREATE on schema "public"; the progress table does not
@@ -306,10 +293,10 @@ to run concurrently.
 
 | Boundary | Fields | Why |
 |---|---|---|
-| Pause (in place) | `routes`, `defaultTemplate`, `maxStreams`, `commandTimeoutMs`, `reconnectBudgetMs`, `shutdownTimeoutMs` | read per delivery; a new `commandTimeoutMs` is applied to the live session (`SET statement_timeout`) before its next command |
-| Stop (restart) | `host`, `port`, `database`, `user`, `password`, `sslMode`, `allowRemotePlaintext`, `tlsCaPem`, `tlsClientCertificatePem`, `tlsClientPrivateKeyPem`, `connectTimeoutMs` | connection settings |
-| Replace (recreate, preserve) | `outputs`, the incoming edges | output aliases are bound at construction; the cursor owner is unchanged, so receipts remain valid |
-| Unsupported | `progressTable`, the graph identity | they change the cursor identity: committed operations would no longer be recognised and an unfinished batch could never resume ("missing its first operation"). Remove the component (Erase) and add a new one. |
+| Pause (in place) | `routes`, `defaultTemplate`, `maxStreams`, `commandTimeoutMs`, `connectTimeoutMs`, `shutdownTimeoutMs` | read per delivery or per connection; a new `commandTimeoutMs` closes the idle connection so the next operation reconnects with it |
+| Stop (restart) | `user`, `password`, `sslMode`, `allowRemotePlaintext`, `tlsCaPem`, `tlsClientCertificatePem`, `tlsClientPrivateKeyPem` | login and transport |
+| Replace (recreate, preserve) | `outputs`, the incoming edges, `deliveryGuarantee`, `onPermanentFailure` | output aliases are bound at construction; the guarantee and policy are declared in the description the graph checks; the cursor owner is unchanged, so receipts remain valid |
+| Unsupported | `host`, `port`, `database`, `progressTable`, the graph identity | they locate or own the destination cursor: changing them would move every stream's cursor, so committed operations would no longer be recognised and an unfinished batch could never resume ("missing its first operation"). Remove the component (Erase) and add a new one. |
 
 Apply re-assesses, refuses a stale current configuration or a weaker boundary,
 requires a completed pause for in-place updates and a stopped sink for restart
@@ -358,14 +345,14 @@ plus its destination cursor rows. Metrics (X-11) are not implemented.
 - A failed delivery is retried without Stop/Start, through the host as well.
   A delivery the host cancels mid-flight still requires Stop before more
   input, because its batch may not have settled.
-- A procedure that commits internally, or effects outside the transaction,
-  are at-least-once.
+- Effects outside the transaction are at-least-once; bind `deliveryId` to
+  deduplicate them.
 - Lowering `maxStreams` below the number of existing rows blocks only new
   streams.
-- In-memory (volatile) queries are accepted only with
-  `deliveryGuarantee: atLeastOnce`, at least once and without resume across a
-  restart; without opt-in the edge fails when it is bound.
-  Volatile producers other than queries are refused at the first delivery.
+- Producers with a volatile identity (in-memory queries, volatile graph
+  producers) are accepted only with `deliveryGuarantee: atLeastOnce`, at least
+  once and without resume across a restart; without opt-in the graph fails
+  the edge when it binds it.
 - The SDK conformance kit (`SinkConformance`) targets plain `NativeSink`s; this
   consumer's lifecycle is covered by its unit and live tests instead.
 
@@ -373,9 +360,20 @@ plus its destination cursor rows. Metrics (X-11) are not implemented.
 
 | Legacy `reactions/storedproc-postgres` | Native sink |
 |---|---|
-| Whole-command retry with fixed backoff; log-and-skip errors | Classified per-operation retry within `reconnectBudgetMs`; permanent failures fail the input (no skip) |
-| Optional transactional delivery on `public.drasi_delivery_stream_v1` (format 1, one global 4,096-stream limit, no owner) | Always transactional; configurable format-2 table with an owner column, per-owner `maxStreams`, real Erase |
+| Whole-command retry with fixed backoff; log-and-skip errors | One classified attempt per operation, retried by the graph; permanent failures stall, or with `onPermanentFailure: skip` are recorded in the dead-letter table atomically with the cursor |
+| Optional transactional delivery on `public.drasi_delivery_stream_v1` (format 1, one global 4,096-stream limit, no owner) | Always transactional; configurable format-4 table with an owner column, per-owner `maxStreams`, real Erase |
 | Template context `query_id`, `query_name`, `operation` (`ADD`/`UPDATE`/`DELETE`), `before`/`after`/`data` | Truthful change context (`REPLACE`, `PATCH`; a patch's `after` holds only the properties it sets; no `data`) |
 | Identity providers including certificate mTLS | Activation credentials (password/token) and static PEM client certificates |
 | `ConfigValue` per field | Flat configuration with top-level secret fields |
 | Any block helper allowed in templates | Only `if`, `unless`, `each`, `with` |
+
+## Delivery failures in the graph
+
+The sink follows the graph's
+[delivery-failure model](../NATIVE-SINK-GUIDE.md#delivery-failures) through
+the shared protocol: one attempt per `handle`, a transient failure (rolled
+back, connection lost, commit outcome unknown, deadlock, lock wait) retried
+by the graph in place, and a permanent one (a procedure, commit, template or
+cursor rejection) following `onPermanentFailure`. Under `skip`, the skip is
+recorded in the destination's dead-letter table in the same transaction that
+advances the cursor, so it is exactly once; a cursor rejection still stalls.

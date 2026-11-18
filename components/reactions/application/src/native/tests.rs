@@ -298,11 +298,13 @@ async fn callback_errors_remain_typed_in_handling_and_cancelled_cleanup() {
         .await
         .unwrap_err()
         .is::<ApplicationFailure>());
+    // A finished callback error leaves the reaction ready for the graph's retry.
+    release.notify_one();
     assert!(reaction
-        .handle(input(2))
+        .handle(input(1))
         .await
         .unwrap_err()
-        .is::<ApplicationReactionError>());
+        .is::<ApplicationFailure>());
     reaction.stop(&lifecycle_ctx::stop()).await.unwrap();
     reaction.start(&lifecycle_ctx::start()).await.unwrap();
     assert!(
@@ -337,10 +339,9 @@ async fn callback_factory_and_future_panics_poison_only_their_binding() {
     .unwrap();
     for mut reaction in [factory, future] {
         reaction.start(&lifecycle_ctx::start()).await.unwrap();
-        assert!(matches!(
-            reaction.handle(input(1)).await.unwrap_err().downcast_ref(),
-            Some(ApplicationReactionError::CallbackPanicked(_))
-        ));
+        let error = reaction.handle(input(1)).await.unwrap_err();
+        assert!(error.is::<ComponentPanic>(), "{error:?}");
+        assert!(super::is_callback_panic(&error), "{error:?}");
         reaction.stop(&lifecycle_ctx::stop()).await.unwrap();
         assert!(matches!(
             reaction

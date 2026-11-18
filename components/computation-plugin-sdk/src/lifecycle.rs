@@ -78,13 +78,14 @@ pub struct StopContext {
 }
 
 /// Context for [`crate::NativeComponent::dispose`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct DisposeContext {
     scope: OperationScope,
     reason: DisposeReason,
     intent: StateIntent,
     attempt: u32,
+    credentials: Option<ActivationCredentials>,
 }
 
 /// Context for [`crate::NativeManagement::apply`].
@@ -200,7 +201,29 @@ impl DisposeContext {
             reason,
             intent,
             attempt,
+            credentials: None,
         })
+    }
+
+    /// Attach freshly resolved activation credentials for an `Erase` dispose.
+    pub fn with_credentials(mut self, credentials: Option<ActivationCredentials>) -> Self {
+        self.credentials = credentials;
+        self
+    }
+
+    /// Activation credentials, resolved anew for this dispose: present only
+    /// for an `Erase` dispose of a component whose factory declares
+    /// activation credentials. Erasure may need to reach an external system
+    /// even when the component never started in this process, so the host
+    /// supplies the same credentials a start would receive. Never persist
+    /// them or copy them into configuration.
+    pub fn credentials(&self) -> Option<&ActivationCredentials> {
+        self.credentials.as_ref()
+    }
+
+    /// Takes ownership of the credentials, leaving none in the context.
+    pub fn take_credentials(&mut self) -> Option<ActivationCredentials> {
+        self.credentials.take()
     }
 
     pub fn reason(&self) -> DisposeReason {
@@ -221,6 +244,21 @@ impl DisposeContext {
     /// One for the first attempt; retries keep the same reason and intent.
     pub fn attempt(&self) -> u32 {
         self.attempt
+    }
+}
+
+impl std::fmt::Debug for DisposeContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DisposeContext")
+            .field("scope", &self.scope)
+            .field("reason", &self.reason)
+            .field("intent", &self.intent)
+            .field("attempt", &self.attempt)
+            .field(
+                "credentials",
+                &self.credentials.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
     }
 }
 

@@ -15,9 +15,9 @@ use std::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use drasi_lib::computation::v1::{
-    ComponentDescriptor, ComponentId, ComponentSemanticKind, ComputationComponent, DisposeContext,
-    Endpoint, EnvelopeSink, InputEnvelope, PipeRequirements, PortDescriptor, PortDirection, PortId,
-    SchemaDescriptor, SinkCompletion, StartContext, StopContext,
+    ComponentDescriptor, ComponentId, ComponentPanic, ComponentSemanticKind, ComputationComponent,
+    DisposeContext, Endpoint, EnvelopeSink, InputEnvelope, PipeRequirements, PortDescriptor,
+    PortDirection, PortId, SchemaDescriptor, SinkCompletion, StartContext, StopContext,
 };
 use futures::{future::BoxFuture, FutureExt};
 use tokio::sync::{mpsc, Mutex};
@@ -216,7 +216,18 @@ fn callback_panic(payload: Box<dyn Any + Send>) -> anyhow::Error {
                 .map(|message| message.to_string())
         })
         .unwrap_or_else(|| "non-string panic payload".into());
-    ApplicationReactionError::CallbackPanicked(message).into()
+    // ComponentPanic makes the graph quarantine this generation instead of
+    // retrying delivery into a poisoned callback.
+    ComponentPanic::new(ApplicationReactionError::CallbackPanicked(message)).into()
+}
+
+fn is_callback_panic(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref(),
+            Some(ApplicationReactionError::CallbackPanicked(_))
+        )
+    })
 }
 
 async fn finish_callback(callback: &mut Callback) -> Result<()> {
@@ -225,10 +236,7 @@ async fn finish_callback(callback: &mut Callback) -> Result<()> {
     };
     let result = pending.await;
     callback.pending = None;
-    if matches!(
-        result.as_ref().err().and_then(|error| error.downcast_ref()),
-        Some(ApplicationReactionError::CallbackPanicked(_))
-    ) {
+    if result.as_ref().err().is_some_and(is_callback_panic) {
         callback.poisoned = true;
     }
     result
@@ -343,9 +351,13 @@ impl EnvelopeSink for ApplicationReaction {
                         .await
                         .map_err(callback_panic)?
                 }));
-                finish_callback(callback).await?;
-                self.state = State::Running;
-                Ok(())
+                // A callback that returned an error has finished, so the graph
+                // may retry the input; only a panic leaves it unusable.
+                let result = finish_callback(callback).await;
+                if !callback.poisoned {
+                    self.state = State::Running;
+                }
+                result
             }
         }
     }

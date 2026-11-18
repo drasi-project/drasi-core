@@ -193,7 +193,6 @@ let runner = DeliveryRunner::new(
         scope: RecoveryScope::Failure(FailureMode::ProcessRestart),
         max_streams: NonZeroUsize::new(16).unwrap(),
         receipts_per_stream: NonZeroUsize::new(64).unwrap(),
-        retry: DeliveryRetryPolicy::default(), // One attempt, no automatic retry.
     },
 )?;
 ```

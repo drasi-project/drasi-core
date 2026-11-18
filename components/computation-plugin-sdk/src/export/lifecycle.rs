@@ -496,7 +496,14 @@ fn validate_context(
         &context.operation_id,
     )
     .map_err(|error| Failure::protocol(format!("{error:#}")))?;
-    let credentials = code == START && instance.activation_credentials_bound;
+    // Bound factories receive credentials on START and on an erasing
+    // DISPOSE, which may have to reach the external system without a start.
+    let credentials = instance.activation_credentials_bound
+        && (code == START
+            || (code == DISPOSE
+                && context
+                    .dispose
+                    .is_some_and(|dispose| dispose.intent == StateIntent::Erase)));
     if context.credentials.is_some() != credentials
         || context.stop_mode.is_some() != (code == STOP)
         || context.dispose.is_some() != (code == DISPOSE)

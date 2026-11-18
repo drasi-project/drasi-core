@@ -10,11 +10,11 @@ The sink is for development, demos and operational tracing. It accepts the
 standard graph-change schema on its `in` port, so it works directly behind a
 source, a transformer or a continuous query. For each change it either renders
 a Handlebars template chosen by output and operation, or formats the change as
-JSON or as the legacy compact form. It then sends the line to the process `log`
-facade, stdout or stderr.
+JSON or as the legacy compact form. It then sends the line to the host's
+logger (through the `log` facade), stdout or stderr.
 
-The sink stores nothing. It has no checkpoint, no buffer and no worker of its
-own.
+The sink stores nothing. It has no checkpoint and no buffer; stdout and stderr
+writes run on a shared writer thread per stream.
 
 ## Architecture
 
@@ -23,7 +23,7 @@ InputEnvelope ─► SinkOutputs::output_for(stream) ─► alias
              └─► GraphChangeBatch::notifications ─► per change:
                      Renderer: alias + operation group ─► template | format
                  ─► lines ([id] header?, [id] message…)
-                 ─► Emitter: log facade | stdout | stderr (write_all + flush)
+                 ─► Emitter: log facade (host logger) | stdout/stderr writer thread (write_all + flush)
 ```
 
 | Piece | Location | Responsibility |
@@ -86,19 +86,29 @@ time (for example `{{lookup after}}` with a missing argument). The
 Completion is `Handled`. `handle` returns `Ok` only after every line of the
 input was emitted:
 
-- `log` output: every record was passed to the `log` facade. The facade cannot
-  report failures, and whatever logger the host installed decides whether, when
-  and where records are written (including its own buffering and level
-  filtering).
-- `stdout`/`stderr` output: all lines of the input were written in one locked
-  `write_all` and flushed. A write or flush error (for example a closed pipe)
-  fails the input, which the host may retry.
+- `log` output: every record was passed to the `log` facade. Loaded as a
+  plugin library, the SDK's logging bridge forwards each record to the host's
+  logger (the host installs it when it loads the library, with the level it had
+  then); statically linked, the sink shares the host's facade. The facade
+  cannot report failures, and the host's logger decides whether, when and where
+  records are written (including its own buffering and level filtering).
+- `stdout`/`stderr` output: all lines of the input were written in one
+  `write_all` and flushed by the stream's writer thread (one per stream, shared
+  by every log sink in the process or library). `handle` awaits that write
+  without blocking the async runtime and stays cancellable; a write already
+  queued is not cancelled. A write or flush error (for example a closed pipe)
+  fails the input transiently, and the graph retries it in place.
+- A template that fails under `renderFailurePolicy: strict` is a permanent
+  failure: `onPermanentFailure` decides whether the sink stalls (default) or
+  skips and counts the input (see the
+  [delivery-failure model](../NATIVE-SINK-GUIDE.md#delivery-failures)).
 
 Delivery is at-least-once. A crash or failure after some or all lines were
 written, but before the host recorded completion, causes the input to be
 delivered again, and its lines appear twice. Nothing is lost while the host
-retains the input. Writes to stdout/stderr are blocking calls on the calling
-thread; a stalled reader of the pipe stalls the sink.
+retains the input. A stalled reader of a stdout/stderr pipe stalls the sink's
+input (it keeps waiting for its write) but never a runtime thread, and Stop
+can still abort it.
 
 ## Lifecycle
 
@@ -120,7 +130,7 @@ exports `NativeManagement`. Supported modes are `InPlace` and `Recreate`.
 | Change | Boundary |
 |---|---|
 | `routes`, `defaultTemplate`, `format`, `includeHeader`, `level`, `target`, `output`, `renderFailurePolicy` | Pause (InPlace) |
-| `outputs` aliases, or the incoming bindings (`current.inputs != proposed.inputs`) | Replace (Recreate) |
+| `outputs` aliases, `onPermanentFailure`, or the incoming bindings (`current.inputs != proposed.inputs`) | Replace (Recreate) |
 
 Assessment validates the proposed configuration exactly as construction would
 (against the proposed inputs when the request carries them, otherwise templates

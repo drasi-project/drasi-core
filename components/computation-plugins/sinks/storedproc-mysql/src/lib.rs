@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 pub use component::MySqlStoredProcSink;
 pub use config::MySqlStoredProcConfig;
-pub use drasi_mysql_common::storedproc::delivery::owner_id;
+pub use drasi_computation_storedproc_common::owner;
 pub use drasi_reaction_common::{QueryConfig, TemplateSpec};
 
 pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
@@ -50,19 +50,17 @@ pub fn plugin() -> Result<PluginDefinition> {
 drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
 
 impl Factory for MySqlStoredProcFactory {
-    /// A consumer whose inputs deliver with its configured `deliveryGuarantee`.
+    /// A consumer whose inputs deliver with its configured
+    /// `deliveryGuarantee` and which applies its `onPermanentFailure`.
     fn describe(
         &self,
         request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
     ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        let guarantee = match request.request.configuration.get("deliveryGuarantee") {
-            None | Some(serde_json::Value::Null) => {
-                drasi_computation_plugin_sdk::DeliveryGuarantee::ExactlyOnce
-            }
-            Some(value) => serde_json::from_value(value.clone())
-                .map_err(|error| anyhow::anyhow!("invalid deliveryGuarantee: {error}"))?,
-        };
-        Ok(request.consumer(guarantee))
+        let config = MySqlStoredProcConfig::parse_with_activation_credentials(
+            request.request.configuration.clone(),
+            request.request.activation_credentials_bound,
+        )?;
+        Ok(request.consumer(config.delivery_guarantee, config.on_permanent_failure))
     }
     fn supports_activation_credentials(&self) -> bool {
         true
@@ -76,7 +74,7 @@ impl Factory for MySqlStoredProcFactory {
             true,
         )?;
         let context = ActivationCredentialContext {
-            hostname: config.hostname,
+            hostname: config.host,
             port: config.port,
         };
         context.validate()?;

@@ -588,12 +588,13 @@ fn read_plugin_metadata(lib: &Library) -> Option<String> {
                 let meta = &*meta_ptr;
                 let sdk_ver = meta.sdk_version.to_string();
                 let core_ver = meta.core_version.to_string();
+                let lib_ver = meta.lib_version.to_string();
                 let plugin_ver = meta.plugin_version.to_string();
                 let target = meta.target_triple.to_string();
                 let commit = meta.git_commit.to_string();
                 let built = meta.build_timestamp.to_string();
                 Some(format!(
-                    "sdk={sdk_ver} core={core_ver} plugin={plugin_ver} target={target} commit={commit} built={built}"
+                    "abi={sdk_ver} core={core_ver} lib={lib_ver} plugin={plugin_ver} target={target} commit={commit} built={built}"
                 ))
             } else {
                 None
@@ -626,10 +627,24 @@ fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
     Some((v.major as u32, v.minor as u32, v.patch as u32))
 }
 
+/// Declared ABI family of the ordinary Source/Reaction plugins.
+pub const ORDINARY_ABI_FAMILY: &str = "ordinary";
+/// Declared ABI family of native ComputationGraph plugins.
+pub const COMPUTATION_ABI_FAMILY: &str = "computation";
+
+/// The ordinary ABI rule shared by registry resolution and binary loading: a
+/// valid semantic version with the host's major.minor (patch may differ).
+/// SDK Cargo package compatibility never implies ABI compatibility.
+pub(crate) fn ordinary_abi_compatible(plugin: &str) -> bool {
+    let host = drasi_plugin_sdk::ffi::metadata::FFI_SDK_VERSION;
+    match (semver::Version::parse(host), semver::Version::parse(plugin)) {
+        (Ok(host), Ok(plugin)) => host.major == plugin.major && host.minor == plugin.minor,
+        _ => false,
+    }
+}
+
 fn supported_legacy_abi(version: &str) -> bool {
-    semver::Version::parse(version)
-        .ok()
-        .is_some_and(|version| version.major == 0 && version.minor == 19)
+    ordinary_abi_compatible(version)
 }
 
 /// Validate plugin metadata against the host SDK version.
@@ -667,8 +682,9 @@ fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<Option
 
     if !supported_legacy_abi(&plugin_sdk_version) {
         anyhow::bail!(
-            "Plugin '{}' SDK version mismatch: plugin={}, host={}. \
-             Only ordinary ABI 0.19.x is supported; rebuild older plugins with the current SDK.",
+            "Plugin '{}' FFI ABI version mismatch: plugin={}, host={}. \
+             Only the host's ordinary ABI major.minor is supported; SDK Cargo package \
+             compatibility does not imply ABI compatibility. Rebuild older plugins with the current SDK.",
             path.display(),
             plugin_sdk_version,
             host_sdk_version,
@@ -689,7 +705,7 @@ fn validate_plugin_metadata(lib: &Library, path: &Path) -> anyhow::Result<Option
     }
 
     log::debug!(
-        "Plugin '{}' version check passed: sdk={} target={}",
+        "Plugin '{}' version check passed: abi={} target={}",
         path.display(),
         plugin_sdk_version,
         plugin_target
@@ -838,6 +854,8 @@ pub fn plugin_kind_from_filename(filename: &str) -> Option<String> {
 pub struct PluginMetadataSummary {
     pub plugin_id: String,
     pub version: String,
+    /// ABI version reported by the binary; for the ordinary family this legacy
+    /// field name means the FFI ABI, not the SDK Cargo package version.
     pub sdk_version: String,
     pub abi_family: Option<String>,
     pub abi_version: Option<String>,
@@ -864,7 +882,7 @@ pub fn scan_plugin_metadata(path: &Path) -> Option<PluginMetadataSummary> {
                 plugin_id: crate::plugin_registry::computation_plugin_id(&metadata),
                 version: metadata.plugin.version.to_string(),
                 sdk_version: metadata.abi_version.clone(),
-                abi_family: Some("computation".into()),
+                abi_family: Some(COMPUTATION_ABI_FAMILY.into()),
                 abi_version: Some(metadata.abi_version),
                 core_version: String::new(),
                 target_triple: drasi_computation_plugin_sdk::metadata::TARGET.to_owned(),
@@ -913,9 +931,9 @@ pub fn scan_plugin_metadata(path: &Path) -> Option<PluginMetadataSummary> {
     Some(PluginMetadataSummary {
         plugin_id,
         version: plugin_version,
+        abi_family: Some(ORDINARY_ABI_FAMILY.into()),
+        abi_version: Some(sdk_version.clone()),
         sdk_version,
-        abi_family: None,
-        abi_version: None,
         core_version,
         target_triple,
         git_commit,
@@ -989,14 +1007,14 @@ mod tests {
             (
                 "old",
                 metadata("0.15.0", target),
-                "SDK version mismatch",
+                "FFI ABI version mismatch",
             ),
-            ("old_016", metadata("0.16.0", target), "SDK version mismatch"),
-            ("old_017", metadata("0.17.0", target), "SDK version mismatch"),
-            ("old_018", metadata("0.18.0", target), "SDK version mismatch"),
-            ("future", metadata("0.20.0", target), "SDK version mismatch"),
-            ("malformed", metadata("0.16.invalid", target), "SDK version mismatch"),
-            ("oversized", metadata("4294967296.16.0", target), "SDK version mismatch"),
+            ("old_016", metadata("0.16.0", target), "FFI ABI version mismatch"),
+            ("old_017", metadata("0.17.0", target), "FFI ABI version mismatch"),
+            ("old_018", metadata("0.18.0", target), "FFI ABI version mismatch"),
+            ("future", metadata("0.20.0", target), "FFI ABI version mismatch"),
+            ("malformed", metadata("0.16.invalid", target), "FFI ABI version mismatch"),
+            ("oversized", metadata("4294967296.16.0", target), "FFI ABI version mismatch"),
             ("wrong_target", metadata("0.19.0", "incompatible-target"), "target mismatch"),
         ] {
             let dir = tempfile::tempdir().unwrap();

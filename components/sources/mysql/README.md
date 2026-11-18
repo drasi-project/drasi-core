@@ -251,8 +251,9 @@ during startup, not deferred until the first changed row.
 An empty native `tables` list selects the current database catalog. Only
 untracked ordinary-row mode discovers new tables during live replication;
 tracked and whole-transaction modes reject changes to database-wide selection.
-`table_keys: [{table, key_columns}]` overrides the physical primary key; an
-otherwise keyless table can use its `id` column. Nullable declarations are
+`table_keys: [{table, key_columns}]` overrides the physical primary key; a
+keyless table needs a `table_keys` entry (a column named `id` is never inferred
+as identity). Nullable declarations are
 accepted, but an actual null graph key is an error. Explicit key overrides add
 their own binding material without changing existing default binding bytes.
 Untracked starts also support `{mode: start}` and `{mode: gtid, set: "..."}`.

@@ -98,7 +98,7 @@ impl PgOutputDecoder {
 
         let msg_type = data[0];
         let payload = &data[1..];
-        if self.strict.is_some() && matches!(msg_type, b'I' | b'U' | b'D') {
+        if self.strict.is_some() && matches!(msg_type, b'I' | b'U' | b'D' | b'T') {
             anyhow::ensure!(
                 self.current_transaction.is_some(),
                 "pgoutput row outside a transaction"
@@ -114,7 +114,7 @@ impl PgOutputDecoder {
             b'I' => self.decode_insert(payload),
             b'U' => self.decode_update(payload),
             b'D' => self.decode_delete(payload),
-            b'T' if self.strict.is_none() => self.decode_truncate(payload),
+            b'T' => self.decode_truncate(payload),
             b'M' if self.strict.is_none() => self.decode_message_logical(payload),
             _ => {
                 anyhow::ensure!(
@@ -405,12 +405,23 @@ impl PgOutputDecoder {
         let mut cursor = Cursor::new(data);
 
         let relation_count = cursor.read_u32::<BigEndian>()?;
-        let _options = cursor.read_u8()?;
+        let options = cursor.read_u8()?;
+        if self.strict.is_some() {
+            // CASCADE (1) and RESTART IDENTITY (2) are the only options; each
+            // relation is a four-byte OID.
+            anyhow::ensure!(
+                options <= 3
+                    && u64::from(relation_count) * 4
+                        == cursor.get_ref().len() as u64 - cursor.position(),
+                "invalid pgoutput Truncate"
+            );
+        }
 
-        let mut relation_ids = Vec::with_capacity(relation_count as usize);
+        let mut relation_ids = Vec::with_capacity(relation_count.min(1600) as usize);
         for _ in 0..relation_count {
             relation_ids.push(cursor.read_u32::<BigEndian>()?);
         }
+        self.finish_message(&cursor)?;
 
         debug!("Truncate: {relation_count} relations");
         Ok(Some(WalMessage::Truncate { relation_ids }))

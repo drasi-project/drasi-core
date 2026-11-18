@@ -10,7 +10,11 @@
 //! `configuration()` is the persistence hook.
 
 use anyhow::{bail, ensure, Context, Result};
-use drasi_computation_contracts::{DeliveryGuarantee, OutputAliases, SinkOutputs};
+use drasi_computation_contracts::{
+    DeliveryGuarantee, OutputAliases, PermanentFailurePolicy, SinkOutputs,
+};
+pub use drasi_computation_storedproc_common::cursor::ProgressTable;
+use drasi_computation_storedproc_common::settings;
 use drasi_mssql_common::sql::CommandTemplate;
 use drasi_reaction_common::{sql_template::validate_parameter_only, OperationType, QueryConfig};
 use serde::{Deserialize, Serialize};
@@ -19,12 +23,14 @@ use std::{collections::HashMap, time::Duration};
 
 /// Default SQL Server TCP port.
 pub const DEFAULT_PORT: u16 = 1433;
-/// Default destination cursor table.
-pub const DEFAULT_PROGRESS_TABLE: &str = "dbo.drasi_delivery_progress";
+/// Default destination cursor table (in schema `dbo`).
+pub const DEFAULT_PROGRESS_TABLE: &str =
+    drasi_computation_storedproc_common::cursor::DEFAULT_PROGRESS_TABLE;
 /// Default number of delivery streams one sink may keep in the cursor table.
-pub const DEFAULT_MAX_STREAMS: u32 = 4096;
+pub const DEFAULT_MAX_STREAMS: u32 =
+    drasi_computation_storedproc_common::cursor::DEFAULT_MAX_STREAMS;
 /// Upper bound on `maxStreams`.
-pub const MAX_MAX_STREAMS: u32 = 1_000_000;
+pub const MAX_MAX_STREAMS: u32 = drasi_computation_storedproc_common::cursor::MAX_STREAMS_LIMIT;
 /// Default per-round-trip command timeout.
 pub const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
 /// Upper bound on `commandTimeoutMs`.
@@ -33,14 +39,10 @@ pub const MAX_COMMAND_TIMEOUT_MS: u64 = 3_600_000;
 pub const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 15_000;
 /// Upper bound on `connectTimeoutMs`.
 pub const MAX_CONNECT_TIMEOUT_MS: u64 = 300_000;
-/// Default total time for reconnecting and retrying one operation.
-pub const DEFAULT_RETRY_BUDGET_MS: u64 = 60_000;
-/// Upper bound on `retryBudgetMs`.
-pub const MAX_RETRY_BUDGET_MS: u64 = 3_600_000;
+/// Default bound on closing the connection at Stop and Dispose.
+pub const DEFAULT_SHUTDOWN_TIMEOUT_MS: u64 = settings::DEFAULT_SHUTDOWN_TIMEOUT_MS;
 /// Upper bound on `trustedCaPem`.
 pub const MAX_PEM_BYTES: usize = drasi_mssql_common::client::MAX_PEM_BYTES;
-/// SQL Server identifier length limit.
-const MAX_IDENTIFIER: usize = 128;
 
 fn port() -> u16 {
     DEFAULT_PORT
@@ -57,8 +59,8 @@ fn command_timeout_ms() -> u64 {
 fn connect_timeout_ms() -> u64 {
     DEFAULT_CONNECT_TIMEOUT_MS
 }
-fn retry_budget_ms() -> u64 {
-    DEFAULT_RETRY_BUDGET_MS
+fn shutdown_timeout_ms() -> u64 {
+    DEFAULT_SHUTDOWN_TIMEOUT_MS
 }
 
 /// TDS encryption, shared with the native SQL Server source
@@ -93,6 +95,10 @@ pub struct MsSqlStoredProcConfig {
     /// progress; `atLeastOnce` also accepts in-memory queries.
     #[serde(default)]
     pub delivery_guarantee: DeliveryGuarantee,
+    /// `stall` (default) or `skip`: a skipped operation is recorded in the
+    /// dead-letter table atomically with the cursor advance.
+    #[serde(default)]
+    pub on_permanent_failure: PermanentFailurePolicy,
     #[serde(default, skip_serializing_if = "OutputAliases::is_empty")]
     pub outputs: OutputAliases,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -103,8 +109,8 @@ pub struct MsSqlStoredProcConfig {
     pub command_timeout_ms: u64,
     #[serde(default = "connect_timeout_ms")]
     pub connect_timeout_ms: u64,
-    #[serde(default = "retry_budget_ms")]
-    pub retry_budget_ms: u64,
+    #[serde(default = "shutdown_timeout_ms")]
+    pub shutdown_timeout_ms: u64,
 }
 
 impl std::fmt::Debug for MsSqlStoredProcConfig {
@@ -122,12 +128,13 @@ impl std::fmt::Debug for MsSqlStoredProcConfig {
             .field("progress_table", &self.progress_table)
             .field("max_streams", &self.max_streams)
             .field("delivery_guarantee", &self.delivery_guarantee)
+            .field("on_permanent_failure", &self.on_permanent_failure)
             .field("outputs", &self.outputs)
             .field("routes", &self.routes)
             .field("default_template", &self.default_template)
             .field("command_timeout_ms", &self.command_timeout_ms)
             .field("connect_timeout_ms", &self.connect_timeout_ms)
-            .field("retry_budget_ms", &self.retry_budget_ms)
+            .field("shutdown_timeout_ms", &self.shutdown_timeout_ms)
             .finish()
     }
 }
@@ -150,15 +157,16 @@ impl MsSqlStoredProcConfig {
             Field::new("trustServerCertificate", Boolean, false, "Skip server certificate validation (testing only; logs a warning). Mutually exclusive with trustedCaPem.").default(false),
             Field::new("trustedCaPem", String, false, "PEM CA certificates trusted in addition to the system roots when verifying the server certificate."),
             Field::new("hostNameInCertificate", String, false, "Host name expected in the server certificate when it differs from host.").default_description("The value of host."),
-            Field::new("progressTable", String, false, "Destination cursor table, as table or schema.table (letters, digits and underscores). Created at start when missing; see CONFIGURATION.md for grants.").default(DEFAULT_PROGRESS_TABLE),
+            Field::new("progressTable", String, false, "Destination cursor table (format 4, shared by the stored-procedure sinks), as table (in schema dbo) or schema.table, lowercase identifiers. Its dead-letter table <table>_dead_letter sits beside it. Created at start when missing; see CONFIGURATION.md for grants. Changing it is unsupported in place.").default(DEFAULT_PROGRESS_TABLE),
             Field::new("maxStreams", Integer, false, "Delivery streams this sink may keep in the progress table (one per producer output).").default(DEFAULT_MAX_STREAMS).minimum(1).maximum(MAX_MAX_STREAMS as u64),
             Field::new("deliveryGuarantee", String, false, "exactlyOnce accepts only producers with a durable output identity (for example persistent queries). atLeastOnce also accepts producers with a volatile identity (for example in-memory queries): their outputs are delivered at least once, deduplicated within one producer run, and not resumed across a process restart. An incompatible producer is refused when the edge is configured.").default(json!(DeliveryGuarantee::ExactlyOnce)).allowed([json!(DeliveryGuarantee::ExactlyOnce), json!(DeliveryGuarantee::AtLeastOnce)]),
+            Field::on_permanent_failure(),
             Field::new("outputs", Object, false, "Optional aliases for incoming outputs: a map of alias to {component, port?}. Every incoming edge is accepted; an unaliased output is named after its producing component. Routes match the alias.").constraint(drasi_computation_contracts::ConfigurationConstraint::output_aliases()),
             Field::new("routes", Object, false, "Per-output-alias command templates: {alias: {added?, updated?, deleted?: {template}}}. A route may also name the last dotted segment of an alias.").default(json!({})),
             Field::new("defaultTemplate", Object, false, "Command templates used when no route matches: {added?, updated?, deleted?: {template}}. At least one template must be configured across routes and defaultTemplate."),
             Field::new("commandTimeoutMs", Integer, false, "Deadline for each server round trip of a delivery statement (never for a whole input). An expired command drops the connection.").default(DEFAULT_COMMAND_TIMEOUT_MS).minimum(1).maximum(MAX_COMMAND_TIMEOUT_MS),
             Field::new("connectTimeoutMs", Integer, false, "Deadline for TCP, TLS and login of one connection attempt.").default(DEFAULT_CONNECT_TIMEOUT_MS).minimum(1).maximum(MAX_CONNECT_TIMEOUT_MS),
-            Field::new("retryBudgetMs", Integer, false, "Total time to reconnect and retry one operation (or the start preparation) after a retryable failure, with jittered exponential backoff. 0 disables in-call retries.").default(DEFAULT_RETRY_BUDGET_MS).minimum(0).maximum(MAX_RETRY_BUDGET_MS),
+            Field::new("shutdownTimeoutMs", Integer, false, "Bound on closing the connection at Stop and Dispose when the host gives no earlier deadline.").default(DEFAULT_SHUTDOWN_TIMEOUT_MS).minimum(1).maximum(settings::MAX_DURATION_MS),
         ])
         .expect("constant SQL Server stored-procedure configuration")
     }
@@ -193,10 +201,7 @@ impl MsSqlStoredProcConfig {
             (1..=MAX_CONNECT_TIMEOUT_MS).contains(&self.connect_timeout_ms),
             "connectTimeoutMs must be in 1..={MAX_CONNECT_TIMEOUT_MS}"
         );
-        ensure!(
-            self.retry_budget_ms <= MAX_RETRY_BUDGET_MS,
-            "retryBudgetMs must be in 0..={MAX_RETRY_BUDGET_MS}"
-        );
+        settings::validate_duration("shutdownTimeoutMs", self.shutdown_timeout_ms)?;
         self.outputs.validate()?;
         let mut configured = 0;
         for (template, location) in self.templates() {
@@ -256,8 +261,8 @@ impl MsSqlStoredProcConfig {
         Duration::from_millis(self.connect_timeout_ms)
     }
 
-    pub fn retry_budget(&self) -> Duration {
-        Duration::from_millis(self.retry_budget_ms)
+    pub fn shutdown_timeout(&self) -> Duration {
+        Duration::from_millis(self.shutdown_timeout_ms)
     }
 
     /// Every configured template with a description of where it is.
@@ -357,47 +362,4 @@ fn check_template_shape(value: &Value) -> Result<()> {
         operations(config, "defaultTemplate")?;
     }
     Ok(())
-}
-
-/// A validated `table` or `schema.table` name.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProgressTable {
-    schema: Option<String>,
-    table: String,
-}
-
-impl ProgressTable {
-    pub fn parse(name: &str) -> Result<Self> {
-        let parts: Vec<&str> = name.split('.').collect();
-        let (schema, table) = match parts.as_slice() {
-            [table] => (None, *table),
-            [schema, table] => (Some(*schema), *table),
-            _ => bail!("progressTable must be table or schema.table"),
-        };
-        for part in schema.iter().chain(std::iter::once(&table)) {
-            let mut characters = part.chars();
-            ensure!(
-                part.len() <= MAX_IDENTIFIER
-                    && characters
-                        .next()
-                        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
-                    && characters.all(|c| c.is_ascii_alphanumeric() || c == '_'),
-                "progressTable parts must start with a letter or underscore and contain only \
-                 letters, digits and underscores (at most 128 each)"
-            );
-        }
-        Ok(Self {
-            schema: schema.map(str::to_owned),
-            table: table.to_owned(),
-        })
-    }
-
-    /// The bracket-quoted name used in SQL text.
-    pub fn quoted(&self) -> String {
-        let quote = |part: &str| format!("[{}]", part.replace(']', "]]"));
-        match &self.schema {
-            Some(schema) => format!("{}.{}", quote(schema), quote(&self.table)),
-            None => quote(&self.table),
-        }
-    }
 }

@@ -8,7 +8,7 @@ use crate::{
     config::SourceConfig,
     management,
     progress::Membership,
-    worker::{PauseGate, Shared, Shutdown, Worker},
+    worker::{Output, PauseGate, Shared, Shutdown, Worker},
 };
 use anyhow::{bail, ensure, Context, Result};
 use async_trait::async_trait;
@@ -34,8 +34,8 @@ use drasi_core_types::{interface::StorageDurability, schema::SourceSchema};
 use drasi_mssql_common::{
     client::Authentication,
     native::{
-        self, error::is_transient, markers, CdcConnector, Cursor, CursorComparator, NativeSettings,
-        Poller, TiberiusConnector,
+        self, error::is_transient, markers, CdcConnector, CursorComparator, NativeSettings, Poller,
+        TiberiusConnector,
     },
 };
 use std::{
@@ -102,9 +102,8 @@ pub struct MsSqlSource {
     policy: Arc<InputPositionPolicy>,
     state: Arc<ReaderState>,
     schema_reader: Arc<SchemaReader>,
-    /// The cursor of a fresh group's first activation in this process; a
-    /// later activation that mixes fresh and resumed members needs it.
-    origin: Option<Cursor>,
+    /// Least time between idle progress records.
+    idle_progress: Duration,
     receiver: Option<mpsc::Receiver<OutputEnvelope>>,
     shutdown: watch::Sender<Shutdown>,
     pause: watch::Sender<bool>,
@@ -167,7 +166,7 @@ impl MsSqlSource {
             members: unique,
             schema_reader: Arc::new(SchemaReader(Arc::downgrade(&state))),
             state,
-            origin: None,
+            idle_progress: crate::worker::IDLE_PROGRESS,
             receiver: None,
             shutdown: watch::channel(Shutdown::Running).0,
             pause: watch::channel(false).0,
@@ -255,20 +254,25 @@ impl MsSqlSource {
         let mut session = connector.connect().await?;
         let poller =
             Poller::open(session.as_mut(), &settings, self.descriptor.id().as_str()).await?;
-        let resume = membership.resume(&observation, self.origin.as_ref())?;
-        let cursor = match resume {
-            Some(cursor) => {
-                poller.check_binding(&cursor)?;
-                Some(cursor)
+        // Fresh members of a group with committed cursors join at its
+        // minimum. Only a group with no cursor at all resolves an origin;
+        // `current` is then committed by every member before any change is
+        // published, while `beginning` is the retained minimum and needs no
+        // record.
+        let (cursor, origin) = match observation.minimum.clone() {
+            Some(minimum) => {
+                poller.check_binding(&minimum)?;
+                (Some(minimum), None)
             }
             None => {
                 let origin = poller.origin(session.as_mut(), &settings).await?;
-                if self.origin.is_none() {
-                    self.origin.clone_from(&origin);
-                }
-                origin
+                (origin.clone(), origin)
             }
         };
+        let mut queue = VecDeque::new();
+        if let Some(origin) = origin {
+            queue.push_back(Output::Progress(origin));
+        }
         Ok(Worker {
             source: self.descriptor.id().clone(),
             stream: self.stream.clone(),
@@ -278,8 +282,12 @@ impl MsSqlSource {
             shared: self.state.shared.clone(),
             progress: self.progress.clone(),
             membership,
+            holding: !queue.is_empty(),
+            emitted: cursor.clone(),
             cursor,
-            queue: VecDeque::new(),
+            queue,
+            last_emission: Instant::now(),
+            idle_progress: self.idle_progress,
             pause: PauseGate {
                 requested: self.pause.subscribe(),
                 acknowledged: self.paused.clone(),
@@ -441,6 +449,11 @@ impl MsSqlSource {
     }
 
     #[cfg(test)]
+    pub(crate) fn set_idle_progress(&mut self, interval: Duration) {
+        self.idle_progress = interval;
+    }
+
+    #[cfg(test)]
     pub(crate) fn sequence(&self) -> u64 {
         self.state.shared.sequence.load(Ordering::Acquire)
     }
@@ -518,8 +531,8 @@ impl NativeComponent for MsSqlSource {
     }
     /// Decision MS-21: replay is claimed across a process restart only. CDC
     /// change tables survive power loss, but the cleanup job purges them by
-    /// age, and the origin of a fresh group lives in process memory, so the
-    /// source cannot promise a stronger replay.
+    /// age, so the source cannot promise a stronger replay. A fresh group's
+    /// origin is committed by every member before any change is published.
     fn consumer_replay_retention(&self) -> Option<StorageDurability> {
         Some(StorageDurability::LOCAL_PROCESS_RESTART)
     }

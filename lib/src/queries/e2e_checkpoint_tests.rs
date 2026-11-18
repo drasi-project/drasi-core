@@ -65,7 +65,27 @@ struct E2eSourceControl {
     position_handle_removed: Arc<AtomicU32>,
     /// Sender for injecting events. Recreated in subscribe() for each subscription.
     event_tx: Arc<RwLock<Option<mpsc::Sender<Arc<SourceEventWrapper>>>>>,
+    /// Supply a one-row snapshot to fresh bootstrap subscriptions.
+    bootstrap: std::sync::atomic::AtomicBool,
+    /// Supply an empty snapshot instead of one row.
+    bootstrap_empty: std::sync::atomic::AtomicBool,
+    /// Omit the snapshot boundary cursor from the bootstrap result.
+    bootstrap_cursorless: std::sync::atomic::AtomicBool,
+    /// Element ID of the snapshot row (defaults to `snapshot`).
+    bootstrap_node_id: std::sync::Mutex<Option<&'static str>>,
+    /// Source sequence carried by the snapshot row.
+    bootstrap_sequence: AtomicU64,
+    /// When set, the bootstrap result is withheld and its sender stored here.
+    bootstrap_completion: std::sync::Mutex<Option<BootstrapCompletion>>,
+    /// The latest position handle; the query confirms committed sequences here.
+    position_handle: std::sync::Mutex<Option<Arc<AtomicU64>>>,
 }
+
+type BootstrapCompletion = Arc<
+    tokio::sync::Mutex<
+        Option<tokio::sync::oneshot::Sender<anyhow::Result<crate::bootstrap::BootstrapResult>>>,
+    >,
+>;
 
 struct E2eSourceFixture {
     id: crate::ComponentId,
@@ -142,6 +162,73 @@ impl E2eSourceControl {
     fn set_fail_count(&self, count: u32) {
         self.remaining_failures.store(count, Ordering::Release);
     }
+
+    fn with_bootstrap(&self) {
+        self.bootstrap.store(true, Ordering::Release);
+    }
+
+    /// Withhold the bootstrap result; the test completes or drops it.
+    fn defer_bootstrap_completion(&self) -> BootstrapCompletion {
+        let completion = Arc::new(tokio::sync::Mutex::new(None));
+        *self.bootstrap_completion.lock().unwrap() = Some(completion.clone());
+        completion
+    }
+
+    async fn bootstrap_response(
+        &self,
+        source_id: &crate::ComponentId,
+    ) -> (
+        Option<crate::channels::BootstrapEventReceiver>,
+        Option<tokio::sync::oneshot::Receiver<anyhow::Result<crate::bootstrap::BootstrapResult>>>,
+    ) {
+        use drasi_core::models::{
+            Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue,
+            SourceChange,
+        };
+        let (events, receiver) = mpsc::channel(1);
+        let (result, result_receiver) = tokio::sync::oneshot::channel();
+        let empty = self.bootstrap_empty.load(Ordering::Acquire);
+        if !empty {
+            let mut properties = ElementPropertyMap::new();
+            properties.insert("id", ElementValue::String(source_id.as_str().into()));
+            properties.insert("value", ElementValue::Integer(42));
+            let node = self.bootstrap_node_id.lock().unwrap().unwrap_or("snapshot");
+            events
+                .send(crate::channels::BootstrapEvent {
+                    source_id: source_id.clone(),
+                    change: SourceChange::Insert {
+                        element: Element::Node {
+                            metadata: ElementMetadata {
+                                reference: ElementReference::new(source_id.as_str(), node),
+                                labels: Arc::from(vec![Arc::from("Node")]),
+                                effective_from: 0,
+                            },
+                            properties,
+                        },
+                    },
+                    timestamp: chrono::Utc::now(),
+                    sequence: self.bootstrap_sequence.load(Ordering::Acquire),
+                })
+                .await
+                .unwrap();
+        }
+        let completion = self.bootstrap_completion.lock().unwrap().clone();
+        match completion {
+            Some(completion) => *completion.lock().await = Some(result),
+            None => result
+                .send(Ok(crate::bootstrap::BootstrapResult {
+                    event_count: usize::from(!empty),
+                    source_position: (!self.bootstrap_cursorless.load(Ordering::Acquire))
+                        .then(|| snapshot_cursor(source_id)),
+                }))
+                .unwrap(),
+        }
+        (Some(receiver), Some(result_receiver))
+    }
+}
+
+fn snapshot_cursor(source_id: &crate::ComponentId) -> Bytes {
+    Bytes::from(format!("snapshot-{source_id}"))
 }
 
 #[async_trait]
@@ -234,14 +321,31 @@ impl Source for E2eTestSource {
         } else {
             None
         };
+        self.position_handle
+            .lock()
+            .unwrap()
+            .clone_from(&position_handle);
+
+        // Like a replay-capable source: a native cursor or a framework sequence
+        // resumes the stream; only a fresh subscription bootstraps.
+        let (bootstrap_receiver, bootstrap_result_receiver) =
+            if self.bootstrap.load(Ordering::Acquire)
+                && settings.enable_bootstrap
+                && settings.resume_from.is_none()
+                && settings.resume_sequence.is_none()
+            {
+                self.bootstrap_response(self.id()).await
+            } else {
+                (None, None)
+            };
 
         Ok(SubscriptionResponse {
             query_id: settings.query_id,
             source_id: self.id().clone(),
             receiver: Box::new(ChannelChangeReceiver::new(rx)),
-            bootstrap_receiver: None,
+            bootstrap_receiver,
             position_handle,
-            bootstrap_result_receiver: None,
+            bootstrap_result_receiver,
         })
     }
 
@@ -263,7 +367,19 @@ async fn build_e2e_lib(
     tmp_dir: &tempfile::TempDir,
     default_recovery_policy: Option<RecoveryPolicy>,
 ) -> anyhow::Result<Arc<DrasiLib>> {
-    let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
+    build_e2e_lib_with(
+        id,
+        Arc::new(RocksDbIndexProvider::new(tmp_dir.path(), false, false)),
+        default_recovery_policy,
+    )
+    .await
+}
+
+async fn build_e2e_lib_with(
+    id: &str,
+    provider: Arc<dyn IndexBackendPlugin>,
+    default_recovery_policy: Option<RecoveryPolicy>,
+) -> anyhow::Result<Arc<DrasiLib>> {
     let mut builder = DrasiLib::builder()
         .with_allow_external_component_ids(true)
         .with_query_factory(
@@ -279,10 +395,7 @@ async fn build_e2e_lib(
                 .clone(),
         )
         .with_id(id)
-        .with_index_provider(
-            "persistent",
-            Arc::new(provider) as Arc<dyn IndexBackendPlugin>,
-        );
+        .with_index_provider("persistent", provider);
 
     if let Some(policy) = default_recovery_policy {
         builder = builder.with_default_recovery_policy(policy);
@@ -2177,5 +2290,910 @@ mod aggregate_snapshot_tests {
                 .collect::<std::collections::BTreeMap<_, _>>(),
             std::collections::BTreeMap::from([(aapl, stale), (msft, current)])
         );
+    }
+}
+
+/// Bootstrap handover, restart and replacement guarantees for persistent
+/// queries whose sources supply snapshots through ordinary subscriptions.
+mod durable_bootstrap_tests {
+    use super::*;
+    use drasi_core::interface::{
+        CheckpointKey, CheckpointStore, CreatedIndexes, IndexError, LiveResultsWriter,
+        OutputPartition, RowMutation, SourceCheckpoint,
+    };
+
+    const BOOTSTRAP_MARKER: &str = "\0computation:query-bootstrap:v1";
+
+    fn name(value: &str) -> crate::ComponentName {
+        crate::ComponentName::try_new(value).expect("fixture component name")
+    }
+
+    fn id(value: u128) -> crate::ComponentId {
+        crate::test_helpers::component_id(0xb007_0000 + value)
+    }
+
+    struct Sources {
+        controls: Vec<Arc<E2eSourceControl>>,
+        ids: Vec<crate::ComponentId>,
+    }
+
+    /// Adds `left` and `right`; `configure` prepares each control before use.
+    async fn add_sources(
+        core: &DrasiLib,
+        names: &[&str],
+        configure: impl Fn(usize, &E2eSourceControl),
+    ) -> Sources {
+        let mut sources = Sources {
+            controls: Vec::new(),
+            ids: Vec::new(),
+        };
+        for (index, source_name) in names.iter().enumerate() {
+            let fixture = E2eSourceFixture::new(id(index as u128 + 1), name(source_name), true);
+            configure(index, &fixture.control);
+            sources.controls.push(fixture.control.clone());
+            sources.ids.push(fixture.id.clone());
+            fixture.add_to(core).await.unwrap();
+            core.start_source_by_name(&name(source_name)).await.unwrap();
+        }
+        sources
+    }
+
+    fn query_config(
+        query_name: &str,
+        text: &str,
+        inputs: &[&str],
+        policy: RecoveryPolicy,
+    ) -> QueryConfig {
+        let mut builder = Query::cypher(name(query_name))
+            .with_id(id(0x100))
+            .query(text)
+            .enable_bootstrap(true)
+            .auto_start(false)
+            .with_storage_backend(StorageBackendRef::Named("persistent".into()))
+            .with_recovery_policy(policy);
+        for input in inputs {
+            builder = builder.from_input_by_name(name(input));
+        }
+        builder.build().unwrap()
+    }
+
+    async fn query_handle(
+        core: &DrasiLib,
+        query_name: &str,
+    ) -> Arc<dyn super::super::traits::Query> {
+        core.query_manager()
+            .get_query_instance_by_name(&name(query_name))
+            .await
+            .unwrap()
+    }
+
+    async fn wait_for_confirmed(control: &E2eSourceControl, sequence: u64) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let handle = control.position_handle.lock().unwrap().clone();
+                if handle.is_some_and(|handle| handle.load(Ordering::Acquire) == sequence) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("query must confirm the durable input checkpoint")
+    }
+
+    async fn subscriptions_closed(controls: &[Arc<E2eSourceControl>]) -> bool {
+        for control in controls {
+            if control
+                .event_tx
+                .read()
+                .await
+                .as_ref()
+                .is_some_and(|sender| !sender.is_closed())
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// A completed bootstrap is reopened from its committed boundary without
+    /// re-bootstrapping: each snapshot source resumes from its snapshot cursor
+    /// and every source resumes from framework sequence zero, so input admitted
+    /// after the snapshot is replayed rather than skipped. This holds for empty
+    /// snapshots and for sources that supply no snapshot at all, and for a
+    /// replacement bootstrap after an authorized configuration change.
+    #[rstest::rstest]
+    #[case::rows(false, 2, false)]
+    #[case::empty_snapshot(true, 2, false)]
+    #[case::mixed_sources(false, 1, false)]
+    #[case::no_bootstrap_providers(false, 0, false)]
+    #[case::replacement_rows(false, 2, true)]
+    #[case::replacement_mixed_sources(false, 1, true)]
+    #[tokio::test]
+    #[serial]
+    async fn bootstrap_snapshot_reopens_without_live_events(
+        #[case] empty: bool,
+        #[case] bootstrap_sources: usize,
+        #[case] replacement: bool,
+    ) {
+        let directory = tempfile::TempDir::new().unwrap();
+        // A replacement is a configuration change, which only AutoReset
+        // authorizes; first creation and reopen behave the same under both.
+        let policy = if replacement {
+            RecoveryPolicy::AutoReset
+        } else {
+            RecoveryPolicy::Strict
+        };
+        let last_run = if replacement { 2 } else { 1 };
+        let mut generation = None;
+        for run in 0..=last_run {
+            let seed = replacement && run == 0;
+            let restart = run == last_run;
+            let core = build_e2e_lib("bootstrap-reopen", &directory, None)
+                .await
+                .unwrap();
+            let sources = add_sources(&core, &["left", "right"], |index, control| {
+                if index < bootstrap_sources {
+                    control.with_bootstrap();
+                }
+                control.bootstrap_empty.store(empty, Ordering::Release);
+            })
+            .await;
+            core.add_query(query_config(
+                "bootstrap-q",
+                if seed {
+                    "MATCH (n:Node) RETURN n.id AS id, n.value AS previous_value"
+                } else {
+                    "MATCH (n:Node) RETURN n.id AS id, n.value AS value"
+                },
+                &["left", "right"],
+                policy,
+            ))
+            .await
+            .unwrap();
+            core.start_query_by_name(&name("bootstrap-q"))
+                .await
+                .unwrap();
+            let query = query_handle(&core, "bootstrap-q").await;
+            let snapshot = query.fetch_snapshot().await.unwrap();
+            assert_eq!(snapshot.as_of_sequence, 0, "run {run}");
+            if seed {
+                generation = Some(snapshot.output_generation);
+                core.shutdown().await.unwrap();
+                continue;
+            }
+            match (restart, generation) {
+                // A reopen keeps the completed bootstrap's output generation.
+                (true, Some(previous)) => assert_eq!(snapshot.output_generation, previous),
+                // A replacement bootstrap starts a new output generation.
+                (false, Some(previous)) => assert!(snapshot.output_generation > previous),
+                (_, None) => {}
+            }
+            generation = Some(snapshot.output_generation);
+            let mut rows = snapshot.to_vec();
+            rows.sort_by_key(|row| row["id"].as_str().unwrap().to_string());
+            let expected: Vec<_> = if empty {
+                Vec::new()
+            } else {
+                sources
+                    .ids
+                    .iter()
+                    .take(bootstrap_sources)
+                    .map(|source| serde_json::json!({"id": source.as_str(), "value": 42}))
+                    .collect()
+            };
+            assert_eq!(rows, expected, "run {run}");
+            assert!(query.fetch_outbox(0).await.unwrap().results.is_empty());
+            for (index, control) in sources.controls.iter().enumerate() {
+                assert_eq!(
+                    *control.last_resume_from.read().await,
+                    (restart && index < bootstrap_sources)
+                        .then(|| snapshot_cursor(&sources.ids[index])),
+                    "run {run} source {index}"
+                );
+                assert_eq!(
+                    *control.last_resume_sequence.read().await,
+                    restart.then_some(0),
+                    "run {run} source {index}"
+                );
+                assert_eq!(control.subscribe_count.load(Ordering::Acquire), 1);
+            }
+            core.shutdown().await.unwrap();
+        }
+    }
+
+    /// An event that changes no result still advances the durable input
+    /// checkpoint; a restart resumes after it (cursor and sequence-only
+    /// sources alike) while the output remains at the bootstrap boundary.
+    #[rstest::rstest]
+    #[case::cursor_only(false, RecoveryPolicy::Strict)]
+    #[case::sequence_only_strict(true, RecoveryPolicy::Strict)]
+    #[case::sequence_only_auto_reset(true, RecoveryPolicy::AutoReset)]
+    #[tokio::test]
+    #[serial]
+    async fn bootstrap_snapshot_reopens_after_filtered_event(
+        #[case] sequence_only: bool,
+        #[case] policy: RecoveryPolicy,
+    ) {
+        use drasi_core::models::{Element, ElementMetadata, ElementReference, SourceChange};
+        let directory = tempfile::TempDir::new().unwrap();
+        let names: &[&str] = if sequence_only {
+            &["source", "sequence-only"]
+        } else {
+            &["source"]
+        };
+        for restart in [false, true] {
+            let core = build_e2e_lib("bootstrap-filtered", &directory, None)
+                .await
+                .unwrap();
+            let sources = add_sources(&core, names, |index, control| {
+                if index == 0 {
+                    control.with_bootstrap();
+                }
+            })
+            .await;
+            core.add_query(query_config(
+                "filtered",
+                "MATCH (n:Node) WHERE n.value = 42 RETURN n.id AS id, n.value AS value",
+                names,
+                policy,
+            ))
+            .await
+            .unwrap();
+            core.start_query_by_name(&name("filtered")).await.unwrap();
+            let source = &sources.controls[0];
+            assert_eq!(
+                *source.last_resume_from.read().await,
+                restart.then(|| Bytes::from_static(b"filtered-1"))
+            );
+            assert_eq!(
+                *source.last_resume_sequence.read().await,
+                restart.then_some(1)
+            );
+            if sequence_only {
+                assert_eq!(
+                    *sources.controls[1].last_resume_sequence.read().await,
+                    Some(if restart { 7 } else { 0 }).filter(|_| restart)
+                );
+            }
+            let query = query_handle(&core, "filtered").await;
+            if !restart {
+                send_event(&source.event_tx, sources.ids[0].clone(), 1, b"filtered-1").await;
+                wait_for_confirmed(source, 1).await;
+                if sequence_only {
+                    let event = SourceEventWrapper::new(
+                        sources.ids[1].clone(),
+                        crate::channels::events::SourceEvent::Change(SourceChange::Insert {
+                            element: Element::Node {
+                                metadata: ElementMetadata {
+                                    reference: ElementReference::new(
+                                        sources.ids[1].as_str(),
+                                        "filtered",
+                                    ),
+                                    labels: Arc::from(vec![Arc::from("Excluded")]),
+                                    effective_from: 0,
+                                },
+                                properties: Default::default(),
+                            },
+                        }),
+                        chrono::Utc::now(),
+                        7,
+                    );
+                    let sender = sources.controls[1].event_tx.read().await.clone().unwrap();
+                    sender.send(Arc::new(event)).await.unwrap();
+                    wait_for_confirmed(&sources.controls[1], 7).await;
+                }
+            }
+            let snapshot = query.fetch_snapshot().await.unwrap();
+            assert_eq!(snapshot.as_of_sequence, 0);
+            assert_eq!(snapshot.output_generation, 0);
+            assert_eq!(
+                snapshot.to_vec(),
+                vec![serde_json::json!({"id": sources.ids[0].as_str(), "value": 42})]
+            );
+            assert!(query.fetch_outbox(0).await.unwrap().results.is_empty());
+            if restart {
+                send_event(&source.event_tx, sources.ids[0].clone(), 42, b"matching-42").await;
+                let outbox = wait_for_outbox_sequence(&core, &name("filtered"), 1).await;
+                assert_eq!(outbox.latest_sequence, 1);
+                let rows = query.fetch_snapshot().await.unwrap().to_vec();
+                assert_eq!(rows.len(), 2);
+                assert!(rows.contains(&serde_json::json!({"id": "node-42", "value": 42})));
+            }
+            core.shutdown().await.unwrap();
+        }
+    }
+
+    /// Source-native cursors, bootstrap ordinals and live framework sequences
+    /// are separate identities: the result sequence counts committed outputs
+    /// and the restart resumes from the last live event's sequence and cursor.
+    #[tokio::test]
+    #[serial]
+    async fn bootstrap_and_live_sequences_remain_independent_of_source_cursor_on_restart() {
+        const BOOTSTRAP_SEQUENCE: u64 = 1_000_000;
+        const FIRST_CURSOR: &[u8] = b"local-epoch:7";
+        const SECOND_CURSOR: &[u8] = b"local-epoch:8";
+        let directory = tempfile::TempDir::new().unwrap();
+        for restart in [false, true] {
+            let core = build_e2e_lib("sequence-instance", &directory, None)
+                .await
+                .unwrap();
+            let sources = add_sources(&core, &["cursor-source"], |_, control| {
+                control.with_bootstrap();
+                control
+                    .bootstrap_sequence
+                    .store(BOOTSTRAP_SEQUENCE, Ordering::Release);
+            })
+            .await;
+            let source = &sources.controls[0];
+            core.add_query(query_config(
+                "cursor-query",
+                "MATCH (n:Node) RETURN n.id AS id, n.value AS value",
+                &["cursor-source"],
+                RecoveryPolicy::Strict,
+            ))
+            .await
+            .unwrap();
+            core.start_query_by_name(&name("cursor-query"))
+                .await
+                .unwrap();
+            assert_eq!(
+                *source.last_resume_from.read().await,
+                restart.then(|| Bytes::from_static(FIRST_CURSOR))
+            );
+            assert_eq!(
+                *source.last_resume_sequence.read().await,
+                restart.then_some(BOOTSTRAP_SEQUENCE + 1)
+            );
+            let query = query_handle(&core, "cursor-query").await;
+            if restart {
+                let restored = query.fetch_snapshot().await.unwrap();
+                assert_eq!(restored.as_of_sequence, 1);
+                assert_eq!(restored.to_vec().len(), 2);
+            }
+            let result_sequence = if restart { 2 } else { 1 };
+            let event_sequence = BOOTSTRAP_SEQUENCE + result_sequence;
+            let cursor = if restart { SECOND_CURSOR } else { FIRST_CURSOR };
+            send_event(
+                &source.event_tx,
+                sources.ids[0].clone(),
+                event_sequence,
+                cursor,
+            )
+            .await;
+            let outbox =
+                wait_for_outbox_sequence(&core, &name("cursor-query"), result_sequence).await;
+            assert_eq!(outbox.latest_sequence, result_sequence);
+            let rows = query.fetch_snapshot().await.unwrap().to_vec();
+            assert_eq!(rows.len(), result_sequence as usize + 1);
+            for live in 1..=result_sequence {
+                assert!(rows.contains(&serde_json::json!({
+                    "id": format!("node-{}", BOOTSTRAP_SEQUENCE + live),
+                    "value": BOOTSTRAP_SEQUENCE + live,
+                })));
+            }
+            wait_for_confirmed(source, event_sequence).await;
+            core.shutdown().await.unwrap();
+        }
+    }
+
+    #[derive(Default)]
+    struct Fault {
+        handover_checkpoint: std::sync::atomic::AtomicBool,
+        snapshot_write: std::sync::atomic::AtomicBool,
+    }
+
+    struct FaultStore {
+        inner: Arc<dyn CheckpointStore>,
+        fault: Arc<Fault>,
+    }
+
+    #[async_trait]
+    impl CheckpointStore for FaultStore {
+        fn is_persistent(&self) -> bool {
+            self.inner.is_persistent()
+        }
+        async fn stage_checkpoint(
+            &self,
+            key: &CheckpointKey,
+            sequence: u64,
+            position: Option<&Bytes>,
+        ) -> Result<(), IndexError> {
+            if key.metadata_name() == Some(BOOTSTRAP_MARKER)
+                && sequence == 1
+                && self.fault.handover_checkpoint.load(Ordering::Acquire)
+            {
+                return Err(IndexError::IOError);
+            }
+            self.inner.stage_checkpoint(key, sequence, position).await
+        }
+        async fn read_checkpoint(
+            &self,
+            key: &CheckpointKey,
+        ) -> Result<Option<SourceCheckpoint>, IndexError> {
+            self.inner.read_checkpoint(key).await
+        }
+        async fn read_all_checkpoints(
+            &self,
+        ) -> Result<HashMap<CheckpointKey, SourceCheckpoint>, IndexError> {
+            self.inner.read_all_checkpoints().await
+        }
+        async fn clear_checkpoints(&self) -> Result<(), IndexError> {
+            self.inner.clear_checkpoints().await
+        }
+        async fn write_config_hash(&self, hash: u64) -> Result<(), IndexError> {
+            self.inner.write_config_hash(hash).await
+        }
+        async fn read_config_hash(&self) -> Result<Option<u64>, IndexError> {
+            self.inner.read_config_hash().await
+        }
+        async fn stage_result_sequence(
+            &self,
+            id: &OutputPartition,
+            sequence: u64,
+        ) -> Result<(), IndexError> {
+            self.inner.stage_result_sequence(id, sequence).await
+        }
+        async fn write_result_sequence(
+            &self,
+            id: &OutputPartition,
+            sequence: u64,
+        ) -> Result<(), IndexError> {
+            self.inner.write_result_sequence(id, sequence).await
+        }
+        async fn read_result_sequence(
+            &self,
+            id: &OutputPartition,
+        ) -> Result<Option<u64>, IndexError> {
+            self.inner.read_result_sequence(id).await
+        }
+        async fn write_output_generation(
+            &self,
+            id: &OutputPartition,
+            generation: u64,
+        ) -> Result<(), IndexError> {
+            self.inner.write_output_generation(id, generation).await
+        }
+        async fn read_output_generation(
+            &self,
+            id: &OutputPartition,
+        ) -> Result<Option<u64>, IndexError> {
+            self.inner.read_output_generation(id).await
+        }
+    }
+
+    struct FaultLiveResults {
+        inner: Arc<dyn LiveResultsWriter>,
+        fault: Arc<Fault>,
+    }
+
+    #[async_trait]
+    impl LiveResultsWriter for FaultLiveResults {
+        async fn apply_mutations(
+            &self,
+            id: &crate::ComponentId,
+            rows: &[RowMutation<'_>],
+        ) -> Result<(), IndexError> {
+            if self.fault.snapshot_write.load(Ordering::Acquire) {
+                return Err(IndexError::IOError);
+            }
+            self.inner.apply_mutations(id, rows).await
+        }
+        async fn read_snapshot(
+            &self,
+            id: &crate::ComponentId,
+        ) -> Result<Vec<(u64, Vec<u8>)>, IndexError> {
+            self.inner.read_snapshot(id).await
+        }
+        async fn clear(&self, id: &crate::ComponentId) -> Result<(), IndexError> {
+            self.inner.clear(id).await
+        }
+        async fn row_count(&self, id: &crate::ComponentId) -> Result<usize, IndexError> {
+            self.inner.row_count(id).await
+        }
+    }
+
+    struct FaultProvider {
+        inner: RocksDbIndexProvider,
+        fault: Arc<Fault>,
+    }
+
+    impl FaultProvider {
+        fn wrap(&self, mut indexes: CreatedIndexes) -> CreatedIndexes {
+            indexes.checkpoint_store = indexes.checkpoint_store.map(|inner| {
+                Arc::new(FaultStore {
+                    inner,
+                    fault: self.fault.clone(),
+                }) as Arc<dyn CheckpointStore>
+            });
+            indexes.live_results_writer = indexes.live_results_writer.map(|inner| {
+                Arc::new(FaultLiveResults {
+                    inner,
+                    fault: self.fault.clone(),
+                }) as Arc<dyn LiveResultsWriter>
+            });
+            indexes
+        }
+    }
+
+    #[async_trait]
+    impl IndexBackendPlugin for FaultProvider {
+        async fn create_indexes(
+            &self,
+            component_id: &crate::ComponentId,
+        ) -> Result<CreatedIndexes, IndexError> {
+            Ok(self.wrap(self.inner.create_indexes(component_id).await?))
+        }
+        async fn create_scoped_indexes(
+            &self,
+            storage_scope: &drasi_core::interface::StorageScope,
+            component_id: &crate::ComponentId,
+        ) -> Result<CreatedIndexes, IndexError> {
+            Ok(self.wrap(
+                self.inner
+                    .create_scoped_indexes(storage_scope, component_id)
+                    .await?,
+            ))
+        }
+        fn is_volatile(&self) -> bool {
+            self.inner.is_volatile()
+        }
+        fn durability(&self) -> drasi_core::interface::StorageDurability {
+            self.inner.durability()
+        }
+        fn supports_atomic_query_output(&self) -> bool {
+            self.inner.supports_atomic_query_output()
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum HandoverFailure {
+        /// One provider reports failure while the other never completes.
+        Provider { failing: usize },
+        /// One provider drops its result while the other never completes.
+        DroppedProvider { failing: usize },
+        /// The atomic handover commit (boundaries, marker, output) fails.
+        HandoverCommit,
+        /// Writing the durable snapshot rows fails.
+        SnapshotWrite,
+    }
+
+    /// A failed bootstrap handover never authorizes the queued live tail,
+    /// releases its source subscriptions, and leaves no partial boundary: a
+    /// restart refuses the incomplete snapshot under Strict and rebuilds it
+    /// from a new snapshot under AutoReset.
+    #[rstest::rstest]
+    #[case::provider_failure_first(HandoverFailure::Provider { failing: 0 })]
+    #[case::provider_failure_second(HandoverFailure::Provider { failing: 1 })]
+    #[case::dropped_provider_first(HandoverFailure::DroppedProvider { failing: 0 })]
+    #[case::dropped_provider_second(HandoverFailure::DroppedProvider { failing: 1 })]
+    #[case::handover_commit(HandoverFailure::HandoverCommit)]
+    #[case::snapshot_write(HandoverFailure::SnapshotWrite)]
+    #[tokio::test]
+    #[serial]
+    async fn bootstrap_handover_failure_cancels_tail_and_rolls_back(
+        #[case] failure: HandoverFailure,
+    ) {
+        let directory = tempfile::TempDir::new().unwrap();
+        let fault = Arc::new(Fault::default());
+        let core = build_e2e_lib_with(
+            "handover",
+            Arc::new(FaultProvider {
+                inner: RocksDbIndexProvider::new(directory.path(), false, false),
+                fault: fault.clone(),
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+        let completions = std::sync::Mutex::new(Vec::new());
+        let sources = add_sources(&core, &["left", "right"], |_, control| {
+            control.with_bootstrap();
+            completions
+                .lock()
+                .unwrap()
+                .push(control.defer_bootstrap_completion());
+        })
+        .await;
+        let completions = completions.into_inner().unwrap();
+        core.add_query(query_config(
+            "handover",
+            "MATCH (n:Node) RETURN n.id AS id, n.value AS value",
+            &["left", "right"],
+            RecoveryPolicy::Strict,
+        ))
+        .await
+        .unwrap();
+        fault.snapshot_write.store(
+            matches!(failure, HandoverFailure::SnapshotWrite),
+            Ordering::Release,
+        );
+        fault.handover_checkpoint.store(
+            matches!(failure, HandoverFailure::HandoverCommit),
+            Ordering::Release,
+        );
+        let started = {
+            let core = core.clone();
+            tokio::spawn(async move { core.start_query_by_name(&name("handover")).await })
+        };
+        // Both subscriptions are open and their providers are running.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let mut ready = true;
+                for completion in &completions {
+                    ready &= completion.lock().await.is_some();
+                }
+                if ready {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("both bootstrap providers must start");
+        // The tail is queued before the handover fails (a snapshot write
+        // failure may already have closed the subscription).
+        let tail = sources.controls[0].event_tx.read().await.clone().unwrap();
+        let _ = tail
+            .send(Arc::new(
+                SourceEventWrapper::new(
+                    sources.ids[0].clone(),
+                    crate::channels::events::SourceEvent::Change(
+                        drasi_core::models::SourceChange::Insert {
+                            element: drasi_core::models::Element::Node {
+                                metadata: drasi_core::models::ElementMetadata {
+                                    reference: drasi_core::models::ElementReference::new(
+                                        sources.ids[0].as_str(),
+                                        "live-1",
+                                    ),
+                                    labels: Arc::from(vec![Arc::from("Node")]),
+                                    effective_from: 0,
+                                },
+                                properties: Default::default(),
+                            },
+                        },
+                    ),
+                    chrono::Utc::now(),
+                    1,
+                )
+                .with_source_position(Bytes::from_static(b"live-1")),
+            ))
+            .await;
+        drop(tail);
+        for (index, completion) in completions.iter().enumerate() {
+            let sender = completion.lock().await.take().unwrap();
+            match failure {
+                HandoverFailure::Provider { failing } if index == failing => sender
+                    .send(Err(anyhow::anyhow!("injected provider failure")))
+                    .unwrap(),
+                HandoverFailure::DroppedProvider { failing } if index == failing => drop(sender),
+                // The other provider never finishes; the failure must cancel it.
+                HandoverFailure::Provider { .. } | HandoverFailure::DroppedProvider { .. } => {
+                    std::mem::forget(sender)
+                }
+                // A snapshot write failure may already have dropped the receiver.
+                HandoverFailure::HandoverCommit | HandoverFailure::SnapshotWrite => {
+                    let _ = sender.send(Ok(crate::bootstrap::BootstrapResult {
+                        event_count: 1,
+                        source_position: Some(snapshot_cursor(&sources.ids[index])),
+                    }));
+                }
+            }
+        }
+        // The start request may settle before or after the handover; either
+        // way the query must reach Error without waiting for the provider
+        // that never finishes.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), started)
+            .await
+            .expect("a failed handover must not wait for the unfinished provider");
+        wait_for_status(&core, &name("handover"), ComponentStatus::Error).await;
+        let query = query_handle(&core, "handover").await;
+        assert!(
+            query.fetch_snapshot().await.is_err(),
+            "a failed bootstrap must not publish a snapshot"
+        );
+        assert!(
+            query
+                .fetch_outbox(0)
+                .await
+                .map(|outbox| outbox.results.is_empty())
+                .unwrap_or(true),
+            "the queued tail must not run after the failure"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !subscriptions_closed(&sources.controls).await {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("source forwarders must be cancelled");
+        drop(query);
+        core.shutdown().await.unwrap();
+        drop(core);
+
+        for policy in [RecoveryPolicy::Strict, RecoveryPolicy::AutoReset] {
+            let core = build_e2e_lib("handover", &directory, None).await.unwrap();
+            let sources = add_sources(&core, &["left", "right"], |_, control| {
+                control.with_bootstrap()
+            })
+            .await;
+            core.add_query(query_config(
+                "handover",
+                "MATCH (n:Node) RETURN n.id AS id, n.value AS value",
+                &["left", "right"],
+                policy,
+            ))
+            .await
+            .unwrap();
+            let started = core.start_query_by_name(&name("handover")).await;
+            for control in &sources.controls {
+                assert_eq!(
+                    *control.last_resume_from.read().await,
+                    None,
+                    "no source boundary may survive a failed handover"
+                );
+                assert_eq!(*control.last_resume_sequence.read().await, None);
+            }
+            match policy {
+                RecoveryPolicy::Strict => {
+                    let error = format!("{:?}", started.unwrap_err());
+                    assert!(error.contains("bootstrap did not complete"), "{error}");
+                }
+                RecoveryPolicy::AutoReset => {
+                    started.unwrap();
+                    let snapshot = query_handle(&core, "handover")
+                        .await
+                        .fetch_snapshot()
+                        .await
+                        .unwrap();
+                    let mut rows = snapshot.to_vec();
+                    rows.sort_by_key(|row| row["id"].as_str().unwrap().to_string());
+                    assert_eq!(
+                        rows,
+                        sources
+                            .ids
+                            .iter()
+                            .map(|source| serde_json::json!({"id": source.as_str(), "value": 42}))
+                            .collect::<Vec<_>>()
+                    );
+                    assert_eq!(snapshot.as_of_sequence, 0);
+                }
+            }
+            core.shutdown().await.unwrap();
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum ReplacementCause {
+        ConfigChange,
+        IncompleteBootstrap,
+        SourceGap,
+    }
+
+    /// A replacement bootstrap (after a configuration change, an interrupted
+    /// bootstrap, or a source history gap) that is itself interrupted leaves
+    /// an incomplete durable bootstrap. Strict refuses it; AutoReset discards
+    /// the partially populated indexes and rebuilds from a complete snapshot.
+    #[rstest::rstest]
+    #[case::config_change_strict(ReplacementCause::ConfigChange, RecoveryPolicy::Strict)]
+    #[case::config_change_auto_reset(ReplacementCause::ConfigChange, RecoveryPolicy::AutoReset)]
+    #[case::incomplete_strict(ReplacementCause::IncompleteBootstrap, RecoveryPolicy::Strict)]
+    #[case::incomplete_auto_reset(ReplacementCause::IncompleteBootstrap, RecoveryPolicy::AutoReset)]
+    #[case::source_gap_strict(ReplacementCause::SourceGap, RecoveryPolicy::Strict)]
+    #[case::source_gap_auto_reset(ReplacementCause::SourceGap, RecoveryPolicy::AutoReset)]
+    #[tokio::test]
+    #[serial]
+    async fn interrupted_replacement_bootstrap_obeys_recovery_policy(
+        #[case] cause: ReplacementCause,
+        #[case] policy: RecoveryPolicy,
+    ) {
+        let directory = tempfile::TempDir::new().unwrap();
+        let text = |original: bool| {
+            if original && matches!(cause, ReplacementCause::ConfigChange) {
+                "MATCH (n:Node) RETURN count(n) AS previous_count"
+            } else {
+                "MATCH (n:Node) RETURN count(n) AS count"
+            }
+        };
+        let mut previous_generation = 0;
+        for original in [true, false] {
+            let core = build_e2e_lib("replacement-instance", &directory, None)
+                .await
+                .unwrap();
+            let incomplete = !original || matches!(cause, ReplacementCause::IncompleteBootstrap);
+            let mut completions = Vec::new();
+            let sources = add_sources(&core, &["source"], |_, control| {
+                control.with_bootstrap();
+                *control.bootstrap_node_id.lock().unwrap() =
+                    Some(if original { "original" } else { "interrupted" });
+                if !original && matches!(cause, ReplacementCause::SourceGap) {
+                    control.set_fail_count(1);
+                }
+            })
+            .await;
+            if incomplete {
+                completions.push(sources.controls[0].defer_bootstrap_completion());
+            }
+            core.add_query(query_config(
+                "replacement",
+                text(original),
+                &["source"],
+                RecoveryPolicy::AutoReset,
+            ))
+            .await
+            .unwrap();
+            if incomplete {
+                let start = {
+                    let core = core.clone();
+                    tokio::spawn(
+                        async move { core.start_query_by_name(&name("replacement")).await },
+                    )
+                };
+                // Wait until the snapshot row has been processed and the
+                // provider is still incomplete: the durable state of a crash
+                // after an indexed bootstrap row.
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while completions[0].lock().await.is_none() {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                core.shutdown().await.unwrap();
+                let _ = start.await;
+            } else {
+                core.start_query_by_name(&name("replacement"))
+                    .await
+                    .unwrap();
+                let snapshot = query_handle(&core, "replacement")
+                    .await
+                    .fetch_snapshot()
+                    .await
+                    .unwrap();
+                previous_generation = snapshot.output_generation;
+                core.shutdown().await.unwrap();
+            }
+        }
+
+        let core = build_e2e_lib("replacement-instance", &directory, None)
+            .await
+            .unwrap();
+        let sources = add_sources(&core, &["source"], |_, control| {
+            control.with_bootstrap();
+            *control.bootstrap_node_id.lock().unwrap() = Some("complete");
+        })
+        .await;
+        core.add_query(query_config(
+            "replacement",
+            text(false),
+            &["source"],
+            policy,
+        ))
+        .await
+        .unwrap();
+        let started = core.start_query_by_name(&name("replacement")).await;
+        match policy {
+            RecoveryPolicy::Strict => {
+                let error = format!("{:?}", started.unwrap_err());
+                assert!(error.contains("bootstrap did not complete"), "{error}");
+            }
+            RecoveryPolicy::AutoReset => {
+                started.unwrap();
+                let snapshot = query_handle(&core, "replacement")
+                    .await
+                    .fetch_snapshot()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    snapshot.to_vec(),
+                    vec![serde_json::json!({"count": 1})],
+                    "replacement must discard partially populated indexes"
+                );
+                assert!(snapshot.output_generation > previous_generation);
+                assert_eq!(*sources.controls[0].last_resume_from.read().await, None);
+            }
+        }
+        core.shutdown().await.unwrap();
     }
 }

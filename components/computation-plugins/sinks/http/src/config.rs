@@ -5,8 +5,9 @@
 //! published defaults and every check that does not need the graph's edges.
 
 use anyhow::{ensure, Context, Result};
+pub use drasi_computation_contracts::PermanentFailurePolicy;
 use drasi_computation_contracts::{OutputAliases, SinkOutputs};
-pub use drasi_computation_network_common::config::{duration, FailurePolicy, SecretString};
+pub use drasi_computation_network_common::config::{duration, SecretString};
 use drasi_computation_network_common::{
     config::{normalized_headers, timeout_ms, ClientTls, MAX_RETRIES, RESERVED_HEADERS},
     retry::{RetryPolicy, DEFAULT_RETRY_BUDGET_MS, MAX_RETRY_BUDGET_MS},
@@ -112,8 +113,9 @@ pub struct HttpSinkConfig {
     pub max_retries: u32,
     #[serde(default = "retry_budget_ms")]
     pub retry_budget_ms: u64,
+    /// What the graph does with an input the destination can never accept.
     #[serde(default)]
-    pub failure_policy: FailurePolicy,
+    pub on_permanent_failure: PermanentFailurePolicy,
     #[serde(default = "success_status_codes")]
     pub success_status_codes: Vec<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -150,7 +152,7 @@ impl HttpSinkConfig {
             Field::new("poolMaxIdlePerHost", Integer, false, "Idle pooled connections kept per host; 0 disables connection reuse.").default(pool_max_idle_per_host()).minimum(0).maximum(MAX_POOL_IDLE_PER_HOST as u64),
             Field::new("maxRetries", Integer, false, "Additional attempts after the first for a retryable failure.").default(retries()).minimum(0).maximum(MAX_RETRIES as u64),
             Field::new("retryBudgetMs", Integer, false, "Total time from the first attempt after which no retry starts; bounds how long one delivery can hold a handle.").default(retry_budget_ms()).minimum(1).maximum(MAX_RETRY_BUDGET_MS),
-            Field::new("failurePolicy", String, false, "strict fails the input so the host retries it; skip logs the failed change and completes the input.").default(json!(FailurePolicy::default())).allowed([json!(FailurePolicy::Strict), json!(FailurePolicy::Skip)]),
+            Field::on_permanent_failure(),
             Field::new("successStatusCodes", Array, false, "Response statuses (200..=299) that complete a delivery. 202 is excluded by default because it only reports queuing.").default(json!(DEFAULT_SUCCESS_STATUS_CODES)),
             Field::new("tlsCaPem", String, false, "PEM CA certificates trusted in addition to the built-in roots."),
             Field::new("tlsClientCertificatePem", String, false, "PEM client certificate chain for mutual TLS; requires tlsClientPrivateKeyPem."),
@@ -400,7 +402,7 @@ mod tests {
                 "outputs": outputs(), "url": "http://localhost/events", "headers": {},
                 "timeoutMs": 60000, "connectTimeoutMs": 10000, "poolIdleTimeoutMs": 90000,
                 "poolMaxIdlePerHost": 10, "maxRetries": 3, "retryBudgetMs": 120000,
-                "failurePolicy": "strict", "successStatusCodes": [200, 201, 203, 204],
+                "onPermanentFailure": "stall", "successStatusCodes": [200, 201, 203, 204],
                 "maxBatchBytes": 16777216, "maxRequestBytes": 33554432
             })
         );

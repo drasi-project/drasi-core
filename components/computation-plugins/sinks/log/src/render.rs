@@ -11,6 +11,7 @@
 
 use crate::config::{LogFormat, LogSinkConfig, OperationTemplates, RenderFailurePolicy};
 use anyhow::{bail, Context, Result};
+use drasi_computation_contracts::DeliveryFailure;
 use drasi_computation_contracts::{ChangeNotification, ChangeRoute, SinkOutputs};
 use handlebars::template::{Parameter, Template, TemplateElement};
 use handlebars::Handlebars;
@@ -144,10 +145,14 @@ impl Renderer {
                 fallback: None,
             }),
             Err(error) => match self.policy {
-                RenderFailurePolicy::Strict => Err(anyhow::Error::new(error).context(format!(
-                    "log template for output '{}' failed to render",
-                    notification.alias()
-                ))),
+                // The same input renders the same way every time.
+                RenderFailurePolicy::Strict => Err(DeliveryFailure::permanent(
+                    anyhow::Error::new(error).context(format!(
+                        "log template for output '{}' failed to render",
+                        notification.alias()
+                    )),
+                )
+                .into()),
                 RenderFailurePolicy::Fallback => Ok(Rendered {
                     message: format_plain(self.format, &context)?,
                     fallback: Some(error.to_string()),

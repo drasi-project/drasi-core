@@ -114,6 +114,66 @@ pub fn parse_retry_after(value: &str) -> Option<Duration> {
     Some(delay.to_std().unwrap_or(Duration::ZERO))
 }
 
+/// Applies a sink's declared `onPermanentFailure` to the changes of one
+/// input, which a network sink delivers one request at a time.
+///
+/// * A transient failure stops the input at once; the graph retries the whole
+///   input in place, and every request carries the same delivery identity.
+/// * A permanent failure under `stall` stops the input at once; the graph
+///   records a terminal failure on the node.
+/// * A permanent failure under `skip` is logged, and the remaining changes of
+///   the input are still delivered; the input then completes as permanently
+///   failed so the graph counts it as skipped.
+pub struct InputOutcome<'a> {
+    policy: drasi_computation_contracts::PermanentFailurePolicy,
+    component: &'a drasi_computation_contracts::ComponentId,
+    permanent: Option<anyhow::Error>,
+}
+
+impl<'a> InputOutcome<'a> {
+    pub fn new(
+        policy: drasi_computation_contracts::PermanentFailurePolicy,
+        component: &'a drasi_computation_contracts::ComponentId,
+    ) -> Self {
+        Self {
+            policy,
+            component,
+            permanent: None,
+        }
+    }
+
+    /// Records one classified delivery result; an error stops the input.
+    pub fn record(
+        &mut self,
+        result: anyhow::Result<()>,
+        output: &str,
+        sequence: u64,
+    ) -> anyhow::Result<()> {
+        use drasi_computation_contracts::{delivery_failure_class, PermanentFailurePolicy};
+        let Err(error) = result else {
+            return Ok(());
+        };
+        let permanent = delivery_failure_class(&error).is_some_and(|class| class.is_permanent());
+        if !permanent || self.policy == PermanentFailurePolicy::Stall {
+            return Err(error);
+        }
+        crate::diag!(
+            Warn,
+            "skipping an undeliverable change: component={} output={} sequence={sequence} error={}",
+            self.component,
+            crate::config::sanitize(output),
+            crate::config::sanitize(&format!("{error:#}"))
+        );
+        self.permanent.get_or_insert(error);
+        Ok(())
+    }
+
+    /// Completes the input: permanently failed if any change was skipped.
+    pub fn finish(self) -> anyhow::Result<()> {
+        self.permanent.map_or(Ok(()), Err)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

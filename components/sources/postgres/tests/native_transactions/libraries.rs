@@ -128,10 +128,6 @@ pub(super) fn options() -> DeliveryOptions {
         scope: RecoveryScope::Failure(FailureMode::ProcessRestart),
         max_streams: size(4),
         receipts_per_stream: size(4),
-        retry: DeliveryRetryPolicy {
-            max_attempts: size(3),
-            delay: Duration::from_millis(5),
-        },
     }
 }
 
@@ -150,7 +146,6 @@ pub(super) fn sink_settings(database: &Database) -> Value {
         "database": connection.database, "user": connection.user, "password": connection.password,
         "sslMode": if connection.ssl_mode == SslMode::Require { "require" } else { "disable" },
         "commandTimeoutMs": 5000, "connectTimeoutMs": 5000, "shutdownTimeoutMs": 5000,
-        "reconnectBudgetMs": 10000,
         "defaultTemplate": {
             "added": {"template": "CALL native_upsert('ADD', {{param after.id}}, {{param after.name}})"},
             "updated": {"template": "CALL native_upsert('UPDATE', {{param after.id}}, {{param after.name}})"},
@@ -280,7 +275,8 @@ async fn open(
             ResourceHandle::new(
                 ResourceRole::Checkpoint,
                 Arc::new(QuerySourceProgressResource(progress.clone())),
-            ),
+            )
+            .with_capabilities(ResourceCapabilities::DURABLE),
         )?
         .declare_resource(ResourceSpecification {
             id: settings.clone(),
@@ -721,22 +717,31 @@ async fn native_storedproc_retries_only_rolled_back_retryable_sql_outcomes() -> 
     .await?;
     consumer.initialize(&lifecycle_ctx::initialize()).await?;
     consumer.start(&lifecycle_ctx::start()).await?;
-    consumer
-        .handle(InputEnvelope {
-            port: PortId::try_new("in")?,
-            envelope: outputs[0].envelope.clone(),
-        })
-        .await?;
+    let input = || InputEnvelope {
+        port: PortId::try_new("in").expect("port"),
+        envelope: outputs[0].envelope.clone(),
+    };
+    // One attempt per delivery: a rolled-back serialization failure is
+    // returned as transient across the ABI and the graph retries the input.
+    for _ in 0..2 {
+        let error = consumer.handle(input()).await.unwrap_err();
+        assert!(
+            matches!(
+                drasi_lib::computation::v1::delivery_failure_class(&error),
+                Some(drasi_lib::computation::v1::DeliveryFailureClass::Transient { .. })
+            ),
+            "{error:#}"
+        );
+        assert_eq!(count(&database).await?, 0);
+    }
+    consumer.handle(input()).await?;
     assert_eq!(count(&database).await?, 1);
     let attempts: i64 = database
         .client()
         .query_one("SELECT last_value FROM retry_attempt", &[])
         .await?
         .get(0);
-    assert_eq!(
-        attempts, 3,
-        "the host must preserve the native handler's retry classification"
-    );
+    assert_eq!(attempts, 3, "each retry is one attempt");
     assert_eq!(consumer.progress().await?[0].completed_operations, 1);
     consumer.stop(&lifecycle_ctx::stop()).await?;
     drop(consumer);

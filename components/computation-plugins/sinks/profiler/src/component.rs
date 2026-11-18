@@ -4,7 +4,8 @@
 use anyhow::{ensure, Result};
 use async_trait::async_trait;
 use drasi_computation_contracts::{
-    ComponentDescriptor, InputEnvelope, QueryChangeCodec, SinkCompletion,
+    ComponentDescriptor, DeliveryFailure, InputEnvelope, PermanentFailurePolicy, QueryChangeCodec,
+    SinkCompletion,
 };
 use drasi_computation_plugin_sdk::lifecycle::{
     nothing_to_do, DisposeContext, InitializeContext, LifecycleResult, PauseContext, ResumeContext,
@@ -44,6 +45,7 @@ pub(super) fn configuration_definition() -> drasi_computation_plugin_sdk::Config
         )
         .default(report_interval_secs())
         .minimum(1),
+        Field::on_permanent_failure(),
     ])
     .expect("constant profiler sink configuration")
 }
@@ -55,6 +57,9 @@ pub struct ProfilerSinkConfig {
     pub window_size: usize,
     #[serde(default = "report_interval_secs")]
     pub report_interval_secs: u64,
+    /// What the graph does with an input that failed permanently.
+    #[serde(default)]
+    pub on_permanent_failure: PermanentFailurePolicy,
 }
 
 impl Default for ProfilerSinkConfig {
@@ -62,9 +67,14 @@ impl Default for ProfilerSinkConfig {
         Self {
             window_size: window_size(),
             report_interval_secs: report_interval_secs(),
+            on_permanent_failure: PermanentFailurePolicy::default(),
         }
     }
 }
+
+/// The `log` target of every profiling report. Loaded as a library, the
+/// SDK forwards these records to the host's logger.
+pub const REPORT_TARGET: &str = "drasi.profiler";
 
 impl ProfilerSinkConfig {
     pub fn parse(value: serde_json::Value) -> Result<Self> {
@@ -127,7 +137,7 @@ impl Samples {
 
     fn report(&self, component: &str) {
         if self.values.is_empty() {
-            log::info!("[{component}] no profiling data collected");
+            log::info!(target: REPORT_TARGET, "[{component}] no profiling data collected");
             return;
         }
         for line in [
@@ -152,7 +162,7 @@ impl Samples {
         .into_iter()
         .flatten()
         {
-            log::info!("[{component}] {line}");
+            log::info!(target: REPORT_TARGET, "[{component}] {line}");
         }
     }
 }
@@ -246,7 +256,10 @@ impl NativeSink for ProfilerSink {
 
     async fn handle(&mut self, input: InputEnvelope) -> Result<()> {
         ensure!(input.port.as_str() == "in", "unknown profiler input port");
-        if let Some(mut profiling) = QueryChangeCodec::metadata(&input.envelope)?.profiling {
+        // An envelope without query output metadata never gains it.
+        let metadata =
+            QueryChangeCodec::metadata(&input.envelope).map_err(DeliveryFailure::permanent)?;
+        if let Some(mut profiling) = metadata.profiling {
             let received = timestamp_ns();
             profiling.reaction_receive_ns = Some(received);
             profiling.reaction_complete_ns = Some(timestamp_ns());

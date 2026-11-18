@@ -13,7 +13,6 @@ mod component;
 pub mod config;
 mod connection;
 pub mod management;
-mod retry;
 
 use anyhow::{Context, Result};
 use drasi_computation_contracts::{
@@ -31,9 +30,10 @@ use std::sync::Arc;
 pub use component::{PostgresStoredProcSink, RenderError};
 pub use config::{CommandRoute, CommandSpec, PostgresStoredProcConfig, SslMode};
 pub use connection::{ConnectError, APPLICATION_NAME};
+pub use drasi_computation_storedproc_common::owner;
 pub use drasi_postgres_common::delivery::progress::{
-    create_table_sql, DeliveryError, DeliveryOwner, Disposition, ProgressTable, ProgressTableError,
-    DEFAULT_MAX_STREAMS, DEFAULT_PROGRESS_TABLE, PROGRESS_FORMAT_VERSION,
+    create_table_sql, disposition_of_code, qualified, Disposition, ProgressTable,
+    ProgressTableError, DEFAULT_MAX_STREAMS, DEFAULT_PROGRESS_TABLE, PROGRESS_FORMAT_VERSION,
 };
 
 pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
@@ -79,7 +79,7 @@ impl PostgresStoredProcFactory {
             "PostgreSQL sink requires its construction scope: the graph identity names the \
              destination cursor owner",
         )?;
-        let owner = DeliveryOwner::derive(&scope.graph_id, request.id.as_str());
+        let owner = owner(&scope.graph_id, request.id.as_str());
         let outputs = SinkOutputs::from_inputs(&request.inputs, &config.outputs)?;
         PostgresStoredProcSink::new(
             self.metadata().descriptor(request.id.clone())?,
@@ -91,19 +91,14 @@ impl PostgresStoredProcFactory {
 }
 
 impl Factory for PostgresStoredProcFactory {
-    /// A consumer whose inputs deliver with its configured `deliveryGuarantee`.
+    /// A consumer whose inputs deliver with its configured
+    /// `deliveryGuarantee` and which applies its `onPermanentFailure`.
     fn describe(
         &self,
         request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
     ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        let guarantee = match request.request.configuration.get("deliveryGuarantee") {
-            None | Some(serde_json::Value::Null) => {
-                drasi_computation_plugin_sdk::DeliveryGuarantee::ExactlyOnce
-            }
-            Some(value) => serde_json::from_value(value.clone())
-                .map_err(|error| anyhow::anyhow!("invalid deliveryGuarantee: {error}"))?,
-        };
-        Ok(request.consumer(guarantee))
+        let config = PostgresStoredProcConfig::parse(request.request.configuration.clone())?;
+        Ok(request.consumer(config.delivery_guarantee, config.on_permanent_failure))
     }
     fn metadata(&self) -> FactoryMetadata {
         FactoryMetadata {

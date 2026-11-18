@@ -15,6 +15,7 @@ use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use drasi_computation_contracts::{
     ComponentDescriptor, DeliveryHandler, DeliveryItem, EnvelopeCodec, GraphChangeCodec,
+    PermanentFailurePolicy,
 };
 use drasi_computation_network_common::{
     config::ClientTls,
@@ -64,6 +65,10 @@ pub struct HttpDeliveryConfig {
     pub tls_client_certificate_pem: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_client_private_key_pem: Option<SecretString>,
+    /// `stall` (default) or `skip`: a batch the endpoint rejects permanently
+    /// is recorded as completed in the delivery ledger and counted as skipped.
+    #[serde(default)]
+    pub on_permanent_failure: PermanentFailurePolicy,
 }
 
 impl HttpDeliveryConfig {
@@ -82,6 +87,7 @@ impl HttpDeliveryConfig {
             Field::new("tlsCaPem", String, false, "PEM CA certificates trusted in addition to the built-in roots."),
             Field::new("tlsClientCertificatePem", String, false, "PEM client certificate chain for mutual TLS; requires tlsClientPrivateKeyPem."),
             Field::new("tlsClientPrivateKeyPem", String, false, "PEM private key for tlsClientCertificatePem.").secret(),
+            Field::on_permanent_failure(),
         ])
         .expect("constant HTTP delivery configuration")
     }
@@ -144,6 +150,11 @@ pub(crate) fn plan(current: &HttpDeliveryConfig, proposed: &HttpDeliveryConfig) 
         "connectTimeoutMs",
         c.connect_timeout_ms != p.connect_timeout_ms,
         Stop,
+    );
+    planner.field(
+        "onPermanentFailure",
+        c.on_permanent_failure != p.on_permanent_failure,
+        Replace,
     );
     planner.field("token", c.token != p.token, Pause);
     planner.field("timeoutMs", c.timeout_ms != p.timeout_ms, Pause);
@@ -212,7 +223,8 @@ impl HttpDeliveryConsumer {
             Self::codec()?,
             self.config.message_bytes()?,
             Duration::from_millis(self.config.timeout_ms),
-        )?;
+        )?
+        .with_permanent_failure(self.config.on_permanent_failure);
         handler.set_options(
             self.config.message_bytes()?,
             Duration::from_millis(self.config.timeout_ms),
@@ -336,9 +348,6 @@ impl NativeManagement for HttpDeliveryConsumer {
 
 #[async_trait]
 impl DeliveryHandler for HttpDeliveryConsumer {
-    fn retryable(&self, error: &anyhow::Error) -> bool {
-        crate::delivery::retryable(error)
-    }
     async fn handle(&mut self, item: DeliveryItem<'_>) -> Result<()> {
         ensure!(
             item.port.as_str() == "in",

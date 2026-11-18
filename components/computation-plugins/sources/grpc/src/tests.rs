@@ -468,3 +468,26 @@ fn unauthenticated_non_loopback_listeners_are_refused_at_construction() -> Resul
     .is_ok());
     Ok(())
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn idle_connections_are_closed_after_the_header_read_timeout() -> Result<()> {
+    use tokio::io::AsyncReadExt;
+    let config = with(
+        base(free_port()),
+        json!({"maxConnections": 1, "headerReadTimeoutMs": 100}),
+    );
+    let port = config["port"].as_u64().context("port")?;
+    let mut source = started(config).await?;
+    // A socket that never sends the HTTP/2 preface holds the only slot until
+    // the deadline, then is closed so a real client can connect.
+    let mut idle = tokio::net::TcpStream::connect(("127.0.0.1", port as u16)).await?;
+    let mut buffer = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), idle.read_to_end(&mut buffer))
+        .await
+        .context("idle connection must be closed")?
+        .ok();
+    submit(port, None, 1).await??;
+    assert!(source.next().await?.is_some());
+    source.stop(&contexts::stop(StopMode::Drain)).await?;
+    Ok(())
+}

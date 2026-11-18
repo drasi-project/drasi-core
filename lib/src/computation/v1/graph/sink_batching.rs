@@ -1,8 +1,12 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+use super::sink_delivery::{self, FailureAction, SinkDeliveryStatus};
 use super::*;
-use crate::computation::v1::{Acknowledgement, HandlingOutcome, SinkBatching};
+use crate::computation::v1::{
+    Acknowledgement, ComponentOperationError, FailureDisposition, HandlingOutcome,
+    PermanentFailurePolicy, SinkBatching,
+};
 use tokio::time::Instant;
 
 #[cfg(test)]
@@ -27,6 +31,25 @@ pub(super) struct SinkBatchState {
     completed: usize,
     acknowledging: Option<BoxFuture<'static, Result<(), PipeError>>>,
     acknowledgement_failed: bool,
+    /// Failed attempts of the input at the head of the batch.
+    attempts: u32,
+    /// Inputs to deliver one at a time to isolate a permanently failing one.
+    isolate: usize,
+}
+
+/// Whether a flush delivered every retained input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Flushed {
+    Complete,
+    /// Stop or pause arrived while an input awaited retry; it stays retained.
+    Interrupted,
+}
+
+/// What follows a failed delivery attempt.
+enum Settled {
+    Retry,
+    Skipped,
+    Interrupted,
 }
 
 impl SinkBatchState {
@@ -156,12 +179,15 @@ impl SinkBatchState {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn flush(
         &mut self,
         component: &mut Component,
         node: &NodeSnapshot,
         input_progress: &mut Option<Box<input_progress::InputProgress>>,
-    ) -> GraphResult<()> {
+        quiesce: &mut watch::Receiver<bool>,
+        delivery: &SinkDeliveryStatus,
+    ) -> GraphResult<Flushed> {
         self.flushing = true;
         self.acknowledge().await?;
         while !self.inputs.is_empty() {
@@ -177,10 +203,11 @@ impl SinkBatchState {
                     .map_err(|error| component_error(node, "sink batch policy", error))?;
             }
             let first = self.inputs.front().expect("nonempty batch");
-            let use_batch = policy.is_some_and(|policy| {
-                !SinkBatching::is_barrier(&first.input)
-                    && first.bytes.saturating_add(5) <= policy.max_bytes
-            });
+            let use_batch = self.isolate == 0
+                && policy.is_some_and(|policy| {
+                    !SinkBatching::is_barrier(&first.input)
+                        && first.bytes.saturating_add(5) <= policy.max_bytes
+                });
             let count = if use_batch {
                 let policy = policy.expect("batch policy");
                 let mut bytes = 5usize;
@@ -223,7 +250,7 @@ impl SinkBatchState {
                     .as_ref()
                     .is_none_or(|inputs| !inputs[index].duplicate)
             };
-            if use_batch {
+            let (operation, result) = if use_batch {
                 let batch: Vec<_> = self
                     .inputs
                     .iter()
@@ -232,16 +259,35 @@ impl SinkBatchState {
                     .filter(|(index, _)| is_new(*index))
                     .map(|(_, input)| input.input.clone())
                     .collect();
-                if !batch.is_empty() {
-                    sink.handle_batch(batch)
-                        .await
-                        .map_err(|error| component_error(node, "handle batch", error))?;
-                }
+                let result = if batch.is_empty() {
+                    Ok(())
+                } else {
+                    sink.handle_batch(batch).await
+                };
+                ("handle batch", result)
             } else if is_new(0) {
-                sink.handle(first.input.clone())
-                    .await
-                    .map_err(|error| component_error(node, "handle", error))?;
+                ("handle", sink.handle(first.input.clone()).await)
+            } else {
+                ("handle", Ok(()))
+            };
+            match result {
+                Ok(()) => {
+                    if std::mem::take(&mut self.attempts) > 0 {
+                        delivery.recovered();
+                    }
+                }
+                Err(error) => {
+                    match self
+                        .settle(component, node, operation, error, count, quiesce, delivery)
+                        .await?
+                    {
+                        Settled::Retry => continue,
+                        Settled::Interrupted => return Ok(Flushed::Interrupted),
+                        Settled::Skipped => {}
+                    }
+                }
             }
+            self.isolate = self.isolate.saturating_sub(count);
             check_descriptor(component, node)?;
             if let (Some(progress), Some(prepared)) = (input_progress.as_mut(), prepared) {
                 progress.confirm(prepared);
@@ -251,7 +297,74 @@ impl SinkBatchState {
         }
         self.flushing = false;
         self.deadline = None;
-        Ok(())
+        Ok(Flushed::Complete)
+    }
+
+    /// Applies the delivery-failure model to one failed attempt of the
+    /// `count` inputs at the head of the batch.
+    #[allow(clippy::too_many_arguments)]
+    async fn settle(
+        &mut self,
+        component: &Component,
+        node: &NodeSnapshot,
+        operation: &'static str,
+        error: anyhow::Error,
+        count: usize,
+        quiesce: &mut watch::Receiver<bool>,
+        delivery: &SinkDeliveryStatus,
+    ) -> GraphResult<Settled> {
+        let id = node.descriptor.id();
+        match sink_delivery::classify(&error) {
+            FailureAction::Fail => Err(component_error(node, operation, error)),
+            FailureAction::Permanent if count > 1 => {
+                // Deliver these inputs one at a time so that only the input
+                // that can never be delivered is subject to the policy.
+                self.isolate = count;
+                Ok(Settled::Retry)
+            }
+            FailureAction::Permanent => {
+                match sink_delivery::permanent_policy(component.description()) {
+                    PermanentFailurePolicy::Stall => {
+                        log::error!(
+                            "Sink {id} stalled on an input that can never be delivered: {error:#}"
+                        );
+                        Err(component_error(
+                            node,
+                            operation,
+                            ComponentOperationError::new(FailureDisposition::Terminal, error)
+                                .into(),
+                        ))
+                    }
+                    PermanentFailurePolicy::Skip => {
+                        log::warn!(
+                            "Sink {id} skipped an input that can never be delivered: {error:#}"
+                        );
+                        if std::mem::take(&mut self.attempts) > 0 {
+                            delivery.recovered();
+                        }
+                        delivery.skipped();
+                        Ok(Settled::Skipped)
+                    }
+                }
+            }
+            FailureAction::Retry(retry_after) => {
+                self.attempts = self.attempts.saturating_add(1);
+                let delay = sink_delivery::backoff(self.attempts, retry_after);
+                log::warn!(
+                    "Sink {id} delivery attempt {} failed; retrying the same input in {delay:?}: {error:#}",
+                    self.attempts
+                );
+                delivery.retrying(component_error(node, operation, error));
+                if *quiesce.borrow() {
+                    return Ok(Settled::Interrupted);
+                }
+                tokio::select! {
+                    biased;
+                    _ = cancelled(quiesce) => Ok(Settled::Interrupted),
+                    _ = tokio::time::sleep(delay) => Ok(Settled::Retry),
+                }
+            }
+        }
     }
 }
 
@@ -334,6 +447,7 @@ pub(super) async fn run(
     budget: &NodeWorkBudget,
     retained: &mut Option<Box<SinkBatchState>>,
     input_progress: &mut Option<Box<input_progress::InputProgress>>,
+    delivery: &SinkDeliveryStatus,
 ) -> GraphResult<()> {
     if inputs.is_empty() && retained.as_ref().is_none_or(|state| state.is_empty()) {
         cancelled(quiesce).await;
@@ -356,7 +470,9 @@ pub(super) async fn run(
         }
         if *quiesce.borrow() {
             if !state.is_empty() {
-                state.flush(component, node, input_progress).await?;
+                state
+                    .flush(component, node, input_progress, quiesce, delivery)
+                    .await?;
             }
             return Ok(());
         }
@@ -366,7 +482,13 @@ pub(super) async fn run(
                     .as_ref()
                     .is_some_and(|activity| activity.draining()))
         {
-            state.flush(component, node, input_progress).await?;
+            if state
+                .flush(component, node, input_progress, quiesce, delivery)
+                .await?
+                == Flushed::Interrupted
+            {
+                return Ok(());
+            }
             continue;
         }
         if state.is_empty()
@@ -434,7 +556,9 @@ pub(super) async fn run(
         };
         let Some(selected) = selected else {
             if !state.is_empty() {
-                state.flush(component, node, input_progress).await?;
+                state
+                    .flush(component, node, input_progress, quiesce, delivery)
+                    .await?;
             }
             return Ok(());
         };
@@ -454,7 +578,13 @@ pub(super) async fn run(
                 .crosses_boundary(&candidate, policy)
                 .map_err(|error| component_error(node, "measure sink input", error))?
             {
-                state.flush(component, node, input_progress).await?;
+                if state
+                    .flush(component, node, input_progress, quiesce, delivery)
+                    .await?
+                    == Flushed::Interrupted
+                {
+                    return Ok(());
+                }
                 continue;
             }
         }

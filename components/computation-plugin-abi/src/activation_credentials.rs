@@ -4,16 +4,20 @@
 //! Optional activation-credentials protocol. Base tables and the current wire version are
 //! unchanged. A supporting factory accepts the versioned creation envelope on
 //! its existing create callbacks, and bound instances accept credential payloads
-//! only on their normal, owned START operation. No credential-fetch RPC exists.
+//! only on their normal, owned START operation and on an erasing DISPOSE (an
+//! erase may have to reach the external system without any start in this
+//! process). No credential-fetch RPC exists.
 //!
 //! All payloads are bounded named MessagePack. A bound creation is
 //! `{activation_credentials_version: 1, request: <base CreateRequest>}`; the
 //! ordinary request and immutable configuration are not modified. This envelope
 //! also applies to source/bootstrap coordinator creation when identity-bound.
-//! Bound START carries `credentials` in its lifecycle context, either
+//! Bound START and bound DISPOSE with `intent: Erase` carry `credentials` in
+//! their lifecycle context, either
 //! `{kind: "usernamePassword", username, password}` or
 //! `{kind: "token", username, token}`. Certificates and unknown fields/kinds are
-//! rejected. An unbound START context must not carry credentials.
+//! rejected. Any other context, and every context of an unbound instance, must
+//! not carry credentials.
 
 use crate::{BorrowedBytes, Header, Reply};
 use std::ffi::c_void;

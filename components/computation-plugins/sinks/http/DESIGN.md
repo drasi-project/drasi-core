@@ -78,9 +78,10 @@ or recovery frame fails the input; an empty change set sends nothing.
 ## Delivery profile (HTTP sink): `Handled`
 
 `handle` returns `Ok` only when every change of the input was delivered (a
-configured success status was received), or a failed change was deliberately
-skipped under `failurePolicy: skip`. There is no local queue: a returned `Ok` is
-never "accepted for later".
+configured success status was received). Under `onPermanentFailure: skip`, an
+input with a permanently rejected change still delivers its other changes and
+then fails permanently, so the graph counts it as skipped. There is no local
+queue: a returned `Ok` is never "accepted for later".
 
 Exact duplicate windows (the destination may see the same change again; every
 repeat carries the same `x-drasi-delivery-id`):
@@ -89,9 +90,12 @@ repeat carries the same `x-drasi-delivery-id`):
    the request was written, or a retryable status (for example a 503 returned
    after the destination applied the effect) is retried with the identical
    request.
-2. **Replay of a failed input.** Under `strict`, a failure fails the whole
-   input; the host retries it later. Changes of that input that were already
-   delivered (earlier single requests, or earlier batch chunks) are sent again.
+2. **Replay of a failed input.** A transient failure fails the whole input,
+   and the graph retries it in place with backoff (see the
+   [delivery-failure model](../NATIVE-SINK-GUIDE.md#delivery-failures)).
+   Changes of that input that were already delivered (earlier single requests,
+   or earlier batch chunks) are sent again. Under `skip`, a permanently failed
+   batch is redelivered one input at a time to isolate the rejected input.
 3. **Crash or cancellation before acknowledgement.** If the process stops, or
    the host drops the in-flight `handle` (Stop with `Abort`, a deadline), after
    the destination completed a request but before the host acknowledged the
@@ -244,7 +248,8 @@ HTTP sink:
 
 - **Pause (InPlace):** `outputTemplates`, `headers`, `secretHeaders`, `token`,
   `timeoutMs`, `maxRequestBytes`, `maxRetries`, `retryBudgetMs`,
-  `failurePolicy`, `successStatusCodes` — everything read per delivery.
+  `successStatusCodes` — everything read per delivery. `onPermanentFailure` is
+  a Replace: it is part of the description the graph captured.
 - **Stop (Restart):** `url`, `baseUrl`, `batchEndpoint`, `adaptive`,
   `maxBatchBytes` (the host batching declaration), TLS fields,
   `connectTimeoutMs`, `poolIdleTimeoutMs`, `poolMaxIdlePerHost`.

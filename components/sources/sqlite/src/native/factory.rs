@@ -110,9 +110,26 @@ impl Default for SqliteSourceFactory {
 impl ComponentFactory for SqliteSourceFactory {
     fn describe(
         &self,
-        _context: &drasi_lib::computation::v1::ConstructionContext,
+        context: &drasi_lib::computation::v1::ConstructionContext,
     ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
-        Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
+        use drasi_sqlite_common::native::SqliteProgress;
+        let bound = |name: &str| {
+            context
+                .specification
+                .dependencies
+                .get(name)
+                .is_some_and(|ids| !ids.is_empty())
+        };
+        Ok(drasi_sqlite_common::native::description(
+            if bound("source_progress") {
+                SqliteProgress::Single
+            } else if bound("consumer_progress") {
+                SqliteProgress::Group
+            } else {
+                SqliteProgress::None
+            },
+            &context.specification.descriptor,
+        ))
     }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor

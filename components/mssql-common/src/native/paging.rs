@@ -198,6 +198,52 @@ impl Poller {
         })
     }
 
+    /// The maximum LSN and each capture instance's retained minimum, checking
+    /// that every instance is available and that `cursor` is neither ahead of
+    /// CDC nor behind its retention.
+    async fn retained(
+        &self,
+        session: &mut dyn CdcSession,
+        cursor: Option<&Cursor>,
+    ) -> Result<([u8; 10], Vec<[u8; 10]>)> {
+        let catalog = &self.catalog;
+        let captures: Vec<&str> = catalog.tables.iter().map(|t| t.capture.as_str()).collect();
+        let max = max_lsn(session).await?;
+        let mins = session.min_lsns(&captures).await?;
+        ensure!(
+            mins.len() == catalog.tables.len(),
+            "SQL Server returned {} minimum LSNs for {} capture instances",
+            mins.len(),
+            catalog.tables.len()
+        );
+        for (table, min) in catalog.tables.iter().zip(&mins) {
+            if *min == [0; 10] {
+                return Err(position_unavailable(format!(
+                    "capture instance {} of {} is unavailable",
+                    table.capture,
+                    table.canonical()
+                )));
+            }
+        }
+        if let Some(cursor) = cursor {
+            if cursor.lsn > max {
+                return Err(position_unavailable(
+                    "the committed cursor is ahead of the CDC maximum LSN (the database was \
+                     restored or CDC was re-enabled)",
+                ));
+            }
+            for (table, min) in catalog.tables.iter().zip(&mins) {
+                if cursor.lsn < *min {
+                    return Err(position_unavailable(format!(
+                        "CDC cleanup removed changes of {} after the committed cursor",
+                        table.canonical()
+                    )));
+                }
+            }
+        }
+        Ok((max, mins))
+    }
+
     /// Checks that `cursor` belongs to this catalog's binding.
     pub fn check_binding(&self, cursor: &Cursor) -> Result<()> {
         cursor.validate()?;
@@ -245,40 +291,7 @@ impl Poller {
         cursor: Option<&Cursor>,
     ) -> Result<Poll> {
         let catalog = &self.catalog;
-        let captures: Vec<&str> = catalog.tables.iter().map(|t| t.capture.as_str()).collect();
-        let max = max_lsn(session).await?;
-        let mins = session.min_lsns(&captures).await?;
-        ensure!(
-            mins.len() == catalog.tables.len(),
-            "SQL Server returned {} minimum LSNs for {} capture instances",
-            mins.len(),
-            catalog.tables.len()
-        );
-        for (table, min) in catalog.tables.iter().zip(&mins) {
-            if *min == [0; 10] {
-                return Err(position_unavailable(format!(
-                    "capture instance {} of {} is unavailable",
-                    table.capture,
-                    table.canonical()
-                )));
-            }
-        }
-        if let Some(cursor) = cursor {
-            if cursor.lsn > max {
-                return Err(position_unavailable(
-                    "the committed cursor is ahead of the CDC maximum LSN (the database was \
-                     restored or CDC was re-enabled)",
-                ));
-            }
-            for (table, min) in catalog.tables.iter().zip(&mins) {
-                if cursor.lsn < *min {
-                    return Err(position_unavailable(format!(
-                        "CDC cleanup removed changes of {} after the committed cursor",
-                        table.canonical()
-                    )));
-                }
-            }
-        }
+        let (max, mins) = self.retained(session, cursor).await?;
         let starts: Vec<[u8; 10]> = match cursor {
             Some(cursor) => vec![cursor.lsn; mins.len()],
             None => mins.clone(),

@@ -25,6 +25,7 @@ checks every native library independently, including its build dependencies.
 | Source | [drasi-computation-source-counter](sources/counter) | `drasi.standard/volatile-counter` | Dynamic or Rust SDK |
 | Source | [drasi-computation-source-http](sources/http) | `drasi.network/http-source` | Dynamic or Rust SDK |
 | Source | [drasi-computation-source-grpc](sources/grpc) | `drasi.network/grpc-source` | Dynamic or Rust SDK |
+| Source | [drasi-computation-source-otel](sources/otel) | `drasi.network/otel-source` | Dynamic or Rust SDK |
 | Source | [drasi-computation-source-mysql](sources/mysql) | [Row and transaction source factories](sources/mysql/README.md) | Dynamic or Rust SDK |
 | Source | [drasi-computation-source-mssql](sources/mssql) | `drasi.mssql/changes` | Dynamic or Rust SDK; qualification deferred |
 | Source | [drasi-computation-source-postgres](sources/postgres) | `drasi/postgres-transactions`, `drasi.postgres/changes`, `drasi.postgres/shared-changes`, `drasi.postgres/shared-transactions` | Dynamic or Rust SDK |

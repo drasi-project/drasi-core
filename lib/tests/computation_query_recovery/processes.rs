@@ -517,7 +517,7 @@ fn normal_drasi_query_recovers_after_child_death_during_reset_and_deprovision() 
                 )
                 .await;
                 let error = strict
-                    .start()
+                    .start(&lifecycle_contexts::start())
                     .await
                     .expect_err("partial clearing cannot resume");
                 if phase == "reset-wipe-after" {
@@ -537,7 +537,7 @@ fn normal_drasi_query_recovers_after_child_death_during_reset_and_deprovision() 
                         "{phase}: {error:#}"
                     );
                 }
-                strict.stop().await.unwrap();
+                strict.stop(&lifecycle_contexts::stop()).await.unwrap();
             }
         });
         let resume = if reset {

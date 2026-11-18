@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
+use drasi_computation_contracts::{ResourceCapabilities, ResourceDurability};
 
 /// Exact progress resources for one producer's required consumer boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,14 +57,19 @@ impl ConsumerProgressConfig {
                 .map(|(id, handle)| (id.clone(), handle.role()))
                 .collect(),
         )?;
+        let mut durability = None;
         let owners = self
             .consumers
             .iter()
             .map(|(consumer, resource)| {
-                let owner = dependencies
+                let handle = dependencies
                     .get(resource)
-                    .context("consumer progress dependency is unavailable")?
-                    .get::<QuerySourceProgressResource>()?;
+                    .context("consumer progress dependency is unavailable")?;
+                durability = Some(combined_durability(
+                    durability,
+                    handle.capabilities().durability,
+                ));
+                let owner = handle.get::<QuerySourceProgressResource>()?;
                 anyhow::ensure!(
                     owner.0.component_id() == consumer && owner.0.graph_id() == graph,
                     "consumer progress dependency belongs to another graph or consumer"
@@ -71,6 +77,9 @@ impl ConsumerProgressConfig {
                 Ok(owner.0.clone())
             })
             .collect::<Result<Vec<_>>>()?;
+        // The set is durable only when every member is; one volatile member
+        // makes it volatile, and any undeclared member leaves it undeclared.
+        let durability = durability.unwrap_or(ResourceDurability::Undeclared);
         Ok(ResourceHandle::new(
             ResourceRole::Checkpoint,
             Arc::new(ConsumerProgressSet::new(
@@ -78,7 +87,20 @@ impl ConsumerProgressConfig {
                 self.producer.clone(),
                 owners,
             )?),
-        ))
+        )
+        .with_capabilities(ResourceCapabilities { durability }))
+    }
+}
+
+fn combined_durability(
+    current: Option<ResourceDurability>,
+    member: ResourceDurability,
+) -> ResourceDurability {
+    use ResourceDurability::{Durable, Undeclared, Volatile};
+    match (current.unwrap_or(member), member) {
+        (Volatile, _) | (_, Volatile) => Volatile,
+        (Durable, Durable) => Durable,
+        _ => Undeclared,
     }
 }
 

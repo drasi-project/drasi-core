@@ -811,8 +811,14 @@ impl DrasiLib {
             failures.push(error.context("shutting down instance adapters"));
         }
         drop(_lifecycle);
-        // Store ownership must outlive every unfinished processing owner.
-        if failures.is_empty() {
+        // Store ownership must outlive every unfinished processing owner. A
+        // terminal failure leaves none: retrying cannot change it, so release
+        // configuration ownership too and keep reporting the failure; dropping
+        // the last handle then releases the runtime and its state stores.
+        if failures
+            .iter()
+            .all(crate::computation::instance::shutdown_failure_is_terminal)
+        {
             if let Some(management) = self.management.get() {
                 if let Err(error) = deadline
                     .wait("closing configuration storage", true, management.close())

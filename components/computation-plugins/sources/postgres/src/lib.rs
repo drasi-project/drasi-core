@@ -17,6 +17,7 @@ pub mod config;
 mod management;
 mod rows;
 mod shared;
+mod whole;
 mod worker;
 
 use anyhow::{Context, Result};
@@ -25,9 +26,10 @@ use drasi_computation_contracts::{
     ComponentRole, ComponentUpdateMode, ImplementationIdentity, PortDescriptor, StreamId,
 };
 use drasi_computation_plugin_sdk::{
-    lifecycle::Assessment, ActivationCredentialContext, Capabilities, Component, ConfigDetails,
-    ControlSender, CreateRequest, CreatedComponent, Factory, FactoryMetadata,
-    NativeConsumerProgress, NativeSourceProgress, PluginDefinition, UpdateRequest,
+    lifecycle::Assessment, wire::DescribeRequest, ActivationCredentialContext, Capabilities,
+    Component, ComponentDescription, ConfigDetails, ControlSender, CreateRequest, CreatedComponent,
+    Factory, FactoryMetadata, NativeConsumerProgress, NativeSourceProgress, PluginDefinition,
+    UpdateRequest,
 };
 use std::sync::Arc;
 
@@ -120,8 +122,42 @@ fn credential_context(mode: Mode, request: &CreateRequest) -> Result<ActivationC
     Ok(context)
 }
 
+/// The declared description: outputs carry only source replay progress,
+/// kept in the progress bound to the source. A mode whose cursors must
+/// survive a process restart requires that progress to be durable, so the
+/// graph refuses wiring it to volatile progress before anything starts.
+fn describe(mode: Mode, request: &DescribeRequest) -> Result<ComponentDescription> {
+    let config = SourceConfig::from_value(mode, &request.request.configuration)?;
+    Ok(description(mode, config.recoverable(), &request.descriptor))
+}
+
+/// The description of a `mode` source whose cursors are `recoverable` across
+/// a process restart; in-process wrappers declare the same.
+pub fn description(
+    mode: Mode,
+    recoverable: bool,
+    descriptor: &drasi_computation_contracts::ComponentDescriptor,
+) -> ComponentDescription {
+    drasi_computation_plugin_sdk::wire::progress_source_description(
+        descriptor,
+        progress_dependency(mode),
+        recoverable,
+    )
+}
+
+/// The dependency the source's progress is bound to.
+pub fn progress_dependency(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Transactions | Mode::Rows => "source_progress",
+        Mode::SharedRows | Mode::SharedTransactions => "consumer_progress",
+    }
+}
+
 macro_rules! common_factory_methods {
     ($mode:expr) => {
+        fn describe(&self, request: &DescribeRequest) -> Result<ComponentDescription> {
+            describe($mode, request)
+        }
         fn metadata(&self) -> FactoryMetadata {
             metadata($mode)
         }
@@ -147,16 +183,6 @@ macro_rules! common_factory_methods {
 }
 
 impl Factory for PostgresSourceFactory {
-    /// Outputs carry only source replay progress unless published through a Host admission channel.
-    fn describe(
-        &self,
-        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
-    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.source_description(
-            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
-            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
-        ))
-    }
     common_factory_methods!(Mode::Transactions);
     fn supports_source_progress(&self) -> bool {
         true
@@ -188,16 +214,6 @@ impl Factory for PostgresSourceFactory {
 }
 
 impl Factory for PostgresRowsFactory {
-    /// Outputs carry only source replay progress unless published through a Host admission channel.
-    fn describe(
-        &self,
-        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
-    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.source_description(
-            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
-            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
-        ))
-    }
     common_factory_methods!(Mode::Rows);
     fn supports_source_progress(&self) -> bool {
         true
@@ -230,16 +246,6 @@ impl Factory for PostgresRowsFactory {
 }
 
 impl Factory for PostgresSharedRowsFactory {
-    /// Outputs carry only source replay progress unless published through a Host admission channel.
-    fn describe(
-        &self,
-        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
-    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.source_description(
-            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
-            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
-        ))
-    }
     common_factory_methods!(Mode::SharedRows);
     fn supports_consumer_progress(&self) -> bool {
         true
@@ -274,16 +280,6 @@ impl Factory for PostgresSharedRowsFactory {
 }
 
 impl Factory for PostgresSharedTransactionsFactory {
-    /// Outputs carry only source replay progress unless published through a Host admission channel.
-    fn describe(
-        &self,
-        request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
-    ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.source_description(
-            drasi_computation_plugin_sdk::OutputDescription::UNTRACKED,
-            drasi_computation_plugin_sdk::ProgressPersistence::Undeclared,
-        ))
-    }
     common_factory_methods!(Mode::SharedTransactions);
     fn supports_consumer_progress(&self) -> bool {
         true

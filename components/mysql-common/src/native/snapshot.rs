@@ -8,6 +8,7 @@ use super::{
     progress::ConsumerBinding,
     rows, source, MySqlConfig, MySqlStartPosition,
 };
+use crate::keys::quote_identifier;
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use drasi_computation_contracts::{
@@ -41,7 +42,7 @@ pub(crate) async fn read_rows(
     for (table, expected) in tables {
         let keys = catalog::key_columns(config, table, expected)?;
         let mut cursor = connection
-            .cursor(&format!("SELECT * FROM `{table}`"))
+            .cursor(&format!("SELECT * FROM {}", quote_identifier(table)))
             .await?;
         catalog::validate_snapshot_columns(expected, &cursor.columns)?;
         while let Some(values) = connection.fetch(&mut cursor).await? {
@@ -762,7 +763,7 @@ impl Work {
         };
         let (_, digest) = tokio::time::timeout(
             self.config.timeout(),
-            binlog::Binlog::snapshot_history(
+            binlog::Binlog::boundary_identity(
                 &mut self.sessions[0],
                 &self.config,
                 &file,
@@ -823,7 +824,10 @@ impl Work {
         let (_, tables) = catalog::inspect(&mut self.sessions[1], &self.config).await?;
         for table in tables.keys() {
             self.sessions[1]
-                .query(&format!("SELECT * FROM `{table}` LIMIT 0"))
+                .query(&format!(
+                    "SELECT * FROM {} LIMIT 0",
+                    quote_identifier(table)
+                ))
                 .await?;
         }
         let sql = if self.sessions[0].version >= (8, 4, 0) {

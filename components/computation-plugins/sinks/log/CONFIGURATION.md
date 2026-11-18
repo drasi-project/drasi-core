@@ -22,8 +22,9 @@ the same descriptions, defaults and typed nested schemas.
 | `includeHeader` | boolean | `false` | Emit one header line per non-empty input; change lines are then indented. | Pause |
 | `level` | string | `info` | `error`, `warn`, `info`, `debug`, `trace`. Applies to `output: log`. | Pause |
 | `target` | string | `drasi.log` | Nonempty, no control characters. The `log` record target for `output: log`. Fallback warnings always use this target. | Pause |
-| `output` | string | `log` | `log`, `stdout`, `stderr`. | Pause |
+| `output` | string | `log` | `log` (the host's logger, also when loaded as a plugin library), `stdout`, `stderr`. | Pause |
 | `renderFailurePolicy` | string | `fallback` | `fallback`, `strict`. See [Render failures](#render-failures). | Pause |
+| `onPermanentFailure` | string | `stall` | `stall`, `skip`. What the graph does with an input that failed permanently (a `strict` render failure). See [Render failures](#render-failures). | Replace |
 
 A change to the incoming bindings (adding or removing an edge) also requires
 Replace. No field is secret.
@@ -123,7 +124,10 @@ A template that passed validation can still fail while rendering, for example
 | `renderFailurePolicy` | Effect |
 |---|---|
 | `fallback` (default) | The change is emitted in `format`, and a `warn` record on `target` names the output, sequence, operation and error. The input completes and is not retried. |
-| `strict` | The input fails and nothing from it is emitted. The host's failure handling applies; because the failure is deterministic, retrying does not succeed until the template is changed. |
+| `strict` | Nothing from the input is emitted and it fails permanently. With `onPermanentFailure: stall` (default) the sink records a terminal failure and emits nothing more until the template is fixed; with `skip` the graph logs and counts the input and continues. |
+
+A failed stdout/stderr write is transient: the graph retries the same input in
+place with backoff until it is written.
 
 ## Examples
 
@@ -164,7 +168,7 @@ Per-output templates with a default and a dotted-suffix route:
 | Proposed change | Assessment |
 |---|---|
 | Any of `routes`, `defaultTemplate`, `format`, `includeHeader`, `level`, `target`, `output`, `renderFailurePolicy`; or no change | Pause (InPlace), data preserved |
-| `outputs`, or the incoming bindings | Replace (Recreate) |
+| `outputs`, `onPermanentFailure`, or the incoming bindings | Replace (Recreate) |
 | Invalid configuration: unknown field or value, syntax error, unknown helper, partial, unmatched or ambiguous route | Error (rejected) |
 
 An in-place update is applied inside a completed Pause and takes effect for the

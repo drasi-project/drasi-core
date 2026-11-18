@@ -62,6 +62,32 @@ pub enum Producer {
 }
 
 impl Producer {
+    /// Whether `self` is a later output generation of the same durable query
+    /// as `previous`: a reset or recreation that supersedes its earlier
+    /// output, whose remaining obligations the reset discarded.
+    pub fn supersedes(&self, previous: &Self) -> bool {
+        match (self, previous) {
+            (
+                Self::Query {
+                    identity,
+                    generation,
+                },
+                Self::Query {
+                    identity: earlier,
+                    generation: earlier_generation,
+                },
+            ) => {
+                generation > earlier_generation
+                    && identity.incarnation().is_none()
+                    && earlier.incarnation().is_none()
+                    && identity.construction_scope() == earlier.construction_scope()
+                    && identity.graph_id() == earlier.graph_id()
+                    && identity.query_id() == earlier.query_id()
+            }
+            _ => false,
+        }
+    }
+
     pub fn validate(&self, stream: &StreamId) -> anyhow::Result<()> {
         let (scope, graph, component) = match self {
             Self::Graph(identity) => {
@@ -108,6 +134,15 @@ pub struct Candidate {
 }
 
 impl Candidate {
+    /// The output generation of a durable (strict) query producer; `None`
+    /// for graph producers and at-least-once candidates.
+    pub fn generation(&self) -> Option<u64> {
+        match (&self.producer, &self.epoch) {
+            (Producer::Query { generation, .. }, None) => Some(*generation),
+            _ => None,
+        }
+    }
+
     pub fn new(envelope: &ChangeEnvelope, codec: &EnvelopeCodec) -> anyhow::Result<Self> {
         let query = QueryChangeCodec::is_query_output(envelope);
         let progress = if query {

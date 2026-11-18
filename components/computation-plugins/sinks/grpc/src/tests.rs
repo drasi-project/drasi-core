@@ -398,7 +398,10 @@ fn assessment_matrix() -> Result<()> {
             case(json!({"timeoutMs": 10}), pause),
             case(json!({"maxRetries": 0}), pause),
             case(json!({"retryBudgetMs": 10}), pause),
-            case(json!({"failurePolicy": "skip"}), pause),
+            case(
+                json!({"onPermanentFailure": "skip"}),
+                Some(UpdateBoundary::Replace),
+            ),
             case(json!({"requireConnectedAtStart": true}), pause),
             case(json!({"batchSize": 10}), pause),
             case(json!({"batchFlushTimeoutMs": 10}), pause),
@@ -675,6 +678,11 @@ async fn multi_change_requests_carry_a_range_identity() -> Result<()> {
     Ok(())
 }
 
+fn permanent(error: &anyhow::Error) -> bool {
+    drasi_computation_contracts::delivery_failure_class(error)
+        .is_some_and(|class| class.is_permanent())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn incomplete_and_rejected_acknowledgements_fail_without_retry() -> Result<()> {
     let receiver = Receiver::start("127.0.0.1:0", None).await?;
@@ -682,21 +690,26 @@ async fn incomplete_and_rejected_acknowledgements_fail_without_retry() -> Result
     receiver.state.partial.store(true, Ordering::SeqCst);
     let error = sink.handle(input(1)?).await.expect_err("partial");
     assert!(format!("{error:#}").contains("incomplete"));
+    assert!(permanent(&error), "{error:#}");
     assert_eq!(receiver.state.calls(), 1);
     receiver.state.partial.store(false, Ordering::SeqCst);
 
     receiver.state.reject.store(true, Ordering::SeqCst);
     let error = sink.handle(input(2)?).await.expect_err("rejected");
     assert!(format!("{error:#}").contains("rejected by receiver"));
+    assert!(permanent(&error), "{error:#}");
     assert_eq!(receiver.state.calls(), 2);
 
-    // Under skip the rejection completes the input.
+    // Under skip the rejection is logged and the input still fails
+    // permanently, so the graph counts it as skipped.
     let mut skip = started(with(
         base(&receiver.endpoint()),
-        json!({"failurePolicy": "skip"}),
+        json!({"onPermanentFailure": "skip"}),
     ))
     .await?;
-    skip.handle(input(3)?).await?;
+    assert!(permanent(
+        &skip.handle(input(3)?).await.expect_err("skipped")
+    ));
     assert_eq!(receiver.state.calls(), 3);
     receiver.state.reject.store(false, Ordering::SeqCst);
     Ok(())
@@ -712,9 +725,13 @@ async fn a_stalled_receiver_is_bounded_by_the_call_deadline() -> Result<()> {
     ))
     .await?;
     let started_at = std::time::Instant::now();
-    assert!(sink.handle(input(1)?).await.is_err());
+    let error = sink.handle(input(1)?).await.expect_err("stalled");
     assert!(started_at.elapsed() < Duration::from_secs(3));
     assert_eq!(receiver.state.calls(), 2, "a deadline expiry is retried");
+    assert!(
+        !permanent(&error),
+        "exhausted retries stay transient: {error:#}"
+    );
     Ok(())
 }
 
@@ -748,14 +765,17 @@ async fn templates_render_payload_and_metadata_and_failures_follow_the_policy() 
 
     for template in ["{\"missing\": {{after.nope}}}", "not json {{sequence}}"] {
         let before = receiver.state.calls();
-        let mut strict = started(with(base(&receiver.endpoint()), templates(template))).await?;
-        assert!(strict.handle(input(5)?).await.is_err(), "{template}");
+        let mut stall = started(with(base(&receiver.endpoint()), templates(template))).await?;
+        let error = stall.handle(input(5)?).await.expect_err(template);
+        assert!(permanent(&error), "{template}: {error:#}");
         let mut skip = started(with(
             with(base(&receiver.endpoint()), templates(template)),
-            json!({"failurePolicy": "skip"}),
+            json!({"onPermanentFailure": "skip"}),
         ))
         .await?;
-        skip.handle(input(5)?).await?;
+        assert!(permanent(
+            &skip.handle(input(5)?).await.expect_err(template)
+        ));
         assert_eq!(
             receiver.state.calls(),
             before,

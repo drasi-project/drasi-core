@@ -9,7 +9,7 @@ static SDK and the native ABI 4.0 dynamic library:
 | Factory | Permissions and behavior |
 |---|---|
 | `drasi.mssql/snapshot` | Standalone **read-only** table snapshot. Explicit `tables`, primary/custom keys, SELECT/catalog visibility and the database's SNAPSHOT-isolation option. No CDC catalogs, marker, DDL or data writes. Returns **no CDC handover watermark**. |
-| `drasi.mssql/bootstrap` | Opt-in coordinated CDC snapshot. Requires actual query progress and an explicitly configured, administrator-provisioned CDC `barrierTable`. Writes and deletes its own marker and holds shared table locks until snapshot COMMIT. |
+| `drasi.mssql/bootstrap` | Opt-in coordinated CDC snapshot. Requires actual query progress and an explicitly configured, administrator-provisioned CDC `barrierTable`. Writes and deletes its own marker. Holds shared table locks only while it fixes a SNAPSHOT-isolation view and commits the marker, then reads row versions without blocking writers; needs `ALLOW_SNAPSHOT_ISOLATION ON`. |
 
 ## Configuration
 
@@ -58,22 +58,31 @@ without repeating that unsupported handover claim.
 
 The coordinated algorithm:
 
-1. Discover and validate all selected tables/capture/key definitions.
-2. Begin SERIALIZABLE and take `TABLOCK,HOLDLOCK` read locks on **every selected
-   source table**, including tables excluded by a query's labels.
-3. Through a separate connection, commit a unique marker into the explicitly
-   provisioned CDC marker table, which must not be a selected source table.
-4. Wait for that exact INSERT to appear in its actual CDC capture table.
-5. Read selected rows while the table locks remain held, verify metadata, commit
-   the snapshot transaction, and delete only the owned marker.
+1. Discover and validate all selected tables/capture/key definitions, and
+   refuse a database without `ALLOW_SNAPSHOT_ISOLATION ON` (both modes read
+   under SNAPSHOT isolation).
+2. On a separate marker connection, begin a transaction and take
+   `TABLOCK,HOLDLOCK` read locks on **every selected source table**, including
+   tables excluded by a query's labels. Granting them waits for in-flight
+   writers; from then on no selected-table write can commit.
+3. On the reader connection, begin a SNAPSHOT transaction and touch every
+   selected table, which fixes its row-version view inside that window.
+4. On the marker connection, insert a unique marker into the explicitly
+   provisioned CDC marker table (which must not be a selected source table) and
+   commit, which releases the table locks.
+5. Wait for that exact INSERT to appear in its actual CDC capture table; its
+   `__$start_lsn` is the boundary.
+6. Read selected rows from the SNAPSHOT view, verify metadata and CDC
+   retention, commit, and delete only the owned marker.
 
-Those locks now remain held while downstream consumers apply backpressure.
-There is no default total-row/dataset cap; administrators still must plan for
-writer blocking and sufficient CDC retention during large coordinated snapshots.
+The view holds exactly the changes committed before the marker's LSN: nothing
+on a selected table committed between the locks being granted and the marker's
+commit. Writers wait only for that short window (bounded by
+`commandTimeoutMs` as the lock timeout), never for the scan, the CDC capture or
+downstream backpressure; the scan reads row versions and takes no locks. Plan
+`tempdb` version-store space for the snapshot's duration, and enough CDC
+retention for the scan.
 
-The proposed cut depends on **both** the retained table locks and the captured
-marker's commit ordering—not the marker/LSN alone. Table writers can block for
-the bounded snapshot duration, unlike the old nonblocking SNAPSHOT reads.
 No plugin performs CREATE/ALTER/CDC administration, and normal credentials need
 no sysadmin or KILL privileges. A DBA provisions CDC and a table such as
 `dbo.DrasiBarrier(token uniqueidentifier primary key)` once; the application

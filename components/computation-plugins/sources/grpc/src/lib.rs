@@ -19,7 +19,6 @@
 mod component;
 pub mod config;
 mod durable_grpc;
-mod incoming;
 
 use drasi_computation_contracts::{
     ComponentRole, ComponentUpdateMode, GraphChangeCodec, ImplementationIdentity, PipeRequirements,

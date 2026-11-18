@@ -32,17 +32,28 @@ async fn whole_commit_fanout() -> Result<()> {
         let plugins = libraries::plugins(dynamic)?;
         let database = Database::new().await?;
         let path = tempfile::tempdir()?;
+        // One slow permit admits the fresh group's join record, which both
+        // members commit before any change flows.
         let graph = build_graph_mode(
             &plugins,
             &database,
             Some(path.path()),
-            0,
+            1,
             false,
             None,
             SharedOutput::Transactions,
         )
         .await?;
         start_graph(&graph).await?;
+        wait_until("both members committed the join point", || {
+            Ok(graph
+                .owners
+                .iter()
+                .all(|owner| position(owner).is_ok_and(|position| position.is_some())))
+        })
+        .await?;
+        let origin = position(&graph.owners[0])?.context("join point")?;
+        assert_eq!(origin.commit_lsn, lsn(&start_lsn(&database.config)));
         database
             .client()
             .batch_execute(
@@ -54,14 +65,14 @@ async fn whole_commit_fanout() -> Result<()> {
         tokio::time::sleep(Duration::from_millis(200)).await;
         for index in 0..2 {
             assert!(graph.results[index].snapshot()?.rows.is_empty());
-            assert_eq!(output_count(&graph.accepted[index]), 0);
-            assert!(position(&graph.owners[index])?.is_none());
+            assert_eq!(output_count(&graph.accepted[index]), 1, "the join record");
+            assert_eq!(position(&graph.owners[index])?, Some(origin.clone()));
         }
         assert_eq!(database.feedback().await?, start_lsn(&database.config));
         database.client().batch_execute("COMMIT").await?;
         wait_until(
             "fast whole transaction and one queued slow transaction",
-            || Ok(output_count(&graph.outputs[0]) == 1 && output_count(&graph.accepted[1]) == 1),
+            || Ok(output_count(&graph.outputs[0]) == 1 && output_count(&graph.accepted[1]) == 2),
         )
         .await?;
         assert_eq!(values(&graph.results[0])?, [json!({"id":1,"name":"final"})]);
@@ -73,12 +84,12 @@ async fn whole_commit_fanout() -> Result<()> {
             let inputs = inputs.lock().expect("accepted transaction log");
             assert_eq!(
                 inputs.len(),
-                1,
-                "one source emission, not one emission per row"
+                2,
+                "the join record and one source emission, not one emission per row"
             );
-            let transaction = SourceTransactionCodec::decode(&inputs[0], limits(16))?;
+            let transaction = SourceTransactionCodec::decode(&inputs[1], limits(16))?;
             assert_eq!(transaction.into_changes().len(), 4);
-            assert_eq!(input_position(&inputs[0])?, first);
+            assert_eq!(input_position(&inputs[1])?, first);
         }
         graph.gates[1].add_permits(1);
         wait_until("slow atomic handling", || {
@@ -96,7 +107,7 @@ async fn whole_commit_fanout() -> Result<()> {
             )
             .await?;
         wait_until("second whole commit held by the slow member", || {
-            Ok(output_count(&graph.outputs[0]) == 2 && output_count(&graph.accepted[1]) == 2)
+            Ok(output_count(&graph.outputs[0]) == 2 && output_count(&graph.accepted[1]) == 3)
         })
         .await?;
         let second = position(&graph.owners[0])?.context("second commit")?;
@@ -137,28 +148,28 @@ async fn whole_commit_fanout() -> Result<()> {
             Ok(graph
                 .accepted
                 .iter()
-                .all(|events| output_count(events) == 3))
+                .all(|events| output_count(events) == 4))
         })
         .await?;
         for inputs in &graph.accepted {
             let inputs = inputs.lock().expect("accepted transaction log");
-            let replay = input_position(&inputs[2])?;
+            let replay = input_position(&inputs[3])?;
             assert_eq!(replay.commit_lsn, second.commit_lsn);
             assert!(replay.sequence > second.sequence);
-            assert!(inputs[2].system().sequence() > inputs[1].system().sequence());
+            assert!(inputs[3].system().sequence() > inputs[2].system().sequence());
         }
         graph.gates[1].add_permits(128);
         wait_until(
             "slow commit and duplicate replay handled independently",
             || {
-                Ok(output_count(&graph.inputs[1]) == 3
+                Ok(output_count(&graph.inputs[1]) == 4
                     && output_count(&graph.outputs[1]) == 2
                     && graph.owners.iter().all(|owner| {
                         owner
                             .snapshot()
                             .transport_sequences
                             .get(&stream())
-                            .is_some_and(|value| *value >= 3)
+                            .is_some_and(|value| *value >= 4)
                     }))
             },
         )
@@ -467,6 +478,13 @@ async fn different_counters() -> Result<()> {
             )?;
         source.initialize(&lifecycle_ctx::initialize()).await?;
         source.start(&lifecycle_ctx::start()).await?;
+        // The fresh group's origin is committed first; then changes flow.
+        let join = tokio::time::timeout(Duration::from_secs(5), source.next())
+            .await??
+            .context("join record")?;
+        assert!(join.envelope.changes().operations().is_empty());
+        apply(&mut fast, join.clone()).await?;
+        apply(&mut slow, join).await?;
         database
             .client()
             .batch_execute(
@@ -491,8 +509,8 @@ async fn different_counters() -> Result<()> {
             renumber_transaction(&transactions[0], 9000, 20_000)?,
         )
         .await?;
-        apply(&mut slow, renumber_transaction(&transactions[0], 1, 1)?).await?;
-        apply(&mut slow, renumber_transaction(&transactions[1], 2, 2)?).await?;
+        apply(&mut slow, renumber_transaction(&transactions[0], 2, 2)?).await?;
+        apply(&mut slow, renumber_transaction(&transactions[1], 3, 3)?).await?;
         let fast_position = position(&owners[0])?.context("older physical cursor")?;
         let slow_position = position(&owners[1])?.context("newer physical cursor")?;
         assert!(fast_position.commit_lsn < slow_position.commit_lsn);
@@ -778,26 +796,9 @@ async fn actual_owner_and_persistent_mode_guards_static_and_dynamic() -> Result<
                 group.clone(),
             )
             .is_err());
-        let mut fast = ordinary_query("fast", None, owners[0].clone()).await?;
-        let mut slow = ordinary_query("slow", None, owners[1].clone()).await?;
-        fast.start(&lifecycle_ctx::start()).await?;
-        slow.start(&lifecycle_ctx::start()).await?;
-        let mut source = factory.create_component_with_consumer_progress(
-            id(77),
-            configuration.clone(),
-            libraries::scope(ComponentBatch::GRAPH_ID),
-            group,
-        )?;
-        source.initialize(&lifecycle_ctx::initialize()).await?;
-        let error = source
-            .start(&lifecycle_ctx::start())
-            .await
-            .expect_err("volatile consumer");
-        assert!(format!("{error:#}").contains("persistent"), "{error:#}");
-        source.stop(&lifecycle_ctx::stop()).await?;
-        fast.stop(&lifecycle_ctx::stop()).await?;
-        slow.stop(&lifecycle_ctx::stop()).await?;
-        drop((source, fast, slow));
+        // Durable consumer progress is a declared requirement, refused at
+        // binding (`postgres_durable_progress_requirements_are_refused_at_binding`).
+        drop(group);
 
         let snapshot_factory = plugins
             .bootstrap

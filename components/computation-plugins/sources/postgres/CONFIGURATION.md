@@ -37,7 +37,14 @@ credentials (username and password or token), which then replace `user` and
 |---|---|---|---|---|
 | `stream` | string | required | Output stream identifier on every change. | unsupported |
 | `coordinatedSnapshot` | boolean | `false` | Start from a snapshot taken by the paired coordinated provider, which creates and hands over a managed slot. Requires managed slot ownership and no `startLsn`; row mode also requires `persistent`. | unsupported |
-| `persistent` | boolean | `false` | Rows only. Require persistent consumer progress so committed rows survive a process restart. | unsupported |
+| `persistent` | boolean | `false` | Rows only. Committed rows survive a process restart: the source declares that its progress resource must be durable, and the graph refuses a volatile binding. | unsupported |
+
+Transactions factories, persistent or coordinated rows, and persistent shared
+rows declare a durable progress requirement on their progress binding
+(`source_progress` or `consumer_progress`). Bind a progress resource that
+declares durability (the progress of a query with persistent indexes);
+volatile or undeclared progress is refused at binding, before the source
+starts, as an `Incompatible` failure on the source node.
 
 ## Settings
 
@@ -56,9 +63,9 @@ credentials (username and password or token), which then replace `user` and
 | `slotOwnership` | string | `managed` | `managed` or `external`. See [Slots](#slots). | | unsupported |
 | `slotName` | string | none | Required for `external`, rejected for `managed`. 1 to 63 lowercase letters, digits or underscores. | | unsupported |
 | `startLsn` | string | none | Initial cursor such as `0/16B3748`, used only before the first checkpoint. When absent, streaming starts at the slot's confirmed position. Not allowed with `coordinatedSnapshot`. | | Restart before the first checkpoint, otherwise unsupported |
-| `maxTransactionChanges` | integer | `100000` | ≥ 1. A larger transaction fails without publishing a prefix and is retried after the limit grows. | | Restart (increase only) |
-| `maxTransactionBytes` | integer | `67108864` | ≥ 1. Encoded transaction size. | | Restart (increase only) |
-| `maxTransactionDurationMs` | integer | `300000` | ≥ 1. Assembly and publish deadline per transaction. | | Restart |
+| `maxTransactionChanges` | integer | `100000` | ≥ 1. Whole-transaction outputs: a larger commit fails with `SourceTransactionError::Limit` without publishing a prefix, the slot retains WAL from it, and it replays whole after the limit grows. Row outputs: the most changes buffered before a commit streams its rows instead (never a failure). | | Restart (increase only) |
+| `maxTransactionBytes` | integer | `67108864` | ≥ 1. Encoded transaction size (row outputs: the pgoutput size buffered before streaming), with the same behaviour as `maxTransactionChanges`. | | Restart (increase only) |
+| `maxTransactionDurationMs` | integer | `300000` | ≥ 1. Assembly and publish deadline per transaction (row outputs: while buffering). | | Restart |
 | `maxProtocolBytes` | integer | `16777216` | ≥ 64. Largest protocol message, catalog result or relation metadata. | | Restart |
 | `ioTimeoutMs` | integer | `30000` | ≥ 1. Connect, catalog query, feedback write and start budget (bounded further by the host's start deadline). | | Restart |
 | `feedbackIntervalMs` | integer | `10000` | ≥ 1. Standby status interval. Keep it below the server's `wal_sender_timeout` (60 s by default); a paused source relies on it to keep its session. | | Restart |
@@ -95,14 +102,17 @@ SELECT pg_create_logical_replication_slot('drasi_orders', 'pgoutput');
 | PostgreSQL 13 or later (15 or later for coordinated snapshots) | `wal_status`, `max_slot_wal_keep_size`; snapshot export rules. Older servers are refused with an `Unsupported` error. |
 | `wal_level = logical` | Logical decoding. |
 | `max_replication_slots` and `max_wal_senders` with headroom | One slot and one sender per source, plus one slot and session per running snapshot. |
-| A publication: `CREATE PUBLICATION drasi_orders FOR TABLE orders, order_lines WITH (publish = 'insert, update, delete');` | TRUNCATE is refused (decision D-9): it cannot be represented as row changes. |
+| A publication: `CREATE PUBLICATION drasi_orders FOR TABLE orders, order_lines WITH (publish = 'insert, update, delete');` | TRUNCATE is refused (decision D-9): it cannot be represented as row changes. A TRUNCATE of a selected table after `ALTER PUBLICATION` adds it fails the source with `Unsupported`. |
 | A primary key, or a `tableKeys` entry whose columns the replica identity carries (`REPLICA IDENTITY FULL` or a `USING INDEX` identity) | Stable element identity. Tables without a usable key are rejected (decision D-10). |
 | `max_slot_wal_keep_size = -1` (recommended) | A finite value is allowed (decision D-8); the source logs a warning, and if the slot falls behind and is invalidated (`wal_status = lost`) it fails with `PositionUnavailable`. |
 | `wal_sender_timeout` above `feedbackIntervalMs` | Keeps idle and paused sessions alive. |
 
 Monitor `pg_replication_slots` (`active`, `wal_status`, `safe_wal_size`, and
 `pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)`) for every source
-slot: a stopped or stalled source retains WAL.
+slot: a stopped or stalled source retains WAL. A running source whose
+selected tables are quiet commits progress records (after 30 seconds without
+output), so its slot keeps up with a busy database once consumers commit
+them.
 
 ## Updates
 
@@ -120,7 +130,9 @@ rebuild a new binding needs.
 
 Removal without erase keeps every slot. Removal with erase (dispose with
 `StateIntent::Erase`) drops all managed slots of this source and is safe to
-repeat; it fails with `SlotActive` while another session uses one of them, so
+repeat. It authenticates with the activation credentials the host supplies to
+the erasing dispose (or the configured `user` and `password`), so a source
+removed after a process restart without starting can still drop its slots; it fails with `SlotActive` while another session uses one of them, so
 stop every user first. External slots are never dropped; remove them yourself
 when no longer needed, or they retain WAL indefinitely.
 
@@ -130,11 +142,13 @@ when no longer needed, or they retain WAL indefinitely.
 |---|---|---|
 | `SchemaChanged` | A selected table's key columns, key column types or replica identity, the publication's operations or row filters, the slot, or the table set (for an all-tables publication) changed. Adding, dropping or retyping a **non-key** column is not a schema change (decision D-7). | Remove the source with erase and add it again. |
 | `PositionUnavailable` | The slot is missing, invalidated, or no longer retains the committed cursor. | Remove with erase and re-add (a new snapshot), or restore the slot. |
-| `Unsupported` | Server older than 13, publication missing or publishing TRUNCATE, a slot that is not a persistent `pgoutput` slot. | Fix the server or publication. |
+| `Unsupported` | Server older than 13, publication missing or publishing TRUNCATE, a slot that is not a persistent `pgoutput` slot, or a runtime TRUNCATE of a selected table. | Fix the server or publication; after a TRUNCATE, remove with erase and re-add. |
+| `SourceTransactionError::Limit` | Whole-transaction outputs: a commit exceeds `maxTransactionChanges` or `maxTransactionBytes`. | Raise the limit and restart; the commit replays whole. |
 | `SlotActive` | Erase found an owned slot in use. | Stop the other session; retry. |
 
 Transport failures (connection reset, timeouts, server shutdown and
-connection SQLSTATEs) reconnect within `reconnectBudgetMs` in every mode.
+connection SQLSTATEs, and a host name that does not resolve) reconnect within
+`reconnectBudgetMs` in every mode.
 Permanent failures never reconnect: the source reports them through `next`,
 and the host stops it.
 

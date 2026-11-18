@@ -15,6 +15,7 @@ use std::{
 pub mod consumer_snapshot;
 pub mod error;
 pub mod handle;
+pub mod identity;
 pub mod journal;
 pub mod progress;
 pub mod runtime;
@@ -25,6 +26,49 @@ pub use crate::SqliteParam;
 pub use error::{SqlitePaused, SqliteStopping};
 pub use handle::{SqliteHandle, SqliteTransactionHandle};
 pub type SqliteRow = serde_json::Map<String, serde_json::Value>;
+
+/// Where a source's replay progress is bound, which decides its declared
+/// description.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SqliteProgress {
+    /// No replay: the source keeps no progress.
+    None,
+    /// The journal replays from one query's cursor (`source_progress`).
+    Single,
+    /// The journal replays for a fixed consumer group (`consumer_progress`).
+    Group,
+}
+
+/// The description a SQLite source declares, for the loaded plugin and the
+/// in-process wrapper alike. Outputs carry only source replay progress. A
+/// journal replays from cursors kept in the bound progress, so it requires
+/// that progress to be durable and the graph refuses a volatile binding;
+/// without a journal the source keeps no progress.
+pub fn description(
+    progress: SqliteProgress,
+    descriptor: &drasi_computation_contracts::ComponentDescriptor,
+) -> drasi_computation_contracts::ComponentDescription {
+    use drasi_computation_contracts::{
+        ComponentDescription, DependencyRequirement, DurabilityRequirement, OutputDescription,
+        ProgressPersistence,
+    };
+    let dependency = match progress {
+        SqliteProgress::None => {
+            return ComponentDescription::new(ProgressPersistence::Volatile)
+                .with_outputs(descriptor, OutputDescription::UNTRACKED)
+        }
+        SqliteProgress::Single => "source_progress",
+        SqliteProgress::Group => "consumer_progress",
+    };
+    ComponentDescription::new(ProgressPersistence::Durable)
+        .with_outputs(descriptor, OutputDescription::UNTRACKED)
+        .with_dependency(
+            dependency,
+            DependencyRequirement {
+                durability: DurabilityRequirement::Durable,
+            },
+        )
+}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

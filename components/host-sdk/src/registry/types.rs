@@ -45,8 +45,11 @@ impl Default for RegistryConfig {
 
 /// Version information from the host application, used for compatibility checks.
 ///
-/// All version fields use semver format. Compatibility requires major.minor match
-/// between host and plugin for sdk, core, and lib versions.
+/// All version fields use semver format. Ordinary Source/Reaction artifacts
+/// require a major.minor match for the SDK, core and lib package versions *and*
+/// the declared FFI ABI. The host's ABIs are not fields: they always come from
+/// the SDKs the binary loader uses ([`Self::abi_version`],
+/// [`Self::computation_abi_version`]), never from a Cargo package version.
 #[derive(Debug, Clone)]
 pub struct HostVersionInfo {
     /// Version of drasi-plugin-sdk used by the host.
@@ -59,6 +62,19 @@ pub struct HostVersionInfo {
     pub target_triple: String,
 }
 
+impl HostVersionInfo {
+    /// The ordinary FFI ABI used by the host's binary loader, independent of
+    /// the SDK package version.
+    pub fn abi_version(&self) -> &'static str {
+        drasi_plugin_sdk::ffi::metadata::FFI_SDK_VERSION
+    }
+
+    /// The native ComputationGraph ABI used by the host's native loader.
+    pub fn computation_abi_version(&self) -> &'static str {
+        drasi_computation_plugin_abi::ABI_VERSION
+    }
+}
+
 /// A fully resolved plugin reference, ready to download.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedPlugin {
@@ -66,12 +82,12 @@ pub struct ResolvedPlugin {
     pub reference: String,
     /// Plugin version (e.g., "0.1.8").
     pub version: String,
-    /// SDK version of the plugin.
+    /// SDK Cargo package version of the plugin.
     pub sdk_version: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub abi_family: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub abi_version: Option<String>,
+    /// Declared ABI family (`ordinary` or `computation`), validated during resolution.
+    pub abi_family: String,
+    /// Declared ABI version of that family, validated during resolution.
+    pub abi_version: String,
     /// Core version of the plugin.
     pub core_version: String,
     /// Lib version of the plugin.
@@ -96,10 +112,13 @@ pub struct PluginMetadataJson {
     pub plugin_type: String,
     /// Plugin version (e.g., "0.1.8").
     pub version: String,
-    /// drasi-plugin-sdk version.
+    /// SDK Cargo package version.
     pub sdk_version: String,
+    /// Declared ABI family. Metadata without it can be inspected, but an absent
+    /// family or ABI version never establishes compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub abi_family: Option<String>,
+    /// ABI version of that family, read from the binary's marker at build time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub abi_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -296,6 +315,49 @@ pub mod media_types {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_metadata_is_inspectable_without_inventing_an_abi() {
+        let metadata: PluginMetadataJson = serde_json::from_value(serde_json::json!({
+            "name": "drasi-source-mock",
+            "kind": "mock",
+            "type": "source",
+            "version": "0.1.0",
+            "sdk_version": "0.11.3",
+            "core_version": "0.5.10",
+            "lib_version": "0.9.3",
+            "target_triple": "aarch64-apple-darwin"
+        }))
+        .expect("inspect legacy metadata");
+        assert_eq!(metadata.abi_family, None);
+        assert_eq!(metadata.abi_version, None);
+        let serialized = serde_json::to_value(&metadata).expect("serialize legacy metadata");
+        assert!(serialized.get("abi_family").is_none());
+        assert!(serialized.get("abi_version").is_none());
+    }
+
+    #[test]
+    fn metadata_keeps_package_and_abi_versions_separate() {
+        let metadata: PluginMetadataJson = serde_json::from_value(serde_json::json!({
+            "name": "drasi-source-mock",
+            "kind": "mock",
+            "type": "source",
+            "version": "0.1.0",
+            "sdk_version": "0.11.3",
+            "abi_family": "ordinary",
+            "abi_version": "0.19.0",
+            "core_version": "0.5.10",
+            "lib_version": "0.9.3",
+            "target_triple": "aarch64-apple-darwin"
+        }))
+        .expect("new metadata");
+        assert_eq!(metadata.sdk_version, "0.11.3");
+        assert_eq!(metadata.abi_family.as_deref(), Some("ordinary"));
+        assert_eq!(metadata.abi_version.as_deref(), Some("0.19.0"));
+        let serialized = serde_json::to_value(&metadata).expect("serialize metadata");
+        assert_eq!(serialized["sdk_version"], "0.11.3");
+        assert_eq!(serialized["abi_version"], "0.19.0");
+    }
 
     #[test]
     fn test_parse_full_reference() {

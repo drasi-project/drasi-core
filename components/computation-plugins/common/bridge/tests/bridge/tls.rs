@@ -242,10 +242,7 @@ async fn mutual_tls_uses_the_same_protocol_and_rejects_wrong_peer_pins_and_plain
         .handle(super::input(graph_input(78, 19)?))
         .await
         .unwrap_err();
-    assert_eq!(
-        error.downcast_ref::<BridgeError>().unwrap().code,
-        ErrorCode::Incompatible
-    );
+    assert_eq!(error.bridge_cause().unwrap().code, ErrorCode::Incompatible);
     assert_eq!(source.status().accepted, 1);
     rejected.stop(&lifecycle_ctx::stop()).await?;
     source.stop(&lifecycle_ctx::stop()).await?;

@@ -94,21 +94,34 @@ async fn wait<T>(
     }
 }
 
+/// Upper bound for observing an abort requested after a worker ignored its
+/// cooperative stop. Async workers normally exit at their next suspension.
+const ABORT_JOIN_GRACE: Duration = Duration::from_secs(1);
+
 /// Removes a worker only after its exit has been observed.
 ///
-/// Cancellation or timeout retains the handle for the next cleanup attempt.
-/// A timeout requests abort, but does not claim that abort has completed.
+/// A worker that does not stop within `timeout` is aborted, and the abort is
+/// joined within a bounded grace so released resources are actually dropped
+/// when this returns. Cancellation, or work that cannot observe the abort
+/// (such as blocking work), retains the handle for the next cleanup attempt.
 pub async fn join_owned_worker<T>(
     slot: &mut Option<JoinHandle<T>>,
     timeout: Duration,
 ) -> Result<WorkerCompletion<T>, WorkerCleanupError> {
     let result = join_owned_worker_gracefully(slot, timeout).await;
-    if matches!(result, Err(WorkerCleanupError::TimedOut { .. })) {
-        if let Some(task) = slot.as_ref() {
-            task.abort();
-        }
+    if !matches!(result, Err(WorkerCleanupError::TimedOut { .. })) {
+        return result;
     }
-    result
+    let Some(task) = slot.as_mut() else {
+        return result;
+    };
+    task.abort();
+    let joined = wait(task, timeout.min(ABORT_JOIN_GRACE)).await;
+    if matches!(joined, Err(WorkerCleanupError::TimedOut { .. })) {
+        return result;
+    }
+    *slot = None;
+    joined
 }
 
 /// Waits without aborting on timeout, retaining the owner for another join.
@@ -318,20 +331,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn timeout_retains_ownership_until_abort_is_joined() {
-        let mut slot = Some(tokio::spawn(std::future::pending::<()>()));
-        assert!(matches!(
-            join_owned_worker(&mut slot, Duration::from_millis(10)).await,
-            Err(WorkerCleanupError::TimedOut { .. })
-        ));
-        assert!(slot.is_some());
+    async fn timeout_aborts_and_joins_a_worker_before_releasing_it() {
+        let exits = Arc::new(AtomicUsize::new(0));
+        let exit = Exit(exits.clone());
+        let mut slot = Some(tokio::spawn(async move {
+            let _exit = exit;
+            std::future::pending::<()>().await;
+        }));
         assert_eq!(
-            join_owned_worker(&mut slot, Duration::from_secs(1))
+            join_owned_worker(&mut slot, Duration::from_millis(10))
                 .await
                 .unwrap(),
             WorkerCompletion::Cancelled,
         );
         assert!(slot.is_none());
+        assert_eq!(
+            exits.load(Ordering::SeqCst),
+            1,
+            "aborted worker must be joined"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

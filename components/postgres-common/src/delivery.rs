@@ -11,7 +11,7 @@ pub mod progress;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use drasi_computation_contracts::{DeliveryHandler, DeliveryItem};
+use drasi_computation_contracts::{DeliveryFailure, DeliveryHandler, DeliveryItem};
 use tokio_postgres::{Client, IsolationLevel, Row, Transaction};
 
 const MAX_STREAMS: i64 = 4096;
@@ -233,13 +233,6 @@ impl Cursor {
 
 #[async_trait]
 impl<E: PostgresDeliveryEffect> DeliveryHandler for PostgresDeliveryHandler<E> {
-    fn retryable(&self, error: &anyhow::Error) -> bool {
-        error
-            .downcast_ref::<tokio_postgres::Error>()
-            .and_then(tokio_postgres::Error::code)
-            .is_some_and(|code| matches!(code.code(), "40001" | "40P01" | "55P03"))
-    }
-
     async fn handle(&mut self, item: DeliveryItem<'_>) -> Result<()> {
         anyhow::ensure!(
             self.initialized,
@@ -265,10 +258,27 @@ impl<E: PostgresDeliveryEffect> DeliveryHandler for PostgresDeliveryHandler<E> {
                 .commit()
                 .await
                 .map_err(|error| PostgresDeliveryError::CommitUnknown(error).into()),
+            // A rolled-back serialization failure, deadlock or lock timeout
+            // may succeed when the graph retries the operation.
+            Err(failure) if rolled_back_contention(&failure) => {
+                match transaction.rollback().await {
+                    Ok(()) => Err(DeliveryFailure::transient(failure).into()),
+                    Err(rollback) => {
+                        Err(PostgresDeliveryError::Rollback { failure, rollback }.into())
+                    }
+                }
+            }
             Err(failure) => match transaction.rollback().await {
                 Ok(()) => Err(failure),
                 Err(rollback) => Err(PostgresDeliveryError::Rollback { failure, rollback }.into()),
             },
         }
     }
+}
+
+fn rolled_back_contention(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<tokio_postgres::Error>()
+        .and_then(tokio_postgres::Error::code)
+        .is_some_and(|code| matches!(code.code(), "40001" | "40P01" | "55P03"))
 }

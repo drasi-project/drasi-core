@@ -814,7 +814,7 @@ async fn shared_family_loader_and_registry_execute_native_factories() -> Result<
     assert_eq!(values(&captured(&capture_path)?)?, [7, 8]);
     assert_eq!(
         configuration(&graph.configuration_snapshot()?, "capture")?,
-        json!({"path":capture_path,"append":false})
+        json!({"path":capture_path,"append":false,"onPermanentFailure":"stall"})
     );
 
     let participants = registry.transactional_transformer_registry(Arc::new(
@@ -1013,7 +1013,7 @@ async fn separately_loaded_pipeline_exact_outputs_configuration_and_topology_rou
     assert_eq!(configuration(&snapshot, "middleware")?, middleware_config);
     assert_eq!(
         configuration(&snapshot, "capture")?,
-        json!({"path":path,"append":false})
+        json!({"path":path,"append":false,"onPermanentFailure":"stall"})
     );
     let decoded: GraphConfigurationSnapshot =
         serde_json::from_slice(&serde_json::to_vec(&snapshot)?)?;
@@ -1134,7 +1134,7 @@ async fn actual_library_rejects_bad_configuration_ports_schemas_and_failed_lifec
     assert!(failed.start(&crate::hooks::start_ctx()).await.is_err());
     assert_eq!(
         failed.configuration()?,
-        json!({"path":bad_path,"append":false})
+        json!({"path":bad_path,"append":false,"onPermanentFailure":"stall"})
     );
     assert!(failed.handle(insert(1, 3)?).await.is_err());
     failed.stop(&crate::hooks::stop_ctx()).await?;

@@ -104,8 +104,9 @@ for lifecycle, storage, retry and handler restrictions.
 Managed construction uses a graph-owned `IndexBackend` recipe:
 `{"kind":"nativeConsumer","failureScope":"processRestart","maxStreams":16,
 "receiptsPerStream":64}`. Its `resource_dependencies` must name exactly one actual
-index-provider resource. Optional `retry` uses `DeliveryRetryPolicy`; omitted
-retry means its existing default, not unlimited attempts. The recipe reuses the
+index-provider resource. The runner makes one attempt per delivery; a failed
+operation keeps the completed prefix and the graph retries the input in place
+under the sink delivery-failure model. The recipe reuses the
 declared provider while isolating delivery storage by instance and graph. It
 cannot substitute a producer's shared transaction group for the consumer's
 own per-operation transaction. Component specifications bind this resource
@@ -169,7 +170,8 @@ consumers:
 
 Declare it as a `Checkpoint` resource, with exactly `left-progress` and
 `right-progress` as `Checkpoint` resource dependencies. Each member is a
-`sourceProgress` recipe for the corresponding actual component. Bind the set to
+`sourceProgress` recipe for the corresponding actual component. The set is
+durable only when every member is. Bind the set to
 the producer's `consumer_progress` slot. A query binds its own member resource to
 `source_progress`; an eligible native transformer/handled sink binds it to
 `input_progress`. Matching names alone do not establish ownership. A transformer's
@@ -406,11 +408,15 @@ resolved secret values are never substituted into exported references. Restoring
 configuration selects the same declared resource scope; it does not restore an
 earlier processing position.
 
-The `{"kind":"sourceProgress","component":"query"}` recipe creates a checkpoint
-resource for the named consumer in the current graph. Bind that same resource ID
-to the consumer and its replayable source using `source_progress`. The consumer
-publishes its actual recovered state; the recipe cannot supply checkpoints,
-readiness or durability claims. Resolution creates a separate owner per instance,
+The `{"kind":"sourceProgress","component":"query","indexes":"query-indexes"}`
+recipe creates a checkpoint resource for the named consumer in the current graph.
+Declare the query's own index resource (`indexes`) as its only dependency: the
+query commits its checkpoints there, so the progress resource declares exactly
+the durability that index resource declares, and the query refuses a progress
+binding that declares a different one. Bind that same resource ID to the consumer
+and its replayable source using `source_progress`. The consumer publishes its
+actual recovered state; the recipe cannot supply checkpoints, readiness or
+durability claims. Resolution creates a separate owner per instance,
 not a global cache keyed by component names. Sources across the native boundary
 must explicitly negotiate recovery-v1; native ABI compatibility is not
 recovery support. `{"kind":"queryCatalog"}` creates a catalog shared by queries
@@ -719,12 +725,39 @@ The `OciRegistryClient` supports downloading plugins from OCI registries and opt
 - `download_plugin()` returns `DownloadResult` containing the plugin path and an optional `VerificationResult`
 - `PluginMetadata` now includes `git_commit` and `build_timestamp` fields for build provenance
 
+### Registry compatibility
+
+Every published artifact declares its ABI explicitly; compatibility is never
+inferred from a package version, plugin type or missing field.
+
+| OCI annotation | Meaning |
+|---|---|
+| `io.drasi.plugin.abi-family` | `ordinary` (Source/Reaction, `drasi-plugin-sdk`) or `computation` (native) |
+| `io.drasi.plugin.abi-version` | That family's ABI, read from the binary's marker at build time |
+| `io.drasi.plugin.sdk-version` / `core-version` / `lib-version` | Cargo package versions |
+
+`PluginResolver` rejects an artifact before download when its family or ABI is
+missing, unknown or incompatible, using the same rule as the binary loader:
+ordinary artifacts need the host's FFI ABI major.minor plus matching SDK, core
+and lib package major.minor; native artifacts need the host's native ABI major
+with an older or equal minor and the host target. Explicitly pinned references
+are checked the same way, and the resolved digest is the one whose annotations
+were checked. `download_plugin` then requires the manifest annotation, metadata
+layer and the binary's own marker (`drasi-plugin-ffi-abi=` or
+`drasi-computation-plugin-abi=`) to agree exactly, rejects a binary carrying the
+other family's marker, and re-checks host compatibility before writing anything.
+`HostVersionInfo::abi_version()` and `computation_abi_version()` report the
+loaders' ABIs. Artifacts without these declarations must be rebuilt and
+republished with `cargo xtask build-plugins` / `publish-plugins`, which read the
+marker from each binary (including cross-compiled targets) and refuse, before
+using credentials or uploading, any metadata that disagrees with it.
+
 ## Plugin Load Sequence
 
 1. **Discovery** — scans the plugin directory for files matching configured glob patterns (the `DEFAULT_PLUGIN_FILE_PATTERNS` — `libdrasi_*` / `drasi_*` — match every plugin type), groups them by base name (stripping all known extensions: `.dylib`, `.so`, `.dll`, `.rlib`, `.rmeta`, `.d`)
 2. **Extension filtering** — for each plugin group, selects only cdylib files (`.dylib`, `.so`, `.dll`). Non-cdylib Cargo artifacts (`.rlib`, `.d`, `.rmeta`) are silently ignored. If multiple cdylib extensions exist for the same plugin, an error is logged and the plugin is skipped (ambiguous)
 3. **Library open** — `libloading::Library::new(path)` loads the `.so`/`.dylib`/`.dll`
-4. **Metadata validation** — resolves `drasi_plugin_metadata()` symbol, checks SDK version (major.minor match) and target triple
+4. **Metadata validation** — resolves `drasi_plugin_metadata()` symbol, checks the ordinary FFI ABI version (major.minor match, independent of the SDK package version) and target triple
 5. **Initialization** — calls `drasi_plugin_init()` which returns an `FfiPluginRegistration` containing vtable arrays and callback setters
 6. **Callback wiring** — calls `set_log_callback` and `set_lifecycle_callback` with host context pointers
 7. **Proxy extraction** — wraps each `SourcePluginVtable`, `ReactionPluginVtable`, and `BootstrapPluginVtable` in their corresponding proxy types

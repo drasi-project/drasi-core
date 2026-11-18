@@ -281,6 +281,43 @@ impl GraphChangeCodec {
         Ok(envelope)
     }
 
+    /// A source's progress-only record: an empty change set carrying the
+    /// source metadata (source ID, source sequence and position) that keys a
+    /// consumer's checkpoint to that source. A consumer commits it like any
+    /// other source event, so a per-change source can persist a position that
+    /// carries no change, such as its starting point or a range it proved
+    /// holds no selected change. Whole-transaction outputs use an empty
+    /// committed source transaction instead.
+    pub fn encode_source_progress(
+        source: &ComponentId,
+        stream: StreamId,
+        sequence: u64,
+        position: Bytes,
+        timestamp: DateTime<Utc>,
+    ) -> Result<ChangeEnvelope, GraphCodecError> {
+        let metadata = LegacySourceMetadata {
+            version: 1,
+            source_id: source.clone(),
+            sequence: Some(sequence),
+            source_position: Some(position.to_vec()),
+            timestamp,
+            profiling: None,
+            schema: None,
+        };
+        let (changes, _) = Self::encode_change_set(&[], &stream, sequence)?;
+        let id = super::emission_id(&stream, sequence)?;
+        let system = SystemMetadata::new(stream, sequence)
+            .with_timestamp(timestamp)
+            .with_source_position(position);
+        let mut envelope = ChangeEnvelope::new(id, changes, system);
+        envelope.append_annotation(ContextEntry::try_new(
+            source.clone(),
+            SOURCE_METADATA,
+            ContextValue::Bytes(Arc::from(serde_json::to_vec(&metadata)?)),
+        )?)?;
+        Ok(envelope)
+    }
+
     pub fn encode_change(
         change: SourceChange,
         stream: StreamId,

@@ -46,8 +46,15 @@ pub struct LockedPlugin {
     pub version: String,
     /// Content digest (sha256:...).
     pub digest: String,
-    /// SDK version of the plugin.
+    /// SDK Cargo package version of the plugin.
     pub sdk_version: String,
+    /// Declared ABI family. An absent value is not proof of compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abi_family: Option<String>,
+    /// ABI version of that family. An absent value is never inferred from a
+    /// package version and is not proof of compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abi_version: Option<String>,
     /// Core version of the plugin.
     pub core_version: String,
     /// Lib version of the plugin.
@@ -253,6 +260,8 @@ mod tests {
             version: "0.1.8".to_string(),
             digest: "sha256:abc123".to_string(),
             sdk_version: "0.3.1".to_string(),
+            abi_family: Some("ordinary".to_string()),
+            abi_version: Some("0.19.0".to_string()),
             core_version: "0.3.3".to_string(),
             lib_version: "0.3.8".to_string(),
             platform: "linux/amd64".to_string(),
@@ -276,6 +285,8 @@ mod tests {
                 version: "0.1.7".to_string(),
                 digest: "sha256:def456".to_string(),
                 sdk_version: "0.3.1".to_string(),
+                abi_family: Some("ordinary".to_string()),
+                abi_version: Some("0.19.0".to_string()),
                 core_version: "0.3.3".to_string(),
                 lib_version: "0.3.8".to_string(),
                 platform: "linux/amd64".to_string(),
@@ -293,6 +304,28 @@ mod tests {
         assert_eq!(loaded.version, 1);
         assert_eq!(loaded.plugins.len(), 2);
         assert_eq!(loaded.get("source/postgres").unwrap(), &sample_entry());
+    }
+
+    #[test]
+    fn legacy_lockfile_does_not_infer_abi_from_sdk_package_version() {
+        let dir = TempDir::new().expect("temporary plugin directory");
+        let mut lockfile = PluginLockfile::new();
+        let mut entry = sample_entry();
+        entry.abi_family = None;
+        entry.abi_version = None;
+        lockfile.insert("source/postgres".to_string(), entry);
+        lockfile.write(dir.path()).expect("legacy lockfile");
+        let content =
+            std::fs::read_to_string(dir.path().join("plugins.lock")).expect("lockfile contents");
+        assert!(!content.contains("abi_version"));
+        assert!(!content.contains("abi_family"));
+        let loaded = PluginLockfile::read(dir.path())
+            .expect("read legacy lockfile")
+            .expect("existing lockfile");
+        let locked = loaded.get("source/postgres").expect("locked plugin");
+        assert_eq!(locked.abi_family, None);
+        assert_eq!(locked.abi_version, None);
+        assert_eq!(locked.sdk_version, "0.3.1");
     }
 
     #[test]
@@ -334,6 +367,8 @@ mod tests {
                 version: "0.1.8".to_string(),
                 digest: String::new(),
                 sdk_version: "0.3.1".to_string(),
+                abi_family: Some("ordinary".to_string()),
+                abi_version: Some("0.19.0".to_string()),
                 core_version: "0.3.3".to_string(),
                 lib_version: "0.3.8".to_string(),
                 platform: "x86_64-unknown-linux-gnu".to_string(),

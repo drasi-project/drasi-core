@@ -1,7 +1,11 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-use std::{io::Write, path::Path};
+use std::{
+    io::Write,
+    path::Path,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use drasi_core::interface::IndexError;
 use drasi_core_types::{ComponentId, StorageScope};
@@ -9,6 +13,7 @@ use drasi_core_types::{ComponentId, StorageScope};
 use crate::IndexDb;
 
 const ROOT_MARKER: &str = ".drasi-rocksdb-identity-format";
+const STAGED_PREFIX: &str = ".drasi-rocksdb-identity-format.staged-";
 const ROOT_FORMAT: &[u8] = b"drasi-rocksdb-identity-v2\n";
 const DATABASE_MARKER: &[u8] = b"\0drasi:storage-identity-format";
 const VERSION: u32 = 2;
@@ -34,7 +39,12 @@ pub(crate) fn prepare_root(root: &Path) -> Result<(), IndexError> {
             Err(error) => return Err(error),
         }
         for entry in std::fs::read_dir(root)? {
-            if entry?.file_name() != ROOT_MARKER {
+            let name = entry?.file_name();
+            // A concurrent preparer's staged marker is not existing storage.
+            let staged = name
+                .to_str()
+                .is_some_and(|name| name.starts_with(STAGED_PREFIX));
+            if name != ROOT_MARKER && !staged {
                 return match std::fs::read(&marker) {
                     Ok(bytes) => validate(bytes),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(incompatible(
@@ -44,21 +54,31 @@ pub(crate) fn prepare_root(root: &Path) -> Result<(), IndexError> {
                 };
             }
         }
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&marker)
-        {
-            Ok(mut file) => {
-                file.write_all(ROOT_FORMAT)?;
-                file.sync_all()?;
-                std::fs::File::open(root)?.sync_all()
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                validate(std::fs::read(marker)?)
-            }
-            Err(error) => Err(error),
+        // Publish the marker atomically: a concurrent preparer either finds
+        // no marker or the complete one, never a created-but-unwritten file.
+        // Every preparer stages the same constant, so a replacing rename is
+        // harmless.
+        static STAGED: AtomicU64 = AtomicU64::new(0);
+        let staged = root.join(format!(
+            "{STAGED_PREFIX}{}-{}",
+            std::process::id(),
+            STAGED.fetch_add(1, Ordering::Relaxed)
+        ));
+        let published = (|| {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&staged)?;
+            file.write_all(ROOT_FORMAT)?;
+            file.sync_all()?;
+            std::fs::rename(&staged, &marker)?;
+            std::fs::File::open(root)?.sync_all()
+        })();
+        if published.is_err() {
+            let _ = std::fs::remove_file(&staged);
         }
+        published?;
+        validate(std::fs::read(marker)?)
     })();
     result.map_err(IndexError::other)
 }
@@ -97,4 +117,56 @@ pub(crate) fn verify_database(
     options.set_sync(true);
     db.put_opt(DATABASE_MARKER, expected, &options)
         .map_err(IndexError::other)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Queries sharing a RocksDB root are initialized concurrently; none may
+    /// observe the marker between its creation and its contents.
+    #[test]
+    fn concurrent_preparers_never_observe_a_partial_root_marker() {
+        for _ in 0..50 {
+            let root = tempfile::tempdir().unwrap();
+            let barrier = std::sync::Barrier::new(8);
+            std::thread::scope(|scope| {
+                let workers: Vec<_> = (0..8)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            barrier.wait();
+                            prepare_root(root.path())
+                        })
+                    })
+                    .collect();
+                for worker in workers {
+                    worker.join().unwrap().expect("prepare shared root");
+                }
+            });
+            assert_eq!(
+                std::fs::read(root.path().join(ROOT_MARKER)).unwrap(),
+                ROOT_FORMAT
+            );
+            let entries: Vec<_> = std::fs::read_dir(root.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert_eq!(
+                entries,
+                [std::ffi::OsString::from(ROOT_MARKER)],
+                "no staged file remains"
+            );
+        }
+    }
+
+    #[test]
+    fn a_different_root_format_is_still_refused() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join(ROOT_MARKER),
+            b"drasi-rocksdb-identity-v1\n",
+        )
+        .unwrap();
+        assert!(prepare_root(root.path()).is_err());
+    }
 }

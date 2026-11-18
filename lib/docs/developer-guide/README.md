@@ -3987,7 +3987,6 @@ let runner = Arc::new(Mutex::new(DeliveryRunner::new_transactional(
         scope: RecoveryScope::Failure(FailureMode::ProcessRestart),
         max_streams: size(1),
         receipts_per_stream: size(128),
-        retry: DeliveryRetryPolicy::default(),
     },
 )?));
 ```
@@ -3995,8 +3994,9 @@ let runner = Arc::new(Mutex::new(DeliveryRunner::new_transactional(
 The provider is the native RocksDB provider from Chapter 9. `codec` registers
 the standard graph-change schema and a message-size limit. `DeliveryScope` names
 the stable instance, graph, and consumer. The module's `size` helper constructs
-positive `NonZeroUsize` bounds. `DeliveryRetryPolicy::default` makes
-one attempt; a retry policy is not implied by persistence.
+positive `NonZeroUsize` bounds. The runner makes one attempt per delivery; the
+graph retries a transiently failed input in place (see the sink
+delivery-failure model).
 
 The sink owns this runner, returns `contract` from `recovery_contract`, and
 awaits `deliver_transactional` in `handle`. Its lifecycle hooks show what a
@@ -5252,7 +5252,12 @@ named resource keys.
 ```
 
 Declare this as a Checkpoint resource with exactly the two distinct Checkpoint
-dependencies. Each member uses a `sourceProgress` recipe for its actual component.
+dependencies. Each member uses a `sourceProgress` recipe for its actual component,
+`{"kind":"sourceProgress","component":<query>,"indexes":<that query's index resource>}`,
+with that index resource as its only dependency. A member declares the durability
+its query's index resource declares, and the set is durable only when every member
+is, so a source that needs durable consumer progress refuses a set with a volatile
+query in it.
 Bind the set to the source's `consumer_progress`, and each query's own member to
 its `source_progress`. Eligible standalone transformers/Handled sinks instead
 use their own `input_progress` slot.
@@ -5420,7 +5425,7 @@ pub(super) async fn add_webhook(
                     serde_json::json!({
                         "outputs":{"low-stock":{"component":query_id,"port":"out"}},
                         "url":destination,
-                        "timeoutMs":5000, "maxRetries":0, "failurePolicy":"strict"
+                        "timeoutMs":5000, "maxRetries":0, "onPermanentFailure":"stall"
                     }),
                 )
                 .map_err(|source| GraphError::Validation {

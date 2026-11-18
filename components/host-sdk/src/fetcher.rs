@@ -234,7 +234,7 @@ pub fn read_plugin_metadata(path: &Path) -> Option<PluginBinaryMetadata> {
             return Some(PluginBinaryMetadata {
                 plugin_version: metadata.plugin.version.to_string(),
                 sdk_version: metadata.abi_version.clone(),
-                abi_family: Some("computation".into()),
+                abi_family: Some(crate::loader::COMPUTATION_ABI_FAMILY.into()),
                 abi_version: Some(metadata.abi_version),
                 target_triple: drasi_computation_plugin_sdk::metadata::TARGET.to_owned(),
                 ..Default::default()
@@ -267,11 +267,13 @@ pub fn read_plugin_metadata(path: &Path) -> Option<PluginBinaryMetadata> {
     }
 
     let meta = unsafe { &*meta_ptr };
+    // The ordinary family's `sdk_version` field carries its FFI ABI version.
+    let abi_version = unsafe { meta.sdk_version.to_string() };
     Some(PluginBinaryMetadata {
         plugin_version: unsafe { meta.plugin_version.to_string() },
-        sdk_version: unsafe { meta.sdk_version.to_string() },
-        abi_family: None,
-        abi_version: None,
+        sdk_version: abi_version.clone(),
+        abi_family: Some(crate::loader::ORDINARY_ABI_FAMILY.into()),
+        abi_version: Some(abi_version),
         core_version: unsafe { meta.core_version.to_string() },
         lib_version: unsafe { meta.lib_version.to_string() },
         target_triple: unsafe { meta.target_triple.to_string() },

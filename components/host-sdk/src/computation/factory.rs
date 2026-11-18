@@ -1611,7 +1611,9 @@ impl ComponentFactory for NativeFactory {
                 .await
                 .map_err(ComponentCreationError::terminal)?;
             return Ok(ConstructedComponent::sink(Box::new(
-                proxy.with_description(description),
+                proxy
+                    .with_description(description)
+                    .map_err(ComponentCreationError::terminal)?,
             )));
         }
         let progress = if context

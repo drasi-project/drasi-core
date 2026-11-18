@@ -2376,10 +2376,15 @@ mod tests {
             .get_checkpoint_store()
             .await
             .expect("Should have checkpoint store");
+        // The rebuilt query's bootstrap may record a fresh sequence-zero
+        // boundary for a source that contributed no snapshot; nothing from the
+        // previous configuration's progress survives.
         let all_cp = cp_store.read_all_checkpoints().await.unwrap();
         assert!(
-            all_cp.is_empty(),
-            "Checkpoints should be cleared after config change"
+            all_cp
+                .values()
+                .all(|checkpoint| checkpoint.sequence == 0 && checkpoint.source_position.is_none()),
+            "Checkpoints should be cleared after config change: {all_cp:?}"
         );
 
         let configuration_after = crate::test_helpers::checkpoints::raw_store(&query_instance)

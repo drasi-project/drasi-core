@@ -1359,7 +1359,14 @@ impl EnvelopeSink for TrafficNode {
         }
         if self.probe.fail_handling.swap(false, Ordering::AcqRel) {
             self.probe.handling_failures.fetch_add(1, Ordering::AcqRel);
-            anyhow::bail!("injected failure before handling the held event");
+            // Permanent, so the node fails under the default stall policy
+            // and the replacement handler receives the held event.
+            return Err(
+                drasi_lib::computation::v1::DeliveryFailure::permanent(anyhow::anyhow!(
+                    "injected failure before handling the held event"
+                ))
+                .into(),
+            );
         }
         self.probe
             .handled

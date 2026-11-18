@@ -502,7 +502,7 @@ mod tests {
         use drasi_lib::channels::{QueryResult, ResultDiff};
         let mut view = super::ResultView::default();
         let mut result = QueryResult::new(
-            "q".into(),
+            super::component_id(1),
             1,
             std::time::SystemTime::now().into(),
             vec![

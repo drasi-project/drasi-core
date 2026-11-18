@@ -29,6 +29,10 @@ pub struct Failure {
     /// Operation-specific structured detail, such as a management apply outcome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
+    /// A sink's classification of a failed delivery, carried from the
+    /// [`drasi_computation_contracts::DeliveryFailure`] in the plugin's error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<drasi_computation_contracts::DeliveryFailureClass>,
 }
 impl Failure {
     pub fn new(code: u32, message: impl Into<String>) -> Self {
@@ -37,6 +41,7 @@ impl Failure {
             message: message.into(),
             retryable: false,
             data: None,
+            delivery: None,
         }
     }
     pub fn with_data(mut self, data: serde_json::Value) -> Self {
@@ -77,7 +82,8 @@ impl From<anyhow::Error> for Failure {
             Ok(failure) => failure,
             Err(error) => {
                 let message = format!("{error:#}");
-                match lifecycle_error_kind(&error) {
+                let delivery = drasi_computation_contracts::delivery_failure_class(&error);
+                let mut failure = match lifecycle_error_kind(&error) {
                     Some(LifecycleErrorKind::Retryable) => Self::failed(message).retryable(),
                     Some(LifecycleErrorKind::Cancelled) => {
                         Self::new(status::CANCELLED, message).retryable()
@@ -86,7 +92,9 @@ impl From<anyhow::Error> for Failure {
                         Self::new(status::UNSUPPORTED, message)
                     }
                     Some(LifecycleErrorKind::Terminal) | None => Self::failed(message),
-                }
+                };
+                failure.delivery = delivery;
+                failure
             }
         }
     }

@@ -16,8 +16,8 @@ use axum::{
 use drasi_computation_contracts::ProducerSession;
 use drasi_computation_network_common::diag;
 use drasi_http_common::webhook::{
-    auth::{verify_auth, AuthResult},
-    config::{ErrorBehavior, WebhookConfig},
+    auth::{AuthResult, ResolvedAuth},
+    config::{ErrorBehavior, WebhookConfig, WebhookRoute},
     content_parser::{parse_content, ContentType},
     route_matcher::{convert_method, find_matching_mappings, headers_to_map, RouteMatcher},
     template_engine::{TemplateContext, TemplateEngine},
@@ -33,14 +33,46 @@ pub(crate) struct Webhooks {
     pub config: WebhookConfig,
     matcher: RouteMatcher,
     engine: TemplateEngine,
+    /// Each route's authentication with secrets resolved, by route index.
+    auth: Vec<Option<ResolvedAuth>>,
 }
 
 impl Webhooks {
-    pub fn new(config: WebhookConfig) -> Self {
-        Self {
+    /// Resolves every route's secrets once for this configuration; a missing
+    /// secret refuses the configuration instead of failing each request.
+    pub fn new(config: WebhookConfig) -> anyhow::Result<Self> {
+        let auth = config
+            .routes
+            .iter()
+            .map(|route| {
+                route
+                    .auth
+                    .as_ref()
+                    .map(ResolvedAuth::resolve)
+                    .transpose()
+                    .map_err(|error| error.context(format!("webhook route {}", route.path)))
+            })
+            .collect::<anyhow::Result<_>>()?;
+        Ok(Self {
             matcher: RouteMatcher::new(&config.routes),
             engine: TemplateEngine::new(),
+            auth,
             config,
+        })
+    }
+
+    fn verify(&self, route: &WebhookRoute, headers: &HeaderMap, body: &[u8]) -> AuthResult {
+        // Fails closed: the route always comes from this configuration.
+        match self
+            .config
+            .routes
+            .iter()
+            .position(|candidate| std::ptr::eq(candidate, route))
+        {
+            Some(index) => self.auth[index]
+                .as_ref()
+                .map_or(AuthResult::NotConfigured, |auth| auth.verify(headers, body)),
+            None => AuthResult::Failed("route is not part of the resolved configuration".into()),
         }
     }
 }
@@ -123,7 +155,7 @@ pub(crate) async fn handle(
         .unwrap_or(&webhooks.config.error_behavior);
     // Authentication failures are always 401 with a generic message, whatever
     // the error policy: callers learn nothing about the configured secrets.
-    if let AuthResult::Failed(reason) = verify_auth(route.auth.as_ref(), &headers, &body) {
+    if let AuthResult::Failed(reason) = webhooks.verify(route, &headers, &body) {
         diag!(
             Debug,
             "HTTP webhook authentication failed for {}: {reason}",
@@ -152,11 +184,14 @@ pub(crate) async fn handle(
         return mapping_error(behavior, StatusCode::BAD_REQUEST, "no matching mapping");
     }
     let durable = ingress.shared.durable().is_some();
-    let explicit = if durable {
-        explicit_session(&headers)
-    } else {
-        None
-    };
+    let explicit = explicit_session(&headers);
+    if explicit.is_some() {
+        // Idempotent delivery cannot be honoured without durable admission;
+        // accepting the request volatile would silently drop the guarantee.
+        if let Err(error) = ingress.shared.admission_service() {
+            return crate::durable_http::admission_response(Err(error));
+        }
+    }
     if explicit.is_some()
         && mappings
             .iter()

@@ -6,11 +6,15 @@
 
 pub use drasi_computation_contracts::{
     ComponentDescription, ComponentUpdateData, ComponentUpdateMode, ComponentUpdatePlan,
-    DeliveryGuarantee, DependencyCapabilities, DependencyRequirement, DurabilityRequirement,
-    InputDelivery, OutputDescription, PortFormatAlternative, PortFormatCatalogue,
-    ProgressPersistence, ResourceCapabilities, ResourceDurability, SinkBatching,
+    DeliveryFailure, DeliveryFailureClass, DeliveryGuarantee, DependencyCapabilities,
+    DependencyRequirement, DurabilityRequirement, InputDelivery, OutputDescription,
+    PermanentFailurePolicy, PortFormatAlternative, PortFormatCatalogue, ProgressPersistence,
+    ResourceCapabilities, ResourceDurability, SinkBatching,
 };
 pub use drasi_computation_plugin_abi as abi;
+/// The facade plugins write diagnostics and operator output through; see
+/// [`diagnostics`].
+pub use log;
 pub mod activation_credentials;
 pub mod admission;
 pub mod bootstrap;
@@ -20,6 +24,7 @@ pub mod configuration;
 pub mod consumer;
 pub mod consumer_progress;
 mod control;
+pub mod diagnostics;
 mod export;
 pub mod input_position;
 pub mod lifecycle;
@@ -76,6 +81,10 @@ pub use wire::{
 #[macro_export]
 macro_rules! export_computation_plugin {
     ($definition:expr) => {
+        /// Binary-inspectable native ABI declaration (read without loading).
+        #[used]
+        static __DRASI_COMPUTATION_ABI_VERSION_MARKER: [u8; $crate::abi::ABI_VERSION_MARKER.len()] =
+            $crate::abi::ABI_VERSION_MARKER;
         fn __drasi_computation_export(
         ) -> &'static std::result::Result<$crate::ExportedPlugin, String> {
             static EXPORT: std::sync::OnceLock<
@@ -264,6 +273,14 @@ macro_rules! export_computation_plugin {
                 }
             }))
             .unwrap_or(std::ptr::null())
+        }
+        #[no_mangle]
+        pub unsafe extern "C" fn drasi_computation_plugin_logging_v1(
+            table: *const $crate::abi::logging::HostLoggerV1,
+        ) -> $crate::abi::Status {
+            $crate::transport::status_boundary(|| unsafe {
+                $crate::diagnostics::install_host_logger(table)
+            })
         }
         #[no_mangle]
         pub unsafe extern "C" fn drasi_computation_plugin_entry(

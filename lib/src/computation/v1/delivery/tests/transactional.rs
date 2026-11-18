@@ -22,17 +22,12 @@ struct Stateful {
     attempts: Mutex<Vec<String>>,
     fail: Option<u64>,
     failures: AtomicUsize,
-    transient: bool,
     hold: Option<Arc<Notify>>,
     arm_commit: Option<Arc<AtomicBool>>,
 }
 
 #[async_trait]
 impl TransactionalDeliveryHandler for Stateful {
-    fn retryable(&self, error: &anyhow::Error) -> bool {
-        self.transient && error.downcast_ref::<Rejected>().is_some()
-    }
-
     async fn handle(
         &self,
         item: DeliveryItem<'_>,
@@ -143,13 +138,9 @@ async fn state_and_operation_progress_share_the_same_commit_and_rollback() -> an
         .deliver_transactional(&batch, &handler)
         .await
         .unwrap_err();
-    let Some(DeliveryError::Handling {
-        attempts, source, ..
-    }) = error.downcast_ref()
-    else {
+    let Some(DeliveryError::Handling { source, .. }) = error.downcast_ref() else {
         panic!("typed handling failure was lost: {error:#}");
     };
-    assert_eq!(*attempts, 1);
     assert!(source.downcast_ref::<Rejected>().is_some());
     assert_eq!(state(&delivery).await?, Some(ElementValue::Integer(1)));
     assert_eq!(delivery.progress().await?[0].completed_operations, 1);
@@ -171,19 +162,28 @@ async fn state_and_operation_progress_share_the_same_commit_and_rollback() -> an
 async fn transactional_retries_roll_back_state_before_reusing_the_same_operation_id(
 ) -> anyhow::Result<()> {
     let path = tempfile::tempdir()?;
-    let mut options = options();
-    options.retry.max_attempts = size(2);
     let mut delivery =
-        DeliveryRunner::new_transactional(scope(), indexes(path.path()).await, codec(), options)?;
+        DeliveryRunner::new_transactional(scope(), indexes(path.path()).await, codec(), options())?;
     let handler = Stateful {
         fail: Some(0),
         failures: AtomicUsize::new(1),
-        transient: true,
         ..Default::default()
     };
-    delivery
-        .deliver_transactional(&input(&producer("out"), 1, 2), &handler)
-        .await?;
+    let batch = input(&producer("out"), 1, 2);
+    let error = delivery
+        .deliver_transactional(&batch, &handler)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<DeliveryError>(),
+        Some(DeliveryError::Handling { .. })
+    ));
+    assert_eq!(
+        state(&delivery).await?,
+        None,
+        "the failed attempt rolled back"
+    );
+    delivery.deliver_transactional(&batch, &handler).await?;
     assert_eq!(state(&delivery).await?, Some(ElementValue::Integer(2)));
     let attempts = handler.attempts.lock().expect("attempts").clone();
     assert_eq!(attempts.len(), 3);
@@ -375,18 +375,15 @@ async fn failed_state_rollback_preserves_both_causes_and_prevents_retries() -> a
         inner: original.indexes().session_control.clone(),
         fail: AtomicBool::new(true),
     });
-    let mut options = options();
-    options.retry.max_attempts = size(2);
     let mut delivery = DeliveryRunner::new_transactional(
         scope(),
         with_control(original, control),
         codec(),
-        options,
+        options(),
     )?;
     let handler = Stateful {
         fail: Some(0),
         failures: AtomicUsize::new(1),
-        transient: true,
         ..Default::default()
     };
     let batch = input(&producer("out"), 1, 2);

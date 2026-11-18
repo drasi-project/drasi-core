@@ -2445,12 +2445,17 @@ async fn execute(
                 .as_ref()
                 .and_then(|context| context.dispose)
                 .expect("validated dispose request");
+            let credentials = call
+                .context
+                .as_ref()
+                .and_then(|context| context.credentials.clone());
             let context = crate::lifecycle::DisposeContext::new(
                 scope.clone(),
                 request.reason,
                 request.intent,
                 request.attempt,
-            )?;
+            )?
+            .with_credentials(credentials);
             run_hook(&scope, component.base_mut().dispose(&context)).await?;
             instance.administration.state()?.disposed = true;
         }

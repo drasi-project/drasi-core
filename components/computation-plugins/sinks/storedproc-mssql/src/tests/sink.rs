@@ -296,8 +296,7 @@ async fn handle_outside_an_activation_fails_without_latching() -> Result<()> {
         use drasi_computation_contracts::DeliveryHandler;
         let mut sink = sink(config())?;
         let batch = batch(1, &[insert("r", &[("id", ElementValue::Integer(1))])])?;
-        let error = sink.handle(batch.item(0)?).await.expect_err("not running");
-        assert!(!sink.retryable(&error));
+        sink.handle(batch.item(0)?).await.expect_err("not running");
         assert!(sink.handle(batch.item(0)?).await.is_err());
         Ok(())
     })

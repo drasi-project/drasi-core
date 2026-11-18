@@ -7,9 +7,8 @@
 
 use crate::{
     config::{Command, Commands, PostgresStoredProcConfig},
-    connection::{bounded, ConnectError, Connection, Driver, Login},
+    connection::{bounded, Login, PgConnector},
     management,
-    retry::Backoff,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -24,13 +23,13 @@ use drasi_computation_plugin_sdk::lifecycle::{
 use drasi_computation_plugin_sdk::{
     ActivationCredentials, ApplyUpdateRequest, NativeComponent, NativeManagement, UpdateRequest,
 };
-use drasi_postgres_common::{
-    delivery::progress::{DeliveryError, DeliveryOwner, ProgressEffect, ProgressStore},
-    sql::{build_native_render_input, execute_parameters},
+use drasi_computation_storedproc_common::{
+    driver::{Delivery, ErrorClass, Session},
+    OperationContext, Position,
 };
+use drasi_postgres_common::delivery::progress::PgSession;
 use drasi_reaction_common::OperationType;
 use std::fmt;
-use tokio_postgres::Transaction;
 
 /// A command template that failed to render: deterministic and permanent.
 #[derive(Debug)]
@@ -67,54 +66,45 @@ impl std::error::Error for RenderError {
     }
 }
 
-struct ProcedureEffect<'a> {
-    outputs: &'a SinkOutputs,
-    commands: &'a Commands,
+/// Renders the command of one operation: `None` when no template applies
+/// or its condition rendered nothing.
+fn render(
+    outputs: &SinkOutputs,
+    commands: &Commands,
+    item: &DeliveryItem<'_>,
+) -> Result<Option<(String, Vec<serde_json::Value>)>> {
+    let input = OperationContext::new(item, outputs)?;
+    let Command::Template(template) = commands.resolve(&input.alias, input.operation) else {
+        log::debug!(
+            "PostgreSQL sink: no {:?} command configured for output '{}'",
+            input.operation,
+            input.alias
+        );
+        return Ok(None);
+    };
+    let (command, parameters) = template
+        .render(&input.context)
+        .map_err(|source| RenderError {
+            alias: input.alias.clone(),
+            operation: input.operation,
+            source,
+        })?;
+    if command.trim().is_empty() {
+        log::debug!(
+            "PostgreSQL sink: the command condition excluded output '{}'",
+            input.alias
+        );
+        return Ok(None);
+    }
+    Ok(Some((command, parameters)))
 }
 
-#[async_trait]
-impl ProgressEffect for ProcedureEffect<'_> {
-    async fn apply(&self, transaction: &Transaction<'_>, item: &DeliveryItem<'_>) -> Result<()> {
-        let output = self.outputs.output_for(item.envelope.system().stream())?;
-        let input = build_native_render_input(item.envelope, item.operation, output)?;
-        let Command::Template(template) = self.commands.resolve(&input.alias, input.operation)
-        else {
-            log::debug!(
-                "PostgreSQL sink: no {:?} command configured for output '{}'",
-                input.operation,
-                input.alias
-            );
-            return Ok(());
-        };
-        let (command, parameters) =
-            template
-                .render(&input.context)
-                .map_err(|source| RenderError {
-                    alias: input.alias.clone(),
-                    operation: input.operation,
-                    source,
-                })?;
-        if command.trim().is_empty() {
-            log::debug!(
-                "PostgreSQL sink: the command condition excluded output '{}'",
-                input.alias
-            );
-            return Ok(());
-        }
-        execute_parameters(transaction, &command, parameters).await?;
-        Ok(())
+/// A lifecycle error for a failed start or erase step.
+fn lifecycle(error: anyhow::Error) -> LifecycleError {
+    match PgSession::classify(&error) {
+        ErrorClass::Transient { .. } => LifecycleError::retryable(error),
+        ErrorClass::Permanent => LifecycleError::terminal(error),
     }
-}
-
-/// Whether a delivery failure may succeed on another attempt.
-pub(crate) fn retryable(error: &anyhow::Error) -> bool {
-    if let Some(error) = error.downcast_ref::<DeliveryError>() {
-        return error.retryable();
-    }
-    if let Some(error) = error.downcast_ref::<ConnectError>() {
-        return error.retryable();
-    }
-    false
 }
 
 /// The native PostgreSQL stored-procedure consumer.
@@ -123,13 +113,11 @@ pub struct PostgresStoredProcSink {
     config: PostgresStoredProcConfig,
     outputs: SinkOutputs,
     commands: Commands,
-    store: ProgressStore,
-    /// The activation's connection slot; `Some` while started.
-    active: Option<Option<Connection>>,
-    /// A driver whose graceful close did not finish within a Stop deadline.
-    retiring: Option<Driver>,
-    /// The last activation's login, kept in memory only, for reconnects and
-    /// Erase. Never persisted or exposed through `configuration()`.
+    owner: String,
+    /// The activation's delivery engine; `Some` while started.
+    delivery: Option<Delivery<PgConnector>>,
+    /// The last activation's login, kept in memory only, for Erase after
+    /// Stop. Never persisted or exposed through `configuration()`.
     login: Option<Login>,
     paused: bool,
 }
@@ -139,28 +127,26 @@ impl PostgresStoredProcSink {
         descriptor: ComponentDescriptor,
         config: PostgresStoredProcConfig,
         outputs: SinkOutputs,
-        owner: DeliveryOwner,
+        owner: String,
     ) -> Result<Self> {
         config.validate()?;
         config.validate_outputs(&outputs)?;
         let commands = Commands::compile(&config)?;
-        let store = ProgressStore::new(config.table()?, owner, config.max_streams)?;
         Ok(Self {
             descriptor,
             config,
             outputs,
             commands,
-            store,
-            active: None,
-            retiring: None,
+            owner,
+            delivery: None,
             login: None,
             paused: false,
         })
     }
 
     /// The destination cursor owner of this consumer.
-    pub fn owner(&self) -> &DeliveryOwner {
-        self.store.owner()
+    pub fn owner(&self) -> &str {
+        &self.owner
     }
 
     fn configured_login(&self) -> Login {
@@ -170,101 +156,26 @@ impl PostgresStoredProcSink {
         }
     }
 
-    fn login(&self) -> Login {
-        self.login
-            .clone()
-            .unwrap_or_else(|| self.configured_login())
-    }
-
-    /// Joins a driver left by a Stop that ran out of time.
-    async fn join_retiring(&mut self, deadline: Option<tokio::time::Instant>) -> LifecycleResult {
-        let Some(driver) = self.retiring.as_mut() else {
-            return Ok(());
-        };
-        let limit = bounded(self.config.shutdown_timeout(), deadline);
-        match tokio::time::timeout(limit, driver).await {
-            Ok(result) => {
-                self.retiring = None;
-                match result {
-                    Ok(Ok(())) => {}
-                    // An earlier connection failure is not a Stop failure.
-                    Ok(Err(error)) => log::debug!("PostgreSQL sink connection closed: {error}"),
-                    Err(error) if error.is_cancelled() => {}
-                    Err(error) => log::warn!("PostgreSQL sink connection driver failed: {error}"),
-                }
-                Ok(())
-            }
-            Err(_) => Err(LifecycleError::retryable(anyhow::anyhow!(
-                "the PostgreSQL connection did not close within {limit:?}; its driver is retained \
-                 and Stop may be retried"
-            ))),
-        }
-    }
-
-    /// Connects, prepares the progress table and the cursor statements.
-    async fn activate(
-        &self,
-        login: &Login,
-        deadline: Option<tokio::time::Instant>,
-    ) -> LifecycleResult<Connection> {
-        let mut connection = Connection::connect(&self.config, login, deadline)
-            .await
-            .map_err(|error| {
-                if error.retryable() {
-                    LifecycleError::retryable(error)
-                } else {
-                    LifecycleError::terminal(error)
-                }
-            })?;
-        let limit = bounded(self.config.client_command_timeout(), deadline);
-        if let Err(error) = self
-            .store
-            .ensure_table(&mut connection.client, Some(limit))
-            .await
-        {
-            let retry = error.retryable();
-            connection.discard().await;
-            return Err(if retry {
-                LifecycleError::retryable(error)
-            } else {
-                LifecycleError::terminal(error)
-            });
-        }
-        if let Err(error) = connection.ready(&self.store, &self.config, limit).await {
-            let retry = error.retryable();
-            connection.discard().await;
-            return Err(if retry {
-                LifecycleError::retryable(error)
-            } else {
-                LifecycleError::terminal(error)
-            });
-        }
-        Ok(connection)
+    fn delivery(&self, login: Login) -> Delivery<PgConnector> {
+        Delivery::new(
+            PgConnector::new(self.config.clone(), login, self.owner.clone()),
+            self.config.max_streams,
+            self.config.on_permanent_failure,
+        )
     }
 
     async fn erase(&self, ctx: &DisposeContext) -> Result<u64> {
-        let deadline = ctx.deadline();
-        let connection = Connection::connect(&self.config, &self.login(), deadline).await?;
-        let limit = bounded(self.config.client_command_timeout(), deadline);
-        let result = self.store.erase(&connection.client, Some(limit)).await;
-        if let Some(driver) = connection.close() {
-            let limit = bounded(self.config.shutdown_timeout(), deadline);
-            if tokio::time::timeout(limit, driver).await.is_err() {
-                log::warn!("PostgreSQL sink erase connection did not close within {limit:?}");
-            }
+        let login = self
+            .login
+            .clone()
+            .unwrap_or_else(|| self.configured_login());
+        let mut delivery = self.delivery(login);
+        let erased = delivery.erase().await;
+        let limit = bounded(self.config.shutdown_timeout(), ctx.deadline());
+        if let Err(error) = delivery.close(limit).await {
+            log::warn!("PostgreSQL sink erase connection close: {error:#}");
         }
-        Ok(result?)
-    }
-
-    async fn release(&mut self) {
-        if let Some(Some(connection)) = self.active.take() {
-            connection.discard().await;
-        }
-        if let Some(driver) = self.retiring.take() {
-            driver.abort();
-            let _ = driver.await;
-        }
-        self.paused = false;
+        erased
     }
 }
 
@@ -300,40 +211,42 @@ impl NativeComponent for PostgresStoredProcSink {
         nothing_to_do()
     }
 
-    /// Connects, prepares the progress table and the cursor statements within
-    /// `connectTimeoutMs`, `commandTimeoutMs` and the lifecycle deadline. A
-    /// cancelled or failed start leaves nothing running and the sink startable.
+    /// Connects and prepares the progress and dead-letter tables and the
+    /// cursor statements: one attempt within `connectTimeoutMs`,
+    /// `commandTimeoutMs` and the lifecycle deadline. A transient failure is
+    /// retryable (the host's lifecycle retry policy decides); a cancelled or
+    /// failed start leaves nothing open and the sink startable.
     async fn start(&mut self, ctx: &mut StartContext) -> LifecycleResult {
         if ctx.cancellation().is_cancelled() {
             return Err(LifecycleError::cancelled());
         }
-        if self.active.is_some() {
+        if self.delivery.is_some() {
             return Err(LifecycleError::terminal(anyhow::anyhow!(
                 "PostgreSQL sink is already started"
             )));
-        }
-        if let Some(driver) = &self.retiring {
-            if !driver.is_finished() {
-                return Err(LifecycleError::retryable(anyhow::anyhow!(
-                    "PostgreSQL sink requires its previous connection to close before restart; \
-                     retry Stop first"
-                )));
-            }
-            self.join_retiring(ctx.deadline()).await?;
         }
         let login = match ctx.take_credentials() {
             Some(credentials) => credential_login(credentials).map_err(LifecycleError::terminal)?,
             None => self.configured_login(),
         };
-        let deadline = ctx.deadline();
+        let mut delivery = self.delivery(login.clone());
         let cancellation = ctx.cancellation().clone();
-        let connection = tokio::select! {
+        let deadline = async {
+            match ctx.deadline() {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Err(LifecycleError::cancelled()),
-            connection = self.activate(&login, deadline) => connection?,
-        };
+            _ = deadline => return Err(LifecycleError::retryable(anyhow::anyhow!(
+                "PostgreSQL sink start deadline expired"
+            ))),
+            prepared = delivery.prepare() => prepared.map_err(lifecycle)?,
+        }
         self.login = Some(login);
-        self.active = Some(Some(connection));
+        self.delivery = Some(delivery);
         self.paused = false;
         Ok(())
     }
@@ -351,27 +264,22 @@ impl NativeComponent for PostgresStoredProcSink {
         Ok(())
     }
 
-    /// `Drain` closes the client and waits for the server to answer a command
-    /// still running (bounded by `statement_timeout`); `Abort` drops the
-    /// socket at once. On expiry the driver is retained and a retryable error
-    /// is returned.
+    /// `Drain` closes the idle connection gracefully within
+    /// `shutdownTimeoutMs` and the deadline; `Abort` (or an expired close)
+    /// drops it, and the server rolls back anything open. Nothing outlives
+    /// Stop.
     async fn stop(&mut self, ctx: &StopContext) -> LifecycleResult {
         self.paused = false;
-        if let Some(Some(connection)) = self.active.take() {
-            if let Some(driver) = connection.close() {
-                if ctx.mode() == StopMode::Abort {
-                    driver.abort();
-                }
-                self.retiring = Some(driver);
+        let Some(mut delivery) = self.delivery.take() else {
+            return Ok(());
+        };
+        if ctx.mode() == StopMode::Drain && !ctx.cancellation().is_cancelled() {
+            let limit = bounded(self.config.shutdown_timeout(), ctx.deadline());
+            if let Err(error) = delivery.close(limit).await {
+                log::debug!("PostgreSQL sink connection close: {error:#}");
             }
         }
-        let cancellation = ctx.cancellation().clone();
-        let deadline = ctx.deadline();
-        tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => Err(LifecycleError::cancelled()),
-            result = self.join_retiring(deadline) => result,
-        }
+        Ok(())
     }
 
     /// `Erase` first deletes this consumer's cursor rows (only
@@ -387,8 +295,8 @@ impl NativeComponent for PostgresStoredProcSink {
             match erased {
                 Ok(rows) => log::info!(
                     "PostgreSQL sink erased {rows} cursor rows of owner {} from {}",
-                    self.store.owner(),
-                    self.store.table()
+                    self.owner,
+                    self.config.progress_table
                 ),
                 Err(error) => {
                     return Err(LifecycleError::retryable(
@@ -397,7 +305,8 @@ impl NativeComponent for PostgresStoredProcSink {
                 }
             }
         }
-        self.release().await;
+        self.delivery = None;
+        self.paused = false;
         self.login = None;
         Ok(())
     }
@@ -450,24 +359,28 @@ impl NativeManagement for PostgresStoredProcSink {
             });
         }
         match boundary {
-            UpdateBoundary::Pause if self.active.is_some() && !self.paused => {
+            UpdateBoundary::Pause if self.delivery.is_some() && !self.paused => {
                 return Err(refused("in-place updates require a completed pause"));
             }
-            UpdateBoundary::Stop if self.active.is_some() => {
+            UpdateBoundary::Stop if self.delivery.is_some() => {
                 return Err(refused("restart updates require a stopped sink"));
             }
             UpdateBoundary::Replace => return Err(refused("Replace is not an instance update")),
             UpdateBoundary::Pause | UpdateBoundary::Stop => {}
         }
         let commands = Commands::compile(&proposed).map_err(refused)?;
-        let store = ProgressStore::new(
-            proposed.table().map_err(refused)?,
-            self.store.owner().clone(),
-            proposed.max_streams,
-        )
-        .map_err(refused)?;
+        if let Some(delivery) = self.delivery.as_mut() {
+            delivery.set_max_streams(proposed.max_streams);
+            if proposed.command_timeout_ms != self.config.command_timeout_ms {
+                // The next operation reconnects with the new statement bound.
+                let limit = self.config.shutdown_timeout();
+                if let Err(error) = delivery.close(limit).await {
+                    log::debug!("PostgreSQL sink connection close: {error:#}");
+                }
+            }
+            delivery.connector_mut().set_config(proposed.clone());
+        }
         self.commands = commands;
-        self.store = store;
         self.config = proposed;
         Ok(())
     }
@@ -475,18 +388,14 @@ impl NativeManagement for PostgresStoredProcSink {
 
 #[async_trait]
 impl DeliveryHandler for PostgresStoredProcSink {
-    fn retryable(&self, error: &anyhow::Error) -> bool {
-        retryable(error)
-    }
-
     fn delivery_guarantee(&self) -> drasi_computation_contracts::DeliveryGuarantee {
         self.config.delivery_guarantee
     }
 
-    /// Delivers one operation. Transient failures (rolled back, connection
-    /// lost, commit outcome unknown) are retried within `reconnectBudgetMs`,
-    /// reconnecting as needed; the destination cursor makes every retry
-    /// idempotent. A failure never prevents a later `handle`.
+    /// Delivers one operation in one transaction with its cursor row (see
+    /// `drasi_computation_storedproc_common::driver`): one attempt, classified
+    /// for the graph, which retries transient failures; under
+    /// `onPermanentFailure: skip` a content failure is settled as skipped.
     async fn handle(&mut self, item: DeliveryItem<'_>) -> Result<()> {
         anyhow::ensure!(
             item.port.as_str() == "in",
@@ -503,82 +412,25 @@ impl DeliveryHandler for PostgresStoredProcSink {
                 .into(),
             );
         }
-        let login = self.login();
+        let position = Position::from_item(&item)?;
         let Self {
-            config,
             outputs,
             commands,
-            store,
-            active,
+            delivery,
             ..
         } = self;
-        let slot = active.as_mut().context("PostgreSQL sink is not running")?;
-        let effect = ProcedureEffect { outputs, commands };
-        let mut backoff = Backoff::new(config.reconnect_budget());
-        loop {
-            let error = match attempt(config, store, slot, &login, &effect, &item).await {
-                Ok(()) => return Ok(()),
-                Err(error) => error,
-            };
-            if !retryable(&error) || !backoff.wait().await {
-                return Err(error);
-            }
-            log::warn!("Retrying PostgreSQL delivery {}: {error:#}", item.id);
-        }
+        let delivery = delivery
+            .as_mut()
+            .context("PostgreSQL sink is not running")?;
+        let mut render = || render(outputs, commands, &item);
+        delivery.deliver(&position, &mut render).await.map(drop)
     }
-}
-
-async fn attempt(
-    config: &PostgresStoredProcConfig,
-    store: &ProgressStore,
-    slot: &mut Option<Connection>,
-    login: &Login,
-    effect: &ProcedureEffect<'_>,
-    item: &DeliveryItem<'_>,
-) -> Result<()> {
-    if slot.as_ref().is_some_and(|connection| !connection.usable()) {
-        if let Some(connection) = slot.take() {
-            log::debug!("PostgreSQL sink replaces an unusable connection");
-            connection.discard().await;
-        }
-    }
-    if slot.is_none() {
-        *slot = Some(Connection::connect(config, login, None).await?);
-    }
-    let connection = slot.as_mut().context("PostgreSQL connection missing")?;
-    let limit = config.client_command_timeout();
-    connection.in_flight = true;
-    let result = match connection.ready(store, config, limit).await {
-        Ok(()) => match &connection.prepared {
-            Some(prepared) => {
-                store
-                    .deliver(&mut connection.client, prepared, effect, item, Some(limit))
-                    .await
-            }
-            None => Err(DeliveryError::Rejected(
-                "cursor statements are not prepared".into(),
-            )),
-        },
-        Err(error) => Err(error),
-    };
-    connection.in_flight = false;
-    if let Err(error) = &result {
-        if error.discards_connection() {
-            if let Some(connection) = slot.take() {
-                connection.discard().await;
-            }
-        }
-    }
-    Ok(result?)
 }
 
 impl Drop for PostgresStoredProcSink {
     fn drop(&mut self) {
-        if self.retiring.is_some() || matches!(self.active, Some(Some(_))) {
-            log::warn!("Native PostgreSQL sink dropped without awaited connection cleanup");
-        }
-        if let Some(driver) = self.retiring.take() {
-            driver.abort();
+        if self.delivery.is_some() {
+            log::warn!("Native PostgreSQL sink dropped without a Stop");
         }
     }
 }

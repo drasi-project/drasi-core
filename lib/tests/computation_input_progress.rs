@@ -763,7 +763,8 @@ impl EnvelopeSink for InterruptedSink {
     async fn handle(&mut self, _: InputEnvelope) -> Result<()> {
         self.entered.send("handle").await?;
         self.processing.notified().await;
-        anyhow::bail!("effect failed")
+        // Permanent under the default stall policy: the node fails.
+        Err(DeliveryFailure::permanent(anyhow::anyhow!("effect failed")).into())
     }
 }
 

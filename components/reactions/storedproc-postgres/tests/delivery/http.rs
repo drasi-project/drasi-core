@@ -217,7 +217,6 @@ async fn http_rejects_state_runners_before_accepting_external_handlers() -> Resu
             scope: RecoveryScope::Failure(FailureMode::ProcessRestart),
             max_streams: size(2),
             receipts_per_stream: size(2),
-            retry: DeliveryRetryPolicy::default(),
         },
     )?;
     let effects = Arc::new(AtomicUsize::new(0));
@@ -283,25 +282,6 @@ async fn http_exact_message_limits_and_explicit_retry_classification_are_enforce
         size(limit),
         Duration::from_secs(5),
     )?;
-    for (status, retryable) in [
-        (StatusCode::TOO_MANY_REQUESTS, true),
-        (StatusCode::SERVICE_UNAVAILABLE, true),
-        (StatusCode::BAD_REQUEST, false),
-        (StatusCode::CONFLICT, false),
-        (StatusCode::UNPROCESSABLE_ENTITY, false),
-        (StatusCode::ACCEPTED, false),
-    ] {
-        assert_eq!(
-            exact.retryable(
-                &HttpDeliveryError::Rejected {
-                    status,
-                    message: "fixture".into()
-                }
-                .into()
-            ),
-            retryable
-        );
-    }
     for (url, bytes, timeout) in [
         ("ftp://localhost/delivery", 1024, Duration::from_secs(1)),
         (

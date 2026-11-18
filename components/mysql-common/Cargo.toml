@@ -43,6 +43,8 @@ native = [
 storedproc = [
     "client",
     "dep:handlebars",
+    "dep:drasi-computation-storedproc-common",
+    "dep:thiserror",
     "dep:drasi-computation-contracts",
     "dep:drasi-reaction-common",
     "drasi-reaction-common/sql",
@@ -52,6 +54,8 @@ storedproc = [
 drasi-core-types.workspace = true
 drasi-computation-contracts = { workspace = true, optional = true }
 drasi-reaction-common = { workspace = true, optional = true }
+drasi-computation-storedproc-common = { workspace = true, optional = true }
+thiserror = { version = "2", optional = true }
 anyhow = "1.0"
 log = "0.4"
 # A rustls TLS backend (+ ring crypto provider) is compiled in with `client` so

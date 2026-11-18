@@ -307,8 +307,8 @@ impl SqliteSnapshot {
         state.durability().require(FailureMode::ProcessRestart)?;
         let progress = self.progress.snapshot()?;
         anyhow::ensure!(
-            progress.recovered && progress.persistent && progress.failure.is_none(),
-            "SQLite snapshot requires recovered persistent owner progress"
+            progress.recovered && progress.failure.is_none(),
+            "SQLite snapshot requires recovered owner progress"
         );
         let handover = state
             .read()

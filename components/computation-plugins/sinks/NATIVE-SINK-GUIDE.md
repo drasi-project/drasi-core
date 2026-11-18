@@ -2,7 +2,7 @@
 
 This guide states what a production native sink (`NativeComponent` +
 `NativeSink`, or a `DeliveryHandler` consumer) must do beyond compiling against
-the ABI 4 SDK. It applies to every crate in this directory. The HTTP, gRPC, SSE
+the native SDK (`drasi_computation_plugin_abi::ABI_VERSION`). It applies to every crate in this directory. The HTTP, gRPC, SSE
 and log sinks are the reference implementations. The general rules in the
 [native source standard](../sources/NATIVE-SOURCE-GUIDE.md) for management,
 configuration, errors and documentation apply unchanged. This guide records
@@ -35,24 +35,96 @@ Never report completion on a weaker signal than the profile states. For
 example, an HTTP `202 Accepted` is not completion unless it is configured as
 success.
 
-## Retries, idempotency and failure policy
+## Delivery failures
 
-- Use `drasi_computation_network_common::retry`: bounded exponential backoff
-  with full jitter, a destination-requested delay (`Retry-After`), and a total
-  time budget (`retryBudgetMs`). The budget bounds how long a Drain stop can
-  wait for an in-flight delivery.
-- Classify failures by status code, `tonic::Code` or error kind, never by
-  message text. Do not retry permanent failures (authentication, invalid
-  request, not found).
-- Send a stable delivery identity with every remote request:
-  `x-drasi-delivery-id`, built by `config::delivery_id`. It is made from the
-  producer's logical sequence and change ordinal, so retries and replays carry
-  the same identity and a receiver can deduplicate. It contains no transport
-  or configuration identity.
-- `failurePolicy: strict` fails the input, and the host retries it.
-  `failurePolicy: skip` logs a sanitized record (`config::sanitize`) and
-  completes the input. A template that fails to render is a per-change failure
-  under that policy. It never falls back silently to another body.
+Every sink uses the graph's one delivery-failure model. A sink never decides
+to retry an input later, skip it or stall on it by itself; it classifies why
+`handle` failed and the graph acts on that classification.
+
+**Classify.** Carry a `DeliveryFailure` (from `drasi_computation_contracts`,
+re-exported by the SDK) in the error `handle` returns. It crosses the plugin
+ABI with the error.
+
+| Class | Meaning | Examples |
+|---|---|---|
+| `DeliveryFailure::transient(e)` | The same input may be delivered later. | Connection refused, timeouts, HTTP 5xx/408/409/425/429, gRPC `UNAVAILABLE`/`RESOURCE_EXHAUSTED`/`ABORTED`, database deadlocks and lost connections. |
+| `DeliveryFailure::transient_after(e, delay)` | As above, not before `delay`. | HTTP `Retry-After`, gRPC `grpc-retry-pushback-ms`. |
+| `DeliveryFailure::permanent(e)` | This input can never be delivered. | Other HTTP 4xx, gRPC `INVALID_ARGUMENT` and other non-retryable codes, gRPC `success=false`, a template that fails to render (strictly), a change larger than the request limit, a procedure or cursor rejection. |
+| `DeliveryFailure::skipped(e)` | This operation can never be delivered and the consumer, declaring `skip`, has already recorded the skip with its own progress, atomically. | Only consumers whose progress the host's `DeliveryRunner` owns (see below). |
+
+An error without a `DeliveryFailure` is transient. Classify by status code,
+`tonic::Code`, SQLSTATE or error kind, never by message text. A sink whose
+activation cannot deliver again until it is restarted (for example a consumer
+with an uncertain transaction) returns a terminal `LifecycleError` instead;
+the graph then fails the node.
+
+**Transient: retried in place.** The graph keeps the input, does not
+acknowledge it, and delivers the same input again with bounded exponential
+backoff and jitter (200 ms doubling to 30 s), never sooner than a retry-after
+hint (honoured up to 10 minutes). It never skips the input and never retries
+without a delay. Stop and Pause end the wait at once: the input stays retained
+on the node and is delivered after Resume, or released unacknowledged on Stop.
+While it retries, the node stays `Running`, its health is `Degraded`, and its
+failure is the last error as a `Processing`/`Retryable` failure; both clear
+when the input is delivered. Reconciliation does not restart a node that is
+retrying in place.
+
+**Permanent: the declared policy.** Every sink has the same setting,
+`onPermanentFailure` (`ConfigOption::on_permanent_failure()` publishes it), and
+declares the parsed value in its description
+(`DescribeRequest::unkeyed_sink(policy)` /
+`ComponentDescription::with_permanent_failure`). Because it is part of the
+description the graph captured at construction, a change to it is a `Replace`.
+
+| Value | Behaviour |
+|---|---|
+| `stall` (default) | The node records a terminal `Processing` failure and delivers nothing more until an operator acts (fix the destination or configuration, then Stop/Start or Retry, or change `onPermanentFailure`). |
+| `skip` | The graph logs the input, acknowledges it, counts it in `ObservedComponent::skipped_inputs` and continues with the next input. |
+
+When a multi-input batch fails permanently, the graph delivers those inputs
+one at a time, so only the input that can never be delivered is stalled on or
+skipped. A network sink that delivers each change of an input as its own
+request uses `retry::InputOutcome`: under `skip` it still delivers the input's
+other changes and then reports the input as permanently failed.
+
+A consumer whose progress the host's `DeliveryRunner` owns (the
+stored-procedure sinks, `http-delivery`) settles a skip itself, because the
+graph cannot advance that progress: under `skip` it records the undeliverable
+operation with its destination progress in one atomic step (the
+stored-procedure sinks write a dead-letter row in the same transaction that
+advances the destination cursor; `http-delivery` has only the runner's ledger)
+and returns `DeliveryFailure::skipped`. The runner then records the operation
+as completed, delivers the input's other operations, and reports the input as
+permanently failed (`DeliveryError::Skipped`), so the graph acknowledges it
+and counts the skip; a replay repeats nothing. The host enforces the
+declaration: a settled skip from a consumer that declares `stall`, or an
+unsettled permanent failure of an operation under `skip` (for example a
+destination cursor rejection), fails the node instead. A transactional
+consumer supports only `stall`.
+
+**Retries inside a sink.** A sink may make bounded fast retries of one request
+before it returns (`drasi_computation_network_common::retry`: exponential
+backoff with full jitter, `Retry-After`, a total budget `retryBudgetMs` that
+bounds how long a Drain stop waits). What remains after that budget is
+returned classified, and the graph's backoff takes over.
+
+**Idempotency.** Send a stable delivery identity with every remote request:
+`x-drasi-delivery-id`, built by `config::delivery_id`. It is made from the
+producer's logical sequence and change ordinal, so retries, in-place retries
+and replays carry the same identity and a receiver can deduplicate. It
+contains no transport or configuration identity. A template that fails to
+render never falls back silently to another body.
+
+## Operator output and diagnostics
+
+Write diagnostics and operator-visible output with the `log` facade
+(`drasi_computation_plugin_sdk::log`). Loaded as a library, the exported
+plugin receives the host's logger through the ABI's logging extension, so the
+records reach the host's logger with their level and target; statically
+linked, the plugin shares the host's facade. Do not print to stdout or stderr
+for diagnostics. A sink whose output *is* a standard stream (the log sink's
+`stdout`/`stderr` outputs) writes from a dedicated thread so a blocked stream
+never blocks the async runtime.
 
 ## Server-style sinks
 
@@ -74,12 +146,12 @@ As for sources. Sink-specific classification:
 
 - **Pause (in place):** anything read per delivery: templates, routes,
   headers or metadata, credentials sent per request, timeouts, retry policy,
-  failure policy, log level.
+  log level.
 - **Stop (restart):** endpoint, listener address, TLS material, connection
   settings, batching bounds the host reads at start.
 - **Replace:** output aliases, a change to the bound inputs
   (`update::inputs_changed`; live rebinding is CW-94), a delivery-profile
-  change.
+  change, `onPermanentFailure`.
 
 ## Tests
 
@@ -118,7 +190,8 @@ As for sources (`README.md`, `DESIGN.md`, `CONFIGURATION.md`). The sink
 - input decoding and change projection;
 - the delivery profile, with its exact duplicate and loss windows;
 - batching;
-- retry and classification;
+- retry and delivery-failure classification (which failures are transient
+  and which permanent);
 - the idempotency key.
 
 The sink `CONFIGURATION.md` also covers:

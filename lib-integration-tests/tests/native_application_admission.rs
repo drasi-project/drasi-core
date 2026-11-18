@@ -222,14 +222,20 @@ async fn lifecycle_contract() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let channel = channel(directory.path()).await?;
     let admission = SourceAdmission::new(channel.clone(), PortId::try_new("out")?).await?;
+    // Producer metadata is served before any activation, so a client can
+    // resolve an uncertain outcome while the source is parked; input needs an
+    // activation.
+    let parked = admission
+        .register_producer(ComponentId::try_new(
+            "3c0f6a2e-8d4b-5e71-9a26-7b5d1c8e4f90",
+        )?)
+        .await?;
     assert!(matches!(
-        admission
-            .register_producer(ComponentId::try_new(
-                "05917d50-b359-5767-9855-c3b33fa5e5e9"
-            )?)
-            .await,
+        admission.admit(&parked, 1, &event(1)?).await,
         Err(PipeError::Closed)
     ));
+    assert_eq!(admission.admission_receipt(&parked, 1).await?, None);
+    admission.retire_producer(&parked).await?;
     assert!(NativeApplicationSource::durable(
         drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000135")
             .expect("fixture UUID"),

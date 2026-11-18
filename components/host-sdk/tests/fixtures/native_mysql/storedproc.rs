@@ -20,10 +20,6 @@ pub(crate) fn delivery_options() -> DeliveryOptions {
         scope: RecoveryScope::Failure(FailureMode::ProcessRestart),
         max_streams: NonZeroUsize::new(4).expect("streams"),
         receipts_per_stream: NonZeroUsize::new(4).expect("receipts"),
-        retry: DeliveryRetryPolicy {
-            max_attempts: NonZeroUsize::new(3).expect("attempts"),
-            delay: Duration::from_millis(5),
-        },
     }
 }
 
@@ -164,10 +160,7 @@ fn factory(native: &[Arc<NativePlugin>]) -> Result<Arc<computation::NativeFactor
 }
 
 fn owner(component: &str) -> String {
-    drasi_computation_sink_storedproc_mysql::owner_id(
-        ComponentBatch::GRAPH_ID,
-        id(component).as_str(),
-    )
+    drasi_computation_sink_storedproc_mysql::owner(ComponentBatch::GRAPH_ID, id(component).as_str())
 }
 
 async fn rows_of(database: &Database, component: &str) -> Result<String> {
@@ -302,7 +295,7 @@ async fn large_input(database: &Database, factory: &computation::NativeFactory) 
                 owner("bulk-procedures")
             ))
             .await?,
-        "5000\t5000\t3"
+        "5000\t5000\t4"
     );
     Ok(())
 }
@@ -540,8 +533,9 @@ async fn plugin_retry_without_restart(database: &Database) -> Result<()> {
     sink.start(&mut StartContext::new(scope(), None)).await?;
     let first = sink.handle(batch.item(0)?).await;
     assert!(first.is_err());
-    assert!(
-        !sink.retryable(first.as_ref().expect_err("failed")),
+    assert_eq!(
+        drasi_computation_contracts::delivery_failure_class(first.as_ref().expect_err("failed")),
+        Some(drasi_computation_contracts::DeliveryFailureClass::Permanent),
         "a procedure SIGNAL is permanent"
     );
     database.sql("UPDATE retry_gate SET enabled=false").await?;
@@ -617,13 +611,20 @@ async fn volatile_queries(
     )
     .await?;
     strict.start(&crate::hooks::start_ctx()).await?;
+    // The graph refuses this pairing when it binds the edge (checked by
+    // `graph_refuses_volatile_queries`); driven directly, the host refuses
+    // the envelope as a permanent typed failure instead of degrading it.
     let error = strict
         .handle(volatile_input(FIRST, 1, 9701, "refused")?)
         .await
         .err()
         .context("the volatile input must be refused")?;
+    assert_eq!(
+        drasi_computation_contracts::delivery_failure_class(&error),
+        Some(drasi_computation_contracts::DeliveryFailureClass::Permanent)
+    );
     assert!(
-        format!("{error:#}").contains("output identity is Volatile"),
+        format!("{error:#}").contains("lacks the producer identity that ExactlyOnce"),
         "{error:#}"
     );
     assert_eq!(database.sql(audited).await?, "0");
@@ -661,7 +662,7 @@ async fn volatile_queries(
                 owner("volatile-procedures")
             ))
             .await?,
-        "64\t3"
+        "64\t4"
     );
     sink.stop(&crate::hooks::stop_ctx()).await?;
     graph_refuses_volatile_queries(database, factory).await?;

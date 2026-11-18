@@ -358,9 +358,8 @@ async fn replay_requires_real_file_storage_and_never_adopts_existing_data() -> R
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn durable_start_refuses_rebinding_missing_history_and_external_schema_changes() -> Result<()>
-{
-    for fault in ["binding", "keys", "missing", "schema", "disable"] {
+async fn durable_start_refuses_rebinding_missing_history_and_key_changes() -> Result<()> {
+    for fault in ["binding", "keys", "missing", "external keys", "disable"] {
         let directory = tempfile::tempdir()?;
         let progress = progress();
         let mut query = query(directory.path(), progress.clone()).await?;
@@ -382,8 +381,13 @@ async fn durable_start_refuses_rebinding_missing_history_and_external_schema_cha
             "missing" => {
                 connection.execute("DELETE FROM __drasi_native_outbox_v1", [])?;
             }
-            "schema" => {
-                connection.execute("ALTER TABLE items ADD COLUMN extra TEXT", [])?;
+            "external keys" => {
+                // The table is rebuilt keyed by `value`: its element IDs change.
+                connection.execute_batch(
+                    "CREATE TABLE rebuilt(id INTEGER, value TEXT PRIMARY KEY);
+                     INSERT INTO rebuilt SELECT id, value FROM items;
+                     DROP TABLE items; ALTER TABLE rebuilt RENAME TO items;",
+                )?;
             }
             _ => {}
         }
@@ -404,12 +408,104 @@ async fn durable_start_refuses_rebinding_missing_history_and_external_schema_cha
         } else {
             source(next_settings, progress)?
         };
-        assert!(
-            second.start(&lifecycle_ctx::start()).await.is_err(),
-            "{fault}"
-        );
+        let error = second
+            .start(&lifecycle_ctx::start())
+            .await
+            .expect_err(fault);
+        if fault == "external keys" {
+            assert!(
+                format!("{error:#}").contains("identity columns of captured table 'items'"),
+                "{error:#}"
+            );
+        }
         second.stop(&lifecycle_ctx::stop()).await?;
         query.stop(&lifecycle_ctx::stop()).await?;
+    }
+    Ok(())
+}
+
+/// A journal keeps replaying across DDL that keeps every element ID:
+/// changes to tables it does not capture, new tables and added columns, from
+/// outside while stopped or through the source. Dropping a captured table
+/// through the source is refused and rolled back.
+#[tokio::test(flavor = "current_thread")]
+async fn durable_journal_survives_additive_ddl_and_refuses_orphaning_element_ids() -> Result<()> {
+    for selected in [vec!["items".to_owned()], Vec::new()] {
+        let directory = tempfile::tempdir()?;
+        let owner = progress();
+        let mut consumer = query(directory.path(), owner.clone()).await?;
+        consumer.start(&lifecycle_ctx::start()).await?;
+        let mut settings = config(directory.path());
+        settings.tables = selected.clone();
+        let mut producer = source(settings.clone(), owner.clone())?;
+        producer.start(&lifecycle_ctx::start()).await?;
+        producer
+            .handle()
+            .execute_batch(
+                "CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT); INSERT INTO items VALUES(1,'first')",
+            )
+            .await?;
+        apply(&mut consumer, next(&mut producer).await?).await?;
+        producer.stop(&lifecycle_ctx::stop()).await?;
+        drop(producer);
+
+        // External DDL while stopped: an uncaptured (or newly captured)
+        // table with an index, and a column on the captured table.
+        rusqlite::Connection::open(directory.path().join("source.db"))?.execute_batch(
+            "CREATE TABLE audit(id INTEGER PRIMARY KEY, note TEXT);
+             CREATE INDEX audit_note ON audit(note);
+             ALTER TABLE items ADD COLUMN extra TEXT;",
+        )?;
+        let mut producer = source(settings, owner.clone())?;
+        producer.start(&lifecycle_ctx::start()).await?;
+        // DDL through the source in its own transaction, then a write that
+        // uses it.
+        producer
+            .handle()
+            .execute("ALTER TABLE items ADD COLUMN more TEXT")
+            .await?;
+        producer
+            .handle()
+            .execute("INSERT INTO items(id,value,extra,more) VALUES(2,'second','x','y')")
+            .await?;
+        apply(&mut consumer, next(&mut producer).await?).await?;
+        assert_eq!(
+            rows(&consumer),
+            vec![
+                serde_json::json!({"id": 1, "value": "first"}),
+                serde_json::json!({"id": 2, "value": "second"}),
+            ]
+        );
+        let error = producer
+            .handle()
+            .execute("DROP TABLE items")
+            .await
+            .expect_err("dropping a captured table orphans its element IDs");
+        assert!(
+            format!("{error:#}").contains("dropped or renamed"),
+            "{error:#}"
+        );
+        let remaining = producer
+            .handle()
+            .query("SELECT count(*) AS n FROM items")
+            .await?;
+        assert_eq!(
+            remaining[0]["n"],
+            serde_json::json!(2),
+            "the drop rolled back"
+        );
+        // A table the source does not capture may be dropped, but never
+        // renamed onto a reserved journal name.
+        if !selected.is_empty() {
+            assert!(producer
+                .handle()
+                .execute("ALTER TABLE audit RENAME TO __drasi_native_shadow")
+                .await
+                .is_err());
+            producer.handle().execute("DROP TABLE audit").await?;
+        }
+        producer.stop(&lifecycle_ctx::stop()).await?;
+        consumer.stop(&lifecycle_ctx::stop()).await?;
     }
     Ok(())
 }
@@ -587,7 +683,8 @@ async fn native_sqlite_connected_graph_delivers_only_the_final_transaction_resul
                     ResourceHandle::new(
                         ResourceRole::Checkpoint,
                         Arc::new(QuerySourceProgressResource(progress.clone())),
-                    ),
+                    )
+                    .with_capabilities(ResourceCapabilities::DURABLE),
                 ),
             ];
             let mut dependencies = std::collections::BTreeMap::from([

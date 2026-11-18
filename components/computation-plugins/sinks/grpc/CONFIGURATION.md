@@ -29,7 +29,7 @@ Update boundaries: **Pause** = applied in place, **Stop** = restart,
 | `requireConnectedAtStart` | boolean | `false` | When `true`, Start connects within the retry policy, its deadline and its cancellation. When `false`, the first delivery connects. | no | Pause (read at the next Start) |
 | `maxRetries` | integer | `5` | `0..=100`. Retries of one request after a retryable failure; also connection retries at Start. | no | Pause |
 | `retryBudgetMs` | integer | `120000` | `1..=3600000`. No retry starts later than this after a request's first attempt (or Start's first connection attempt). | no | Pause |
-| `failurePolicy` | string | `strict` | `strict` fails the input so the host retries it. `skip` logs a sanitized warning and completes it. | no | Pause |
+| `onPermanentFailure` | string | `stall` | What the graph does with an input the receiver can never accept: `stall` records a terminal failure on the sink; `skip` logs it, counts it on the sink and continues. Transient failures are always retried in place. See [Operations](#operations). | no | Replace |
 | `keepaliveIntervalMs` | integer | `30000` | `0..=3600000`. HTTP/2 PING interval while a call is open; `0` disables keepalive. | no | Stop |
 | `keepaliveTimeoutMs` | integer | `20000` | `1..=3600000`. PING acknowledgement timeout before the connection is closed. | no | Stop |
 | `compression` | string | `none` | `none` or `gzip`. With `gzip`, the receiver must accept gzip requests. | no | Stop |
@@ -38,7 +38,7 @@ Update boundaries: **Pause** = applied in place, **Stop** = restart,
 | `batching` | object | none | `{"mode":"fixed","batchSize":100,"batchFlushTimeoutMs":1000}` or `{"mode":"adaptive","adaptiveMinBatchSize":1,"adaptiveMaxBatchSize":100,"adaptiveWindowSize":10,"adaptiveBatchTimeoutMs":1000}` (nested defaults shown; sizes ≤ 65536, window ≤ 255 × 100 ms, timeout ≤ 60000). Mutually exclusive with the flat fields. | no | Pause |
 | `outputTemplates` | object | none | See [Templates](#templates). | no | Pause |
 | `maxBatchBytes` | integer | `16777216` | `1..=67108864`. Host collection byte bound. | no | Pause |
-| `maxRequestBytes` | integer | `4194304` | `1..=33554432`. Maximum encoded request (and decoded response). Requests split before it; a larger single change fails under `failurePolicy`. | no | Stop |
+| `maxRequestBytes` | integer | `4194304` | `1..=33554432`. Maximum encoded request (and decoded response). Requests split before it; a larger single change fails permanently. | no | Stop |
 | `outputFormat` | string | `canonicalJson` | `canonicalJson` puts the canonical change JSON in `payload`; `proto` omits it unless a body template renders one. | no | Pause |
 
 Reserved metadata names, set by the sink on every request:
@@ -178,9 +178,9 @@ Each template set has optional `added` (`ADD`), `updated` (`REPLACE` and
 
 | Change | Boundary |
 |---|---|
-| `metadata`, `secretMetadata`, `timeoutMs`, `maxRetries`, `retryBudgetMs`, `failurePolicy`, `requireConnectedAtStart`, `batchSize`, `batchFlushTimeoutMs`, `batching`, `maxBatchBytes`, `outputTemplates`, `outputFormat` | Pause (in place) |
+| `metadata`, `secretMetadata`, `timeoutMs`, `maxRetries`, `retryBudgetMs`, `requireConnectedAtStart`, `batchSize`, `batchFlushTimeoutMs`, `batching`, `maxBatchBytes`, `outputTemplates`, `outputFormat` | Pause (in place) |
 | `endpoint`, `tlsCaPem`, `tlsClientCertificatePem`, `tlsClientPrivateKeyPem`, `tlsDomainName`, `connectTimeoutMs`, `keepaliveIntervalMs`, `keepaliveTimeoutMs`, `compression`, `maxRequestBytes` | Stop (restart) |
-| `outputs`, or the bound inputs | Replace |
+| `outputs`, `onPermanentFailure`, or the bound inputs | Replace |
 | No change | Pause (nothing to do) |
 
 The strongest boundary of the changed fields applies. An invalid proposed
@@ -195,9 +195,20 @@ data is never touched.
 
 ## Operations
 
+- **Delivery failures** follow the graph's
+  [delivery-failure model](../NATIVE-SINK-GUIDE.md#delivery-failures). Transient:
+  `UNAVAILABLE`, `UNKNOWN`, `INTERNAL`, `DEADLINE_EXCEEDED`, `CANCELLED`,
+  `RESOURCE_EXHAUSTED`, `ABORTED` (with `grpc-retry-pushback-ms`/`retry-after`
+  as the minimum delay). Permanent: every other code, `success=false`, an
+  incomplete acknowledgement, a render failure and a change over
+  `maxRequestBytes`. Under `skip` a permanently rejected request is logged, the
+  input's other requests are still sent, and the graph counts the input as
+  skipped; under `stall` the sink records a terminal failure.
 - **Receiver down:** Start succeeds (unless `requireConnectedAtStart`); each
-  delivery retries within `retryBudgetMs`, then fails the input (`strict`),
-  which the host retries. Warnings name the attempt and status.
+  delivery retries within `retryBudgetMs`, then fails the input transiently and
+  the graph retries it in place with backoff; the sink shows as retrying
+  (health `Degraded`, the last error) until the receiver accepts it. Warnings
+  name the attempt and status.
 - **Bounding a stuck delivery:** `timeoutMs` bounds one call,
   `connectTimeoutMs` one connection attempt, and `maxRetries`/`retryBudgetMs`
   the retries of one request. Pause waits for the in-flight delivery; Stop with
@@ -223,7 +234,7 @@ This is a breaking change (D-9); there is no compatibility mode.
 | adaptive `batching` object | same object | Same nested defaults. |
 | `outputFormat` | `outputFormat` | Unchanged values. |
 | `outputTemplates` keyed by query id; context `query_id`, `query_name`, `data`, `row_signature`, `before`/`after` | keyed by output alias; truthful change context (`operation`, `output`, `identity`, `before`, `after`, …) | `query_id` → `output.component`, `query_name` → `output.alias`, `data`/`row` → `after` (or `before` for deletes); a `PATCH`'s `after` holds only the changed properties. |
-| render failure falls back to the canonical payload | render failure follows `failurePolicy` | |
+| render failure falls back to the canonical payload | render failure is permanent, under `onPermanentFailure` | |
 | `GOAWAY`/connection errors matched by text; 5 s `RESOURCE_EXHAUSTED` sleep | classification by status code; channel rebuilt; jittered backoff with receiver hints | |
 | no TLS | TLS and mutual TLS | |
 | no idempotency key | `x-drasi-delivery-id` | |

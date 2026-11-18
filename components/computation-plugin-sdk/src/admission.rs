@@ -95,7 +95,15 @@ pub struct AdmitRequest<'a> {
     pub sequence: u64,
     #[serde(borrow, with = "serde_bytes")]
     pub envelope: std::borrow::Cow<'a, [u8]>,
+    /// Waits for graph activation, mailbox and journal capacity instead of
+    /// answering `Busy` or `CapacityExhausted` (see [`NativeAdmission::admit_wait`]).
+    pub wait: bool,
 }
+
+/// Admission operations one bound capability may have outstanding at once.
+/// The host refuses further requests with `BUSY`; [`NativeAdmission`] queues
+/// its own callers below this bound, so a plugin never observes that refusal.
+pub const MAX_OUTSTANDING_REQUESTS: usize = 16;
 
 struct RetainedAdmission(SourceAdmissionV1);
 // The callbacks, not this side, dereference host state. The contract permits
@@ -113,6 +121,8 @@ pub struct NativeAdmission {
     raw: Arc<RetainedAdmission>,
     codec: Arc<BinaryEnvelopeCodec>,
     identity: Arc<GraphProducerIdentity>,
+    /// Outstanding host operations, shared by every clone of the capability.
+    slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl NativeAdmission {
@@ -150,6 +160,7 @@ impl NativeAdmission {
             raw: Arc::new(RetainedAdmission(raw)),
             codec,
             identity: Arc::new(identity),
+            slots: Arc::new(tokio::sync::Semaphore::new(MAX_OUTSTANDING_REQUESTS)),
         })
     }
 
@@ -209,6 +220,11 @@ impl NativeAdmission {
         input: &[u8],
         uncertainty: AdmissionErrorKind,
     ) -> Result<T, AdmissionError> {
+        // Waiting here is side-effect free: nothing has reached the host yet.
+        let _slot = self.slots.acquire().await.map_err(|_| AdmissionError {
+            kind: AdmissionErrorKind::Closed,
+            message: "native admission capability closed".into(),
+        })?;
         let operation = self.begin(code, input, uncertainty)?;
         let after = |error: String| AdmissionError {
             kind: uncertainty,
@@ -264,11 +280,41 @@ impl NativeAdmission {
         )
         .await
     }
+    /// Admits one envelope, failing fast with `Busy` when the graph mailbox
+    /// is momentarily full and `CapacityExhausted` when the journal is full.
     pub async fn admit(
         &self,
         session: &ProducerSession,
         sequence: u64,
         input: &ChangeEnvelope,
+    ) -> Result<AdmissionReceipt, AdmissionError> {
+        self.admit_request(session, sequence, input, false).await
+    }
+
+    /// Admits one envelope with back-pressure: the host waits for the current
+    /// graph activation, mailbox space and journal capacity instead of
+    /// answering `Busy` or `CapacityExhausted`. It never crosses an activation
+    /// or retries an uncertain write; session, sequence and receipt semantics
+    /// match [`Self::admit`].
+    ///
+    /// The caller owns the deadline. Dropping the future before submission has
+    /// no admission side effect; dropping it later can lose the response, which
+    /// is resolved like any `AcceptanceUnknown` outcome.
+    pub async fn admit_wait(
+        &self,
+        session: &ProducerSession,
+        sequence: u64,
+        input: &ChangeEnvelope,
+    ) -> Result<AdmissionReceipt, AdmissionError> {
+        self.admit_request(session, sequence, input, true).await
+    }
+
+    async fn admit_request(
+        &self,
+        session: &ProducerSession,
+        sequence: u64,
+        input: &ChangeEnvelope,
+        wait: bool,
     ) -> Result<AdmissionReceipt, AdmissionError> {
         let envelope = self.codec.encode(input).map_err(invalid)?;
         self.call(
@@ -277,6 +323,7 @@ impl NativeAdmission {
                 session: session.clone(),
                 sequence,
                 envelope: envelope.into(),
+                wait,
             })?,
             AdmissionErrorKind::AcceptanceUnknown,
         )

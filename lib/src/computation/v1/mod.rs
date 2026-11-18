@@ -309,10 +309,11 @@ mod output_bootstrap;
 pub use output_bootstrap::OutputBootstrapProvider;
 mod output_catalogue;
 pub use drasi_computation_contracts::{
-    check_dependency, check_edge, ComponentCapabilities, ComponentDescription,
-    DependencyCapabilities, DependencyRequirement, DurabilityRequirement, Incompatibility,
-    InputDelivery, InputDescription, OutputDescription, OutputIdentity, OutputRelation,
-    PortDescription, ProgressPersistence, ReplayAbility, ResourceCapabilities, ResourceDurability,
+    check_dependency, check_edge, delivery_failure_class, ComponentCapabilities,
+    ComponentDescription, DeliveryFailure, DeliveryFailureClass, DependencyCapabilities,
+    DependencyRequirement, DurabilityRequirement, Incompatibility, InputDelivery, InputDescription,
+    OutputDescription, OutputIdentity, OutputRelation, PermanentFailurePolicy, PortDescription,
+    ProgressPersistence, ReplayAbility, ResourceCapabilities, ResourceDurability,
 };
 pub use drasi_computation_contracts::{
     OutputCapability, OutputCursor, OutputEndpoint, OutputFollow, OutputFollowHub,

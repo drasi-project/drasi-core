@@ -225,7 +225,10 @@ impl sdk::Factory for ConsumerFactory {
         &self,
         request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
     ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.consumer(drasi_computation_plugin_sdk::DeliveryGuarantee::ExactlyOnce))
+        Ok(request.consumer(
+            drasi_computation_plugin_sdk::DeliveryGuarantee::ExactlyOnce,
+            drasi_computation_contracts::PermanentFailurePolicy::Stall,
+        ))
     }
     fn metadata(&self) -> sdk::FactoryMetadata {
         sdk::FactoryMetadata {

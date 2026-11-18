@@ -132,11 +132,13 @@ members = [
   "components/computation-plugins/bootstrappers/sqlite",
   "components/computation-plugins/common/bridge",
   "components/computation-plugins/common/network",
+  "components/computation-plugins/common/storedproc",
   "components/computation-plugins/sources/bridge",
   "components/computation-plugins/sources/counter",
   "components/computation-plugins/sources/grpc",
   "components/computation-plugins/sources/http",
   "components/computation-plugins/sources/mysql",
+  "components/computation-plugins/sources/otel",
   "components/computation-plugins/sources/mssql",
   "components/computation-plugins/sources/postgres",
   "components/computation-plugins/sources/sqlite",
@@ -222,10 +224,12 @@ drasi-computation-bootstrap-postgres = { version = "0.11.3", path = "components/
 drasi-computation-bootstrap-sqlite = { version = "0.11.3", path = "components/computation-plugins/bootstrappers/sqlite" }
 drasi-computation-bridge-common = { version = "0.11.3", path = "components/computation-plugins/common/bridge" }
 drasi-computation-network-common = { version = "0.11.3", path = "components/computation-plugins/common/network" }
+drasi-computation-storedproc-common = { version = "0.11.3", path = "components/computation-plugins/common/storedproc" }
 drasi-computation-source-bridge = { version = "0.11.3", path = "components/computation-plugins/sources/bridge" }
 drasi-computation-source-grpc = { version = "0.11.3", path = "components/computation-plugins/sources/grpc" }
 drasi-computation-source-http = { version = "0.11.3", path = "components/computation-plugins/sources/http" }
 drasi-computation-source-mysql = { version = "0.11.3", path = "components/computation-plugins/sources/mysql" }
+drasi-computation-source-otel = { version = "0.11.3", path = "components/computation-plugins/sources/otel" }
 drasi-computation-source-mssql = { path = "components/computation-plugins/sources/mssql" }
 drasi-computation-source-postgres = { version = "0.11.3", path = "components/computation-plugins/sources/postgres" }
 drasi-computation-source-sqlite = { version = "0.11.3", path = "components/computation-plugins/sources/sqlite" }

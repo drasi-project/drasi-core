@@ -384,8 +384,11 @@ async fn recovery_detects_changed_join_or_middleware_configuration() {
         )
         .await
         .expect("construct");
-        query.start().await.expect("start");
-        query.stop().await.expect("stop");
+        query
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect("start");
+        query.stop(&lifecycle_contexts::stop()).await.expect("stop");
     }
     let mut changed =
         QueryExecutionSettings::from_configuration(&config).expect("fixture execution settings");
@@ -403,13 +406,16 @@ async fn recovery_detects_changed_join_or_middleware_configuration() {
     .expect("reconstruct");
     assert!(matches!(
         query
-            .start()
+            .start(&lifecycle_contexts::start())
             .await
             .expect_err("configuration changed")
             .downcast_ref::<QueryRecoveryError>(),
         Some(QueryRecoveryError::ConfigurationChanged)
     ));
-    query.stop().await.expect("cleanup");
+    query
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("cleanup");
 }
 
 #[allow(dead_code)]

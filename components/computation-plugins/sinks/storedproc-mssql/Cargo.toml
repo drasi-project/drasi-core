@@ -27,6 +27,7 @@ kind = "sink-storedproc-mssql"
 [dependencies]
 drasi-computation-contracts.workspace = true
 drasi-computation-plugin-sdk.workspace = true
+drasi-computation-storedproc-common.workspace = true
 drasi-core-types.workspace = true
 drasi-mssql-common = { workspace = true, features = ["native", "sql"] }
 drasi-reaction-common = { workspace = true, features = ["sql"] }
@@ -41,6 +42,7 @@ futures-util = "0.3"
 tiberius = { version = "0.13", default-features = false, features = ["tds73"] }
 
 [dev-dependencies]
+drasi-computation-storedproc-common = { workspace = true, features = ["conformance"] }
 drasi-computation-plugin-sdk = { workspace = true, features = ["test-support"] }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "test-util"] }
 

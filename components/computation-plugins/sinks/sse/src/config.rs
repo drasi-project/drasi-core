@@ -109,6 +109,9 @@ pub struct SseSinkConfig {
     pub tls_private_key_pem: Option<SecretString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_client_ca_pem: Option<String>,
+    /// What the graph does with an input the sink can never publish.
+    #[serde(default)]
+    pub on_permanent_failure: drasi_computation_contracts::PermanentFailurePolicy,
 }
 
 impl SseSinkConfig {
@@ -141,6 +144,7 @@ impl SseSinkConfig {
             Field::new("tlsCertificatePem", String, false, "PEM certificate chain served by the TLS listener. Requires tlsPrivateKeyPem."),
             Field::new("tlsPrivateKeyPem", String, false, "PEM private key for tlsCertificatePem.").secret(),
             Field::new("tlsClientCaPem", String, false, "PEM CA bundle; when set, clients must present a certificate issued by it (mutual TLS)."),
+            Field::on_permanent_failure(),
         ])
         .unwrap_or_else(|error| unreachable!("constant SSE sink configuration: {error}"))
     }
@@ -346,6 +350,12 @@ pub(crate) fn plan(current: &SseSinkConfig, proposed: &SseSinkConfig) -> Assessm
     let (c, p) = (current, proposed);
     let mut planner = BoundaryPlanner::default();
     planner.field("outputs", c.outputs != p.outputs, Replace);
+    // The policy is part of the description captured at construction.
+    planner.field(
+        "onPermanentFailure",
+        c.on_permanent_failure != p.on_permanent_failure,
+        Replace,
+    );
     planner.field("host", c.host != p.host, Stop);
     planner.field("port", c.port != p.port, Stop);
     planner.field(

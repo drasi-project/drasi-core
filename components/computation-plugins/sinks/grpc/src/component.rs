@@ -12,16 +12,14 @@ use crate::{
 use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use drasi_computation_contracts::{
-    ChangeNotification, ComponentDescriptor, InputEnvelope, SinkBatching, SinkCompletion,
-    SinkOutputs,
+    ChangeNotification, ComponentDescriptor, DeliveryFailure, InputEnvelope,
+    PermanentFailurePolicy, SinkBatching, SinkCompletion, SinkOutputs,
 };
 use drasi_computation_network_common::{
     batching::{AdaptiveBatchConfig, AdaptivePolicy},
-    config::{
-        delivery_id, sanitize, FailurePolicy, COMPONENT_HEADER, DELIVERY_ID_HEADER, PORT_HEADER,
-    },
+    config::{delivery_id, sanitize, COMPONENT_HEADER, DELIVERY_ID_HEADER, PORT_HEADER},
     diag,
-    retry::{Retry, RetryPolicy},
+    retry::{InputOutcome, Retry, RetryPolicy},
     update::{ensure_same_component, inputs_changed, BoundaryPlanner},
     wire,
 };
@@ -66,7 +64,7 @@ struct Live {
     secret: MetadataMap,
     timeout: Duration,
     retry: RetryPolicy,
-    failure_policy: FailurePolicy,
+    on_permanent_failure: PermanentFailurePolicy,
 }
 
 impl Live {
@@ -134,7 +132,7 @@ impl Live {
                 max_retries: config.max_retries,
                 budget: Duration::from_millis(config.retry_budget_ms),
             },
-            failure_policy: config.failure_policy,
+            on_permanent_failure: config.on_permanent_failure,
         })
     }
 
@@ -331,19 +329,25 @@ impl GrpcSink {
             .collect::<Result<Vec<_>>>()?
             .into_iter()
             .flatten();
-        // Project every change before sending anything, so a strict template
-        // or size failure has no remote effect.
+        // Project every change before sending anything, so a template or
+        // size failure under `stall` has no remote effect.
+        let id = self.descriptor.id().clone();
+        let mut outcome = InputOutcome::new(self.live.on_permanent_failure, &id);
         let mut items = Vec::new();
         for notification in notifications {
-            let built = self.build(&notification).and_then(|(key, change)| {
-                let bytes = change_wire_size(&change);
-                ensure!(
-                    request_overhead(&key) + delivery_id_bytes(&key) + bytes
-                        <= self.live.max_request_bytes,
-                    "gRPC change exceeds maxRequestBytes"
-                );
-                Ok((key, change, bytes))
-            });
+            // The same change projects the same way every time.
+            let built = self
+                .build(&notification)
+                .and_then(|(key, change)| {
+                    let bytes = change_wire_size(&change);
+                    ensure!(
+                        request_overhead(&key) + delivery_id_bytes(&key) + bytes
+                            <= self.live.max_request_bytes,
+                        "gRPC change exceeds maxRequestBytes"
+                    );
+                    Ok((key, change, bytes))
+                })
+                .map_err(|error| anyhow::Error::from(DeliveryFailure::permanent(error)));
             match built {
                 Ok((key, change, bytes)) => items.push(Item {
                     key,
@@ -351,9 +355,8 @@ impl GrpcSink {
                     bytes,
                     notification,
                 }),
-                Err(error) => self.live.failure_policy.delivery(
+                Err(error) => outcome.record(
                     Err(error),
-                    self.descriptor.id(),
                     &notification.output().endpoint().to_string(),
                     notification.sequence(),
                 )?,
@@ -380,7 +383,7 @@ impl GrpcSink {
                     });
                     continue;
                 }
-                self.flush(batch).await?;
+                self.flush(&mut outcome, batch).await?;
             }
             pending = Some(Batch {
                 bytes: request_overhead(&item.key) + delivery_id_bytes(&item.key) + item.bytes,
@@ -391,21 +394,19 @@ impl GrpcSink {
             });
         }
         if let Some(batch) = pending {
-            self.flush(batch).await?;
+            self.flush(&mut outcome, batch).await?;
         }
         if let Some(adaptive) = &mut self.live.adaptive {
             adaptive.record(count);
         }
-        Ok(())
+        outcome.finish()
     }
 
-    async fn flush(&mut self, batch: Batch) -> Result<()> {
+    async fn flush(&mut self, outcome: &mut InputOutcome<'_>, batch: Batch) -> Result<()> {
         let label = batch.key.endpoint();
         let sequence = batch.last().sequence();
         let result = self.deliver(batch).await;
-        self.live
-            .failure_policy
-            .delivery(result, self.descriptor.id(), &label, sequence)
+        outcome.record(result, &label, sequence)
     }
 
     /// Sends one request until it is acknowledged exactly, fails permanently,
@@ -444,16 +445,21 @@ impl GrpcSink {
             let status = match connection.client.process_changes(request).await {
                 Ok(response) => {
                     let response = response.into_inner();
-                    ensure!(
-                        response.success,
-                        "gRPC receiver rejected the delivery (success=false; not retried): {}",
-                        sanitize(&response.error)
-                    );
-                    ensure!(
-                        response.items_processed == expected,
-                        "gRPC receiver acknowledged {} of {expected} changes; the request is incomplete (not retried)",
-                        response.items_processed
-                    );
+                    // The receiver protocol makes both answers final for this request.
+                    if !response.success {
+                        return Err(DeliveryFailure::permanent(anyhow::anyhow!(
+                            "gRPC receiver rejected the delivery (success=false; not retried): {}",
+                            sanitize(&response.error)
+                        ))
+                        .into());
+                    }
+                    if response.items_processed != expected {
+                        return Err(DeliveryFailure::permanent(anyhow::anyhow!(
+                            "gRPC receiver acknowledged {} of {expected} changes; the request is incomplete (not retried)",
+                            response.items_processed
+                        ))
+                        .into());
+                    }
                     return Ok(());
                 }
                 Err(status) => status,
@@ -465,7 +471,8 @@ impl GrpcSink {
             );
             let (reconnect, requested) = match transport::classify(&status) {
                 Failure::Permanent => {
-                    return Err(error.context("permanent gRPC failure; not retried"))
+                    return Err(anyhow::Error::from(DeliveryFailure::permanent(error))
+                        .context("permanent gRPC failure; not retried"))
                 }
                 Failure::Retryable { reconnect, delay } => (reconnect, delay),
             };
@@ -474,7 +481,12 @@ impl GrpcSink {
                     transport::client(connection.endpoint.connect_lazy(), &self.config);
             }
             let Some(delay) = retry.next_delay(requested) else {
-                return Err(error.context(format!(
+                // The graph retries the input in place, no sooner than asked.
+                let failure = match requested {
+                    Some(delay) => DeliveryFailure::transient_after(error, delay),
+                    None => DeliveryFailure::transient(error),
+                };
+                return Err(anyhow::Error::from(failure).context(format!(
                     "gRPC delivery failed after {} retries",
                     retry.attempt()
                 )));
@@ -494,12 +506,13 @@ impl GrpcSink {
 /// Classifies each configuration change by the weakest safe boundary.
 ///
 /// * Pause (in place): everything read per delivery: templates, metadata,
-///   secret metadata, the call deadline, retries, the retry budget, the
-///   failure policy, batching, the output format and `requireConnectedAtStart`
-///   (read only by the next Start).
+///   secret metadata, the call deadline, retries, the retry budget,
+///   batching, the output format and `requireConnectedAtStart` (read only by
+///   the next Start).
 /// * Stop (restart): settings bound into the channel at Start: endpoint, TLS,
 ///   connect timeout, keepalive, compression and `maxRequestBytes`.
-/// * Replace: output aliases.
+/// * Replace: output aliases and `onPermanentFailure` (part of the
+///   description captured at construction).
 pub(crate) fn plan(current: &GrpcSinkConfig, proposed: &GrpcSinkConfig) -> Assessment {
     use UpdateBoundary::*;
     let mut planner = BoundaryPlanner::default();
@@ -543,7 +556,12 @@ pub(crate) fn plan(current: &GrpcSinkConfig, proposed: &GrpcSinkConfig) -> Asses
         c.max_retries != p.max_retries || c.retry_budget_ms != p.retry_budget_ms,
         Pause,
     );
-    planner.field("failurePolicy", c.failure_policy != p.failure_policy, Pause);
+    // The policy is part of the description captured at construction.
+    planner.field(
+        "onPermanentFailure",
+        c.on_permanent_failure != p.on_permanent_failure,
+        Replace,
+    );
     planner.field(
         "requireConnectedAtStart",
         c.require_connected_at_start != p.require_connected_at_start,

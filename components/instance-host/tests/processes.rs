@@ -975,6 +975,7 @@ fn real_bidirectional_native_data_drains_through_native_cuts_before_process_exit
         delivery: PortableDelivery::Events,
         profile: Profile::Volatile,
         failure_scope: drasi_core::interface::FailureMode::ProcessRestart,
+        on_permanent_failure: Default::default(),
         namespace: Namespace {
             version: 1,
             source_prefixes: vec![id(962).to_string()],
@@ -1174,6 +1175,7 @@ fn an_empty_bridge_queue_without_a_peer_cut_cannot_claim_graceful_stop() -> Resu
         delivery: PortableDelivery::Events,
         profile: Profile::Volatile,
         failure_scope: drasi_core::interface::FailureMode::ProcessRestart,
+        on_permanent_failure: Default::default(),
         namespace: Namespace {
             version: 1,
             source_prefixes: vec!["external/".into()],

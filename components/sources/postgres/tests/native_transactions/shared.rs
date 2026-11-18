@@ -387,7 +387,14 @@ async fn build_graph_mode(
         })?
         .provide_resource(
             resource,
-            ResourceHandle::new(ResourceRole::Checkpoint, progress),
+            // As durable as the members' indexes.
+            ResourceHandle::new(ResourceRole::Checkpoint, progress).with_capabilities(
+                if path.is_some() {
+                    ResourceCapabilities::DURABLE
+                } else {
+                    ResourceCapabilities::VOLATILE
+                },
+            ),
         )?
         .declare_resource(ResourceSpecification {
             id: settings.clone(),
@@ -687,10 +694,11 @@ async fn memory_fanout() -> Result<()> {
                 [json!({"id":1,"name":"last"})]
             );
             assert!(!owner.snapshot().persistent);
-            assert_eq!(owner.snapshot().transport_sequences[&stream()], 3);
+            // The fresh group's join record, then three rows.
+            assert_eq!(owner.snapshot().transport_sequences[&stream()], 4);
             let position = position(owner)?.context("handled memory cursor")?;
             assert!(position.complete());
-            assert_eq!(position.sequence, 3);
+            assert_eq!(position.sequence, 4);
             database.wait_feedback(position.feedback_lsn()).await?;
         }
         graph.core.shutdown().await?;
@@ -767,6 +775,13 @@ async fn seed_different_progress(
     )?;
     source.initialize(&lifecycle_ctx::initialize()).await?;
     source.start(&lifecycle_ctx::start()).await?;
+    // A fresh group first commits its origin; rows follow once both have.
+    let join = tokio::time::timeout(Duration::from_secs(5), source.next())
+        .await??
+        .context("join record")?;
+    assert!(join.envelope.changes().operations().is_empty());
+    apply(&mut fast, join.clone()).await?;
+    apply(&mut slow, join).await?;
     database
         .client()
         .batch_execute(
@@ -860,8 +875,10 @@ async fn shared_partial_feedback_and_reconnect_filter_queued_duplicates() -> Res
     for (dynamic, slow_permits) in [(false, 0), (true, 0), (false, 1), (true, 1)] {
         let plugins = libraries::plugins(dynamic)?;
         let database = Database::new().await?;
-        let graph = graph(&plugins, &database, None, slow_permits).await?;
-        let expected_inputs = 6 - slow_permits;
+        // Both members first commit the fresh group's join record (one
+        // permit), then the slow member admits `slow_permits` rows.
+        let graph = graph(&plugins, &database, None, slow_permits + 1).await?;
+        let expected_inputs = 7 - slow_permits;
         database
             .client()
             .batch_execute(
@@ -873,7 +890,8 @@ async fn shared_partial_feedback_and_reconnect_filter_queued_duplicates() -> Res
             Ok(
                 position(&graph.owners[0])?.is_some_and(|position| position.complete())
                     && if slow_permits == 0 {
-                        position(&graph.owners[1])?.is_none()
+                        position(&graph.owners[1])?
+                            .is_some_and(|position| position.offset.is_none())
                     } else {
                         position(&graph.owners[1])?
                             .is_some_and(|position| position.offset == Some(0))
@@ -881,14 +899,10 @@ async fn shared_partial_feedback_and_reconnect_filter_queued_duplicates() -> Res
             )
         })
         .await?;
-        if let Some(slow) = position(&graph.owners[1])? {
-            assert!(!slow.complete());
-            database.wait_feedback(slow.feedback_lsn()).await?;
-        } else {
-            database
-                .wait_feedback(lsn(&start_lsn(&database.config)))
-                .await?;
-        }
+        let slow = position(&graph.owners[1])?.context("slow cursor")?;
+        // The join record sits at the origin, the fixture's start position.
+        assert_eq!(slow.complete(), slow_permits == 0);
+        database.wait_feedback(slow.feedback_lsn()).await?;
         assert_eq!(database.feedback().await?, start_lsn(&database.config));
         let old_pid: i32 = database
             .client()
@@ -942,7 +956,7 @@ async fn shared_partial_feedback_and_reconnect_filter_queued_duplicates() -> Res
             );
             assert_eq!(
                 position(owner)?.context("handled cursor")?.sequence,
-                3,
+                4,
                 "covered duplicates advance only transport"
             );
             let inputs = graph.inputs[index].lock().expect("input log");
@@ -951,13 +965,13 @@ async fn shared_partial_feedback_and_reconnect_filter_queued_duplicates() -> Res
                 assert_eq!(input.system().sequence(), index as u64 + 1);
             }
             let replayed: RowPosition = serde_json::from_slice(
-                &GraphChangeCodec::source_metadata(&inputs[3])?
+                &GraphChangeCodec::source_metadata(&inputs[4])?
                     .context("replayed row metadata")?
                     .source_position
                     .context("replayed row cursor")?,
             )?;
             assert_eq!(replayed.offset, Some(slow_permits));
-            assert_eq!(replayed.sequence, 4);
+            assert_eq!(replayed.sequence, 5);
         }
         database
             .wait_feedback(
@@ -989,6 +1003,113 @@ async fn shared_partial_feedback_and_reconnect_filter_queued_duplicates() -> Res
         graph.core.shutdown().await?;
         drop(graph);
         database.shutdown().await?;
+    }
+    Ok(())
+}
+
+async fn receive(
+    source: &mut drasi_host_sdk::computation::NativeComponentProxy,
+) -> Result<OutputEnvelope> {
+    tokio::time::timeout(Duration::from_secs(8), source.next())
+        .await??
+        .context("source output")
+}
+
+/// A fresh group commits its origin before anything is published and holds
+/// changes meanwhile. A crash before either member committed it, or between
+/// the members' commits, restarts at that origin: a member without a cursor
+/// joins there, and both receive the change made during the downtime once.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires a Docker-compatible PostgreSQL container runtime"]
+async fn shared_groups_restart_at_their_committed_join_point_after_a_crash() -> Result<()> {
+    let plugins = libraries::plugins(false)?;
+    for output in [SharedOutput::Rows, SharedOutput::Transactions] {
+        for committed_before_crash in [0, 1] {
+            let database = Database::new().await?;
+            let path = tempfile::tempdir()?;
+            let owners = ["fast", "slow"].map(|name| {
+                Arc::new(
+                    QuerySourceProgress::new(ComponentBatch::GRAPH_ID, named_id(name))
+                        .expect("test owner"),
+                )
+            });
+            let mut queries = Vec::new();
+            for (index, name) in ["fast", "slow"].into_iter().enumerate() {
+                let mut query =
+                    processing_query(name, Some(path.path()), owners[index].clone(), output)
+                        .await?;
+                query.start(&lifecycle_ctx::start()).await?;
+                queries.push(query);
+            }
+            let configuration = flat(
+                &database.config,
+                if output == SharedOutput::Rows {
+                    json!({"persistent": true})
+                } else {
+                    json!({})
+                },
+            );
+            let make = || -> Result<_> {
+                factory_for(&plugins, output)?.create_component_with_consumer_progress(
+                    id(77),
+                    configuration.clone(),
+                    libraries::scope(ComponentBatch::GRAPH_ID),
+                    Arc::new(ConsumerProgressSet::new(
+                        ComponentBatch::GRAPH_ID,
+                        id(77),
+                        owners.clone(),
+                    )?),
+                )
+            };
+            let mut source = make()?;
+            source.initialize(&lifecycle_ctx::initialize()).await?;
+            source.start(&lifecycle_ctx::start()).await?;
+            let join = receive(&mut source).await?;
+            assert!(
+                join.envelope.changes().operations().is_empty(),
+                "the origin comes first"
+            );
+            for query in &mut queries[..committed_before_crash] {
+                apply(query, join.clone()).await?;
+            }
+            database
+                .client()
+                .batch_execute("INSERT INTO person VALUES (1, 'during downtime')")
+                .await?;
+            assert!(
+                tokio::time::timeout(Duration::from_millis(500), source.next())
+                    .await
+                    .is_err(),
+                "changes wait until every member committed the origin"
+            );
+            // The process dies; a new source object starts over the same
+            // committed progress.
+            source.stop(&lifecycle_ctx::stop()).await?;
+            drop(source);
+            let mut source = make()?;
+            source.initialize(&lifecycle_ctx::initialize()).await?;
+            source.start(&lifecycle_ctx::start()).await?;
+            let rejoin = receive(&mut source).await?;
+            assert!(rejoin.envelope.changes().operations().is_empty());
+            for query in &mut queries {
+                apply(query, rejoin.clone()).await?;
+            }
+            let change = receive(&mut source).await?;
+            assert!(!change.envelope.changes().operations().is_empty());
+            for query in &mut queries {
+                apply(query, change.clone()).await?;
+                assert_eq!(
+                    values(&query.results())?,
+                    [json!({"id": 1, "name": "during downtime"})],
+                    "{committed_before_crash} member(s) committed before the crash"
+                );
+            }
+            source.stop(&lifecycle_ctx::stop()).await?;
+            for query in &mut queries {
+                query.stop(&lifecycle_ctx::stop()).await?;
+            }
+            database.shutdown().await?;
+        }
     }
     Ok(())
 }

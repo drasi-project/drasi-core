@@ -137,7 +137,7 @@ impl BridgeSink {
 #[async_trait]
 impl ComputationComponent for BridgeSink {
     fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
-        drasi_computation_bridge_common::config::sender_description(&self.descriptor)
+        drasi_computation_bridge_common::config::sender_description(&self.descriptor, &self.config)
     }
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
@@ -308,7 +308,7 @@ impl EnvelopeSink for BridgeSink {
                 // Even Busy reopens, fencing any delayed old-connection bytes.
                 self.client.invalidate().await;
                 if !retryable {
-                    return Err(last_error.into());
+                    return Err(delivery_failure(last_error));
                 }
             }
             if attempt + 1 < self.config.limits.retry_attempts {
@@ -318,6 +318,20 @@ impl EnvelopeSink for BridgeSink {
                 .await;
             }
         }
-        Err(last_error.into())
+        Err(delivery_failure(last_error))
+    }
+}
+
+/// Classifies a bridge failure for the graph's delivery-failure model: link
+/// and connection failures are transient; a receiver that rejects this
+/// input's content can never accept it; lost, conflicting or expired link
+/// state ends the activation, because no retry of this input can repair it.
+fn delivery_failure(error: BridgeError) -> anyhow::Error {
+    if error.retryable() {
+        drasi_lib::computation::v1::DeliveryFailure::transient(error).into()
+    } else if matches!(error.code, ErrorCode::Invalid | ErrorCode::Incompatible) {
+        drasi_lib::computation::v1::DeliveryFailure::permanent(error).into()
+    } else {
+        drasi_lib::computation::v1::LifecycleError::terminal(error).into()
     }
 }

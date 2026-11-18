@@ -936,6 +936,8 @@ async fn readonly_view(dynamic: bool) -> Result<()> {
     snapshot["tables"] = json!(["items_view", "missing_allowed"]);
     snapshot["user"] = json!("snapshot_reader");
     snapshot["password"] = json!("snapshot-only");
+    // A view has no primary key; its identity is declared, never inferred.
+    snapshot["tableKeys"] = json!([{"table":"items_view","keyColumns":["id"]}]);
     let graph = graph(
         &database,
         &plugins,

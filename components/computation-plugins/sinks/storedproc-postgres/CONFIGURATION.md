@@ -16,9 +16,9 @@ destination cursor owner.
 
 | Field | Type | Default | Range / values | Secret | Update |
 |---|---|---|---|---|---|
-| `host` | string | `localhost` | nonempty, no NUL | no | Stop |
-| `port` | integer | `5432` | 1..=65535 | no | Stop |
-| `database` | string | required | nonempty | no | Stop |
+| `host` | string | `localhost` | nonempty, no NUL | no | Unsupported |
+| `port` | integer | `5432` | 1..=65535 | no | Unsupported |
+| `database` | string | required | nonempty | no | Unsupported |
 | `user` | string | required | nonempty; replaced by activation credentials | no | Stop |
 | `password` | string | empty | ≤ 4096 bytes; replaced by activation credentials | **yes** | Stop |
 | `sslMode` | string | `require` | `require` (verified TLS: trusted chain and matching host name, libpq `verify-full`), `disable` | no | Stop |
@@ -29,13 +29,17 @@ destination cursor owner.
 | `outputs` | object | `{}` | alias → `{component, port?}` | no | Replace |
 | `routes` | object | `{}` | alias → `{added?, updated?, deleted?: {template}}`; each key must match an output alias or its last dotted segment | no | Pause |
 | `defaultTemplate` | object | none | `{added?, updated?, deleted?: {template}}` | no | Pause |
-| `progressTable` | string | `public.drasi_delivery_progress` | `schema.table`, lowercase identifiers (`[a-z_][a-z0-9_]*`, ≤ 63 bytes each) | no | Unsupported |
+| `progressTable` | string | `drasi_delivery_progress` | `table` (in schema `public`) or `schema.table`, lowercase identifiers (`[a-z_][a-z0-9_]*`; schema ≤ 63 bytes, table ≤ 51 bytes); the dead-letter table `<table>_dead_letter` sits beside it | no | Unsupported |
 | `maxStreams` | integer | `4096` | 1..=1,000,000 cursor rows for this consumer | no | Pause |
 | `deliveryGuarantee` | string | `exactlyOnce` | `exactlyOnce`, `atLeastOnce` (see Delivery guarantee) | no | Replace |
+| `onPermanentFailure` | string | `stall` | `stall`, `skip` (see Permanent failures) | no | Replace |
 | `commandTimeoutMs` | integer | `30000` | 1..=2,147,483,647; server `statement_timeout` per command, client waits 5 s longer | no | Pause |
-| `connectTimeoutMs` | integer | `10000` | 1..=3,600,000; one attempt: TCP, TLS and authentication | no | Stop |
-| `reconnectBudgetMs` | integer | `60000` | 0..=3,600,000; total reconnect and transient-retry time per operation; `0` = one attempt | no | Pause |
-| `shutdownTimeoutMs` | integer | `10000` | 1..=3,600,000; Stop's bound when the host gives no earlier deadline | no | Pause |
+| `connectTimeoutMs` | integer | `10000` | 1..=3,600,000; one attempt: TCP, TLS and authentication | no | Pause |
+| `shutdownTimeoutMs` | integer | `10000` | 1..=3,600,000; Stop's and Dispose's bound when the host gives no earlier deadline | no | Pause |
+
+There is no retry budget: each operation is one attempt, and the graph retries
+transient failures (rolled back, connection lost, commit outcome unknown) with
+its bounded backoff.
 
 At least one nonempty template is required. `routes` keys that match no
 output alias are rejected.
@@ -137,9 +141,10 @@ The sink role needs:
 
 - `CONNECT` on the database;
 - `USAGE` on the progress table's schema;
-- `SELECT`, `INSERT`, `UPDATE`, `DELETE` on the progress table;
-- either `CREATE` on that schema (the sink then creates the table at first
-  start), or a pre-created table.
+- `SELECT`, `INSERT`, `UPDATE`, `DELETE` on the progress table and its
+  dead-letter table;
+- either `CREATE` on that schema (the sink then creates the tables at first
+  start), or pre-created tables.
 
 PostgreSQL 15 and later no longer grant `CREATE` on `public` to every role, so
 a least-privilege role needs a pre-created table. As an administrator:
@@ -149,21 +154,37 @@ CREATE SCHEMA IF NOT EXISTS drasi;
 CREATE TABLE IF NOT EXISTS "drasi"."delivery_progress" (
     owner TEXT NOT NULL CHECK (owner ~ '^[0-9a-f]{64}$'),
     stream_key TEXT NOT NULL,
-    version SMALLINT NOT NULL CHECK (version = 3),
+    version SMALLINT NOT NULL CHECK (version = 4),
     sequence TEXT NOT NULL CHECK (sequence ~ '^[1-9][0-9]{0,19}$'),
     digest BYTEA NOT NULL CHECK (octet_length(digest) = 32),
     operations BIGINT NOT NULL CHECK (operations > 0),
     completed BIGINT NOT NULL CHECK (completed >= 0 AND completed <= operations),
     epoch TEXT NOT NULL CHECK (epoch = '' OR epoch ~ '^[0-9a-f]{64}$'),
+    generation BIGINT NOT NULL CHECK (generation >= 0),
+    pending BIGINT NOT NULL CHECK (pending >= -1 AND pending < operations),
     PRIMARY KEY (owner, stream_key)
 );
+CREATE TABLE IF NOT EXISTS "drasi"."delivery_progress_dead_letter" (
+    owner TEXT NOT NULL CHECK (owner ~ '^[0-9a-f]{64}$'),
+    delivery_id TEXT NOT NULL,
+    stream_key TEXT NOT NULL,
+    sequence TEXT NOT NULL,
+    operation BIGINT NOT NULL,
+    epoch TEXT NOT NULL,
+    generation BIGINT NOT NULL,
+    error TEXT NOT NULL,
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (owner, delivery_id)
+);
 GRANT USAGE ON SCHEMA drasi TO drasi_sink;
-GRANT SELECT, INSERT, UPDATE, DELETE ON drasi.delivery_progress TO drasi_sink;
+GRANT SELECT, INSERT, UPDATE, DELETE ON drasi.delivery_progress,
+    drasi.delivery_progress_dead_letter TO drasi_sink;
 ```
 
 and configure `"progressTable": "drasi.delivery_progress"`. The statement is
-also available as `create_table_sql` in the crate. This is format 3 (it adds
-`epoch`); a format-2 table is refused at Start, not migrated. Start fails with a message
+also available as `create_table_sql` in the crate. This is format 4 (it adds
+`generation` and `pending` and the dead-letter table); an earlier format is
+refused at Start, not migrated. Start fails with a message
 naming the missing schema or privilege, for example
 `role "drasi_sink" lacks CREATE on schema "public"; ...`.
 
@@ -194,6 +215,29 @@ identity, or that declare none, are refused under either guarantee.
   did; nothing is resumed. Persistent producers are still delivered exactly
   once.
 
+### Permanent failures
+
+`onPermanentFailure` decides what happens to an operation that can never be
+delivered (the procedure or its commit rejected it, the template did not
+render, or the procedure ran `COMMIT`/`ROLLBACK`):
+
+- `stall` (default): the sink returns a permanent failure and the graph stalls
+  the node until an operator fixes the procedure, template or data (or changes
+  this setting) and restarts it.
+- `skip`: the sink records the operation in `<progressTable>_dead_letter`
+  (delivery ID, stream, sequence, operation, epoch, generation, the error and
+  the time) and advances the cursor past it **in one transaction**, then
+  reports it as skipped; the graph acknowledges the input, delivers its other
+  operations, and counts the skip on the node. A replay never repeats it.
+  A destination cursor rejection (gap, conflict, expired receipt, capacity)
+  cannot be skipped: it still stalls.
+
+Procedures must keep their work in the sink's transaction: PostgreSQL refuses
+`COMMIT` or `ROLLBACK` in a procedure called inside it (SQLSTATE `2D000`),
+which is a permanent failure. The template context carries `deliveryId`, the
+host's stable operation identity, for deduplicating effects outside
+PostgreSQL.
+
 ### TLS and credentials
 
 `sslMode: require` verifies the server certificate against the system roots
@@ -208,10 +252,10 @@ to consumer factories (DESIGN.md, Known limitations).
 
 | Boundary | Fields |
 |---|---|
-| Pause (in place, after a completed pause) | `routes`, `defaultTemplate`, `maxStreams`, `commandTimeoutMs`, `reconnectBudgetMs`, `shutdownTimeoutMs` |
-| Stop (restart) | `host`, `port`, `database`, `user`, `password`, `sslMode`, `allowRemotePlaintext`, `tlsCaPem`, `tlsClientCertificatePem`, `tlsClientPrivateKeyPem`, `connectTimeoutMs` |
-| Replace (recreate, cursor preserved) | `outputs`, incoming edges, `deliveryGuarantee` (declared on the input port) |
-| Unsupported | `progressTable`, the graph identity: remove the component with Erase and add a new one |
+| Pause (in place, after a completed pause) | `routes`, `defaultTemplate`, `maxStreams`, `commandTimeoutMs`, `connectTimeoutMs`, `shutdownTimeoutMs` |
+| Stop (restart) | `user`, `password`, `sslMode`, `allowRemotePlaintext`, `tlsCaPem`, `tlsClientCertificatePem`, `tlsClientPrivateKeyPem` |
+| Replace (recreate, cursor preserved) | `outputs`, incoming edges, `deliveryGuarantee`, `onPermanentFailure` (declared in the description) |
+| Unsupported | `host`, `port`, `database`, `progressTable`, the graph identity: they locate the destination cursor; remove the component with Erase and add a new one |
 
 ## Lifecycle and removal
 
@@ -220,8 +264,8 @@ startable (connection failures are retryable, missing privileges terminal).
 Pause is host-driven. Stop drains (waits for a running command) or aborts,
 bounded by the deadline and `shutdownTimeoutMs`.
 
-Removal with **Erase** deletes exactly `DELETE FROM <progressTable> WHERE owner
-= '<owner>'` over a fresh connection. It is idempotent (repeat it freely), never
+Removal with **Erase** deletes exactly this owner's rows (`WHERE owner =
+'<owner>'`) from the progress and dead-letter tables over a fresh connection. It is idempotent (repeat it freely), never
 drops the table and never touches other owners' rows, business tables or
 procedures. If the database is unreachable, Erase fails retryably and the host
 retries it. Dispose without Erase (`Preserve`) leaves the rows, so a component
@@ -246,8 +290,14 @@ re-created with the same identity resumes exactly where it stopped.
   the progress rows do not match the host's delivery progress (rows edited,
   restored from a backup, or a component recreated with another identity but
   the same owner). Investigate before deleting rows.
-- **Connection lost / `pg_terminate_backend`**: no action; the sink reconnects
-  within `reconnectBudgetMs` and the cursor prevents duplicates.
+- **Connection lost / `pg_terminate_backend`**: no action; the graph retries
+  the operation, the sink reconnects and the cursor prevents duplicates.
+- **Skipped operations** (`onPermanentFailure: skip`):
+  `SELECT * FROM drasi.delivery_progress_dead_letter WHERE owner = '<owner>'
+  ORDER BY recorded_at`. Replay the business effect by hand if needed; the rows
+  are this sink's and are removed by Erase.
+- **"the command ended the delivery transaction"**: the procedure ran
+  `COMMIT`/`ROLLBACK`; remove the transaction control from the procedure.
 - **Sessions** use `application_name = 'drasi-native-storedproc-postgres'`.
 - **Old format**: the legacy table `public.drasi_delivery_stream_v1` is not read
   or migrated by this sink.
@@ -269,8 +319,9 @@ re-created with the same identity resumes exactly where it stopped.
 | `command_timeout_ms` | `commandTimeoutMs` |
 | `connect_timeout_ms` | `connectTimeoutMs` (one attempt; no longer applied twice) |
 | `shutdown_timeout_ms` | `shutdownTimeoutMs` (only when the host gives no earlier deadline) |
-| `retry_attempts`, backoff settings | `reconnectBudgetMs` plus the host runner's retry policy |
-| transactional delivery opt-in (`public.drasi_delivery_stream_v1`) | always on; `progressTable`, `maxStreams` (format 3, per owner) |
+| `retry_attempts`, backoff settings | removed: the graph retries transient failures |
+| log-and-skip of failed commands | `onPermanentFailure: skip` (recorded in the dead-letter table) |
+| transactional delivery opt-in (`public.drasi_delivery_stream_v1`) | always on; `progressTable`, `maxStreams` (format 4, per owner) |
 
 Template context: legacy `query_id`/`query_name` are replaced by `output`
 (`alias`, `component`, `port`); `operation` `UPDATE` becomes `REPLACE` or

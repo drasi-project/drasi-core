@@ -22,6 +22,7 @@ mod control;
 mod factory;
 mod input_position;
 mod loader;
+mod logging;
 mod output_follow;
 mod output_reads;
 mod output_snapshots;

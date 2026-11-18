@@ -592,6 +592,10 @@ impl Model {
                                 )?;
                             }
                         }
+                    } else if value.mac.path.to_token_stream().to_string() == "tokio :: task_local"
+                    {
+                        // Declares task-local values, not types: nothing to
+                        // inventory.
                     } else if scoped(module) {
                         return Err(format!("{file}:{}: unsupported item macro {}; inspect it and extend inventory coverage", value.span().start().line, value.mac.path.to_token_stream()).into());
                     }
@@ -1974,6 +1978,7 @@ mod tests {
                     ("id", "Option < ComponentId >"),
                     ("name", "ComponentName"),
                     ("auto_start", "bool"),
+                    ("bootstrap_provider", "Option < ComponentReference >"),
                 ],
                 "Vec < QueryInputConfig >",
             ),
@@ -1983,10 +1988,15 @@ mod tests {
                     ("id", "ComponentId"),
                     ("name", "ComponentName"),
                     ("auto_start", "bool"),
+                    ("bootstrap_provider", "Option < ComponentReference >"),
                 ],
                 "Vec < QueryInputConfig >",
             ),
-            ("QuerySettings", vec![], "Vec < QueryInputConfig >"),
+            (
+                "QuerySettings",
+                vec![("bootstrap_provider", "Option < ComponentReference >")],
+                "Vec < QueryInputConfig >",
+            ),
             (
                 "ResolvedQueryConfig",
                 vec![
@@ -1995,6 +2005,7 @@ mod tests {
                         "source_transactions",
                         "Option < drasi_computation_contracts :: SourceTransactionLimits >",
                     ),
+                    ("bootstrap_provider", "Option < ComponentId >"),
                 ],
                 "Vec < drasi_computation_contracts :: QueryInputConfig >",
             ),

@@ -326,7 +326,8 @@ async fn graph_with_options(
             ResourceHandle::new(
                 ResourceRole::Checkpoint,
                 Arc::new(QuerySourceProgressResource(owner.clone())),
-            ),
+            )
+            .with_capabilities(ResourceCapabilities::DURABLE),
         )?;
     }
     let progress_id = if shared {
@@ -340,7 +341,8 @@ async fn graph_with_options(
             "consumers",
             ResourceRole::Checkpoint,
             ResourceOwnership::Borrowed,
-            ResourceHandle::new(ResourceRole::Checkpoint, group.clone()),
+            ResourceHandle::new(ResourceRole::Checkpoint, group.clone())
+                .with_capabilities(ResourceCapabilities::DURABLE),
         )?;
         "consumers".to_owned()
     } else {

@@ -18,6 +18,22 @@
 //!
 //! Clients using the session protocol must not register the source's own
 //! component UUID as their producer name.
+//!
+//! Both models admit with back-pressure ([`NativeAdmission::admit_wait`]): a
+//! momentarily full graph mailbox or journal makes the request wait, bounded
+//! by `timeoutMs`, instead of failing part-way through a batch.
+//!
+//! **Batches are not atomic.** Each event is committed on its own, so a batch
+//! that fails part-way leaves a committed prefix. Every response states that
+//! prefix exactly: session-protocol responses list a receipt per committed
+//! event, and server-sequenced responses carry the committed event count.
+//! When the failure is uncertain, only the event after that prefix may also
+//! have been committed. A batch stops early only on Pause (at an event
+//! boundary), an aborting Stop, the request deadline or a definite rejection.
+//!
+//! A draining Stop refuses new admissions but lets those in flight finish, so
+//! their clients receive the real outcome; only an aborting Stop interrupts
+//! them with an uncertain result.
 
 use crate::ingress::{AdmitFailure, Ingress, IngressError, IngressErrorKind};
 use drasi_computation_contracts::{
@@ -116,7 +132,7 @@ impl Ingress {
         uncertainty: AdmissionErrorKind,
         operation: impl Future<Output = Result<T, AdmissionError>>,
     ) -> Result<T, AdmissionError> {
-        if self.cancel.is_cancelled() {
+        if self.shutdown.is_cancelled() {
             return Err(AdmissionError {
                 kind: AdmissionErrorKind::Closed,
                 message: "source stopped".into(),
@@ -133,8 +149,8 @@ impl Ingress {
         };
         tokio::select! {
             biased;
-            _ = self.cancel.cancelled() => Err(AdmissionError { kind: uncertainty,
-                message: format!("source stopped during request; {resolution}") }),
+            _ = self.abort.cancelled() => Err(AdmissionError { kind: uncertainty,
+                message: format!("source aborted during request; {resolution}") }),
             result = tokio::time::timeout(self.live().timeout, operation) =>
                 result.unwrap_or_else(|_| Err(AdmissionError { kind: uncertainty,
                     message: format!("admission deadline elapsed; {resolution}") })),
@@ -196,7 +212,7 @@ impl Ingress {
                     }
                     receipts.push(
                         service
-                            .admit(session, first_sequence + offset as u64, envelope)
+                            .admit_wait(session, first_sequence + offset as u64, envelope)
                             .await?,
                     );
                 }
@@ -255,7 +271,10 @@ impl Ingress {
                 let envelope = self
                     .durable_envelope(change, state.next)
                     .map_err(|error| (IngressError::invalid(error.message), false))?;
-                match service.admit(&state.session, state.next, &envelope).await {
+                match service
+                    .admit_wait(&state.session, state.next, &envelope)
+                    .await
+                {
                     Ok(_) => {
                         state.next = state.next.checked_add(1).ok_or_else(|| {
                             (
@@ -279,9 +298,9 @@ impl Ingress {
         let timeout = self.live().timeout;
         let result = tokio::select! {
             biased;
-            _ = self.cancel.cancelled() => Err((IngressError::new(
+            _ = self.abort.cancelled() => Err((IngressError::new(
                 IngressErrorKind::Uncertain,
-                "source stopped during admission; the in-flight event may have been committed",
+                "source aborted during admission; the in-flight event may have been committed",
             ), true)),
             result = tokio::time::timeout(timeout, work) => result.unwrap_or_else(|_| Err((IngressError::new(
                 IngressErrorKind::Uncertain,
@@ -307,6 +326,199 @@ impl Ingress {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{IngressConfig, IngressSecurity};
+    use crate::ingress::SourceRuntime;
+    use drasi_computation_contracts::{ComponentDescriptor, ComponentId, GraphChangeCodec};
+    use drasi_computation_plugin_sdk::{
+        abi,
+        lifecycle::{CancellationToken as LifecycleCancellation, StopMode},
+        transport::{self, Failure},
+        wire,
+    };
+    use drasi_core_types::models::{Element, ElementMetadata, ElementReference};
+    use serde_json::json;
+    use std::{ffi::c_void, sync::Arc, time::Duration};
+    use tokio::sync::Notify;
+
+    const SOURCE_ID: &str = "495412a1-7a8f-505f-a9ca-a0da3eeadc36";
+
+    /// A host admission service whose ADMIT is held until released.
+    struct HeldHost {
+        entered: Notify,
+        release: Notify,
+    }
+
+    fn session() -> ProducerSession {
+        serde_json::from_value(json!({
+            "incarnation":"00000000-0000-0000-0000-000000000001","producer":SOURCE_ID,"epoch":1
+        }))
+        .expect("session")
+    }
+
+    unsafe extern "C" fn retain(context: *mut c_void) {
+        unsafe { Arc::increment_strong_count(context.cast::<HeldHost>()) };
+    }
+    unsafe extern "C" fn release(context: *mut c_void) {
+        unsafe { Arc::decrement_strong_count(context.cast::<HeldHost>()) };
+    }
+    unsafe extern "C" fn report_failure(_: *mut c_void, _: abi::BorrowedBytes) -> abi::Status {
+        abi::Status::ok()
+    }
+    unsafe extern "C" fn describe(_: *mut c_void) -> abi::Reply {
+        transport::reply_boundary(|| {
+            let identity: drasi_computation_contracts::GraphProducerIdentity =
+                serde_json::from_value(json!({
+                    "construction_scope":"scope","graph_id":"graph","component_id":SOURCE_ID,
+                    "stream":"test","incarnation":"00000000-0000-0000-0000-000000000001",
+                    "persistent":true
+                }))
+                .map_err(|error| Failure::failed(error.to_string()))?;
+            wire::encode(&identity).map_err(Failure::from)
+        })
+    }
+    unsafe extern "C" fn request(
+        context: *mut c_void,
+        code: u32,
+        _: abi::BorrowedBytes,
+        out: *mut abi::OperationHandle,
+    ) -> abi::Status {
+        transport::status_boundary(|| {
+            unsafe { Arc::increment_strong_count(context.cast::<HeldHost>()) };
+            let host = unsafe { Arc::from_raw(context.cast::<HeldHost>()) };
+            let operation = transport::export_operation(
+                async move {
+                    use abi::services::admission::*;
+                    let session = session();
+                    match code {
+                        REGISTER => wire::encode(&Ok::<_, AdmissionError>(session)),
+                        STATUS => wire::encode(&Ok::<_, AdmissionError>(
+                            drasi_computation_contracts::ProducerStatus {
+                                session,
+                                next_sequence: Some(1),
+                                earliest_receipt: None,
+                            },
+                        )),
+                        ADMIT => {
+                            host.entered.notify_one();
+                            host.release.notified().await;
+                            wire::encode(&Ok::<_, AdmissionError>(AdmissionReceipt {
+                                session,
+                                sequence: 1,
+                                position: 1,
+                            }))
+                        }
+                        _ => return Err(Failure::failed("unexpected admission request")),
+                    }
+                    .map_err(Failure::from)
+                },
+                None,
+            );
+            unsafe { transport::write_out(out, operation) }
+        })
+    }
+
+    type Admitted = Result<usize, AdmitFailure>;
+
+    /// Starts a durable runtime over a held host. Like a request handler, the
+    /// listener owns one admission, whose result it reports.
+    async fn held_runtime(
+        host: &Arc<HeldHost>,
+    ) -> anyhow::Result<(
+        SourceRuntime,
+        Arc<Ingress>,
+        tokio::sync::oneshot::Receiver<Admitted>,
+    )> {
+        let table = abi::services::SourceAdmissionV1 {
+            header: abi::Header::new::<abi::services::SourceAdmissionV1>(),
+            context: Arc::as_ptr(host) as *mut c_void,
+            retain: Some(retain),
+            release: Some(release),
+            request: Some(request),
+            report_failure: Some(report_failure),
+            describe: Some(describe),
+        };
+        let codec = Arc::new(wire::codec(&[GraphChangeCodec::schema()])?);
+        let admission = unsafe { NativeAdmission::from_borrowed(&table, codec) }
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let config = IngressConfig {
+            stream: drasi_computation_contracts::StreamId::try_new("test")?,
+            host: "127.0.0.1".into(),
+            port: 0,
+            timeout_ms: 60_000,
+            ingress_capacity: 8,
+            max_message_bytes: 1024 * 1024,
+            max_connections: 8,
+            security: IngressSecurity::default(),
+        };
+        let descriptor = ComponentDescriptor::try_new(ComponentId::try_new(SOURCE_ID)?, vec![])?;
+        let mut runtime = SourceRuntime::new(descriptor, config, None, Some(admission))?;
+        let (ingress_sender, ingress_receiver) = tokio::sync::oneshot::channel();
+        let (result_sender, result_receiver) = tokio::sync::oneshot::channel();
+        runtime
+            .start(
+                &LifecycleCancellation::new(),
+                None,
+                move |_listener, ingress| async move {
+                    let _ = ingress_sender.send(ingress.clone());
+                    let _ = result_sender.send(ingress.admit(vec![change()]).await);
+                    ingress.shutdown.cancelled().await;
+                    Ok(())
+                },
+            )
+            .await
+            .map_err(|error| error.into_source())?;
+        Ok((runtime, ingress_receiver.await?, result_receiver))
+    }
+
+    fn change() -> SourceChange {
+        SourceChange::Insert {
+            element: Element::Node {
+                metadata: ElementMetadata {
+                    reference: ElementReference::new("test", "a"),
+                    labels: Arc::from(vec![Arc::from("Item")]),
+                    effective_from: 1,
+                },
+                properties: Default::default(),
+            },
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn drain_answers_in_flight_commits_and_abort_interrupts_them() -> anyhow::Result<()> {
+        let deadline = || Some(tokio::time::Instant::now() + Duration::from_secs(5));
+        let host = Arc::new(HeldHost {
+            entered: Notify::new(),
+            release: Notify::new(),
+        });
+        let (mut runtime, ingress, result) = held_runtime(&host).await?;
+        host.entered.notified().await;
+        let stopping = runtime.stop(StopMode::Drain, deadline());
+        tokio::pin!(stopping);
+        tokio::select! {
+            // Polled first: the stop begins before the new request arrives.
+            biased;
+            outcome = &mut stopping => panic!("drain passed the in-flight commit: {outcome:?}"),
+            refused = ingress.admit(vec![change()]) => {
+                // New work is refused as soon as the stop begins.
+                assert_eq!(refused.expect_err("stopping").error.kind, IngressErrorKind::Stopped);
+            }
+        }
+        host.release.notify_one();
+        stopping.await?;
+        assert_eq!(result.await?.expect("drained commit is answered"), 1);
+
+        let host = Arc::new(HeldHost {
+            entered: Notify::new(),
+            release: Notify::new(),
+        });
+        let (mut runtime, _ingress, result) = held_runtime(&host).await?;
+        host.entered.notified().await;
+        // Abort does not wait for the held commit; its outcome is never
+        // reported as success.
+        runtime.stop(StopMode::Abort, deadline()).await?;
+        assert!(!matches!(result.await, Ok(Ok(_))));
+        Ok(())
+    }
 
     #[test]
     fn only_clean_rejections_keep_the_server_sequence() {

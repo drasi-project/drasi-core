@@ -2,7 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! Database-free tests. Live SQL Server qualification is deferred (CW-78);
-//! the cursor protocol runs against an in-memory [`crate::delivery::Session`].
+//! the shared cursor protocol runs against an in-memory session in
+//! `drasi_computation_storedproc_common::conformance`.
 
 mod config;
 mod delivery;

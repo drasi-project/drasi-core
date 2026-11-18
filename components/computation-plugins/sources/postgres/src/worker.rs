@@ -1,25 +1,45 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! The replication worker: reads pgoutput, assembles complete commits,
-//! emits them (or their rows), and sends standby feedback that follows the
-//! host's committed progress.
+//! The replication worker: reads pgoutput, emits whole commits (or their
+//! rows), and sends standby feedback that follows the host's committed
+//! progress.
 //!
 //! The worker also implements pause (stop reading and emitting at a
 //! transaction boundary while feedback continues), reconnection after a
 //! transport failure in every mode, and the final feedback of a Drain stop.
+//!
+//! **Progress records.** Standby feedback only follows committed cursors, so
+//! a publication whose selected tables are quiet would make the server
+//! retain WAL without bound. While nothing is open or queued and no output
+//! has been emitted for `idle_progress`, the worker emits a progress record
+//! (an empty transaction for whole-transaction outputs) at a boundary proven
+//! to hold no unhandled change: a commit without selected changes, or the
+//! WAL end of a primary keepalive minus one. Every transaction committing at
+//! or after a keepalive's WAL end is still to be sent, and the decoder skips
+//! only commits at or below its cursor. Once consumers commit the record,
+//! feedback and the slot advance with it.
+//!
+//! **Consumer groups.** A start that finds a group member without a cursor
+//! first emits a record at the group's join point (the fresh origin, or the
+//! slowest member's cursor) and reads nothing further until every member
+//! has committed a cursor, so the join point is durable before anything is
+//! published.
 
 use crate::rows::RowEmission;
-use crate::shared::{SharedUpdates, TransactionEmission};
+use crate::shared::SharedUpdates;
+use crate::whole::WholeEmission;
 use anyhow::{Context, Result};
 use drasi_computation_contracts::reconnect::BackoffPolicy;
-use drasi_computation_contracts::{OutputEnvelope, SourceProgressUpdates, SourceTransactionError};
+use drasi_computation_contracts::{
+    OutputEnvelope, SourceProgressUpdates, SourceTransactionError, StreamId,
+};
 use drasi_postgres_common::{
     decoder::PgOutputDecoder,
     protocol::BackendMessage,
     replication::{
         checkpoint, connect, ensure_binding, ensure_retained, is_transient, rows::row_checkpoint,
-        slot_positions, source_binding, start_streaming, validate_retention, Connection,
+        slot_positions, source_binding, start_streaming, validate_retention, Connection, Decoded,
         PostgresTransactionConfig, Transactions,
     },
     types::StandbyStatusUpdate,
@@ -40,7 +60,8 @@ use tokio::{
 /// Offset of the WAL payload in an XLogData (`w`) message: the tag plus
 /// start, end and send-time fields.
 const XLOG_DATA_HEADER: usize = 25;
-/// Length of a primary keepalive (`k`) message.
+/// Length of a primary keepalive (`k`) message: the tag, WAL end, send time
+/// and reply-requested flag.
 const KEEPALIVE_LEN: usize = 18;
 /// Offset of the keepalive's reply-requested flag.
 const KEEPALIVE_REPLY: usize = 17;
@@ -48,6 +69,9 @@ const KEEPALIVE_REPLY: usize = 17;
 const RECONNECT_BASE: Duration = Duration::from_millis(250);
 /// Largest reconnect backoff ceiling.
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
+/// Least quiet time before a progress record, as for the MySQL and SQL
+/// Server sources.
+pub(crate) const IDLE_PROGRESS: Duration = Duration::from_secs(30);
 
 pub(crate) enum WorkerProgress {
     Single {
@@ -77,16 +101,31 @@ pub(crate) struct PauseGate {
     pub acknowledged: watch::Sender<bool>,
 }
 
+/// The output a worker produces.
+pub(crate) enum Emission {
+    Rows(RowEmission),
+    Whole(WholeEmission),
+}
+
 pub(crate) struct Worker {
     pub connection: Option<Connection>,
+    pub stream: StreamId,
     pub transactions: Transactions,
     pub progress: WorkerProgress,
     pub confirmed: u64,
     pub next_feedback: Instant,
     pub config: PostgresTransactionConfig,
-    pub persistent: bool,
-    pub rows: Option<RowEmission>,
-    pub whole: Option<TransactionEmission>,
+    pub emission: Emission,
+    /// Outputs waiting for the channel, in order.
+    pub queue: VecDeque<OutputEnvelope>,
+    /// Reads nothing until every member of the consumer group has committed
+    /// a cursor (after the join record).
+    pub holding: bool,
+    /// A fresh group's origin, the resume point while no member has a
+    /// cursor.
+    pub origin: Option<u64>,
+    pub last_emission: Instant,
+    pub idle_progress: Duration,
     pub pause: PauseGate,
     /// Live `reconnectBudgetMs`; `0` disables reconnection.
     pub reconnect_budget_ms: Arc<AtomicU64>,
@@ -95,6 +134,26 @@ pub(crate) struct Worker {
 impl Worker {
     fn paused(&self) -> bool {
         *self.pause.requested.borrow()
+    }
+
+    /// Whether reading may stop here: between transactions, or while a row
+    /// transaction streams.
+    fn at_boundary(&self) -> bool {
+        !self.transactions.in_transaction()
+            || matches!(&self.emission, Emission::Rows(rows) if rows.at_boundary())
+    }
+
+    fn assembly_deadline(&self) -> Option<Instant> {
+        match &self.emission {
+            Emission::Rows(rows) => rows.deadline(),
+            Emission::Whole(whole) => whole.deadline(),
+        }
+    }
+
+    /// Whether a progress record is due: nothing is queued or held and no
+    /// output has been emitted for `idle_progress`.
+    fn idle_due(&self) -> bool {
+        !self.holding && self.queue.is_empty() && self.last_emission.elapsed() >= self.idle_progress
     }
 
     pub async fn feedback(&mut self) -> Result<()> {
@@ -113,18 +172,13 @@ impl Worker {
                     "PostgreSQL consumer was reset; explicit source reconstruction is required"
                 );
                 if snapshot.ready {
-                    anyhow::ensure!(
-                        !self.persistent || snapshot.persistent,
-                        "PostgreSQL consumer lost persistent progress"
-                    );
-                    if let Some(rows) = &self.rows {
-                        rows.confirmed(&snapshot, &self.transactions)?
-                    } else {
-                        checkpoint(
+                    match &self.emission {
+                        Emission::Rows(rows) => rows.confirmed(&snapshot, &self.transactions)?,
+                        Emission::Whole(_) => checkpoint(
                             &snapshot,
                             &self.transactions.source,
                             self.transactions.binding,
-                        )?
+                        )?,
                     }
                 } else {
                     None
@@ -133,15 +187,14 @@ impl Worker {
             WorkerProgress::Shared(progress) => {
                 let observed = progress.snapshot(
                     &self.transactions.source,
-                    &self.transactions.stream,
+                    &self.stream,
                     self.transactions.binding,
-                    self.persistent,
                 )?;
-                let rows = self
-                    .rows
-                    .as_ref()
-                    .context("shared source has no row emissions")?;
+                let Emission::Rows(rows) = &self.emission else {
+                    anyhow::bail!("shared source has no row emissions");
+                };
                 rows.validate_shared_observation(observed.max_counter, observed.max_lsn)?;
+                self.release(observed.ready, observed.missing);
                 if observed.ready {
                     observed.minimum.map(|minimum| minimum.feedback_lsn)
                 } else {
@@ -151,13 +204,17 @@ impl Worker {
             WorkerProgress::SharedTransactions(progress) => {
                 let observed = progress.transaction_snapshot(
                     &self.transactions.source,
-                    &self.transactions.stream,
+                    &self.stream,
                     self.transactions.binding,
                 )?;
-                self.whole
-                    .as_ref()
-                    .context("shared source has no whole-transaction emissions")?
+                let Emission::Whole(whole) = &self.emission else {
+                    anyhow::bail!("shared source has no whole-transaction emissions");
+                };
+                whole
+                    .shared()
+                    .context("shared source has no shared transaction cursors")?
                     .validate_observation(observed.max_counter, observed.max_lsn)?;
+                self.release(observed.ready, observed.missing);
                 if observed.ready {
                     observed.minimum.map(|minimum| minimum.position.commit_lsn)
                 } else {
@@ -173,11 +230,7 @@ impl Worker {
             self.confirmed = next;
         }
         let io_deadline = Instant::now() + self.config.timeout();
-        let assembly_deadline = self
-            .transactions
-            .pending
-            .as_ref()
-            .map(|(_, builder)| builder.deadline());
+        let assembly_deadline = self.assembly_deadline();
         let deadline = assembly_deadline.map_or(io_deadline, |deadline| deadline.min(io_deadline));
         let result = tokio::time::timeout_at(
             deadline,
@@ -200,15 +253,19 @@ impl Worker {
         Ok(())
     }
 
+    /// Ends the hold once every group member has committed a cursor.
+    fn release(&mut self, ready: bool, missing: bool) {
+        if self.holding && ready && !missing {
+            self.holding = false;
+            log::info!("PostgreSQL consumers committed their join point; streaming changes");
+        }
+    }
+
     fn admitted_lsn(&self) -> u64 {
-        self.rows.as_ref().map_or_else(
-            || {
-                self.whole
-                    .as_ref()
-                    .map_or(self.transactions.resume, TransactionEmission::admitted_lsn)
-            },
-            RowEmission::admitted_lsn,
-        )
+        match &self.emission {
+            Emission::Rows(rows) => rows.admitted_lsn(),
+            Emission::Whole(whole) => whole.admitted_lsn(self.transactions.resume),
+        }
     }
 
     /// Streams until a permanent failure. A transport failure reconnects at
@@ -277,15 +334,17 @@ impl Worker {
 
     /// Reopens replication at the committed cursor, after a transport
     /// failure. Output after the cursor is replayed; consumers deduplicate by
-    /// their committed positions, as after a restart.
+    /// their committed positions, as after a restart. Queued output is
+    /// dropped; a group still holding gets its join record again.
     async fn reopen(&mut self) -> Result<()> {
+        use drasi_postgres_common::replication::rows::RowPosition;
         enum Rewind {
             Single {
-                position: Option<drasi_postgres_common::replication::rows::RowPosition>,
+                position: Option<RowPosition>,
                 previous: u64,
             },
             Shared {
-                position: Option<drasi_postgres_common::replication::rows::RowPosition>,
+                position: Option<RowPosition>,
                 previous: u64,
                 floor: (u64, u64, std::collections::BTreeSet<u64>),
             },
@@ -303,11 +362,10 @@ impl Worker {
                 anyhow::ensure!(
                     progress.ready
                         && progress.failure.is_none()
-                        && progress.reset_generation == *generation
-                        && (!self.persistent || progress.persistent),
+                        && progress.reset_generation == *generation,
                     "PostgreSQL progress owner is not ready for safe reconnection"
                 );
-                if self.rows.is_some() {
+                if matches!(self.emission, Emission::Rows(_)) {
                     let position = row_checkpoint(
                         &progress,
                         &self.transactions.source,
@@ -315,7 +373,7 @@ impl Worker {
                     )?;
                     let confirmed = position
                         .as_ref()
-                        .map_or(self.confirmed, |position| position.feedback_lsn());
+                        .map_or(self.confirmed, RowPosition::feedback_lsn);
                     let resume = position
                         .as_ref()
                         .map_or(confirmed, |position| position.commit_lsn);
@@ -340,30 +398,24 @@ impl Worker {
             WorkerProgress::Shared(progress) => {
                 let observed = progress.snapshot(
                     &self.transactions.source,
-                    &self.transactions.stream,
+                    &self.stream,
                     self.transactions.binding,
-                    self.persistent,
                 )?;
                 anyhow::ensure!(
                     observed.ready,
                     "PostgreSQL shared consumers are not ready for safe reconnection"
                 );
-                self.rows
-                    .as_ref()
-                    .context("shared source has no row emissions")?
-                    .validate_shared_observation(observed.max_counter, observed.max_lsn)?;
+                let Emission::Rows(rows) = &self.emission else {
+                    anyhow::bail!("shared source has no row emissions");
+                };
+                rows.validate_shared_observation(observed.max_counter, observed.max_lsn)?;
                 let (position, confirmed, previous) = match observed.minimum {
                     Some(minimum) => {
                         let previous = minimum.position.feedback_lsn();
                         (Some(minimum.position), minimum.feedback_lsn, previous)
                     }
                     None => {
-                        anyhow::ensure!(observed.missing, "PostgreSQL shared minimum is fenced");
-                        let origin = progress.initial_lsn()?;
-                        anyhow::ensure!(
-                            self.confirmed == origin,
-                            "PostgreSQL shared streaming origin is no longer retained"
-                        );
+                        let origin = retained_origin(self.origin, self.confirmed)?;
                         (None, origin, origin)
                     }
                 };
@@ -383,31 +435,23 @@ impl Worker {
             WorkerProgress::SharedTransactions(progress) => {
                 let observed = progress.transaction_snapshot(
                     &self.transactions.source,
-                    &self.transactions.stream,
+                    &self.stream,
                     self.transactions.binding,
                 )?;
                 anyhow::ensure!(
                     observed.ready,
                     "PostgreSQL transaction consumers are not ready for safe reconnection"
                 );
-                self.whole
-                    .as_ref()
-                    .context("shared source has no whole-transaction emissions")?
+                let Emission::Whole(whole) = &self.emission else {
+                    anyhow::bail!("shared source has no whole-transaction emissions");
+                };
+                whole
+                    .shared()
+                    .context("shared source has no shared transaction cursors")?
                     .validate_observation(observed.max_counter, observed.max_lsn)?;
                 let resume = match observed.minimum {
                     Some(minimum) => minimum.position.commit_lsn,
-                    None => {
-                        anyhow::ensure!(
-                            observed.missing,
-                            "PostgreSQL shared transaction minimum is fenced"
-                        );
-                        let origin = progress.initial_lsn()?;
-                        anyhow::ensure!(
-                            self.confirmed == origin,
-                            "PostgreSQL shared streaming origin is no longer retained"
-                        );
-                        origin
-                    }
+                    None => retained_origin(self.origin, self.confirmed)?,
                 };
                 (
                     resume,
@@ -428,48 +472,72 @@ impl Worker {
             &mut connection,
             &self.config,
             &self.transactions.source,
-            &self.transactions.stream,
+            &self.stream,
         )
         .await?;
         ensure_binding(self.transactions.binding, binding)?;
         let (retained, slot_confirmed) = slot_positions(&mut connection, &self.config).await?;
         ensure_retained(retained, slot_confirmed, resume, confirmed)?;
         start_streaming(&mut connection, &self.config, resume).await?;
-        self.transactions.decoder = PgOutputDecoder::strict(self.config.max_protocol_bytes);
-        self.transactions.pending = None;
-        self.transactions.keys = keys;
-        let partial = |position: &Option<drasi_postgres_common::replication::rows::RowPosition>| {
+        let decoder = PgOutputDecoder::strict(self.config.max_protocol_bytes);
+        let partial = |position: &Option<RowPosition>| {
             position
                 .as_ref()
                 .is_some_and(|position| !position.complete())
         };
-        match rewind {
-            Rewind::Single { position, previous } => {
-                self.transactions.resume = decoder_resume(resume, partial(&position))?;
-                self.rows
-                    .as_mut()
-                    .context("row emissions are missing")?
-                    .rewind(position, previous);
+        self.queue.clear();
+        match (rewind, &mut self.emission) {
+            (Rewind::Single { position, previous }, Emission::Rows(rows)) => {
+                self.transactions.restart(
+                    decoder,
+                    keys,
+                    decoder_resume(resume, partial(&position))?,
+                );
+                rows.rewind(position, previous);
             }
-            Rewind::Shared {
-                position,
-                previous,
-                floor,
-            } => {
-                self.transactions.resume = decoder_resume(resume, partial(&position))?;
-                self.rows
-                    .as_mut()
-                    .context("row emissions are missing")?
-                    .rewind_shared(position, previous, floor.0, floor.1, floor.2)?;
+            (
+                Rewind::Shared {
+                    position,
+                    previous,
+                    floor,
+                },
+                Emission::Rows(rows),
+            ) => {
+                self.transactions.restart(
+                    decoder,
+                    keys,
+                    decoder_resume(resume, partial(&position))?,
+                );
+                rows.rewind_shared(position.clone(), previous, floor.0, floor.1, floor.2)?;
+                if self.holding {
+                    self.queue.push_back(rows.join(
+                        position.as_ref(),
+                        resume,
+                        &self.transactions,
+                    )?);
+                }
             }
-            Rewind::Whole { floor } => {
-                self.transactions.resume = resume;
-                self.whole
-                    .as_ref()
-                    .context("whole-transaction emissions are missing")?
+            (Rewind::Whole { floor }, Emission::Whole(whole)) => {
+                self.transactions.restart(decoder, keys, resume);
+                whole.rewind();
+                whole
+                    .shared()
+                    .context("shared source has no shared transaction cursors")?
                     .raise(floor.0, floor.1);
+                if self.holding {
+                    self.queue.push_back(whole.progress(
+                        resume,
+                        chrono::Utc::now(),
+                        self.transactions.binding,
+                        None,
+                    )?);
+                }
             }
-            Rewind::Transactions => self.transactions.resume = resume,
+            (Rewind::Transactions, Emission::Whole(whole)) => {
+                self.transactions.restart(decoder, keys, resume);
+                whole.rewind();
+            }
+            _ => anyhow::bail!("PostgreSQL progress and output modes disagree"),
         }
         self.connection = Some(connection);
         self.confirmed = confirmed;
@@ -496,17 +564,81 @@ impl Worker {
         }
     }
 
-    async fn run_connected(&mut self, sender: mpsc::Sender<OutputEnvelope>) -> Result<()> {
-        let mut pending = VecDeque::new();
-        loop {
-            if let Some((_, builder)) = &mut self.transactions.pending {
-                builder.check_deadline()?;
+    /// Applies one pgoutput message.
+    fn handle(&mut self, payload: &[u8]) -> Result<()> {
+        let Some(decoded) = self.transactions.decode(payload)? else {
+            return Ok(());
+        };
+        let idle = self.idle_due();
+        let transactions = &self.transactions;
+        match (decoded, &mut self.emission) {
+            (Decoded::Begin(info), Emission::Rows(rows)) => rows.begin(&info)?,
+            (Decoded::Begin(_), Emission::Whole(whole)) => whole.begin()?,
+            (Decoded::Changes(changes), Emission::Rows(rows)) => {
+                rows.push(changes, transactions, &mut self.queue)?
             }
-            // Pause at a transaction boundary: finish assembling an open
-            // commit, then stop reading and emitting. Feedback continues so
-            // the server's wal_sender_timeout does not disconnect us.
-            if self.paused() && self.transactions.pending.is_none() {
-                self.pause.acknowledged.send_replace(true);
+            (Decoded::Changes(changes), Emission::Whole(whole)) => whole.push(changes)?,
+            (Decoded::Commit(info), Emission::Rows(rows)) => {
+                rows.commit(&info, idle, transactions, &mut self.queue)?
+            }
+            (Decoded::Commit(info), Emission::Whole(whole)) => {
+                if let Some(envelope) = whole.commit(
+                    info.commit_lsn,
+                    info.commit_timestamp,
+                    idle,
+                    transactions.binding,
+                    transactions.managed_slot.as_deref(),
+                )? {
+                    self.queue.push_back(envelope);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A keepalive reports the server's WAL end: every commit before it has
+    /// been sent. While idle, commit the range up to it as a progress record.
+    fn keepalive(&mut self, wal_end: u64) -> Result<()> {
+        let Some(lsn) = wal_end.checked_sub(1) else {
+            return Ok(());
+        };
+        if self.transactions.in_transaction() || lsn <= self.transactions.resume || !self.idle_due()
+        {
+            return Ok(());
+        }
+        let timestamp = chrono::Utc::now();
+        let envelope = match &mut self.emission {
+            Emission::Rows(rows) => rows.progress(lsn, timestamp, &self.transactions)?,
+            Emission::Whole(whole) => whole.progress(
+                lsn,
+                timestamp,
+                self.transactions.binding,
+                self.transactions.managed_slot.as_deref(),
+            )?,
+        };
+        self.transactions.advance(lsn);
+        self.queue.push_back(envelope);
+        Ok(())
+    }
+
+    async fn run_connected(&mut self, sender: mpsc::Sender<OutputEnvelope>) -> Result<()> {
+        loop {
+            if let Emission::Whole(whole) = &mut self.emission {
+                whole.check_deadline()?;
+            }
+            if self
+                .assembly_deadline()
+                .is_some_and(|deadline| deadline <= Instant::now())
+            {
+                return Err(SourceTransactionError::Deadline.into());
+            }
+            let paused = self.paused();
+            let boundary = self.at_boundary();
+            // Park at a boundary while paused, or while a group holds for
+            // its join point. Feedback continues so the server's
+            // wal_sender_timeout does not disconnect us.
+            if boundary && (paused || (self.holding && self.queue.is_empty())) {
+                self.pause.acknowledged.send_replace(paused);
                 tokio::select! {
                     _ = tokio::time::sleep_until(self.next_feedback) => self.feedback().await?,
                     changed = self.progress.changed() => {
@@ -521,14 +653,15 @@ impl Worker {
                 }
                 continue;
             }
-            if !self.paused() {
+            if !paused {
                 self.pause.acknowledged.send_replace(false);
             }
-            if !pending.is_empty() && !self.paused() {
+            if !self.queue.is_empty() && !paused {
                 tokio::select! {
                     permit = sender.reserve() => {
                         permit.context("PostgreSQL output closed")?
-                            .send(pending.pop_front().context("pending PostgreSQL transaction")?);
+                            .send(self.queue.pop_front().context("queued PostgreSQL output")?);
+                        self.last_emission = Instant::now();
                     }
                     _ = tokio::time::sleep_until(self.next_feedback) => self.feedback().await?,
                     changed = self.progress.changed() => {
@@ -539,14 +672,9 @@ impl Worker {
                 }
                 continue;
             }
-            let deadline = self
-                .transactions
-                .pending
-                .as_ref()
-                .map(|(_, builder)| builder.deadline());
-            // Between transactions, a pause request interrupts the read so
-            // the next loop parks without waiting for WAL or feedback.
-            let between = deadline.is_none();
+            let deadline = self.assembly_deadline();
+            // At a boundary, a pause request interrupts the read so the next
+            // loop parks without waiting for WAL or feedback.
             tokio::select! {
                 biased;
                 _ = async {
@@ -555,7 +683,7 @@ impl Worker {
                         None => std::future::pending().await,
                     }
                 } => return Err(SourceTransactionError::Deadline.into()),
-                _ = self.pause.requested.changed(), if between && self.pause.requested.has_changed().is_ok() => {}
+                _ = self.pause.requested.changed(), if boundary && self.pause.requested.has_changed().is_ok() => {}
                 _ = tokio::time::sleep_until(self.next_feedback) => self.feedback().await?,
                 changed = self.progress.changed() => {
                     changed?;
@@ -566,22 +694,13 @@ impl Worker {
                         BackendMessage::CopyData(data) => match data.first() {
                             Some(b'w') => {
                                 anyhow::ensure!(data.len() > XLOG_DATA_HEADER, "truncated PostgreSQL XLogData");
-                                let payload = &data[XLOG_DATA_HEADER..];
-                                let group = match &self.whole {
-                                    Some(whole) => self.transactions.decode_with_position(payload, |lsn, binding, managed| whole.position(lsn, binding, managed))?,
-                                    None => self.transactions.decode(payload)?,
-                                };
-                                if let Some(group) = group {
-                                    if let Some(whole) = &self.whole { whole.admit(self.transactions.resume); }
-                                    if let Some(rows) = &mut self.rows {
-                                        pending = rows.expand(group, &self.transactions)?;
-                                    } else {
-                                        pending.push_back(group);
-                                    }
-                                }
+                                self.handle(&data[XLOG_DATA_HEADER..])?;
                             }
                             Some(b'k') => {
                                 anyhow::ensure!(data.len() == KEEPALIVE_LEN && data[KEEPALIVE_REPLY] <= 1, "invalid PostgreSQL keepalive");
+                                let mut wal_end = [0; 8];
+                                wal_end.copy_from_slice(&data[1..9]);
+                                self.keepalive(u64::from_be_bytes(wal_end))?;
                                 if data[KEEPALIVE_REPLY] == 1 { self.feedback().await?; }
                             }
                             _ => anyhow::bail!("unknown PostgreSQL CopyData frame"),
@@ -594,6 +713,17 @@ impl Worker {
             }
         }
     }
+}
+
+/// The resume point of a group in which no member has a cursor yet: its
+/// fresh origin, still the confirmed position.
+fn retained_origin(origin: Option<u64>, confirmed: u64) -> Result<u64> {
+    let origin = origin.context("PostgreSQL consumer group has no cursor and no origin")?;
+    anyhow::ensure!(
+        confirmed == origin,
+        "PostgreSQL shared streaming origin is no longer retained"
+    );
+    Ok(origin)
 }
 
 /// The decoder skips commits at or below its resume position; a partial

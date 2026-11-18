@@ -315,7 +315,8 @@ pub(crate) fn operation_failure_disposition(error: &anyhow::Error) -> FailureDis
             }
         }
         if cause.is::<super::DeliveryError>() {
-            // The delivery runner already applied its handling retry budget.
+            // A delivery failure that reached the node is one the sink's
+            // failure policy did not resolve in place.
             return FailureDisposition::Terminal;
         }
         if let Some(error) = cause.downcast_ref::<drasi_core::interface::IndexError>() {
@@ -577,6 +578,9 @@ pub struct ObservedComponent {
     pub started: bool,
     /// Distinguishes initial creation from an explicitly requested lifecycle.
     pub lifecycle_requested: bool,
+    /// Sink inputs this construction generation skipped after a permanent
+    /// delivery failure under `PermanentFailurePolicy::Skip`.
+    pub skipped_inputs: u64,
     pub transition_time: DateTime<Utc>,
 }
 
@@ -1232,6 +1236,7 @@ mod tests {
             exhausted: false,
             started: false,
             lifecycle_requested: true,
+            skipped_inputs: 0,
             transition_time: Utc::now(),
         }
     }

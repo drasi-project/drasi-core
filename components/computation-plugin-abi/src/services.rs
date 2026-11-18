@@ -8,7 +8,9 @@
 use super::*;
 
 pub const SYMBOL: &[u8] = b"drasi_computation_plugin_services_v1\0";
-pub const VERSION: u32 = 1;
+/// Version 2: an admission ADMIT request carries `wait` (back-pressure instead
+/// of `Busy`/`CapacityExhausted`). Hosts and plugins require an exact match.
+pub const VERSION: u32 = 2;
 pub type ServicesFn = unsafe extern "C" fn() -> *const PluginServicesV1;
 
 /// Borrows existing plugin/factory handles from this same binary. It neither

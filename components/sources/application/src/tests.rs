@@ -28,12 +28,14 @@ mod tests {
         )
         .await;
         let (started, ready) = tokio::sync::oneshot::channel();
+        let (shutdown, mut wake) = tokio::sync::watch::channel(false);
         let task = tokio::spawn(async move {
             started.send(()).unwrap();
-            std::future::pending::<()>().await;
+            let _ = wake.wait_for(|stop| *stop).await;
         });
         let worker = task.abort_handle();
         *source.prune_task.write().await = Some(task);
+        *source.prune_shutdown.lock().unwrap() = Some(shutdown);
         ready.await.unwrap();
         source.stop().await.unwrap();
         assert!(worker.is_finished());

@@ -31,6 +31,7 @@ workspace = true
 drasi-core-types.workspace = true
 drasi-computation-contracts = { workspace = true, optional = true }
 drasi-reaction-common = { workspace = true, optional = true }
+drasi-computation-storedproc-common = { workspace = true, optional = true }
 anyhow = "1.0"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
@@ -67,7 +68,7 @@ replication = [
 ]
 storedproc = [
     "dep:drasi-computation-contracts", "dep:drasi-reaction-common",
-    "drasi-reaction-common/sql",
+    "drasi-reaction-common/sql", "dep:drasi-computation-storedproc-common",
     "dep:async-trait", "dep:bytes", "dep:handlebars",
     "dep:postgres-types", "dep:sha2", "dep:thiserror", "dep:tokio",
     "dep:tokio-postgres", "rust_decimal/db-tokio-postgres",

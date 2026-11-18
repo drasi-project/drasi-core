@@ -6,7 +6,7 @@
 //!
 //! Live qualification is deferred (CW-78). The stored-procedure sink is an
 //! external consumer with a destination cursor; its live scenarios need the
-//! fixture to pre-create `<schema>.DrasiDeliveryProgress` and grant the
+//! fixture to pre-create `<schema>.drasi_delivery_progress` (and its dead-letter table) and grant the
 //! application login SELECT, INSERT, UPDATE and DELETE on it.
 
 #[path = "fixtures/native_mssql/coverage.rs"]
@@ -91,8 +91,8 @@ fn sink_settings(db: &Database, extra: Value) -> Value {
         "database": connection["database"], "user": connection["user"],
         "password": connection["password"], "encryption": "required",
         "trustServerCertificate": connection["trustServerCertificate"],
-        "progressTable": format!("{}.DrasiDeliveryProgress", db.schema),
-        "commandTimeoutMs": 15000, "connectTimeoutMs": 15000, "retryBudgetMs": 10000,
+        "progressTable": format!("{}.drasi_delivery_progress", db.schema.to_lowercase()),
+        "commandTimeoutMs": 15000, "connectTimeoutMs": 15000, "shutdownTimeoutMs": 10000,
     });
     if let (Some(settings), Some(extra)) = (settings.as_object_mut(), extra.as_object()) {
         settings.extend(extra.clone());
@@ -145,7 +145,6 @@ fn consumer_options() -> DeliveryOptions {
         scope: RecoveryScope::MemoryLifetime,
         max_streams: NonZeroUsize::new(8).expect("positive stream limit"),
         receipts_per_stream: NonZeroUsize::new(8).expect("positive receipt limit"),
-        retry: DeliveryRetryPolicy::default(),
     }
 }
 

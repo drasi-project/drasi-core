@@ -11,13 +11,13 @@ use std::{
 
 use drasi_computation_plugin_sdk::{
     abi,
-    admission::{AdmissionError, AdmitRequest, ReceiptRequest},
+    admission::{AdmissionError, AdmitRequest, ReceiptRequest, MAX_OUTSTANDING_REQUESTS},
     transport::{self, Failure},
     wire,
 };
 use drasi_lib::computation::v1::{BinaryEnvelopeCodec, PipeError, SourceAdmission};
 
-const REQUEST_LIMIT: usize = 16;
+const REQUEST_LIMIT: usize = MAX_OUTSTANDING_REQUESTS;
 
 struct State {
     active: AtomicBool,
@@ -191,11 +191,21 @@ async fn apply(
             let envelope = codec
                 .decode(&request.envelope)
                 .map_err(anyhow::Error::from)?;
-            response(
-                admission
-                    .admit(&request.session, request.sequence, &envelope)
-                    .await,
-            )
+            let session = &request.session;
+            response(if request.wait {
+                // Back-pressure: wait for the bound mailbox, then for mailbox and
+                // journal capacity. Both waits are side-effect free until submission.
+                match admission.wait_active().await {
+                    Ok(()) => {
+                        admission
+                            .admit_wait(session, request.sequence, &envelope)
+                            .await
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
+                admission.admit(session, request.sequence, &envelope).await
+            })
         }
         _ => Err(Failure::protocol("unknown admission request")),
     }

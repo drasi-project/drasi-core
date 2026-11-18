@@ -9,7 +9,11 @@
 
 use crate::storedproc;
 use anyhow::{ensure, Context, Result};
-use drasi_computation_contracts::{DeliveryGuarantee, OutputAliases, SinkOutputs};
+use drasi_computation_contracts::{
+    DeliveryGuarantee, OutputAliases, PermanentFailurePolicy, SinkOutputs,
+};
+use drasi_computation_storedproc_common::settings;
+pub use drasi_computation_storedproc_common::settings::SslMode;
 use drasi_reaction_common::{OperationType, QueryConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -20,15 +24,9 @@ pub const DEFAULT_PORT: u16 = 3306;
 /// Default deadline for one SQL command (each statement of an operation).
 pub const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
 /// Default deadline for one connection attempt (TCP, TLS, authentication).
-pub const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 5_000;
+pub const DEFAULT_CONNECT_TIMEOUT_MS: u64 = settings::DEFAULT_CONNECT_TIMEOUT_MS;
 /// Default bound on Stop and Dispose cleanup when the host sets no deadline.
-pub const DEFAULT_SHUTDOWN_TIMEOUT_MS: u64 = 10_000;
-/// Default additional connection attempts after the first.
-pub const DEFAULT_CONNECT_RETRY_ATTEMPTS: u32 = 5;
-/// Upper bound on `connectRetryAttempts`.
-pub const MAX_CONNECT_RETRY_ATTEMPTS: u32 = 32;
-/// Default total budget for one connect sequence, including backoff.
-pub const DEFAULT_RECONNECT_BUDGET_MS: u64 = 30_000;
+pub const DEFAULT_SHUTDOWN_TIMEOUT_MS: u64 = settings::DEFAULT_SHUTDOWN_TIMEOUT_MS;
 /// Default maximum MySQL protocol packet, which bounds one command.
 pub const DEFAULT_MAX_PROTOCOL_BYTES: usize = 8 << 20;
 /// Upper bound on `maxProtocolBytes`.
@@ -36,9 +34,9 @@ pub const MAX_PROTOCOL_BYTES: usize = 64 << 20;
 /// Lower bound on `maxProtocolBytes`.
 pub const MIN_PROTOCOL_BYTES: usize = 4096;
 /// Upper bound on any configured duration.
-pub const MAX_DURATION_MS: u64 = 86_400_000;
+pub const MAX_DURATION_MS: u64 = settings::MAX_DURATION_MS;
 /// Upper bound on `maxStreams`.
-pub const MAX_STREAMS: u32 = 1 << 20;
+pub const MAX_STREAMS: u32 = drasi_computation_storedproc_common::cursor::MAX_STREAMS_LIMIT;
 
 fn host() -> String {
     "localhost".into()
@@ -55,12 +53,6 @@ fn connect_timeout() -> u64 {
 fn shutdown_timeout() -> u64 {
     DEFAULT_SHUTDOWN_TIMEOUT_MS
 }
-fn connect_retries() -> u32 {
-    DEFAULT_CONNECT_RETRY_ATTEMPTS
-}
-fn reconnect_budget() -> u64 {
-    DEFAULT_RECONNECT_BUDGET_MS
-}
 fn protocol_bytes() -> usize {
     DEFAULT_MAX_PROTOCOL_BYTES
 }
@@ -76,7 +68,7 @@ fn max_streams() -> u32 {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MySqlStoredProcConfig {
     #[serde(default = "host")]
-    pub hostname: String,
+    pub host: String,
     #[serde(default = "port")]
     pub port: u16,
     pub database: String,
@@ -86,9 +78,12 @@ pub struct MySqlStoredProcConfig {
     /// Secret. Empty when activation credentials supply the account.
     #[serde(default)]
     pub password: String,
-    /// Require TLS and verify the server certificate and hostname.
+    /// Verified TLS (the default) or plaintext, which is refused for a
+    /// non-loopback host unless `allow_remote_plaintext` is set.
     #[serde(default)]
-    pub ssl: bool,
+    pub ssl_mode: SslMode,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_remote_plaintext: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_ca_pem: Option<String>,
     /// Optional aliases for the incoming outputs; the graph supplies each
@@ -109,16 +104,16 @@ pub struct MySqlStoredProcConfig {
     /// progress; `atLeastOnce` also accepts in-memory queries.
     #[serde(default)]
     pub delivery_guarantee: DeliveryGuarantee,
+    /// `stall` (default) or `skip`: a skipped operation is recorded in the
+    /// dead-letter table atomically with the cursor advance.
+    #[serde(default)]
+    pub on_permanent_failure: PermanentFailurePolicy,
     #[serde(default = "command_timeout")]
     pub command_timeout_ms: u64,
     #[serde(default = "connect_timeout")]
     pub connect_timeout_ms: u64,
     #[serde(default = "shutdown_timeout")]
     pub shutdown_timeout_ms: u64,
-    #[serde(default = "connect_retries")]
-    pub connect_retry_attempts: u32,
-    #[serde(default = "reconnect_budget")]
-    pub reconnect_budget_ms: u64,
     #[serde(default = "protocol_bytes")]
     pub max_protocol_bytes: usize,
 }
@@ -127,18 +122,19 @@ impl fmt::Debug for MySqlStoredProcConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("MySqlStoredProcConfig")
-            .field("hostname", &self.hostname)
+            .field("host", &self.host)
             .field("port", &self.port)
             .field("database", &self.database)
             .field("user", &self.user)
             .field("password", &"[REDACTED]")
-            .field("ssl", &self.ssl)
+            .field("ssl_mode", &self.ssl_mode)
             .field("outputs", &self.outputs)
             .field("routes", &self.routes)
             .field("default_template", &self.default_template)
             .field("progress_table", &self.progress_table)
             .field("max_streams", &self.max_streams)
             .field("delivery_guarantee", &self.delivery_guarantee)
+            .field("on_permanent_failure", &self.on_permanent_failure)
             .finish_non_exhaustive()
     }
 }
@@ -205,7 +201,7 @@ impl MySqlStoredProcConfig {
     }
 
     pub fn validate_with_activation_credentials(&self, credentials_bound: bool) -> Result<()> {
-        ensure!(!self.hostname.trim().is_empty(), "hostname is required");
+        ensure!(!self.host.trim().is_empty(), "host is required");
         ensure!(self.port != 0, "port must be in 1..=65535");
         ensure!(
             crate::is_valid_identifier(&self.database) && self.database.len() <= 64,
@@ -216,7 +212,7 @@ impl MySqlStoredProcConfig {
             "user is required unless activation credentials are bound"
         );
         ensure!(
-            [&self.hostname, &self.database, &self.user, &self.password]
+            [&self.host, &self.database, &self.user, &self.password]
                 .iter()
                 .all(|value| !value.contains('\0') && value.len() <= 4096),
             "connection settings must not contain NUL and must be at most 4096 bytes"
@@ -226,34 +222,24 @@ impl MySqlStoredProcConfig {
             "maxProtocolBytes must be in {MIN_PROTOCOL_BYTES}..={MAX_PROTOCOL_BYTES}"
         );
         ensure!(
-            self.ssl || self.tls_ca_pem.is_none(),
-            "tlsCaPem requires ssl: true"
+            self.ssl_mode == SslMode::Require || self.tls_ca_pem.is_none(),
+            "tlsCaPem requires sslMode require"
         );
+        settings::validate_transport(self.ssl_mode, self.allow_remote_plaintext, &self.host)?;
         if let Some(pem) = &self.tls_ca_pem {
             ensure!(
                 !pem.is_empty() && pem.len() <= 64 * 1024,
                 "tlsCaPem must be a nonempty PEM of at most 64 KiB"
             );
         }
-        storedproc::delivery::ProgressTable::new(&self.database, &self.progress_table)?;
-        ensure!(
-            (1..=MAX_STREAMS).contains(&self.max_streams),
-            "maxStreams must be in 1..={MAX_STREAMS}"
-        );
-        ensure!(
-            self.connect_retry_attempts <= MAX_CONNECT_RETRY_ATTEMPTS,
-            "connectRetryAttempts must not exceed {MAX_CONNECT_RETRY_ATTEMPTS}"
-        );
+        self.progress()?;
+        settings::validate_max_streams(self.max_streams)?;
         for (name, value) in [
             ("commandTimeoutMs", self.command_timeout_ms),
             ("connectTimeoutMs", self.connect_timeout_ms),
             ("shutdownTimeoutMs", self.shutdown_timeout_ms),
-            ("reconnectBudgetMs", self.reconnect_budget_ms),
         ] {
-            ensure!(
-                (1..=MAX_DURATION_MS).contains(&value),
-                "{name} must be in 1..={MAX_DURATION_MS}"
-            );
+            settings::validate_duration(name, value)?;
         }
         self.outputs.validate()?;
         ensure!(
@@ -299,9 +285,9 @@ impl MySqlStoredProcConfig {
         .map(|template| template.template.as_str())
     }
 
-    /// The validated cursor table.
+    /// The validated cursor table (`table` lives in `database`).
     pub fn progress(&self) -> Result<storedproc::delivery::ProgressTable> {
-        storedproc::delivery::ProgressTable::new(&self.database, &self.progress_table)
+        storedproc::delivery::ProgressTable::parse(&self.progress_table)
     }
 }
 
@@ -323,12 +309,13 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&config)?,
             json!({
-                "hostname": "localhost", "port": 3306, "database": "test", "user": "u",
-                "password": "p", "ssl": false,
+                "host": "localhost", "port": 3306, "database": "test", "user": "u",
+                "password": "p", "sslMode": "require",
                 "defaultTemplate": {"added": {"template": "CALL a({{param after.id}})"}},
                 "progressTable": "drasi_delivery_progress", "maxStreams": 4096,
-                "deliveryGuarantee": "exactlyOnce", "commandTimeoutMs": 30000, "connectTimeoutMs": 5000, "shutdownTimeoutMs": 10000,
-                "connectRetryAttempts": 5, "reconnectBudgetMs": 30000, "maxProtocolBytes": 8388608
+                "deliveryGuarantee": "exactlyOnce", "onPermanentFailure": "stall",
+                "commandTimeoutMs": 30000, "connectTimeoutMs": 10000, "shutdownTimeoutMs": 10000,
+                "maxProtocolBytes": 8388608
             })
         );
         assert!(!format!("{config:?}").contains("\"p\""));
@@ -365,17 +352,21 @@ mod tests {
             json!({"port": 0}),
             json!({"database": "bad-name"}),
             json!({"user": ""}),
-            json!({"tlsCaPem": "pem-without-ssl"}),
-            json!({"ssl": true, "tlsCaPem": ""}),
+            json!({"sslMode": "disable", "tlsCaPem": "pem-without-ssl"}),
+            json!({"tlsCaPem": ""}),
+            json!({"host": "db.example", "sslMode": "disable"}),
+            json!({"hostname": "localhost"}),
+            json!({"ssl": false}),
             json!({"progressTable": "bad table"}),
             json!({"progressTable": ""}),
-            json!({"progressTable": "x".repeat(65)}),
+            json!({"progressTable": "x".repeat(52)}),
             json!({"maxStreams": 0}),
-            json!({"connectRetryAttempts": 33}),
+            json!({"connectRetryAttempts": 3}),
             json!({"commandTimeoutMs": 0}),
             json!({"connectTimeoutMs": 0}),
             json!({"shutdownTimeoutMs": 0}),
-            json!({"reconnectBudgetMs": 86_400_001u64}),
+            json!({"reconnectBudgetMs": 1000}),
+            json!({"onPermanentFailure": "deadLetter"}),
             json!({"maxProtocolBytes": 100}),
             json!({"maxProtocolBytes": (64 << 20) + 1}),
             json!({"retry_attempts": 3}),

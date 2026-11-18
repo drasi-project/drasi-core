@@ -38,6 +38,7 @@ impl ComponentFactory for BridgeSinkFactory {
     ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
         Ok(drasi_computation_bridge_common::config::sender_description(
             &context.specification.descriptor,
+            &self.0.configuration(context)?,
         ))
     }
     fn descriptor(&self) -> &FactoryDescriptor {

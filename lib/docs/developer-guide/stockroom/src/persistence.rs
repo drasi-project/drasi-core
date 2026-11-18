@@ -340,7 +340,6 @@ impl PersistentStockroom {
                 scope: RecoveryScope::Failure(FailureMode::ProcessRestart),
                 max_streams: size(1),
                 receipts_per_stream: size(128),
-                retry: DeliveryRetryPolicy::default(),
             },
         )?));
         // ANCHOR_END: delivery-runner

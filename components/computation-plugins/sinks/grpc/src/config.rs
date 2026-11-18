@@ -8,8 +8,8 @@
 //! defaults the constructor applies.
 
 use anyhow::{ensure, Context, Result};
+pub use drasi_computation_contracts::PermanentFailurePolicy;
 use drasi_computation_contracts::{OutputAliases, SinkOutputs};
-pub use drasi_computation_network_common::config::FailurePolicy;
 use drasi_computation_network_common::config::{
     duration, normalized_headers, timeout_ms, ClientTls, SecretString, MAX_RETRIES,
     RESERVED_HEADERS,
@@ -113,8 +113,9 @@ pub struct GrpcSinkConfig {
     pub max_retries: u32,
     #[serde(default = "retry_budget")]
     pub retry_budget_ms: u64,
+    /// What the graph does with an input the receiver can never accept.
     #[serde(default)]
-    pub failure_policy: FailurePolicy,
+    pub on_permanent_failure: PermanentFailurePolicy,
     #[serde(default = "keepalive_interval")]
     pub keepalive_interval_ms: u64,
     #[serde(default = "keepalive_timeout")]
@@ -166,7 +167,7 @@ impl GrpcSinkConfig {
             Field::new("requireConnectedAtStart", Boolean, false, "Connect during Start, retrying within the retry policy and the Start deadline. When false, Start does not contact the receiver and the first delivery connects.").default(false),
             Field::new("maxRetries", Integer, false, "Additional attempts for one request after a retryable failure.").default(retries()).minimum(0).maximum(retries_max),
             Field::new("retryBudgetMs", Integer, false, "Total time in milliseconds after the first attempt of one request within which retries may start. Also bounds connection retries at Start.").default(retry_budget()).minimum(1).maximum(MAX_RETRY_BUDGET_MS),
-            Field::new("failurePolicy", String, false, "strict fails the input so the host retries it; skip logs a sanitized record and completes the input. Applies to exhausted retries, permanent rejections, incomplete acknowledgements, template failures and oversized changes.").default(json!(FailurePolicy::default())).allowed([json!(FailurePolicy::Strict), json!(FailurePolicy::Skip)]),
+            Field::on_permanent_failure(),
             Field::new("keepaliveIntervalMs", Integer, false, "HTTP/2 PING interval while a call is open, in milliseconds; 0 disables keepalive.").default(keepalive_interval()).minimum(0).maximum(MAX_KEEPALIVE_MS),
             Field::new("keepaliveTimeoutMs", Integer, false, "Time to wait for a keepalive PING acknowledgement before closing the connection, in milliseconds.").default(keepalive_timeout()).minimum(1).maximum(MAX_KEEPALIVE_MS),
             Field::new("compression", String, false, "Request compression: none or gzip.").default(json!(Compression::default())).allowed([json!(Compression::None), json!(Compression::Gzip)]),
@@ -479,7 +480,7 @@ mod tests {
             json!({
                 "outputs": outputs(), "endpoint":"grpc://localhost:50052",
                 "metadata":{}, "timeoutMs":60000, "connectTimeoutMs":10000,
-                "maxRetries":5, "retryBudgetMs":120000, "failurePolicy":"strict",
+                "maxRetries":5, "retryBudgetMs":120000, "onPermanentFailure":"stall",
                 "keepaliveIntervalMs":30000, "keepaliveTimeoutMs":20000,
                 "compression":"none", "batchSize":1, "batchFlushTimeoutMs":100,
                 "outputFormat":"canonicalJson", "maxBatchBytes":16777216,

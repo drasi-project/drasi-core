@@ -11,6 +11,7 @@
 
 use anyhow::Result;
 use bytes::Bytes;
+use drasi_computation_contracts::DeliveryFailure;
 use drasi_computation_network_common::{
     config::{sanitize, ClientTls, DELIVERY_ID_HEADER},
     diag,
@@ -74,7 +75,7 @@ pub(crate) fn transport_retryable(error: &reqwest::Error) -> bool {
     error.is_connect() || error.is_timeout() || error.is_request()
 }
 
-/// Whether an error returned by [`deliver`] is worth retrying.
+/// Whether an error returned by one attempt is worth retrying.
 pub fn retryable(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<StatusError>()
@@ -82,6 +83,45 @@ pub fn retryable(error: &anyhow::Error) -> bool {
         || error
             .downcast_ref::<reqwest::Error>()
             .is_some_and(transport_retryable)
+}
+
+/// Whether a destination status may succeed later: 5xx, 408 (timeout), 409
+/// (conflict, for example an in-progress duplicate), 425 (too early) and 429
+/// (throttled). Every other status rejects the request's content. The HTTP
+/// sink and the delivery consumer share this classification.
+pub fn transient_status(status: StatusCode) -> bool {
+    is_retryable_status(status)
+}
+
+/// The delay a 429 or 503 response requests in its `Retry-After` header.
+pub(crate) fn requested_delay(response: &reqwest::Response) -> Option<Duration> {
+    matches!(
+        response.status(),
+        StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+    )
+    .then(|| {
+        response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_retry_after)
+    })
+    .flatten()
+}
+
+/// Classifies a failed delivery for the graph: a retryable status or
+/// transport failure is transient (with the destination's requested delay),
+/// anything else rejects this request and is permanent.
+pub(crate) fn classify(error: anyhow::Error, requested: Option<Duration>) -> anyhow::Error {
+    let failure = if retryable(&error) {
+        match requested {
+            Some(delay) => DeliveryFailure::transient_after(error, delay),
+            None => DeliveryFailure::transient(error),
+        }
+    } else {
+        DeliveryFailure::permanent(error)
+    };
+    failure.into()
 }
 
 /// One fully rendered request.
@@ -137,18 +177,7 @@ pub(crate) async fn deliver(
         let (error, requested) = match sent {
             Ok(response) => {
                 let status = response.status();
-                let requested = matches!(
-                    status,
-                    StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
-                )
-                .then(|| {
-                    response
-                        .headers()
-                        .get(reqwest::header::RETRY_AFTER)
-                        .and_then(|value| value.to_str().ok())
-                        .and_then(parse_retry_after)
-                })
-                .flatten();
+                let requested = requested_delay(&response);
                 let body = read_capped(response, MAX_RESPONSE_BODY_BYTES).await;
                 if attempts.success.contains(&status.as_u16()) {
                     return Ok(());
@@ -156,20 +185,19 @@ pub(crate) async fn deliver(
                 let error = StatusError {
                     status,
                     body: sanitize(&String::from_utf8_lossy(&body)),
-                    retryable: is_retryable_status(status),
+                    retryable: transient_status(status),
                 };
                 (anyhow::Error::from(error), requested)
             }
             Err(error) => (anyhow::Error::from(error.without_url()), None),
         };
         if !retryable(&error) {
-            return Err(error.context("permanent HTTP delivery failure"));
+            return Err(classify(error, None).context("permanent HTTP delivery failure"));
         }
         let Some(delay) = retry.next_delay(requested) else {
-            return Err(error.context(format!(
-                "HTTP delivery failed after {} attempts",
-                retry.attempt() + 1
-            )));
+            let attempts = retry.attempt() + 1;
+            return Err(classify(error, requested)
+                .context(format!("HTTP delivery failed after {attempts} attempts")));
         };
         diag!(
             Warn,

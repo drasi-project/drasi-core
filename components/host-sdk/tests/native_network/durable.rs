@@ -113,11 +113,14 @@ async fn network_commit_case(grpc: bool, before: bool, stop: CommitStop) -> Resu
         resume: Notify::new(),
     });
     let port = free_port()?;
+    // A graceful stop must outwait the held commit, so its admission deadline
+    // is long; the other cases rely on a short one.
+    let strong = stop == CommitStop::Graceful;
     let mut harness = Harness::with_gate(
         directory.path(),
         port,
         grpc,
-        Some(gate.clone()),
+        Some((gate.clone(), if strong { 10_000 } else { 100 })),
         "facilities-db",
     )
     .await?;
@@ -140,13 +143,23 @@ async fn network_commit_case(grpc: bool, before: bool, stop: CommitStop) -> Resu
                         });
                         gate.armed.store(true, Ordering::Release);
                         match client.admit(request(&session, 1, 1)).await {
+                            // A graceful stop lets the commit finish and
+                            // answers with its receipt.
+                            Ok(response) if strong => {
+                                let result = response.into_inner().result;
+                                assert!(matches!(
+                                    &result,
+                                    Some(proto::admit_response::Result::Receipt(receipt))
+                                        if receipt.position == 1
+                                ), "{result:?}");
+                            }
                             Ok(response) => assert!(matches!(
                                 response.into_inner().result,
                                 Some(proto::admit_response::Result::Error(error))
                                     if error.kind == proto::ErrorKind::AcceptanceUnknown as i32
                             )),
                             Err(error) => assert!(
-                                [
+                                !strong && [
                                     tonic::Code::Cancelled,
                                     tonic::Code::DeadlineExceeded,
                                     tonic::Code::Unavailable,
@@ -171,8 +184,13 @@ async fn network_commit_case(grpc: bool, before: bool, stop: CommitStop) -> Resu
                             json!({"session":session,"sequence":1,"event":http_event(1)}),
                         )
                         .await?;
-                        assert_eq!(outcome["error"]["kind"], "AcceptanceUnknown", "{outcome}");
-                        assert_eq!(outcome["receipts"], json!([]));
+                        if strong {
+                            assert!(outcome["error"].is_null(), "{outcome}");
+                            assert_eq!(outcome["receipts"][0]["position"], 1, "{outcome}");
+                        } else {
+                            assert_eq!(outcome["error"]["kind"], "AcceptanceUnknown", "{outcome}");
+                            assert_eq!(outcome["receipts"], json!([]));
+                        }
                     }
                     replied.notify_one();
                     Ok::<(), anyhow::Error>(())
@@ -202,7 +220,6 @@ async fn network_commit_case(grpc: bool, before: bool, stop: CommitStop) -> Resu
                                             == ComponentLifecycle::Quiescing
                                     })
                                     .await?;
-                                replied.notified().await;
                                 Ok::<(), anyhow::Error>(())
                             };
                             tokio::select! {
@@ -212,6 +229,7 @@ async fn network_commit_case(grpc: bool, before: bool, stop: CommitStop) -> Resu
                                 result = waiting => result?,
                             }
                             gate.resume.notify_one();
+                            replied.notified().await;
                             let report = stopping.await?;
                             assert_eq!(report.summary, OperationSummary::Completed, "{report:?}");
                         }
@@ -349,6 +367,470 @@ async fn network_graceful_stop_retries_after_boundary_timeout_multi_thread() -> 
     graceful_stop_retries_after_deadline().await
 }
 
+const CONSUMER_ID: &str = "484abdae-6a47-5e92-acbc-64b4bf53fcc2";
+
+fn only(id: &str) -> Result<GraphSelection> {
+    Ok(GraphSelection::Exact(vec![ComponentId::try_new(id)?]))
+}
+
+/// One standard-route (server-sequenced) submission: `Ok(true)` on success,
+/// `Ok(false)` when the source refused it as unavailable.
+async fn standard_submit(grpc: bool, port: u16, value: i64) -> Result<bool> {
+    if grpc {
+        let mut client = source::source_service_client::SourceServiceClient::connect(format!(
+            "http://127.0.0.1:{port}"
+        ))
+        .await?;
+        match client
+            .submit_event(source::SubmitEventRequest {
+                event: Some(durable_event(value)),
+            })
+            .await
+        {
+            Ok(response) => Ok(response.into_inner().success),
+            Err(status) if status.code() == tonic::Code::Unavailable => Ok(false),
+            Err(status) => anyhow::bail!("unexpected status {status}"),
+        }
+    } else {
+        let response = reqwest::Client::builder()
+            .timeout(DEADLINE)
+            .build()?
+            .post(format!(
+                "http://127.0.0.1:{port}/sources/{SOURCE_ID}/events"
+            ))
+            .json(&http_event(value))
+            .send()
+            .await?;
+        match response.status() {
+            StatusCode::OK => Ok(true),
+            StatusCode::SERVICE_UNAVAILABLE => Ok(false),
+            code => anyhow::bail!("unexpected status {code}: {}", response.text().await?),
+        }
+    }
+}
+
+/// Submits once admission is active; activation can trail listener startup.
+async fn standard_submit_when_active(grpc: bool, port: u16, value: i64) -> Result<()> {
+    for _ in 0..200 {
+        if standard_submit(grpc, port, value).await? {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    anyhow::bail!("event {value} was never accepted")
+}
+
+/// A draining stop lets an in-flight server-sequenced commit finish. The
+/// client receives success, so it never retries, and the reopened journal
+/// holds the event exactly once.
+#[tokio::test(flavor = "current_thread")]
+async fn graceful_stop_answers_in_flight_server_sequenced_commits() -> Result<()> {
+    for grpc in [false, true] {
+        let directory = tempfile::tempdir()?;
+        let gate = Arc::new(CommitGate {
+            armed: std::sync::atomic::AtomicBool::new(false),
+            before: true,
+            entered: Notify::new(),
+            resume: Notify::new(),
+        });
+        let port = free_port()?;
+        let mut harness = Harness::with_gate(
+            directory.path(),
+            port,
+            grpc,
+            Some((gate.clone(), 10_000)),
+            "facilities-db",
+        )
+        .await?;
+        let channel = harness.channel.clone();
+        harness
+            .drive(false, |control| {
+                let gate = gate.clone();
+                let channel = channel.clone();
+                async move {
+                    // Registers the server-sequenced producer before arming.
+                    standard_submit_when_active(grpc, port, 0).await?;
+                    gate.armed.store(true, Ordering::Release);
+                    let send = async {
+                        anyhow::ensure!(
+                            standard_submit(grpc, port, 1).await?,
+                            "graceful stop must answer the in-flight commit with success"
+                        );
+                        Ok(())
+                    };
+                    let interrupt = async {
+                        gate.entered.notified().await;
+                        let source = ComponentId::try_new(SOURCE_ID)?;
+                        let mut observed = control.subscribe_observed();
+                        let stopping = control.stop_components(GraphRevision(1), only(SOURCE_ID)?);
+                        tokio::pin!(stopping);
+                        tokio::select! {
+                            result = &mut stopping => {
+                                anyhow::bail!("graceful stop passed the held commit: {result:?}");
+                            }
+                            result = observed.wait_for(|state| {
+                                state.components[&source].lifecycle == ComponentLifecycle::Quiescing
+                            }) => { result?; }
+                        }
+                        gate.resume.notify_one();
+                        let report = stopping.await?;
+                        assert_eq!(report.summary, OperationSummary::Completed, "{report:?}");
+                        Ok(())
+                    };
+                    tokio::try_join!(send, interrupt)?;
+                    assert_eq!(channel.progress().await?.accepted, 2);
+                    Ok(())
+                }
+            })
+            .await?;
+        drop(channel);
+        harness.shutdown().await?;
+
+        let port = free_port()?;
+        let mut harness = Harness::new(directory.path(), port, grpc).await?;
+        let channel = harness.channel.clone();
+        let seen = harness.seen.clone();
+        harness
+            .drive(true, |_| async {
+                while channel.progress().await?.processed["consumer"] != 2 {
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(channel.progress().await?.accepted, 2, "grpc={grpc}");
+                assert_eq!(*seen.lock().expect("capture lock"), [0, 1], "grpc={grpc}");
+                Ok(())
+            })
+            .await?;
+        drop(channel);
+        harness.shutdown().await?;
+    }
+    Ok(())
+}
+
+/// A full journal applies back-pressure instead of committing a prefix: the
+/// HTTP batch and the gRPC stream wait for capacity and then complete whole,
+/// so the client has nothing to retry and nothing is duplicated.
+#[tokio::test(flavor = "current_thread")]
+async fn full_journal_back_pressure_commits_whole_batches() -> Result<()> {
+    for grpc in [false, true] {
+        let directory = tempfile::tempdir()?;
+        let port = free_port()?;
+        let mut harness = Harness::new(directory.path(), port, grpc).await?;
+        let channel = harness.channel.clone();
+        let seen = harness.seen.clone();
+        harness
+            .drive(false, |control| async move {
+                // Admission activation can trail listener startup.
+                let mut client = None;
+                for _ in 0..200 {
+                    let base = format!("http://127.0.0.1:{port}");
+                    if grpc {
+                        let mut candidate =
+                            source::source_service_client::SourceServiceClient::connect(base)
+                                .await?;
+                        if candidate.health_check(()).await.is_ok() {
+                            client = Some(candidate);
+                            break;
+                        }
+                    } else if reqwest::get(format!("{base}/health"))
+                        .await?
+                        .status()
+                        .is_success()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                let send = async {
+                    if let Some(client) = &mut client {
+                        let events = futures_util::stream::iter([1, 2, 3].map(durable_event));
+                        let mut responses = client.stream_events(events).await?.into_inner();
+                        let mut counts = Vec::new();
+                        while let Some(response) = responses.message().await? {
+                            assert!(response.success, "{response:?}");
+                            counts.push(response.events_processed);
+                        }
+                        assert_eq!(counts, [1, 2, 3], "the stream is never torn down");
+                    } else {
+                        let response = reqwest::Client::builder()
+                            .timeout(DEADLINE)
+                            .build()?
+                            .post(format!(
+                                "http://127.0.0.1:{port}/sources/{SOURCE_ID}/events/batch"
+                            ))
+                            .json(&json!({"events":[http_event(1),http_event(2),http_event(3)]}))
+                            .send()
+                            .await?;
+                        assert_eq!(response.status(), StatusCode::OK);
+                        let body: Value = response.json().await?;
+                        assert_eq!(body["events_processed"], 3, "{body}");
+                    }
+                    Ok::<(), anyhow::Error>(())
+                };
+                let release = async {
+                    while channel.progress().await?.accepted < 2 {
+                        tokio::task::yield_now().await;
+                    }
+                    // The journal (capacity 2) is full; the third event waits.
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    assert_eq!(channel.progress().await?.accepted, 2);
+                    let report = control
+                        .start_components(GraphRevision(1), only(CONSUMER_ID)?)
+                        .await?;
+                    assert_eq!(report.summary, OperationSummary::Completed, "{report:?}");
+                    Ok(())
+                };
+                tokio::try_join!(send, release)?;
+                while channel.progress().await?.processed["consumer"] != 3 {
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(channel.progress().await?.accepted, 3);
+                assert_eq!(*seen.lock().expect("capture lock"), [1, 2, 3]);
+                Ok(())
+            })
+            .await?;
+        harness.shutdown().await?;
+    }
+    Ok(())
+}
+
+/// While the graph has the source parked, producer metadata (status and
+/// receipts) is answered, data admission is refused cleanly (no commit, a
+/// retryable `Busy` or 503) and Resume continues the same sequence.
+#[tokio::test(flavor = "current_thread")]
+async fn paused_durable_sources_answer_metadata_and_resume_the_sequence() -> Result<()> {
+    for grpc in [false, true] {
+        let directory = tempfile::tempdir()?;
+        let port = free_port()?;
+        let mut harness = Harness::new(directory.path(), port, grpc).await?;
+        let channel = harness.channel.clone();
+        harness
+            .drive(true, |control| async move {
+                let pause = || async {
+                    let parked = control
+                        .quiesce_components(GraphRevision(1), only(SOURCE_ID)?)
+                        .await?;
+                    assert_eq!(parked, [ComponentId::try_new(SOURCE_ID)?]);
+                    Ok::<(), anyhow::Error>(())
+                };
+                let resume = || async {
+                    let report = control
+                        .start_components(GraphRevision(1), only(SOURCE_ID)?)
+                        .await?;
+                    assert_eq!(report.summary, OperationSummary::Completed, "{report:?}");
+                    Ok::<(), anyhow::Error>(())
+                };
+                if grpc {
+                    let mut client = Client::connect(format!("http://127.0.0.1:{port}")).await?;
+                    let session = register(&mut client).await?;
+                    assert!(matches!(
+                        admit(&mut client, request(&session, 1, 1)).await?,
+                        proto::admit_response::Result::Receipt(value) if value.position == 1
+                    ));
+                    pause().await?;
+                    let status = client
+                        .producer_status(proto::SessionRequest {
+                            source_id: SOURCE_ID.into(),
+                            session: Some(session.clone()),
+                        })
+                        .await?
+                        .into_inner()
+                        .result;
+                    assert!(
+                        matches!(
+                            &status,
+                            Some(proto::status_response::Result::Status(status))
+                                if status.next_sequence == Some(2)
+                        ),
+                        "{status:?}"
+                    );
+                    let receipt = client
+                        .admission_receipt(proto::ReceiptRequest {
+                            source_id: SOURCE_ID.into(),
+                            session: Some(session.clone()),
+                            sequence: 1,
+                        })
+                        .await?
+                        .into_inner()
+                        .result;
+                    assert!(
+                        matches!(
+                            &receipt,
+                            Some(proto::receipt_response::Result::Receipt(receipt))
+                                if receipt.position == 1
+                        ),
+                        "{receipt:?}"
+                    );
+                    let refused = client
+                        .admit(request(&session, 2, 2))
+                        .await?
+                        .into_inner()
+                        .result;
+                    assert!(
+                        matches!(
+                            &refused,
+                            Some(proto::admit_response::Result::Error(error))
+                                if error.kind == proto::ErrorKind::Busy as i32
+                        ),
+                        "{refused:?}"
+                    );
+                    assert!(!standard_submit(grpc, port, 9).await?);
+                    assert_eq!(channel.progress().await?.accepted, 1);
+                    resume().await?;
+                    assert!(matches!(
+                        admit(&mut client, request(&session, 2, 2)).await?,
+                        proto::admit_response::Result::Receipt(value) if value.position == 2
+                    ));
+                } else {
+                    let client = reqwest::Client::builder().timeout(DEADLINE).build()?;
+                    let base = format!("http://127.0.0.1:{port}/sources/{SOURCE_ID}/admission/v1");
+                    let (_, session) = post(
+                        &client,
+                        &base,
+                        "producers/register",
+                        json!({"producer":CLIENT_ID}),
+                    )
+                    .await?;
+                    let (_, outcome) = post(
+                        &client,
+                        &base,
+                        "events",
+                        json!({"session":session,"sequence":1,"event":http_event(1)}),
+                    )
+                    .await?;
+                    assert_eq!(outcome["receipts"][0]["position"], 1, "{outcome}");
+                    pause().await?;
+                    let status = client
+                        .post(format!("{base}/producers/status"))
+                        .json(&json!({"session":session}))
+                        .send()
+                        .await?;
+                    assert_eq!(status.status(), StatusCode::OK);
+                    assert_eq!(status.json::<Value>().await?["next_sequence"], 2);
+                    let receipt = client
+                        .post(format!("{base}/receipts"))
+                        .json(&json!({"session":session,"sequence":1}))
+                        .send()
+                        .await?;
+                    assert_eq!(receipt.status(), StatusCode::OK);
+                    assert_eq!(receipt.json::<Value>().await?["position"], 1);
+                    let refused = client
+                        .post(format!("{base}/events"))
+                        .json(&json!({"session":session,"sequence":2,"event":http_event(2)}))
+                        .send()
+                        .await?;
+                    assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+                    let refused: Value = refused.json().await?;
+                    assert_eq!(refused["error"]["kind"], "Busy", "{refused}");
+                    assert_eq!(refused["receipts"], json!([]));
+                    assert!(!standard_submit(grpc, port, 9).await?);
+                    assert_eq!(channel.progress().await?.accepted, 1);
+                    resume().await?;
+                    let (_, outcome) = post(
+                        &client,
+                        &base,
+                        "events",
+                        json!({"session":session,"sequence":2,"event":http_event(2)}),
+                    )
+                    .await?;
+                    assert_eq!(outcome["receipts"][0]["position"], 2, "{outcome}");
+                }
+                assert_eq!(channel.progress().await?.accepted, 2);
+                Ok(())
+            })
+            .await?;
+        harness.shutdown().await?;
+    }
+    Ok(())
+}
+
+/// Durable webhooks commit across a restart: implicit deliveries resume the
+/// server sequence, and an explicit-session delivery retried before and after
+/// the restart returns its original receipt instead of a second event.
+#[tokio::test(flavor = "current_thread")]
+async fn durable_webhooks_resume_and_dedupe_explicit_session_retries() -> Result<()> {
+    let webhooks = json!({"webhooks":{"routes":[{
+        "path":"/hook","methods":["POST"],
+        "mappings":[{"operation":"insert","elementType":"node",
+            "effectiveFrom":{"value":"{{payload.time}}","format":"unix_millis"},
+            "template":{"id":"row-{{payload.value}}","labels":["Room"],"properties":{"value":"{{payload.value}}"}}}]
+    }]}});
+    async fn deliver(
+        port: u16,
+        value: i64,
+        session: Option<&Value>,
+    ) -> Result<(StatusCode, Value)> {
+        let mut request = reqwest::Client::builder()
+            .timeout(DEADLINE)
+            .build()?
+            .post(format!("http://127.0.0.1:{port}/hook"))
+            .json(&json!({"value":value,"time":1234567}));
+        if let Some(session) = session {
+            request = request
+                .header("x-drasi-producer-session", session.to_string())
+                .header("x-drasi-first-sequence", "1");
+        }
+        let response = request.send().await?;
+        Ok((response.status(), response.json().await?))
+    }
+    let directory = tempfile::tempdir()?;
+    let mut saved = None;
+    for reopened in [false, true] {
+        let port = free_port()?;
+        let mut harness = Harness::with_config(
+            directory.path(),
+            port,
+            false,
+            None,
+            "facilities-db",
+            webhooks.clone(),
+        )
+        .await?;
+        let channel = harness.channel.clone();
+        let seen = harness.seen.clone();
+        saved = Some(
+            harness
+                .drive(reopened, |_| async {
+                    let client = reqwest::Client::builder().timeout(DEADLINE).build()?;
+                    let base = format!("http://127.0.0.1:{port}/sources/{SOURCE_ID}/admission/v1");
+                    let (_, session) = post(
+                        &client,
+                        &base,
+                        "producers/register",
+                        json!({"producer":CLIENT_ID}),
+                    )
+                    .await?;
+                    if !reopened {
+                        let (code, implicit) = deliver(port, 1, None).await?;
+                        assert_eq!(code, StatusCode::OK, "{implicit}");
+                        assert_eq!(implicit["events_processed"], 1);
+                        let (code, first) = deliver(port, 2, Some(&session)).await?;
+                        assert_eq!(code, StatusCode::OK, "{first}");
+                        let (_, retry) = deliver(port, 2, Some(&session)).await?;
+                        assert_eq!(retry["receipts"], first["receipts"], "{retry}");
+                        assert_eq!(channel.progress().await?.accepted, 2);
+                        return Ok((session, first["receipts"].clone()));
+                    }
+                    let (session_before, receipts) = saved.clone().context("first run")?;
+                    assert_eq!(session, session_before);
+                    let (_, retry) = deliver(port, 2, Some(&session)).await?;
+                    assert_eq!(retry["receipts"], receipts, "{retry}");
+                    let (code, implicit) = deliver(port, 3, None).await?;
+                    assert_eq!(code, StatusCode::OK, "{implicit}");
+                    while channel.progress().await?.processed["consumer"] != 3 {
+                        tokio::task::yield_now().await;
+                    }
+                    assert_eq!(channel.progress().await?.accepted, 3);
+                    assert_eq!(*seen.lock().expect("capture lock"), [1, 2, 3]);
+                    Ok((session, receipts))
+                })
+                .await?,
+        );
+        drop(channel);
+        harness.shutdown().await?;
+    }
+    Ok(())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn native_network_admission_crash_child() -> Result<()> {
     let Some(path) = std::env::var_os("DRASI_NETWORK_ADMISSION_CRASH") else {
@@ -474,13 +956,28 @@ impl Harness {
     async fn new(path: &Path, port: u16, grpc: bool) -> Result<Self> {
         Self::with_gate(path, port, grpc, None, "facilities-db").await
     }
+    /// `gate` holds the next armed commit; its admission deadline (ms) is
+    /// given with it. Ungated harnesses use 2000 ms.
     async fn with_gate(
         path: &Path,
         port: u16,
         grpc: bool,
-        gate: Option<Arc<CommitGate>>,
+        gate: Option<(Arc<CommitGate>, u64)>,
         configured_stream: &str,
     ) -> Result<Self> {
+        Self::with_config(path, port, grpc, gate, configured_stream, json!({})).await
+    }
+    /// As [`Self::with_gate`], with `extra` merged into the source configuration.
+    async fn with_config(
+        path: &Path,
+        port: u16,
+        grpc: bool,
+        gate: Option<(Arc<CommitGate>, u64)>,
+        configured_stream: &str,
+        extra: Value,
+    ) -> Result<Self> {
+        let timeout_ms = gate.as_ref().map_or(2000, |(_, timeout)| *timeout);
+        let gate = gate.map(|(gate, _)| gate);
         let indexes = LegacyIndexProviderAdapter::new(Arc::new(RocksDbIndexProvider::new(
             path, false, false,
         )));
@@ -531,8 +1028,14 @@ impl Harness {
             .context("source factory")?
             .clone();
         let resource = ResourceId::try_new("journal")?;
-        let mut specification = factory.specification(ComponentId::try_new(SOURCE_ID)?,
-            json!({"stream":configured_stream,"host":"127.0.0.1","port":port,"timeoutMs":if gate.is_some() { 100 } else { 2000 },"ingressCapacity":4}))?;
+        let mut configuration = json!({"stream":configured_stream,"host":"127.0.0.1","port":port,"timeoutMs":timeout_ms,"ingressCapacity":4});
+        if let (Some(configuration), Some(extra)) =
+            (configuration.as_object_mut(), extra.as_object())
+        {
+            configuration.extend(extra.clone());
+        }
+        let mut specification =
+            factory.specification(ComponentId::try_new(SOURCE_ID)?, configuration)?;
         specification
             .dependencies
             .insert("admission".into(), vec![resource.clone()]);
@@ -794,8 +1297,11 @@ async fn http_durable_receipts_partial_batch_reconstruction_and_retirement() -> 
                 assert_eq!(channel.progress().await?.accepted, 0);
                 let (code, outcome) = post(&client, &base, "events/batch",
                     json!({"session":session,"first_sequence":1,"events":[http_event(1),http_event(2),http_event(3)]})).await?;
-                assert_eq!(code, StatusCode::TOO_MANY_REQUESTS, "{outcome}");
-                assert_eq!(outcome["error"]["kind"], "CapacityExhausted");
+                // The full journal applies back-pressure until the request
+                // deadline, so the third outcome is unknown; the receipt query
+                // below resolves it as not accepted.
+                assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "{outcome}");
+                assert_eq!(outcome["error"]["kind"], "AcceptanceUnknown");
                 assert_eq!(outcome["receipts"].as_array().unwrap().len(), 2);
                 assert_eq!(channel.progress().await?.accepted, 2);
                 assert!(seen.lock().unwrap().is_empty());
@@ -926,8 +1432,10 @@ async fn grpc_durable_stream_reconstruction_receipts_and_retirement() -> Result<
                     assert_eq!((receipt.sequence, receipt.position), (sequence, sequence));
                     assert_eq!(receipt.session.as_ref(), Some(&session));
                 }
+                // The full journal applies back-pressure until the admission
+                // deadline; the third outcome is then unknown, not committed.
                 let result = output.message().await?.context("full-channel response")?.result.context("result")?;
-                assert!(matches!(result, proto::admit_response::Result::Error(error) if error.kind == proto::ErrorKind::CapacityExhausted as i32));
+                assert!(matches!(&result, proto::admit_response::Result::Error(error) if error.kind == proto::ErrorKind::AcceptanceUnknown as i32), "{result:?}");
                 assert!(output.message().await?.is_none(), "error terminates stream without admitting later input");
                 assert!(seen.lock().unwrap().is_empty());
                 assert_eq!(channel.progress().await?.accepted, 2);

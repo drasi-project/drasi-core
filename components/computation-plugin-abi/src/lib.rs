@@ -33,6 +33,45 @@ pub const ENTRY_SYMBOL: &[u8] = b"drasi_computation_plugin_entry\0";
 pub const MAX_METADATA_BYTES: usize = 1024 * 1024;
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
+/// Prefix of the NUL-terminated native ABI version that
+/// `export_computation_plugin!` embeds in every native library, so build,
+/// publication and registry tools identify the binary's ABI without loading it.
+/// Distinct from the ordinary Source/Reaction marker.
+pub const ABI_VERSION_MARKER_PREFIX: &[u8] = b"drasi-computation-plugin-abi=";
+
+const ABI_VERSION_MARKER_LEN: usize = ABI_VERSION_MARKER_PREFIX.len() + ABI_VERSION.len() + 1;
+
+/// `ABI_VERSION_MARKER_PREFIX`, [`ABI_VERSION`] and a terminating NUL.
+pub const ABI_VERSION_MARKER: [u8; ABI_VERSION_MARKER_LEN] = {
+    let mut marker = [0; ABI_VERSION_MARKER_LEN];
+    let mut index = 0;
+    while index < ABI_VERSION_MARKER_PREFIX.len() {
+        marker[index] = ABI_VERSION_MARKER_PREFIX[index];
+        index += 1;
+    }
+    let mut index = 0;
+    while index < ABI_VERSION.len() {
+        marker[ABI_VERSION_MARKER_PREFIX.len() + index] = ABI_VERSION.as_bytes()[index];
+        index += 1;
+    }
+    marker
+};
+
+/// The single native compatibility rule, shared by metadata validation at load
+/// time and registry resolution before download: a `major.minor.patch` version
+/// with this host's major and an older or equal minor.
+pub fn accepts_abi_version(version: &str) -> bool {
+    let mut parts = version.split('.').map(str::parse::<u16>);
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(Ok(major)), Some(Ok(minor)), Some(Ok(_)), None) => {
+            #[allow(clippy::absurd_extreme_comparisons)]
+            let accepted_minor = minor <= ABI_MINOR;
+            major == ABI_MAJOR && accepted_minor
+        }
+        _ => false,
+    }
+}
+
 pub mod activation_credentials;
 pub mod batching;
 pub mod bootstrap;
@@ -40,6 +79,7 @@ pub mod bootstrap_coordination;
 pub mod configuration;
 pub mod consumer;
 pub mod consumer_progress;
+pub mod logging;
 pub mod management;
 pub mod output_follow;
 pub mod output_reads;
@@ -161,7 +201,8 @@ pub mod status {
     pub const PROTOCOL: u32 = 8;
 }
 
-/// Nonzero codes carry UTF-8 JSON Failure data (code, message, retryable). Success
+/// Nonzero codes carry UTF-8 JSON Failure data (code, message, retryable, and a
+/// sink's delivery-failure class). Success
 /// must have an empty error buffer. An unrecognized code is a failure, never success.
 #[repr(C)]
 pub struct Status {
@@ -466,6 +507,27 @@ mod tests {
             },
         ] {
             assert!(bad.validate::<ComponentVTable>().is_err());
+        }
+    }
+
+    #[test]
+    fn binary_marker_declares_exactly_this_abi_version() {
+        let mut expected = ABI_VERSION_MARKER_PREFIX.to_vec();
+        expected.extend_from_slice(ABI_VERSION.as_bytes());
+        expected.push(0);
+        assert_eq!(ABI_VERSION_MARKER.as_slice(), expected.as_slice());
+        assert!(accepts_abi_version(ABI_VERSION));
+        assert!(accepts_abi_version(&format!("{ABI_MAJOR}.{ABI_MINOR}.99")));
+        for version in [
+            format!("{ABI_MAJOR}.{}.0", ABI_MINOR + 1),
+            format!("{}.0.0", ABI_MAJOR - 1),
+            format!("{}.0.0", ABI_MAJOR + 1),
+            format!("{ABI_MAJOR}.{ABI_MINOR}"),
+            format!("{ABI_MAJOR}.{ABI_MINOR}.0.0"),
+            format!("{ABI_MAJOR}.{ABI_MINOR}.0-rc.1"),
+            String::new(),
+        ] {
+            assert!(!accepts_abi_version(&version), "{version}");
         }
     }
 

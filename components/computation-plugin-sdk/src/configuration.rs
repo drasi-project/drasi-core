@@ -187,6 +187,10 @@ impl ConfigOption {
             },
         }
     }
+    /// The configuration key this option describes.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
     pub fn constraint(
         mut self,
         constraint: drasi_computation_contracts::ConfigurationConstraint,
@@ -224,7 +228,31 @@ impl ConfigOption {
         self.field.secret = true;
         self
     }
+
+    /// The `onPermanentFailure` setting every sink publishes with the same
+    /// name, values, default and meaning; the sink declares the parsed value
+    /// with `ComponentDescription::with_permanent_failure`.
+    pub fn on_permanent_failure() -> Self {
+        Self::new(
+            ON_PERMANENT_FAILURE,
+            ConfigType::String,
+            false,
+            "What the graph does with an input the destination can never accept: stall records \
+             a terminal failure on the sink and delivers nothing more until an operator acts; \
+             skip logs the input, counts it on the sink and continues with the next input. \
+             Transient failures are always retried in place.",
+        )
+        .default(Value::from("stall"))
+        .allowed(
+            drasi_computation_contracts::PermanentFailurePolicy::VALUES
+                .into_iter()
+                .map(Value::from),
+        )
+    }
 }
+
+/// The configuration key of every sink's permanent-failure policy.
+pub const ON_PERMANENT_FAILURE: &str = "onPermanentFailure";
 
 pub struct ConfigDefinition {
     options: Vec<ConfigOption>,

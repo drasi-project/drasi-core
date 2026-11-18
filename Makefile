@@ -92,8 +92,8 @@ test-native-mssql: build-test-plugins
 	cargo test --locked -p drasi-host-sdk --test native_mssql_components -- --include-ignored --test-threads=1
 
 test-native-network: build-test-plugins
-	cargo test --locked -p drasi-computation-network-common -p drasi-computation-sink-sse
-	cargo test --locked -p drasi-host-sdk --test native_network_loopback --test native_network_wire
+	cargo test --locked -p drasi-computation-network-common -p drasi-computation-sink-sse -p drasi-computation-source-otel
+	cargo test --locked -p drasi-host-sdk --test native_network_loopback --test native_network_wire --test native_otel_loopback
 
 test-native-mysql: build-test-plugins
 	cargo test --locked $(foreach package,$(NATIVE_MYSQL_PACKAGES),-p $(package)) --lib

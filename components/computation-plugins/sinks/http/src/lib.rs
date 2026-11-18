@@ -32,7 +32,7 @@ use drasi_computation_plugin_sdk::{
 };
 use std::sync::Arc;
 
-pub use config::{FailurePolicy, HttpSinkConfig};
+pub use config::{HttpSinkConfig, PermanentFailurePolicy};
 pub use consumer::{HttpDeliveryConfig, HttpDeliveryConsumer};
 pub use transport::{StatusError, MAX_RESPONSE_BODY_BYTES};
 
@@ -88,7 +88,8 @@ impl Factory for HttpSinkFactory {
         &self,
         request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
     ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.unkeyed_sink())
+        let config = HttpSinkConfig::parse(request.request.configuration.clone())?;
+        Ok(request.unkeyed_sink(config.on_permanent_failure))
     }
     fn supports_sink_batching(&self) -> bool {
         true
@@ -142,7 +143,11 @@ impl Factory for HttpDeliveryFactory {
         &self,
         request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
     ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.consumer(drasi_computation_plugin_sdk::DeliveryGuarantee::ExactlyOnce))
+        let config = consumer::HttpDeliveryConfig::parse(request.request.configuration.clone())?;
+        Ok(request.consumer(
+            drasi_computation_plugin_sdk::DeliveryGuarantee::ExactlyOnce,
+            config.on_permanent_failure,
+        ))
     }
     fn configuration_details(&self) -> Option<drasi_computation_plugin_sdk::ConfigDetails> {
         Some(HttpDeliveryConfig::definition().details())

@@ -10,8 +10,8 @@ configuration is one flat camelCase object; unknown fields are rejected.
 
 | Field | Type | Default | Range / values | Required | Secret | Update |
 |---|---|---|---|---|---|---|
-| `host` | string | — | host name or IP, ≤ 253 bytes | yes | no | Restart |
-| `port` | integer | `1433` | 1–65535 | no | no | Restart |
+| `host` | string | — | host name or IP, ≤ 253 bytes | yes | no | Unsupported |
+| `port` | integer | `1433` | 1–65535 | no | no | Unsupported |
 | `database` | string | — | ≤ 128 characters | yes | no | Unsupported |
 | `user` | string | none | ≤ 1024 bytes | without an identity binding | no | Restart |
 | `password` | string | none | ≤ 1024 bytes | without an identity binding | **yes** | Restart |
@@ -19,15 +19,16 @@ configuration is one flat camelCase object; unknown fields are rejected.
 | `trustServerCertificate` | boolean | `false` | — | no | no | Restart |
 | `trustedCaPem` | string | none | PEM certificates, ≤ 256 KiB | no | no | Restart |
 | `hostNameInCertificate` | string | `host` | host name | no | no | Restart |
-| `progressTable` | string | `dbo.drasi_delivery_progress` | `table` or `schema.table`; letters, digits, `_`; ≤ 128 per part | no | no | Unsupported |
+| `progressTable` | string | `drasi_delivery_progress` | `table` (in schema `dbo`) or `schema.table`, lowercase identifiers (schema ≤ 63 bytes, table ≤ 51 bytes); the dead-letter table `<table>_dead_letter` sits beside it | no | no | Unsupported |
 | `maxStreams` | integer | `4096` | 1–1 000 000 | no | no | InPlace |
 | `deliveryGuarantee` | string | `exactlyOnce` | `exactlyOnce`, `atLeastOnce` (see Delivery guarantee) | no | no | Recreate |
+| `onPermanentFailure` | string | `stall` | `stall`, `skip` (see Permanent failures) | no | no | Recreate |
 | `outputs` | object | `{}` | `{alias: {component, port?}}` | no | no | Recreate |
 | `routes` | object | `{}` | `{alias: {added?, updated?, deleted?: {template}}}` | no | no | InPlace |
 | `defaultTemplate` | object | none | `{added?, updated?, deleted?: {template}}` | no | no | InPlace |
 | `commandTimeoutMs` | integer | `30000` | 1–3 600 000 | no | no | InPlace |
 | `connectTimeoutMs` | integer | `15000` | 1–300 000 | no | no | InPlace |
-| `retryBudgetMs` | integer | `60000` | 0–3 600 000 | no | no | InPlace |
+| `shutdownTimeoutMs` | integer | `10000` | 1–3 600 000; bound on closing the connection at Stop and Dispose | no | no | InPlace |
 
 Rules checked at construction:
 
@@ -42,9 +43,9 @@ Rules checked at construction:
 * The sink needs its graph scope (the host always provides it for consumers).
 
 `commandTimeoutMs` bounds each server round trip of a statement, not a whole
-input. An expired round trip drops the connection; the operation is retried
-after reconnect within `retryBudgetMs` (see `DESIGN.md`). `retryBudgetMs: 0`
-returns the first failure to the host.
+input. An expired round trip drops the connection and the operation fails
+transiently. There is no retry budget: each operation is one attempt and the
+graph retries transient failures with its bounded backoff (see `DESIGN.md`).
 
 ## Examples
 
@@ -163,34 +164,71 @@ The sink's login needs:
 ```sql
 GRANT EXECUTE ON OBJECT::dbo.UpsertOrder TO drasi_sink;      -- each procedure
 GRANT SELECT, INSERT, UPDATE, DELETE ON OBJECT::dbo.drasi_delivery_progress TO drasi_sink;
+GRANT SELECT, INSERT, UPDATE, DELETE ON OBJECT::dbo.drasi_delivery_progress_dead_letter TO drasi_sink;
 ```
 
-To let the sink create the table at its first start, also grant:
+To let the sink create the tables at its first start, also grant:
 
 ```sql
 GRANT CREATE TABLE TO drasi_sink;
 GRANT ALTER ON SCHEMA::dbo TO drasi_sink;
 ```
 
-For a least-privilege login, create the table in advance instead (format 3,
+For a least-privilege login, create the tables in advance instead (format 4,
 identical for the three stored-procedure sinks) and grant only DML:
 
 ```sql
 CREATE TABLE dbo.drasi_delivery_progress (
     owner NVARCHAR(64) NOT NULL,
     stream_key NVARCHAR(128) NOT NULL,
-    version SMALLINT NOT NULL CHECK (version = 3),
+    version SMALLINT NOT NULL CHECK (version = 4),
     sequence NVARCHAR(20) NOT NULL,
     digest VARBINARY(32) NOT NULL CHECK (DATALENGTH(digest) = 32),
     operations BIGINT NOT NULL CHECK (operations > 0),
-    completed BIGINT NOT NULL CHECK (completed >= 0 AND completed <= operations),
+    completed BIGINT NOT NULL,
     epoch NVARCHAR(64) NOT NULL,
+    generation BIGINT NOT NULL CHECK (generation >= 0),
+    pending BIGINT NOT NULL,
+    CHECK (completed >= 0 AND completed <= operations),
+    CHECK (pending >= -1 AND pending < operations),
     PRIMARY KEY (owner, stream_key)
+);
+CREATE TABLE dbo.drasi_delivery_progress_dead_letter (
+    owner NVARCHAR(64) NOT NULL,
+    delivery_id NVARCHAR(128) NOT NULL,
+    stream_key NVARCHAR(128) NOT NULL,
+    sequence NVARCHAR(20) NOT NULL,
+    operation BIGINT NOT NULL,
+    epoch NVARCHAR(64) NOT NULL,
+    generation BIGINT NOT NULL,
+    error NVARCHAR(4000) NOT NULL,
+    recorded_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+    PRIMARY KEY (owner, delivery_id)
 );
 ```
 
-A format 2 table (without `epoch`) is refused at Start, not migrated. Start checks the four DML permissions and the columns and names the missing
-grant in its error. A missing `CREATE TABLE` permission fails Start with a
+An earlier format is refused at Start, not migrated. Start checks the four
+DML permissions and the columns of both tables and names the missing grant in
+its error.
+
+### Permanent failures
+
+`onPermanentFailure` decides what happens to an operation that can never be
+delivered (a procedure `THROW`/`RAISERROR` or constraint violation, a failed
+render, or a procedure that commits or rolls back):
+
+* `stall` (default): the sink returns a permanent failure and the graph stalls
+  the node until an operator acts.
+* `skip`: the sink records the operation (delivery ID, stream, sequence,
+  operation, the error and the time) in `<progressTable>_dead_letter` and
+  advances the cursor past it in one transaction, then reports it as skipped;
+  the graph acknowledges the input, delivers its other operations and counts
+  the skip. A replay never repeats it. A cursor rejection (gap, conflict,
+  expired receipt, capacity) is never skipped.
+
+A procedure that commits, rolls back or leaves a transaction open is refused
+permanently; if its own `COMMIT` already committed the effect, the sink never
+runs it again for that operation. A missing `CREATE TABLE` permission fails Start with a
 message that points here.
 
 ### Delivery guarantee
@@ -252,28 +290,25 @@ only) and logs a warning.
 | Field | Boundary | Why |
 |---|---|---|
 | `routes`, `defaultTemplate` | InPlace (Pause) | Rendered per operation; recompiled on apply |
-| `maxStreams`, `retryBudgetMs` | InPlace (Pause) | Read per operation |
+| `maxStreams`, `shutdownTimeoutMs` | InPlace (Pause) | Read per operation or at Stop |
 | `commandTimeoutMs`, `connectTimeoutMs` | InPlace (Pause) | The idle connection is replaced; the next operation reconnects |
-| `host`, `port`, `user`, `password`, `encryption`, `trustServerCertificate`, `trustedCaPem`, `hostNameInCertificate` | Restart (Stop) | The connection and credentials are established at Start |
-| `deliveryGuarantee` | Recreate (Replace) | Declared on the input port; the graph re-checks every producer against it |
+| `user`, `password`, `encryption`, `trustServerCertificate`, `trustedCaPem`, `hostNameInCertificate` | Restart (Stop) | The login and transport are established at Start |
+| `deliveryGuarantee`, `onPermanentFailure` | Recreate (Replace) | Declared in the description; the graph re-checks every producer against the guarantee |
 | `outputs`, bound inputs | Recreate (Replace) | Route aliases and delivery streams change (live rebinding is CW-94) |
-| `database`, `progressTable` | **Unsupported** | They locate the cursor. Moving it would lose every stream's completed prefix (duplicates or refused operations) and leave old rows behind. Remove the sink with Erase and create a new one |
-
-A `host` change is meant for the same database reached at another address
-(failover, DNS). Pointing `host` at a different server that has a different
-copy of the cursor table has the same effect as changing `database`.
+| `host`, `port`, `database`, `progressTable` | **Unsupported** | They locate the cursor. Moving it would lose every stream's completed prefix (duplicates or refused operations) and leave old rows behind. Remove the sink with Erase and create a new one. For failover, use an address (DNS name or listener) that stays the same. |
 
 ## Removal and Erase
 
 Removing the sink with `StateIntent::Erase` deletes its rows:
 
 ```sql
+DELETE FROM dbo.drasi_delivery_progress_dead_letter WHERE owner = N'<owner>';
 DELETE FROM dbo.drasi_delivery_progress WHERE owner = N'<owner>';
 ```
 
 `owner` is the lowercase hex SHA-256 of `drasi.storedproc/owner/v1`, a NUL
 byte, the graph ID, a NUL byte and the component ID. A missing table is
-success and a repeated Erase deletes nothing. The table itself and other
+success and a repeated Erase deletes nothing. The tables themselves and other
 owners' rows are never touched. `Preserve` keeps the rows, so a sink
 recreated with the same graph and component ID resumes its cursor.
 
@@ -292,7 +327,7 @@ statement to run manually.
 | `payload conflicts with its receipt` | The same batch arrived with different content | Investigate the producer; do not delete the row blindly |
 | `procedure changed the delivery transaction` | The procedure commits or rolls back | Remove transaction control from the procedure; the effect may already be committed |
 | `the rendered command binds N parameters` | Over 2 098 values | Pass a JSON document with `{{param (json …)}}` |
-| Repeated retryable errors (1205, 40613, I/O) | Contention or failover | Automatic within `retryBudgetMs`; the host retries afterwards |
+| Repeated retryable errors (1205, 40613, I/O) | Contention or failover | Each attempt fails transiently and the graph retries the input in place with backoff ([delivery-failure model](../NATIVE-SINK-GUIDE.md#delivery-failures)) |
 
 Useful query:
 
@@ -311,7 +346,8 @@ FROM dbo.drasi_delivery_progress ORDER BY owner, stream_key;
 | `trust_server_certificate` (always trusted in legacy) | `trustServerCertificate` (default `false`), or `trustedCaPem` |
 | `routes`, `default_template` | `routes`, `defaultTemplate` |
 | `command_timeout_ms` (per command) | `commandTimeoutMs` (per round trip) |
-| `retry_attempts` (blind command retry) | `retryBudgetMs` (classified, cursor-protected retry) |
+| `retry_attempts` (blind command retry) | none: classified, cursor-protected retries by the graph |
+| log-and-continue on errors | `onPermanentFailure: skip` (recorded in the dead-letter table) |
 | `identity_provider` | Host activation identity binding |
 | — | `progressTable`, `maxStreams`, `deliveryGuarantee`, `connectTimeoutMs`, `outputs` |
 | Query names in `routes` | Output aliases in `routes` (full alias or last dotted segment) |

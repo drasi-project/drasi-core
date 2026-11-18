@@ -86,7 +86,7 @@ async fn open(
         .unwrap()
         .with_source_progress(progress.clone())
         .unwrap();
-    query.start().await.unwrap();
+    query.start(&lifecycle_contexts::start()).await.unwrap();
     (query, progress)
 }
 
@@ -189,7 +189,7 @@ async fn persisted_model() {
                 "even a skipped stale change must commit its input progress"
             );
         }
-        query.stop().await.unwrap();
+        query.stop(&lifecycle_contexts::stop()).await.unwrap();
     }
 }
 
@@ -449,7 +449,7 @@ async fn prior_mutation_semantics_are_rejected_without_resetting_persistent_stat
             )
         };
         let mut query = create().await.unwrap();
-        query.start().await.unwrap();
+        query.start(&lifecycle_contexts::start()).await.unwrap();
         let source_id = ComponentId::try_new("00000000-0000-4000-8000-000000000002").unwrap();
         let change = SourceChange::Insert {
             element: node(if grouped { source_id.as_str() } else { "a" }, "one", 10, 7),
@@ -478,7 +478,7 @@ async fn prior_mutation_semantics_are_rejected_without_resetting_persistent_stat
         deliver(&mut query, event).await;
         let expected = rows(&query);
         assert_eq!(expected.len(), 1);
-        query.stop().await.unwrap();
+        query.stop(&lifecycle_contexts::stop()).await.unwrap();
         drop(query);
 
         let storage = provider
@@ -519,12 +519,18 @@ async fn prior_mutation_semantics_are_rejected_without_resetting_persistent_stat
         drop((owner, checkpoints));
 
         let mut incompatible = create().await.unwrap();
-        let error = incompatible.start().await.unwrap_err();
+        let error = incompatible
+            .start(&lifecycle_contexts::start())
+            .await
+            .unwrap_err();
         assert!(matches!(
             error.downcast_ref::<QueryRecoveryError>(),
             Some(QueryRecoveryError::ConfigurationChanged)
         ));
-        incompatible.stop().await.unwrap();
+        incompatible
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .unwrap();
         drop(incompatible);
         let storage = provider
             .create_indexes(GRAPH, &ComponentId::try_new(QUERY).unwrap())
@@ -557,12 +563,54 @@ async fn prior_mutation_semantics_are_rejected_without_resetting_persistent_stat
         owner.shutdown().await.unwrap();
         drop((owner, checkpoints));
         let mut reopened = create().await.unwrap();
-        reopened.start().await.unwrap();
+        reopened.start(&lifecycle_contexts::start()).await.unwrap();
         assert_eq!(
             rows(&reopened),
             expected,
             "rejected upgrade cannot discard existing rows"
         );
-        reopened.stop().await.unwrap();
+        reopened.stop(&lifecycle_contexts::stop()).await.unwrap();
+    }
+}
+
+#[allow(dead_code)]
+mod lifecycle_contexts {
+    use drasi_lib::computation::v1::{
+        CancellationToken, DisposeContext, DisposeReason, InitializeContext, OperationScope,
+        PauseContext, ResumeContext, StartContext, StateIntent, StopContext, StopMode,
+    };
+
+    fn scope() -> OperationScope {
+        OperationScope::new("test", "component", 1, None, CancellationToken::new())
+    }
+
+    pub fn initialize() -> InitializeContext {
+        InitializeContext::new(scope())
+    }
+
+    pub fn start() -> StartContext {
+        StartContext::new(scope())
+    }
+
+    pub fn pause() -> PauseContext {
+        PauseContext::new(scope())
+    }
+
+    pub fn resume() -> ResumeContext {
+        ResumeContext::new(scope())
+    }
+
+    pub fn stop() -> StopContext {
+        StopContext::new(scope(), StopMode::Drain)
+    }
+
+    pub fn dispose() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
+            .expect("shutdown preserves state")
+    }
+
+    pub fn erase() -> DisposeContext {
+        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
+            .expect("removal may erase state")
     }
 }

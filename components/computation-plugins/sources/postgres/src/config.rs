@@ -158,7 +158,7 @@ pub fn definition(mode: Mode) -> ConfigDefinition {
             .default("prefer")
             .allowed([json!("disable"), json!("prefer"), json!("require")]),
         string("tlsCaPem", false, "Additional trusted CA certificates (PEM, at most 64 KiB) for server verification."),
-        string("publication", true, "Publication to stream. It must publish insert, update and delete, and must not publish truncate."),
+        string("publication", true, "Publication to stream. It must publish insert, update and delete, and must not publish truncate; a TRUNCATE of a selected table published later fails the source."),
         ConfigOption::new("tables", ConfigType::Array, false, "Tables to emit as schema.table (public may be omitted). Empty emits every publication table; a table added to the publication later then stops the source with a schema-change error.")
             .default(json!([])),
         ConfigOption::new("tableKeys", ConfigType::Array, false, "Explicit keys, as {\"table\": \"schema.table\", \"keyColumns\": [..]}, for tables without a usable primary key. The replica identity must carry the key columns.")
@@ -168,9 +168,9 @@ pub fn definition(mode: Mode) -> ConfigDefinition {
             .allowed([json!("managed"), json!("external")]),
         string("slotName", false, "The operator-owned slot for external ownership: 1 to 63 lowercase letters, digits or underscores. Rejected for managed ownership."),
         string("startLsn", false, "Initial cursor (for example 0/16B3748) used before the first checkpoint. When absent, streaming starts at the slot's confirmed position. Not allowed with coordinatedSnapshot."),
-        integer("maxTransactionChanges", "Largest number of changes in one source transaction; a larger transaction fails and is retried after the limit is raised.", DEFAULT_MAX_TRANSACTION_CHANGES as u64, 1),
-        integer("maxTransactionBytes", "Largest encoded size of one source transaction, in bytes.", DEFAULT_MAX_TRANSACTION_BYTES as u64, 1),
-        integer("maxTransactionDurationMs", "Deadline for assembling and publishing one source transaction.", DEFAULT_MAX_TRANSACTION_DURATION_MS, 1),
+        integer("maxTransactionChanges", "Largest number of changes in one whole transaction: a larger commit fails without publishing anything of it, the slot keeps its WAL, and it replays whole after the limit is raised. Row outputs buffer up to this many changes and stream larger commits instead.", DEFAULT_MAX_TRANSACTION_CHANGES as u64, 1),
+        integer("maxTransactionBytes", "Largest encoded size of one whole transaction, in bytes, with the same behaviour as maxTransactionChanges (row outputs stream larger commits).", DEFAULT_MAX_TRANSACTION_BYTES as u64, 1),
+        integer("maxTransactionDurationMs", "Deadline for assembling and publishing one whole transaction (row outputs: for buffering one).", DEFAULT_MAX_TRANSACTION_DURATION_MS, 1),
         integer("maxProtocolBytes", "Largest PostgreSQL protocol message or catalog result accepted, in bytes.", DEFAULT_MAX_PROTOCOL_BYTES as u64, 64),
         integer("ioTimeoutMs", "Deadline for connecting, catalog queries, feedback writes and each start.", DEFAULT_IO_TIMEOUT_MS, 1),
         integer("feedbackIntervalMs", "Interval between standby status messages. Keep it below the server's wal_sender_timeout (60 s by default); paused sources rely on it to stay connected.", DEFAULT_FEEDBACK_INTERVAL_MS, 1),
@@ -191,7 +191,7 @@ pub fn definition(mode: Mode) -> ConfigDefinition {
                 PERSISTENT,
                 ConfigType::Boolean,
                 false,
-                "Require persistent consumer progress so committed rows survive a process restart.",
+                "Committed rows survive a process restart: the progress binding must be durable, which the graph checks when wiring.",
             )
             .default(false),
         );

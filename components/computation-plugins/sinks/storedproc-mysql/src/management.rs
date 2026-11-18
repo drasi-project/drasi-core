@@ -5,17 +5,17 @@
 //!
 //! * Pause (in place): everything read per operation or per connect —
 //!   `routes`, `defaultTemplate`, `commandTimeoutMs`, `connectTimeoutMs`,
-//!   `shutdownTimeoutMs`, `connectRetryAttempts`, `reconnectBudgetMs` and
-//!   `maxStreams`.
-//! * Stop (restart): the session — `hostname`, `port`, `database`, `user`,
-//!   `password`, `ssl`, `tlsCaPem` and `maxProtocolBytes`.
-//! * Replace: output aliases, the incoming edges and `deliveryGuarantee` (it
-//!   is declared on the input port, so the graph re-checks every producer).
-//! * Unsupported: `progressTable`. The cursor table is the identity of the
-//!   exactly-once receipts. Moving it would drop the receipt of an operation
-//!   in flight (a possible duplicate) and orphan this owner's rows in the old
-//!   table, which no Dispose would ever erase. Remove the component (Erase)
-//!   and add it again to change it, which makes the break explicit.
+//!   `shutdownTimeoutMs` and `maxStreams`.
+//! * Stop (restart): the login and transport — `user`, `password`,
+//!   `sslMode`, `allowRemotePlaintext`, `tlsCaPem` and `maxProtocolBytes`.
+//! * Replace: output aliases, the incoming edges, `deliveryGuarantee` and
+//!   `onPermanentFailure` (both are declared in the description the graph
+//!   checks).
+//! * Unsupported: `host`, `port`, `database` and `progressTable`. They locate
+//!   the destination cursor: moving it would drop the receipt of an operation
+//!   in flight (a possible duplicate) and orphan this owner's rows, which no
+//!   Dispose would ever erase. Remove the component (Erase) and add it again
+//!   to change them, which makes the break explicit.
 
 use crate::config::MySqlStoredProcConfig;
 use anyhow::{Context, Result};
@@ -39,21 +39,34 @@ pub fn plan(
 ) -> Assessment {
     use UpdateBoundary::*;
     let (c, p) = (current, proposed);
-    if c.progress_table != p.progress_table {
-        return Assessment::unsupported(
-            "progressTable is the identity of the destination cursor; remove the component \
-             (Erase) and add it again to move it",
-        );
+    for (field, changed) in [
+        ("host", c.host != p.host),
+        ("port", c.port != p.port),
+        ("database", c.database != p.database),
+        ("progressTable", c.progress().ok() != p.progress().ok()),
+    ] {
+        if changed {
+            return Assessment::unsupported(
+                drasi_computation_storedproc_common::settings::cursor_identity_changed(field),
+            );
+        }
     }
     let mut planner = BoundaryPlanner::default();
     planner.field("inputs", inputs_changed, Replace);
     planner.field("outputs", c.outputs != p.outputs, Replace);
-    planner.field("hostname", c.hostname != p.hostname, Stop);
-    planner.field("port", c.port != p.port, Stop);
-    planner.field("database", c.database != p.database, Stop);
+    planner.field(
+        "onPermanentFailure",
+        c.on_permanent_failure != p.on_permanent_failure,
+        Replace,
+    );
     planner.field("user", c.user != p.user, Stop);
     planner.field("password", c.password != p.password, Stop);
-    planner.field("ssl", c.ssl != p.ssl, Stop);
+    planner.field("sslMode", c.ssl_mode != p.ssl_mode, Stop);
+    planner.field(
+        "allowRemotePlaintext",
+        c.allow_remote_plaintext != p.allow_remote_plaintext,
+        Stop,
+    );
     planner.field("tlsCaPem", c.tls_ca_pem != p.tls_ca_pem, Stop);
     planner.field(
         "maxProtocolBytes",
@@ -85,16 +98,6 @@ pub fn plan(
     planner.field(
         "shutdownTimeoutMs",
         c.shutdown_timeout_ms != p.shutdown_timeout_ms,
-        Pause,
-    );
-    planner.field(
-        "connectRetryAttempts",
-        c.connect_retry_attempts != p.connect_retry_attempts,
-        Pause,
-    );
-    planner.field(
-        "reconnectBudgetMs",
-        c.reconnect_budget_ms != p.reconnect_budget_ms,
         Pause,
     );
     planner.assessment()

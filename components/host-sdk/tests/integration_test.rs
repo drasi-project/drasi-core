@@ -133,6 +133,53 @@ fn selected_legacy_fixtures_have_the_expected_abi() {
     }
 }
 
+/// Each family's binary marker (read without loading the library, as build,
+/// publication and registry tools do) declares exactly the ABI the library
+/// exports through its metadata, and the host's loader ABI for that family.
+#[test]
+#[serial]
+fn test_binary_abi_marker_matches_exported_metadata() {
+    for (name, family, prefix, host_abi) in [
+        (
+            "drasi-source-mock",
+            "ordinary",
+            drasi_ffi_primitives::PLUGIN_ABI_VERSION_MARKER_PREFIX,
+            drasi_plugin_sdk::ffi::FFI_SDK_VERSION,
+        ),
+        (
+            "drasi-reaction-log",
+            "ordinary",
+            drasi_ffi_primitives::PLUGIN_ABI_VERSION_MARKER_PREFIX,
+            drasi_plugin_sdk::ffi::FFI_SDK_VERSION,
+        ),
+        (
+            "drasi-computation-source-counter",
+            "computation",
+            drasi_computation_plugin_abi::ABI_VERSION_MARKER_PREFIX,
+            drasi_computation_plugin_abi::ABI_VERSION,
+        ),
+    ] {
+        let path = require_plugin(name);
+        let binary = std::fs::read(&path).expect("plugin binary");
+        let abi = drasi_ffi_primitives::read_abi_version_marker(&binary, prefix)
+            .expect("binary ABI version marker");
+        let metadata =
+            drasi_host_sdk::loader::scan_plugin_metadata(&path).expect("exported plugin metadata");
+        assert_eq!(metadata.abi_family.as_deref(), Some(family), "{name}");
+        assert_eq!(metadata.abi_version.as_deref(), Some(abi), "{name}");
+        assert_eq!(abi, host_abi, "{name}");
+        let other = if family == "ordinary" {
+            drasi_computation_plugin_abi::ABI_VERSION_MARKER_PREFIX
+        } else {
+            drasi_ffi_primitives::PLUGIN_ABI_VERSION_MARKER_PREFIX
+        };
+        assert!(
+            !binary.windows(other.len()).any(|window| window == other),
+            "{name} must declare exactly one ABI family"
+        );
+    }
+}
+
 #[tokio::test]
 #[serial]
 async fn legacy_library_loading_does_not_grant_durable_admission() {
@@ -505,7 +552,10 @@ fn test_load_mock_source_plugin() {
     );
 
     let meta = plugin.metadata_info.as_ref().unwrap();
-    assert!(meta.contains("sdk="), "Metadata should include SDK version");
+    assert!(
+        meta.contains("abi="),
+        "Metadata should include FFI ABI version"
+    );
     assert!(
         meta.contains("target="),
         "Metadata should include target triple"
@@ -4266,6 +4316,302 @@ impl drasi_lib::bootstrap::BootstrapProvider for TestBootstrapProvider {
             event_count: 0,
             source_position: self.source_position.clone(),
         })
+    }
+}
+
+fn durable_http_config() -> serde_json::Value {
+    serde_json::json!({
+        "host": "127.0.0.1",
+        "port": 0,
+        "durability": {
+            "enabled": true,
+            "max_events": 128,
+            "capacity_policy": "RejectIncoming"
+        }
+    })
+}
+
+fn wal_node_insert(
+    source_id: &drasi_core_types::ComponentId,
+    id: &str,
+) -> drasi_core::models::SourceChange {
+    use drasi_core::models::{
+        Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
+    };
+    let mut properties = ElementPropertyMap::new();
+    properties.insert("id", ElementValue::String(id.into()));
+    SourceChange::Insert {
+        element: Element::Node {
+            metadata: ElementMetadata {
+                reference: ElementReference::new(source_id.as_str(), id),
+                labels: std::sync::Arc::from(vec![std::sync::Arc::from("Node")]),
+                effective_from: 0,
+            },
+            properties,
+        },
+    }
+}
+
+/// A durable HTTP source library replays its WAL from an explicit framework
+/// sequence, including zero before any native cursor exists, instead of
+/// bootstrapping again; only a subscription without either bootstraps.
+#[tokio::test]
+#[serial]
+async fn test_cdylib_durable_http_replays_from_sequence_zero() {
+    use drasi_lib::wal::WalProvider;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let source_id = drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000d0a11")
+        .expect("fixture UUID");
+    let plugin = load_plugin_from_path(
+        &require_plugin("drasi-source-http"),
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("load HTTP source plugin");
+    let source = plugin.source_plugins[0]
+        .create_source(&source_id, &durable_http_config(), false)
+        .await
+        .expect("create HTTP source");
+    let dir = tempfile::tempdir().unwrap();
+    let wal = Arc::new(drasi_wal_redb::RedbWalProvider::new(dir.path()));
+    let (update_tx, _update_rx) =
+        tokio::sync::mpsc::channel::<drasi_lib::component_graph::ComponentUpdate>(16);
+    source
+        .bind_runtime_context(drasi_lib::context::SourceRuntimeContext {
+            instance_id: "ffi-http-test".to_string(),
+            source_id: source_id.clone(),
+            update_tx: update_tx.into(),
+            state_store: None,
+            identity_provider: None,
+            wal_provider: Some(wal.clone()),
+            resource_observer: None,
+        })
+        .await;
+    source.initialize().await.expect("source initialization");
+    let settings =
+        |query: u128, resume_sequence, resume_from| drasi_lib::config::SourceSubscriptionSettings {
+            source_id: source_id.clone(),
+            query_id: drasi_core_types::ComponentId::try_new(format!(
+                "00000000-0000-0000-0000-{query:012x}"
+            ))
+            .expect("fixture UUID"),
+            enable_bootstrap: true,
+            nodes: Default::default(),
+            relations: Default::default(),
+            resume_from,
+            resume_sequence,
+            request_position_handle: true,
+        };
+    let fresh = settings(0xd0a20, None, None);
+    source
+        .set_bootstrap_provider(Box::new(TestBootstrapProvider {
+            source_position: None,
+            expected_settings: fresh.clone(),
+        }))
+        .await;
+    source.start().await.expect("start HTTP source");
+    let scope = drasi_core::interface::StorageScope::default();
+    for id in ["one", "two"] {
+        wal.append(&scope, &source_id, &wal_node_insert(&source_id, id))
+            .await
+            .expect("append WAL event");
+    }
+
+    let subscription = source
+        .subscribe(fresh.clone())
+        .await
+        .expect("subscribe fresh");
+    assert!(subscription.bootstrap_receiver.is_some());
+    drop(subscription);
+    source.remove_position_handle(&fresh.query_id).await;
+
+    for (query, sequence, position, expected) in [
+        (0xd0a21, Some(0), None, 1),
+        (0xd0a22, Some(1), None, 2),
+        (
+            0xd0a23,
+            Some(0),
+            Some(bytes::Bytes::copy_from_slice(&1u64.to_be_bytes())),
+            2,
+        ),
+    ] {
+        let settings = settings(query, sequence, position);
+        let mut subscription = source
+            .subscribe(settings.clone())
+            .await
+            .expect("subscribe for replay");
+        assert!(
+            subscription.bootstrap_receiver.is_none(),
+            "{sequence:?} must replay instead of bootstrapping"
+        );
+        let event = tokio::time::timeout(Duration::from_secs(5), subscription.receiver.recv())
+            .await
+            .expect("replay timeout")
+            .expect("replay event");
+        assert_eq!(event.sequence, expected, "{sequence:?}");
+        drop(subscription);
+        source.remove_position_handle(&settings.query_id).await;
+    }
+    source.stop().await.expect("stop HTTP source");
+}
+
+/// A bootstrap-enabled persistent query over a durable HTTP source library
+/// whose snapshot is empty and cursorless restarts by replaying input written
+/// while it was stopped, under Strict recovery, instead of bootstrapping again.
+#[tokio::test]
+#[serial]
+async fn test_cdylib_durable_http_query_restarts_after_empty_bootstrap() {
+    use drasi_lib::wal::WalProvider;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let source_id = drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000d0a12")
+        .expect("fixture UUID");
+    let query_name =
+        drasi_core_types::ComponentName::try_new("query").expect("fixture component name");
+    let plugin = load_plugin_from_path(
+        &require_plugin("drasi-source-http"),
+        std::ptr::null_mut(),
+        callbacks::default_log_callback_fn(),
+        std::ptr::null_mut(),
+        callbacks::default_lifecycle_callback_fn(),
+    )
+    .expect("load HTTP source plugin");
+    let source = plugin.source_plugins[0]
+        .create_source(&source_id, &durable_http_config(), true)
+        .await
+        .expect("create HTTP source");
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    source
+        .set_bootstrap_provider(Box::new(CountingEmptyBootstrap(calls.clone())))
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let wal = Arc::new(drasi_wal_redb::RedbWalProvider::new(dir.path().join("wal")));
+    let core = drasi_lib::DrasiLib::builder()
+        .with_query_factory(
+            drasi_lib::computation::v1::FactoryRegistry::standard()
+                .get(
+                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                        "drasi/continuous-query",
+                        "1",
+                    )
+                    .expect("reference query identity"),
+                )
+                .expect("reference query factory")
+                .clone(),
+        )
+        .with_id("ffi-http-recovery-instance")
+        .with_allow_external_component_ids(true)
+        .with_source(
+            drasi_core_types::ComponentName::try_new("ffi-http-recovery")
+                .expect("fixture component name"),
+            source,
+        )
+        .with_query(
+            drasi_lib::Query::cypher(query_name.clone())
+                .query("MATCH (n:Node) RETURN n.id AS id")
+                .from_input_by_name(
+                    drasi_core_types::ComponentName::try_new("ffi-http-recovery")
+                        .expect("fixture component name"),
+                )
+                .auto_start(false)
+                .enable_bootstrap(true)
+                .with_storage_backend(drasi_lib::StorageBackendRef::Named("persistent".into()))
+                .with_recovery_policy(drasi_lib::RecoveryPolicy::Strict)
+                .build()
+                .expect("query configuration"),
+        )
+        .with_index_provider(
+            "persistent",
+            Arc::new(drasi_index_rocksdb::RocksDbIndexProvider::new(
+                dir.path().join("rocks"),
+                false,
+                false,
+            )),
+        )
+        .with_wal_provider(wal.clone())
+        .build()
+        .await
+        .expect("build runtime");
+    core.start().await.expect("start runtime");
+    core.start_query_by_name(&query_name)
+        .await
+        .expect("start query");
+    let query = core
+        .query_manager()
+        .get_query_instance_by_name(&query_name)
+        .await
+        .expect("get query");
+    let snapshot = query.fetch_snapshot().await.expect("completed bootstrap");
+    assert_eq!(snapshot.as_of_sequence, 0);
+    assert!(snapshot.to_vec().is_empty());
+    drop(query);
+    core.stop_query_by_name(&query_name)
+        .await
+        .expect("stop query");
+
+    assert_eq!(
+        wal.append(
+            &drasi_core::interface::StorageScope::default(),
+            &source_id,
+            &wal_node_insert(&source_id, "replayed"),
+        )
+        .await
+        .expect("append WAL event"),
+        1
+    );
+
+    core.start_query_by_name(&query_name)
+        .await
+        .expect("restart query");
+    let query = core
+        .query_manager()
+        .get_query_instance_by_name(&query_name)
+        .await
+        .expect("get restarted query");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let snapshot = query.fetch_snapshot().await.expect("fetch snapshot");
+            if snapshot.as_of_sequence >= 1 {
+                assert_eq!(snapshot.as_of_sequence, 1);
+                assert_eq!(
+                    snapshot.to_vec(),
+                    vec![serde_json::json!({"id": "replayed"})]
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("WAL event must be replayed");
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the completed bootstrap must not run again"
+    );
+    drop(query);
+    core.shutdown().await.expect("shutdown runtime");
+}
+
+struct CountingEmptyBootstrap(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+#[async_trait::async_trait]
+impl drasi_lib::bootstrap::BootstrapProvider for CountingEmptyBootstrap {
+    async fn bootstrap(
+        &self,
+        _request: drasi_lib::bootstrap::BootstrapRequest,
+        _context: &drasi_lib::bootstrap::BootstrapContext,
+        event_tx: drasi_lib::channels::BootstrapEventSender,
+        _settings: Option<&drasi_lib::config::SourceSubscriptionSettings>,
+    ) -> anyhow::Result<drasi_lib::bootstrap::BootstrapResult> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        drop(event_tx);
+        Ok(drasi_lib::bootstrap::BootstrapResult::default())
     }
 }
 

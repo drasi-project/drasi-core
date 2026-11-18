@@ -9,7 +9,6 @@ use async_trait::async_trait;
 const FIRST_ID: &str = "00000000-0000-0000-0000-000000000601";
 const SECOND_ID: &str = "00000000-0000-0000-0000-000000000602";
 const THIRD_ID: &str = "00000000-0000-0000-0000-000000000603";
-const VOLATILE_ID: &str = "00000000-0000-0000-0000-000000000604";
 
 struct RetainedInitialSnapshot(ChangeEnvelope);
 #[async_trait]
@@ -357,7 +356,9 @@ async fn shared_snapshots_coordinate_initial_load_and_membership_multi_thread() 
 }
 
 async fn factory_graph() -> Result<()> {
-    for coordinated in [false, true] {
+    // The last run binds volatile consumer progress, which the graph refuses
+    // before the source exists.
+    for (coordinated, durable) in [(false, true), (true, true), (false, false)] {
         let directory = tempfile::tempdir()?;
         let settings = config(directory.path());
         if coordinated {
@@ -458,7 +459,13 @@ async fn factory_graph() -> Result<()> {
             (
                 "consumers",
                 ResourceRole::Checkpoint,
-                ResourceHandle::new(ResourceRole::Checkpoint, consumers.clone()),
+                ResourceHandle::new(ResourceRole::Checkpoint, consumers.clone()).with_capabilities(
+                    if durable {
+                        ResourceCapabilities::DURABLE
+                    } else {
+                        ResourceCapabilities::VOLATILE
+                    },
+                ),
             ),
         ];
         if let Some(snapshots) = snapshots {
@@ -521,6 +528,24 @@ async fn factory_graph() -> Result<()> {
             tokio::join!(run, async {
                 let outcome = async {
                     let startup = control.start_components(GraphRevision(1), GraphSelection::All).await?;
+                    if !durable {
+                        let node = control.observed().components[&id(SOURCE_ID)].clone();
+                        let failure = node.failure.context("binding failure")?;
+                        anyhow::ensure!(
+                            failure.phase == FailurePhase::Binding
+                                && matches!(
+                                    failure.cause.underlying(),
+                                    GraphError::Incompatible {
+                                        source: Incompatibility::ResourceDurability { .. },
+                                        ..
+                                    }
+                                ),
+                            "{failure:?}"
+                        );
+                        anyhow::ensure!(!directory.path().join("source.db").exists());
+                        control.stop_components(GraphRevision(1), GraphSelection::All).await?;
+                        return Ok::<_, anyhow::Error>(());
+                    }
                     anyhow::ensure!(startup.summary == OperationSummary::Completed, "{startup:?}");
                     for result in &results { assert_eq!(result.snapshot()?.rows.len(), usize::from(coordinated)); }
                     if !coordinated {
@@ -558,7 +583,9 @@ async fn factory_graph() -> Result<()> {
         result?;
         assert!(matches!(run, Ok(()) | Err(GraphError::Cancelled)));
         cleanup?;
-        assert_eq!(journal_state(directory.path())?, (1, 1, 0));
+        if durable {
+            assert_eq!(journal_state(directory.path())?, (1, 1, 0));
+        }
     }
     Ok(())
 }
@@ -735,37 +762,6 @@ async fn member_failures() -> Result<()> {
         one.stop(&lifecycle_ctx::stop()).await?;
         two.stop(&lifecycle_ctx::stop()).await?;
     }
-    let directory = tempfile::tempdir()?;
-    let volatile = owner(VOLATILE_ID);
-    let mut query = ContinuousQueryTransformer::new(
-        ContinuousQueryDefinition {
-            graph_id: "native-sqlite".into(),
-            id: id(VOLATILE_ID),
-            query: "MATCH (n:items) RETURN n.id AS id".into(),
-            language: ComputationQueryLanguage::Cypher,
-            output_stream: stream("volatile/out"),
-            outbox_capacity: size(4),
-        },
-        Arc::new(drasi_core::computation::InMemoryComputationProvider),
-    )
-    .await?
-    .with_source_progress(volatile.clone())?;
-    let mut source = SqliteSource::new_replayable_with_consumers(
-        id(SOURCE_ID),
-        stream("changes"),
-        config(directory.path()),
-        group(&[volatile]),
-    )?;
-    query.start(&lifecycle_ctx::start()).await?;
-    assert!(source
-        .start(&lifecycle_ctx::start())
-        .await
-        .expect_err("volatile group owner")
-        .to_string()
-        .contains("persistent"));
-    assert!(!directory.path().join("source.db").exists());
-    source.stop(&lifecycle_ctx::stop()).await?;
-    query.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
 
@@ -847,11 +843,11 @@ async fn shared_journal_guards_capacity_identity_and_missing_history_multi_threa
     conservative_guards().await
 }
 #[tokio::test(flavor = "current_thread")]
-async fn shared_members_fence_failure_reset_and_volatile_storage_current_thread() -> Result<()> {
+async fn shared_members_fence_failure_and_reset_current_thread() -> Result<()> {
     member_failures().await
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shared_members_fence_failure_reset_and_volatile_storage_multi_thread() -> Result<()> {
+async fn shared_members_fence_failure_and_reset_multi_thread() -> Result<()> {
     member_failures().await
 }
 #[tokio::test(flavor = "current_thread")]

@@ -423,6 +423,13 @@ by the Host before startup. Credential fields are bounded to 64 KiB and Debug
 redacts both usernames and secrets. Bound startup failures are sanitized at
 the ABI boundary.
 
+An erasing Dispose of a bound instance receives credentials too
+(`DisposeContext::credentials`/`take_credentials`), resolved anew by the Host
+for that attempt. Erasure may have to reach the external system, for example to
+drop a replication slot, when the object was reconstructed after a process
+restart and never started; use these credentials there instead of retaining a
+previous activation's. A preserving Dispose carries none.
+
 Keep acquired credentials transient. Do not modify `configuration()`, captured
 configuration, source identity or the constructor recipe, and do not fall back
 to literals after a provider failure. Unbound instances still use the unchanged
@@ -695,9 +702,24 @@ and invalid operations return structured failures, not empty successful output.
 The Host retains the original native `Failure` as the cause of a classified
 `ComponentOperationError`. Only `FAILED` with its retryable flag is retryable;
 `PANICKED`, `PROTOCOL`, `CANCELLED`, `CLOSED` and unknown status codes remain
-terminal even if that flag is set. The consumer extension has its own explicit
-retry status and bounded `DeliveryRunner` attempt/delay policy; exhausting it
-does not authorize an implicit graph restart.
+terminal even if that flag is set.
+
+A sink classifies a failed delivery by carrying a `DeliveryFailure`
+(transient, optionally with a retry-after delay, or permanent) in the error
+`handle` returns; `Failure` serializes its class as `delivery` and the Host
+restores the typed `DeliveryFailure`. The graph retries a transient (or
+unclassified) failure in place with bounded backoff and applies the sink's
+declared `onPermanentFailure` to a permanent one; see
+`computation-plugins/sinks/NATIVE-SINK-GUIDE.md`. Consumers use the same
+classification: the `DeliveryRunner` makes one attempt per delivery and never
+retries by itself.
+
+Plugins write diagnostics and operator output with the `log` facade
+(re-exported as `drasi_computation_plugin_sdk::log`). `export_computation_plugin!`
+exports `drasi_computation_plugin_logging_v1`; the Host calls it right after
+loading the library, and the SDK's `diagnostics` module installs a logger that
+forwards each record to the Host's logger. Statically linked plugins share the
+Host's facade directly.
 
 The SDK retains a per-instance panic quarantine across data, control and
 lifecycle operations. A detected panic during polling, operation destruction or
@@ -1152,8 +1174,9 @@ memory cleanup, never an acknowledgement.
 External handlers return success only after actual destination completion.
 Their `DeliveryItem::id` supports destination-side idempotence; a successful
 external effect can repeat after a crash before local progress commits. Progress
-alone is not external exactly-once delivery. Implement `retryable` explicitly for
-known transient errors. Queued/accepted responses are not handled completion.
+alone is not external exactly-once delivery. Classify known transient and
+permanent errors with `DeliveryFailure`. Queued/accepted responses are not
+handled completion.
 
 Transactional handlers receive the non-cloneable `NativeTransactionContext`.
 State and each operation's completion commit in the same actual host transaction.

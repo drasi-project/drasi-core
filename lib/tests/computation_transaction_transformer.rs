@@ -411,7 +411,10 @@ async fn open(
     let mut subject = TransactionTransformer::new(definition, registry, provider)
         .await
         .expect("construct");
-    subject.start().await.expect("start");
+    subject
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("start");
     subject
 }
 
@@ -535,7 +538,10 @@ async fn one_input_uses_one_transaction_and_separate_step_state_without_standalo
     assert_eq!(values(&output[0].envelope, "first_count"), [2]);
     assert_eq!(values(&output[0].envelope, "second_count"), [2]);
     subject.delivery_completed(&output).await.expect("confirm");
-    subject.stop().await.expect("stop");
+    subject
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop");
 }
 
 #[tokio::test]
@@ -568,7 +574,10 @@ async fn failed_or_cancelled_later_step_rolls_back_every_step_and_input_progress
                 subject.transform(input(2, 8)).await.is_err(),
                 "failed participant state cannot be reused"
             );
-            subject.stop().await.expect("rollback and join");
+            subject
+                .stop(&lifecycle_contexts::stop())
+                .await
+                .expect("rollback and join");
         }
         probe.wait.store(false, Ordering::Release);
         probe.fail.store(false, Ordering::Release);
@@ -599,7 +608,10 @@ async fn failed_or_cancelled_later_step_rolls_back_every_step_and_input_progress
             1
         );
         subject.delivery_completed(&output).await.expect("confirm");
-        subject.stop().await.expect("stop");
+        subject
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
     }
 }
 
@@ -625,7 +637,10 @@ async fn invalid_intermediate_schema_rolls_back_before_the_next_step_can_run() {
             "the third step must never see the invalid intermediate result"
         );
         assert!(subject.transform(input(2, 4)).await.is_err());
-        subject.stop().await.expect("rollback");
+        subject
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("rollback");
     }
     probe.invalid_output.store(false, Ordering::Release);
     let mut reopened = open(definition, registry, provider).await;
@@ -639,7 +654,10 @@ async fn invalid_intermediate_schema_rolls_back_before_the_next_step_can_run() {
         assert_eq!(values(&output[0].envelope, name), [1], "{name}");
     }
     reopened.delivery_completed(&output).await.expect("confirm");
-    reopened.stop().await.expect("stop");
+    reopened
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop");
 }
 
 #[tokio::test]
@@ -675,7 +693,7 @@ async fn every_participant_position_rolls_back_failure_and_cancellation_in_varia
                             assert_eq!(probe.trace.lock().expect("trace").len(), failure_at + 1,
                                 "no participant after the failed one may run");
                             assert!(subject.transform(input(2, 20)).await.is_err(), "fenced until reconstruction");
-                            subject.stop().await.expect("rollback and release");
+                            subject.stop(&lifecycle_contexts::stop()).await.expect("rollback and release");
                         }
                         probe.wait.store(false, Ordering::Release);
                         probe.fail.store(false, Ordering::Release);
@@ -694,7 +712,7 @@ async fn every_participant_position_rolls_back_failure_and_cancellation_in_varia
                         }
                         assert_eq!(probe.standalone_calls.load(Ordering::Acquire), 0,
                             "participants must use the shared transaction, not standalone execution");
-                        subject.stop().await.expect("stop");
+                        subject.stop(&lifecycle_contexts::stop()).await.expect("stop");
                     }
                 }
             }
@@ -744,7 +762,10 @@ async fn equal_sequence_numbers_from_different_inputs_get_distinct_step_and_outp
     assert_eq!(values(&second[0].envelope, "first_count"), [2]);
     assert_eq!(values(&second[0].envelope, "second_count"), [2]);
     subject.delivery_completed(&second).await.expect("confirm");
-    subject.stop().await.expect("stop");
+    subject
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop");
 }
 
 #[tokio::test]
@@ -756,7 +777,10 @@ async fn committed_state_and_pending_output_reopen_without_running_steps_again()
     let original = {
         let mut subject = open(definition(), registry.clone(), provider.clone()).await;
         let output = subject.transform(input(1, 3)).await.expect("transform");
-        subject.stop().await.expect("stop before delivery");
+        subject
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop before delivery");
         output[0].envelope.clone()
     };
     assert_eq!(probe.trace.lock().expect("trace").len(), 2);
@@ -789,7 +813,10 @@ async fn committed_state_and_pending_output_reopen_without_running_steps_again()
     assert_eq!(values(&output[0].envelope, "first_count"), [2]);
     assert_eq!(values(&output[0].envelope, "second_count"), [2]);
     subject.delivery_completed(&output).await.expect("confirm");
-    subject.stop().await.expect("stop");
+    subject
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop");
 }
 
 #[tokio::test]
@@ -820,7 +847,10 @@ async fn failed_commit_rolls_back_but_cancelled_commit_confirmation_recovers_sav
                 assert!(subject.transform(input(1, 3)).await.is_err());
             }
             assert!(subject.transform(input(2, 3)).await.is_err());
-            subject.stop().await.expect("await cleanup");
+            subject
+                .stop(&lifecycle_contexts::stop())
+                .await
+                .expect("await cleanup");
         }
         let previous_calls = probe.trace.lock().expect("trace").len();
         let mut reopened = open(definition(), registry, provider).await;
@@ -843,7 +873,10 @@ async fn failed_commit_rolls_back_but_cancelled_commit_confirmation_recovers_sav
         assert_eq!(values(&next[0].envelope, "first_count"), [2]);
         assert_eq!(values(&next[0].envelope, "second_count"), [2]);
         reopened.delivery_completed(&next).await.expect("confirm");
-        reopened.stop().await.expect("stop");
+        reopened
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
     }
 }
 
@@ -889,7 +922,7 @@ async fn output_bindings_commit_with_the_existing_owner_and_resume_without_recom
                 assert!(subject.bind_output_destinations(&bindings).await.is_err());
             }
             assert!(subject.transform(input(1, 3)).await.is_err());
-            subject.stop().await.unwrap();
+            subject.stop(&lifecycle_contexts::stop()).await.unwrap();
         }
         let indexes = provider
             .create_indexes("transactions", &id("sequence"))
@@ -930,7 +963,7 @@ async fn output_bindings_commit_with_the_existing_owner_and_resume_without_recom
             .bind_output_destinations(&tracked_output_bindings(2))
             .await
             .unwrap();
-        subject.stop().await.unwrap();
+        subject.stop(&lifecycle_contexts::stop()).await.unwrap();
     }
 }
 
@@ -958,7 +991,7 @@ async fn output_bindings_cannot_disappear_from_committed_progress() {
                 .await
                 .unwrap();
             subject.transform(input(1, 3)).await.unwrap();
-            subject.stop().await.unwrap();
+            subject.stop(&lifecycle_contexts::stop()).await.unwrap();
         }
         let indexes = provider
             .create_indexes("transactions", &id("sequence"))
@@ -1007,12 +1040,15 @@ async fn output_bindings_cannot_disappear_from_committed_progress() {
         let mut subject = TransactionTransformer::new(definition(), registry, provider.clone())
             .await
             .unwrap();
-        let error = subject.start().await.expect_err(corruption);
+        let error = subject
+            .start(&lifecycle_contexts::start())
+            .await
+            .expect_err(corruption);
         assert!(
             error.chain().any(|cause| cause.is::<OutputBindingError>()),
             "{corruption}: {error:#}"
         );
-        subject.stop().await.unwrap();
+        subject.stop(&lifecycle_contexts::stop()).await.unwrap();
         drop(subject);
         let indexes = provider
             .create_indexes("transactions", &id("sequence"))
@@ -1123,7 +1159,7 @@ async fn output_bindings_survive_process_exit_with_pending_output() {
             .bind_output_destinations(&tracked_output_bindings(2))
             .await
             .unwrap();
-        subject.stop().await.unwrap();
+        subject.stop(&lifecycle_contexts::stop()).await.unwrap();
     }
 }
 
@@ -1153,7 +1189,10 @@ async fn expansion_and_filtering_stay_inside_the_same_transaction_batch() {
             [("first".into(), 5, 1), ("second".into(), 20, 1), ("second".into(), 20, 1)]
         );
         subject.delivery_completed(&output).await.expect("confirm");
-        subject.stop().await.expect("stop");
+        subject
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
     }
 }
 
@@ -1180,18 +1219,27 @@ async fn changed_configuration_and_unconfirmed_retention_are_not_silently_accept
             "rejected input made no state changes"
         );
         subject.delivery_completed(&next).await.expect("confirm");
-        subject.stop().await.expect("stop");
+        subject
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
     }
     configured.steps.swap(0, 1);
     let mut changed = TransactionTransformer::new(configured, registry, provider)
         .await
         .expect("construct");
-    let error = changed.start().await.expect_err("different sequence");
+    let error = changed
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect_err("different sequence");
     assert!(
         format!("{error:#}").contains("configuration or ownership changed"),
         "{error:#}"
     );
-    changed.stop().await.expect("cleanup");
+    changed
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("cleanup");
 }
 
 #[tokio::test]
@@ -1228,11 +1276,17 @@ async fn participating_implementation_remains_usable_as_an_ordinary_transformer(
     let mut ordinary = factory
         .create(&step("ordinary", json!({"add":2})))
         .expect("construct");
-    ordinary.start().await.expect("start");
+    ordinary
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("start");
     let output = ordinary.transform(input(1, 3)).await.expect("standalone");
     assert_eq!(values(&output[0].envelope, "value"), [5]);
     assert_eq!(probe.standalone_calls.load(Ordering::SeqCst), 1);
-    ordinary.stop().await.expect("stop");
+    ordinary
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop");
 }
 
 struct FiniteSource {
@@ -1991,7 +2045,10 @@ async fn factory_constructs_one_graph_node_and_durable_external_delivery_confirm
         !reopened.has_pending_emissions(),
         "graph confirmed every external durable branch"
     );
-    reopened.stop().await.expect("stop");
+    reopened
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop");
 }
 
 #[cfg(any(feature = "middleware-unwind", feature = "middleware-all"))]
@@ -2059,7 +2116,10 @@ async fn builtin_middleware_participates_and_unwind_state_survives_reconstructio
             3
         );
         subject.delivery_completed(&first).await.expect("confirm");
-        subject.stop().await.expect("stop");
+        subject
+            .stop(&lifecycle_contexts::stop())
+            .await
+            .expect("stop");
     }
     let mut subject = open(definition, registry, provider).await;
     let output = subject
@@ -2072,7 +2132,10 @@ async fn builtin_middleware_participates_and_unwind_state_survives_reconstructio
         change, SourceChange::Delete { metadata } if metadata.reference.element_id.ends_with("-b")
     )), "previous child b must be deleted after restart");
     subject.delivery_completed(&output).await.expect("confirm");
-    subject.stop().await.expect("stop");
+    subject
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop");
 }
 
 #[cfg(all(
@@ -2153,7 +2216,10 @@ async fn documented_decoder_then_parser_configuration_runs_as_two_transactional_
         &ElementValue::Object(ElementPropertyMap::from(json!({"value":42})))
     );
     subject.delivery_completed(&output).await.expect("confirm");
-    subject.stop().await.expect("stop");
+    subject
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop");
 }
 
 struct NumberValidator;
@@ -2410,7 +2476,10 @@ async fn query_inputs_use_query_identity_and_position_and_can_feed_another_trans
     let mut query = ContinuousQueryTransformer::new(query_definition.clone(), storage.clone())
         .await
         .expect("query");
-    query.start().await.expect("start query");
+    query
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("start query");
     let mut input_from_query = query.transform(input(1, 3)).await.expect("query output");
     let input_from_query = input_from_query.remove(0).envelope;
     let mut registry = TransactionalTransformerRegistry::default();
@@ -2501,7 +2570,9 @@ async fn query_inputs_use_query_identity_and_position_and_can_feed_another_trans
             format!("{error:#}").contains("logical progress has a gap"),
             "{error:#}"
         );
-        gap.stop().await.expect("cleanup gap");
+        gap.stop(&lifecycle_contexts::stop())
+            .await
+            .expect("cleanup gap");
     }
     let mut gap = open(gap_definition, registry.clone(), storage.clone()).await;
     let output = gap
@@ -2519,14 +2590,20 @@ async fn query_inputs_use_query_identity_and_position_and_can_feed_another_trans
         2
     );
     gap.delivery_completed(&output).await.expect("confirm");
-    gap.stop().await.expect("stop");
+    gap.stop(&lifecycle_contexts::stop()).await.expect("stop");
 
-    query.stop().await.expect("stop before reset");
+    query
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop before reset");
     query
         .dispose(&lifecycle_contexts::erase())
         .await
         .expect("explicitly delete query state");
-    query.start().await.expect("restart reset query");
+    query
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("restart reset query");
     let reset = query.transform(input(1, 3)).await.expect("reset output");
     assert_ne!(
         GraphProducerProgress::from_envelope(&reset[0].envelope)
@@ -2549,9 +2626,18 @@ async fn query_inputs_use_query_identity_and_position_and_can_feed_another_trans
             .is_err(),
         "a reset cannot reuse the previous input owner"
     );
-    first.stop().await.expect("cleanup");
-    second.stop().await.expect("stop");
-    query.stop().await.expect("stop query");
+    first
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("cleanup");
+    second
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop");
+    query
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop query");
 
     let mut volatile = ContinuousQueryTransformer::new(
         query_definition,
@@ -2559,7 +2645,10 @@ async fn query_inputs_use_query_identity_and_position_and_can_feed_another_trans
     )
     .await
     .expect("volatile");
-    volatile.start().await.expect("start");
+    volatile
+        .start(&lifecycle_contexts::start())
+        .await
+        .expect("start");
     let output = volatile.transform(input(1, 3)).await.expect("query output");
     configured.id = id("reject-volatile");
     configured.output_stream = stream("reject-volatile/out");
@@ -2578,8 +2667,14 @@ async fn query_inputs_use_query_identity_and_position_and_can_feed_another_trans
             && message.contains("volatile"),
         "{message}"
     );
-    reject.stop().await.expect("cleanup");
-    volatile.stop().await.expect("stop");
+    reject
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("cleanup");
+    volatile
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop");
 }
 
 #[tokio::test]
@@ -2623,7 +2718,10 @@ async fn custom_schemas_flow_directly_and_incompatible_or_branched_steps_are_rej
         7
     );
     subject.delivery_completed(&output).await.expect("confirm");
-    subject.stop().await.expect("stop");
+    subject
+        .stop(&lifecycle_contexts::stop())
+        .await
+        .expect("stop");
     let mut registry = TransactionalTransformerRegistry::default();
     registry
         .register(Arc::new(NumberFactory { extra_port: true }))
