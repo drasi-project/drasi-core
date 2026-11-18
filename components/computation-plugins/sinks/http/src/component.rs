@@ -4,7 +4,7 @@
 //! The HTTP sink component: lifecycle, management, rendering and delivery.
 
 use crate::{
-    config::{duration, HttpSinkConfig},
+    config::{duration, HttpSinkConfig, UnroutedChanges},
     render::Renderer,
     transport::{self, build_client, Attempts, ClientSettings, Request},
     wire,
@@ -260,6 +260,11 @@ impl HttpSink {
             let output = notification.output();
             let label = output.endpoint().to_string();
             let sequence = notification.sequence();
+            if self.config.unrouted_changes == UnroutedChanges::Ignore
+                && self.spec(notification).is_none()
+            {
+                continue;
+            }
             let Some(max_items) = max_items else {
                 let delivery = match self.render(notification) {
                     Ok(request) => {
@@ -352,8 +357,9 @@ fn insert_output_headers(headers: &mut HeaderMap, output: &SinkOutput) -> Result
 ///
 /// * Pause (in place): everything read per delivery or per host collection —
 ///   templates, headers, secret headers, token, timeout, request size,
-///   retries, retry budget, success statuses, adaptive bounds and
-///   maxBatchBytes (the host reads `batching()` before every collection).
+///   retries, retry budget, success statuses, unrouted-change handling,
+///   adaptive bounds and maxBatchBytes (the host reads `batching()` before
+///   every collection).
 /// * Stop (restart): destination and connection settings bound into the
 ///   client — url, baseUrl, batchEndpoint, TLS, connect timeout and the
 ///   connection pool. Enabling or disabling `adaptive` also changes
@@ -422,6 +428,11 @@ pub(crate) fn plan(
         "onPermanentFailure",
         c.on_permanent_failure != p.on_permanent_failure,
         Replace,
+    );
+    planner.field(
+        "unroutedChanges",
+        c.unrouted_changes != p.unrouted_changes,
+        Pause,
     );
     planner.field(
         "successStatusCodes",

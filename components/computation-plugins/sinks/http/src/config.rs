@@ -63,6 +63,23 @@ fn success_status_codes() -> Vec<u16> {
     DEFAULT_SUCCESS_STATUS_CODES.to_vec()
 }
 
+/// Handling of a change whose operation matches no template route.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UnroutedChanges {
+    /// Post the change notification to the default destination.
+    #[default]
+    Send,
+    /// Complete the change without a request.
+    Ignore,
+}
+
+impl UnroutedChanges {
+    fn is_send(&self) -> bool {
+        *self == Self::Send
+    }
+}
+
 /// Settings of the native HTTP graph-change sink. Each bound output may be a
 /// source, a transformer or a query port. Secret values never print through
 /// `Debug`; serialization returns them because `configuration()` is the
@@ -110,6 +127,8 @@ pub struct HttpSinkConfig {
     pub on_permanent_failure: PermanentFailurePolicy,
     #[serde(default = "success_status_codes")]
     pub success_status_codes: Vec<u16>,
+    #[serde(default, skip_serializing_if = "UnroutedChanges::is_send")]
+    pub unrouted_changes: UnroutedChanges,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_ca_pem: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -146,6 +165,7 @@ impl HttpSinkConfig {
             Field::new("retryBudgetMs", Integer, false, "Total time from the first attempt after which no retry starts; bounds how long one delivery can hold a handle.").default(retry_budget_ms()).minimum(1).maximum(MAX_RETRY_BUDGET_MS),
             Field::on_permanent_failure(),
             Field::new("successStatusCodes", Array, false, "Response statuses (200..=299) that complete a delivery. 202 is excluded by default because it only reports queuing.").default(json!(DEFAULT_SUCCESS_STATUS_CODES)),
+            Field::new("unroutedChanges", String, false, "What happens to a change whose operation has no template route (neither its alias's route nor defaultTemplate): send posts the change notification to the default destination; ignore completes it without a request, so a route that lists only added delivers nothing for updates and deletes.").default(json!(UnroutedChanges::default())).allowed([json!(UnroutedChanges::Send), json!(UnroutedChanges::Ignore)]),
             Field::new("tlsCaPem", String, false, "PEM CA certificates trusted in addition to the built-in roots."),
             Field::new("tlsClientCertificatePem", String, false, "PEM client certificate chain for mutual TLS; requires tlsClientPrivateKeyPem."),
             Field::new("tlsClientPrivateKeyPem", String, false, "PEM private key for tlsClientCertificatePem.").secret(),

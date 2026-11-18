@@ -208,6 +208,7 @@ fn assessment_matrix() -> Result<()> {
             (case(json!({"retryBudgetMs": 10})), Some(UpdateBoundary::Pause)),
             (case(json!({"onPermanentFailure": "skip"})), Some(UpdateBoundary::Replace)),
             (case(json!({"successStatusCodes": [202]})), Some(UpdateBoundary::Pause)),
+            (case(json!({"unroutedChanges": "ignore"})), Some(UpdateBoundary::Pause)),
             (case(json!({"maxRequestBytes": 10})), Some(UpdateBoundary::Pause)),
             (
                 case(json!({"outputTemplates": {"defaultTemplate": {"added": {"template": "{{json after}}"}}}})),
@@ -573,6 +574,34 @@ async fn render_failures_follow_on_permanent_failure() -> Result<()> {
         2,
         "the delete was skipped and the later add delivered"
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unrouted_changes_are_sent_by_default_or_ignored() -> Result<()> {
+    let server = Server::start().await?;
+    let templates = json!({"defaultTemplate": {"added": {"url": "/added"}}});
+    let changes = [insert("r1", "one"), delete("r1")];
+    let mut send =
+        started(json!({"baseUrl": server.url(""), "outputTemplates": templates})).await?;
+    send.handle(envelope(1, &changes)?).await?;
+    let requests = server.state.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].path, "/added");
+    assert!(
+        requests[1].path.starts_with("/changes/"),
+        "{}",
+        requests[1].path
+    );
+    let mut ignore = started(
+        json!({"baseUrl": server.url(""), "outputTemplates": templates,
+        "unroutedChanges": "ignore"}),
+    )
+    .await?;
+    ignore.handle(envelope(2, &changes)?).await?;
+    let requests = server.state.requests();
+    assert_eq!(requests.len(), 3, "only the add was delivered");
+    assert_eq!(requests[2].path, "/added");
     Ok(())
 }
 
