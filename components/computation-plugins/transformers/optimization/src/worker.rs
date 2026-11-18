@@ -7,7 +7,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use drasi_computation_contracts::WakeupSource;
-use serde_json::Value;
 use std::{
     collections::VecDeque,
     panic::{catch_unwind, AssertUnwindSafe},
@@ -45,24 +44,15 @@ pub(crate) fn run(
     let prepared = match model::prepare(config, records) {
         Ok(prepared) => prepared,
         Err(error) => {
-            report(JobEvent::Main(Box::new(MainOutcome {
-                signature: None,
-                provenance: Value::Null,
-                solved: Solved {
-                    status: if error.downcast_ref::<model::LimitExceeded>().is_some() {
-                        Status::Limit
-                    } else {
-                        Status::Error
-                    },
-                    detail: format!("{error:#}"),
-                    objectives: Vec::new(),
-                    values: Vec::new(),
-                },
-                model: None,
-                variables: 0,
-                constraints: 0,
-                members: 0,
-            })));
+            let status = if error.downcast_ref::<model::LimitExceeded>().is_some() {
+                Status::Limit
+            } else {
+                Status::Error
+            };
+            report(JobEvent::Main(Box::new(MainOutcome::failed(
+                status,
+                format!("{error:#}"),
+            ))));
             return;
         }
     };
@@ -73,6 +63,11 @@ pub(crate) fn run(
     report(JobEvent::Main(Box::new(model::solve_main(
         config, &prepared,
     ))));
+    if prepared.unmet.is_some() {
+        // Scenarios of an unknown baseline are not meaningful.
+        report(JobEvent::Scenarios(Vec::new()));
+        return;
+    }
     let mut outcomes = Vec::new();
     let mut solved = 0_u64;
     for definition in &config.scenarios {
@@ -215,20 +210,10 @@ pub(crate) fn spawn(
                 run(&config, &records, skip.as_deref(), &flag, &mut report)
             }));
             if outcome.is_err() {
-                push(JobEvent::Main(Box::new(MainOutcome {
-                    signature: None,
-                    provenance: Value::Null,
-                    solved: Solved {
-                        status: Status::Error,
-                        detail: "the solver panicked".into(),
-                        objectives: Vec::new(),
-                        values: Vec::new(),
-                    },
-                    model: None,
-                    variables: 0,
-                    constraints: 0,
-                    members: 0,
-                })));
+                push(JobEvent::Main(Box::new(MainOutcome::failed(
+                    Status::Error,
+                    "the solver panicked",
+                ))));
             }
             push(JobEvent::Finished);
         })?;

@@ -83,6 +83,8 @@ fn create(configuration: Value) -> Result<PolicyTransformer> {
             .descriptor(ComponentId::try_new(ID)?)?,
         configuration,
         None,
+        &[],
+        None,
     )
 }
 
@@ -232,6 +234,7 @@ fn plugin_exports_and_constructs_through_the_factory() -> Result<()> {
     let metadata = PolicyFactory.metadata();
     assert_eq!(&*metadata.implementation.name, "drasi.standard/policy");
     assert!(metadata.capabilities.management && metadata.capabilities.continuations);
+    assert!(metadata.capabilities.startup_continuation && metadata.capabilities.binds_inputs);
     assert!(PolicyFactory.supports_update_planning());
     let request = drasi_computation_plugin_sdk::testing::create_request(
         &PolicyFactory,
@@ -1079,5 +1082,200 @@ async fn gpu_lab_eligibility_with_managed_policy_updates() -> Result<()> {
         authorization(&decisions, "w-training/us-spare"),
         (json!("Deny"), json!(["purpose-not-permitted"]))
     );
+    Ok(())
+}
+
+/// An upstream output whose snapshot the test controls.
+struct Upstream {
+    snapshot: std::sync::Mutex<(drasi_computation_contracts::OutputCursor, Vec<Element>)>,
+}
+
+#[async_trait]
+impl SnapshotSource for Upstream {
+    async fn read(
+        &self,
+        output: &drasi_computation_contracts::OutputEndpoint,
+    ) -> Result<(
+        drasi_computation_contracts::OutputCursor,
+        Vec<drasi_computation_contracts::Record>,
+    )> {
+        assert_eq!(output.component.as_str(), UPSTREAM);
+        let (cursor, elements) = self.snapshot.lock().unwrap().clone();
+        let records = elements
+            .into_iter()
+            .map(|element| {
+                Ok(GraphChangeCodec::element_record(&ElementImage::try_from(
+                    element,
+                )?)?)
+            })
+            .collect::<Result<_>>()?;
+        Ok((cursor, records))
+    }
+}
+
+const UPSTREAM: &str = "5d7e0f4b-2a64-4bb0-9a3c-6f1e2d3c4b5a";
+
+fn new_producer() -> Result<GraphProducerIdentity> {
+    GraphProducerIdentity::volatile(
+        "instance".into(),
+        "graph".into(),
+        ComponentId::try_new(UPSTREAM)?,
+        StreamId::try_new("source/out")?,
+    )
+}
+
+fn binding() -> Result<InputBinding> {
+    Ok(InputBinding {
+        input_port: PortId::try_new("in")?,
+        output: drasi_computation_contracts::OutputEndpoint::new(
+            ComponentId::try_new(UPSTREAM)?,
+            PortId::try_new("out")?,
+        ),
+        stream: StreamId::try_new("source/out")?,
+    })
+}
+
+fn set_snapshot(
+    upstream: &Upstream,
+    producer: &GraphProducerIdentity,
+    sequence: u64,
+    elements: Vec<Element>,
+) -> Result<()> {
+    *upstream.snapshot.lock().unwrap() = (
+        drasi_computation_contracts::OutputCursor::try_new(producer.clone(), sequence)?,
+        elements,
+    );
+    Ok(())
+}
+
+async fn start_with(upstream: Arc<Upstream>) -> Result<PolicyTransformer> {
+    let mut policy = PolicyTransformer::new(
+        PolicyFactory
+            .metadata()
+            .descriptor(ComponentId::try_new(ID)?)?,
+        base(json!({})),
+        None,
+        &[binding()?],
+        Some(upstream),
+    )?;
+    policy.initialize(&contexts::initialize()).await?;
+    policy.start(&mut contexts::start()).await?;
+    Ok(policy)
+}
+
+/// A live envelope from `producer` at `sequence`.
+async fn live(
+    policy: &mut PolicyTransformer,
+    producer: &GraphProducerIdentity,
+    sequence: u64,
+    changes: &[SourceChange],
+) -> Result<Vec<SourceChange>> {
+    let mut envelope = input(changes, sequence)?.envelope;
+    GraphProducerProgress::annotate(&mut envelope, producer, sequence)?;
+    let outputs = policy
+        .transform(InputEnvelope {
+            port: PortId::try_new("in")?,
+            envelope,
+        })
+        .await?;
+    decode(outputs, policy)
+}
+
+fn bigs(rows: &HashMap<ElementReference, Element>) -> Vec<(String, Value)> {
+    let mut bigs: Vec<_> = rows
+        .iter()
+        .map(|(reference, row)| (reference.element_id.to_string(), property(row, "big")))
+        .collect();
+    bigs.sort_by(|a, b| a.0.cmp(&b.0));
+    bigs
+}
+
+#[tokio::test]
+async fn initializes_from_upstream_snapshots_and_skips_covered_input() -> Result<()> {
+    let producer = new_producer()?;
+    let upstream = Arc::new(Upstream {
+        snapshot: std::sync::Mutex::new((
+            drasi_computation_contracts::OutputCursor::try_new(producer.clone(), 0)?,
+            vec![],
+        )),
+    });
+    set_snapshot(
+        &upstream,
+        &producer,
+        5,
+        vec![item("a", 10, 20), item("b", 10, 5)],
+    )?;
+    let mut policy = start_with(upstream.clone()).await?;
+
+    // The snapshot's decisions are emitted as a continuation.
+    assert!(policy.has_pending_emissions());
+    let initial = drain(&mut policy).await?;
+    assert_eq!(initial.len(), 2);
+    assert!(initial
+        .iter()
+        .all(|change| matches!(change, SourceChange::Insert { .. })));
+    assert_eq!(
+        bigs(&snapshot_rows(&policy).await?),
+        [("a".into(), json!(true)), ("b".into(), json!(false))]
+    );
+
+    // An envelope the snapshot already covers changes nothing.
+    let covered = live(&mut policy, &producer, 4, &[insert(item("a", 11, 1))]).await?;
+    assert!(covered.is_empty());
+    assert_eq!(
+        property(&policy.inputs[&ElementReference::new("source", "a")], "n"),
+        json!(20)
+    );
+
+    // A later one is applied.
+    let changes = live(&mut policy, &producer, 6, &[insert(item("a", 12, 1))]).await?;
+    assert_eq!(changes.len(), 1);
+    assert_eq!(property(element(&changes[0]), "big"), json!(false));
+
+    // Stop and start keep the position: nothing is read or emitted again.
+    policy.stop(&contexts::stop(StopMode::Drain)).await?;
+    set_snapshot(&upstream, &producer, 9, vec![])?;
+    policy.start(&mut contexts::start()).await?;
+    assert!(!policy.has_pending_emissions());
+    Ok(())
+}
+
+#[tokio::test]
+async fn reads_an_upstream_again_when_it_restarts() -> Result<()> {
+    let producer = new_producer()?;
+    let upstream = Arc::new(Upstream {
+        snapshot: std::sync::Mutex::new((
+            drasi_computation_contracts::OutputCursor::try_new(producer.clone(), 0)?,
+            vec![],
+        )),
+    });
+    set_snapshot(
+        &upstream,
+        &producer,
+        3,
+        vec![item("a", 10, 20), item("b", 10, 5)],
+    )?;
+    let mut policy = start_with(upstream.clone()).await?;
+    drain(&mut policy).await?;
+
+    // The upstream restarts: a new producer epoch whose snapshot no longer has `a`.
+    let restarted = new_producer()?;
+    assert_ne!(restarted, producer);
+    set_snapshot(&upstream, &restarted, 1, vec![item("b", 20, 50)])?;
+    let changes = live(&mut policy, &restarted, 2, &[insert(item("c", 21, 1))]).await?;
+    assert_eq!(changes.len(), 3, "{changes:#?}");
+    assert!(changes
+        .iter()
+        .any(|change| matches!(change, SourceChange::Delete { metadata } if &*metadata.reference.element_id == "a")));
+    assert_eq!(
+        bigs(&snapshot_rows(&policy).await?),
+        [("b".into(), json!(true)), ("c".into(), json!(false))]
+    );
+
+    // Without snapshot reads (no dependency bound), the same input is applied as it is.
+    let mut plain = start(base(json!({}))).await?;
+    assert!(!plain.has_pending_emissions());
+    let changes = live(&mut plain, &restarted, 1, &[insert(item("c", 21, 1))]).await?;
+    assert_eq!(changes.len(), 1);
     Ok(())
 }

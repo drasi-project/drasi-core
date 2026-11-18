@@ -102,6 +102,28 @@ upstream continuous query that labels each workload/cluster pair
 }
 ```
 
+### Inputs from a continuous query
+
+The transformer has no joins: when a decision depends on several kinds of
+record (for example a workload, a deployment and the rules that link them),
+an upstream continuous query should produce one row per thing to decide, with
+everything the policy reads, as in the example above. Set the query's
+`result.label` and list that label in `labels`. Each row's result-node
+identity becomes its decision's identity, so put a readable key in a column
+and copy it with `output_properties` (for example `"id": "$element.properties.id"`).
+
+Keep each row's content to what the policy reads. A change to any column
+changes `policy_input_fingerprint` and re-emits the decision, even if the
+outcome is the same. Two query behaviours matter here:
+
+- `collect()` does not keep a stable order, so a collected list can change
+  order without changing content. Prefer per-row values, or collect only
+  values that cannot repeat in a different order (at most one per row).
+- An aggregating query keeps a group after all of its matched elements are
+  deleted, recomputed over an empty set. To retract the row, and so its
+  decision, add `count(...) AS matches` in a `WITH` and filter
+  `WHERE matches > 0` before `RETURN`.
+
 ## Decisions
 
 Each retained input has exactly one decision node. The node has the input's
@@ -174,6 +196,30 @@ current decisions while running. Before start or while stopped it returns
 `NotReady`, and after erase it returns `Retired`. Pause refuses input until
 resume. Stop then start on the same object preserves state. Disposal with erase
 (only while stopped) clears state and permanently fences the instance.
-Reconstruction starts empty with a new volatile epoch; rebuild it from full
-upstream inputs. There is no durable storage, replay, snapshot-follow or
-bootstrap capability.
+Reconstruction starts empty with a new volatile epoch. There is no durable
+storage, replay or snapshot-follow capability.
+
+### Initializing from upstream snapshots
+
+A continuous query does not send its bootstrap results downstream, so a policy
+fed by a query sees only rows that change after it starts. To start from the
+current rows, bind the factory's `output_snapshots` dependency (a
+`nativeOutputSnapshots` resource listing the outputs connected to `in`). The
+factory declares `binds_inputs` and supports `output-snapshots-v1`. With the
+dependency bound:
+
+- At its first start the transformer reads each incoming edge's snapshot.
+  It then queues a decision for every current input. The host emits them
+  through the startup continuation (`startup_continuation`) before admitting
+  input.
+- A live envelope that the snapshot already covers is skipped: same producer
+  epoch, sequence at or below the snapshot's. It still produces its (empty)
+  output envelope.
+- An upstream that restarts (a new producer epoch) is read again. Elements it
+  no longer has are deleted, so their decisions are retracted.
+- Stop then start keeps the positions and reads nothing again.
+
+Envelopes without producer progress, or from a producer that is not a bound
+edge, are applied as they are. Without the dependency nothing is read, and
+the transformer behaves as described above. The SDK's
+`UpstreamSnapshots` helper implements this for any volatile transformer.

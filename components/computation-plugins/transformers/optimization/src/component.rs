@@ -8,15 +8,16 @@ use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use drasi_computation_contracts::{
     ChangeEnvelope, ComponentDescriptor, ComponentUpdateData, ElementImage, ElementPatch,
-    GraphChangeCodec, GraphProducerIdentity, GraphProducerProgress, InputEnvelope, OutputEnvelope,
-    OutputReaders, PortId, WakeupSource,
+    GraphChangeCodec, GraphProducerIdentity, GraphProducerProgress, InputBinding, InputEnvelope,
+    OutputEnvelope, OutputReaders, PortId, WakeupSource,
 };
 use drasi_computation_plugin_sdk::{
     lifecycle::{
         ApplyContext, ApplyError, Assessment, DisposeContext, InitializeContext, LifecycleError,
         LifecycleResult, PauseContext, ResumeContext, StartContext, StopContext, UpdateBoundary,
     },
-    ApplyUpdateRequest, NativeComponent, NativeManagement, NativeTransformer, Scope, UpdateRequest,
+    ApplyUpdateRequest, NativeComponent, NativeManagement, NativeTransformer, Scope,
+    SnapshotSource, UpdateRequest, UpstreamSnapshots,
 };
 use drasi_core_types::models::{Element, ElementReference, SourceChange};
 use std::{
@@ -28,7 +29,7 @@ use tokio::time::Instant;
 
 use crate::{
     config::OptimizationConfig,
-    model::Record,
+    model::{MainOutcome, Record, Status},
     output::{self, EmittedRows, OutRow, Output, Rows},
     worker::{self, Events, Job, JobEvent, Wake},
 };
@@ -92,6 +93,11 @@ pub(crate) struct Optimization {
     inputs: HashMap<ElementReference, Element>,
     /// The latest input, from which emissions derive their lineage.
     last_input: Option<ChangeEnvelope>,
+    /// Upstream snapshot reads, when the host bound `output_snapshots`.
+    snapshots: Option<Arc<dyn SnapshotSource>>,
+    upstreams: UpstreamSnapshots,
+    /// Whether the upstream snapshots have been loaded.
+    loaded: bool,
     /// The latest input effective time; emitted elements carry it.
     clock: u64,
     /// Input (or configuration) changed since the running or last job started.
@@ -108,6 +114,12 @@ pub(crate) struct Optimization {
     /// Signature of the main result currently published.
     current_signature: Option<String>,
     current_provenance: serde_json::Value,
+    /// The main result is `unknown` (a precondition does not hold).
+    main_unknown: bool,
+    /// Scenario roll-up and the signature it was computed for.
+    rollup: Option<(serde_json::Value, Option<String>)>,
+    /// With `atomicScenarios`, a main result waiting for its scenario analysis.
+    held_main: Option<Box<MainOutcome>>,
     solution: Rows,
     status: Option<(String, OutRow)>,
     scenarios: Rows,
@@ -119,6 +131,8 @@ impl Optimization {
         descriptor: ComponentDescriptor,
         config: OptimizationConfig,
         scope: Option<&Scope>,
+        inputs: &[InputBinding],
+        snapshots: Option<Arc<dyn SnapshotSource>>,
     ) -> Result<Self> {
         let identity = GraphProducerIdentity::volatile(
             scope
@@ -141,6 +155,9 @@ impl Optimization {
             retired: false,
             inputs: HashMap::new(),
             last_input: None,
+            upstreams: UpstreamSnapshots::new(inputs, &PortId::try_new("in")?),
+            snapshots,
+            loaded: false,
             clock: 0,
             dirty: false,
             first_dirty: None,
@@ -152,6 +169,9 @@ impl Optimization {
             last_signature: None,
             current_signature: None,
             current_provenance: serde_json::Value::Null,
+            main_unknown: false,
+            rollup: None,
+            held_main: None,
             solution: Rows::new(),
             status: None,
             scenarios: Rows::new(),
@@ -189,6 +209,11 @@ impl Optimization {
         }
     }
 
+    /// Results are published only with their scenario analysis.
+    fn atomic(&self) -> bool {
+        self.config.atomic_scenarios && !self.config.scenarios.is_empty()
+    }
+
     fn cancelling(&self) -> bool {
         self.job
             .as_ref()
@@ -198,12 +223,16 @@ impl Optimization {
     fn reschedule(&self) {
         let open = self.started && !self.paused && !self.retired;
         // A due solve waiting on a cancelled job is woken by the job's events.
-        let deadline = self.due().filter(|_| !self.cancelling());
+        // An atomic job runs to completion; its events wake the next solve.
+        let deadline = self
+            .due()
+            .filter(|_| !self.cancelling() && (!self.atomic() || self.job.is_none()));
         self.wake.schedule(open, self.job.is_some(), deadline);
     }
 
     fn abandon_job(&mut self) {
         self.generation += 1;
+        self.held_main = None;
         if let Some(job) = self.job.take() {
             job.cancel.store(true, Ordering::Release);
         }
@@ -233,41 +262,74 @@ impl Optimization {
 
     fn accept(&mut self, event: JobEvent) {
         match event {
-            JobEvent::Main(outcome) => {
-                self.solution = output::solution_rows(&self.config, &outcome);
-                self.status = Some(output::status_row(&self.config, &outcome));
-                if outcome.signature.is_none() {
-                    self.scenarios.clear();
-                }
-                self.current_signature = outcome
-                    .signature
-                    .clone()
-                    .filter(|_| outcome.solved.status.is_final());
-                self.current_provenance = outcome.provenance.clone();
-            }
+            JobEvent::Main(outcome) if self.atomic() => self.held_main = Some(outcome),
+            JobEvent::Main(outcome) => self.apply_main(&outcome),
             JobEvent::Scenarios(outcomes) => {
+                if let Some(main) = self.held_main.take() {
+                    self.apply_main(&main);
+                }
                 self.scenarios = output::scenario_rows(
                     &self.config,
                     &outcomes,
                     self.current_signature.as_deref(),
                     &self.current_provenance,
                 );
+                self.rollup = (!self.main_unknown).then(|| {
+                    (
+                        output::scenario_rollup(&self.config, &outcomes),
+                        self.current_signature.clone(),
+                    )
+                });
                 self.last_signature = self.current_signature.clone();
             }
             JobEvent::Unchanged => {}
-            JobEvent::Finished => self.job = None,
+            JobEvent::Finished => {
+                // A job that ends without scenarios (the inputs failed to load) still publishes.
+                if let Some(main) = self.held_main.take() {
+                    self.apply_main(&main);
+                }
+                self.job = None;
+            }
         }
+    }
+
+    fn apply_main(&mut self, outcome: &MainOutcome) {
+        self.solution = output::solution_rows(&self.config, outcome);
+        self.status = Some(output::status_row(&self.config, outcome, &self.solution));
+        self.main_unknown = outcome.solved.status == Status::Unknown;
+        if outcome.signature.is_none() || self.main_unknown {
+            self.scenarios.clear();
+            self.rollup = None;
+        }
+        self.current_signature = outcome
+            .signature
+            .clone()
+            .filter(|_| outcome.solved.status.is_final());
+        self.current_provenance = outcome.provenance.clone();
     }
 
     /// Emits the difference between the published rows and the current result.
     fn emit(&mut self) -> Result<Vec<OutputEnvelope>> {
-        let Some(last_input) = &self.last_input else {
+        if self.last_input.is_none() && !self.loaded {
             return Ok(Vec::new());
-        };
+        }
         let mut desired = self.solution.clone();
         desired.extend(self.scenarios.clone());
         if let Some((id, row)) = &self.status {
-            desired.insert(id.clone(), row.clone());
+            let mut row = row.clone();
+            if !self.config.scenarios.is_empty() {
+                // The latest completed analysis stays until the next one replaces it.
+                let (rollup, signature) = self
+                    .rollup
+                    .clone()
+                    .unwrap_or((serde_json::Value::Null, None));
+                row.properties.insert("scenarios".into(), rollup);
+                row.properties.insert(
+                    "scenariosSignature".into(),
+                    signature.map_or(serde_json::Value::Null, serde_json::Value::from),
+                );
+            }
+            desired.insert(id.clone(), row);
         }
         let (next, changes) = output::diff(&self.emitted, &desired, &self.namespace(), self.clock);
         if changes.is_empty() {
@@ -277,12 +339,21 @@ impl Optimization {
             .sequence
             .checked_add(1)
             .context("optimization output sequence exhausted")?;
-        let mut envelope = GraphChangeCodec::derive_changes(
-            last_input,
-            &changes,
-            self.config.stream.clone(),
-            sequence,
-        )?;
+        // Before any live input (only snapshots loaded) the output is a root envelope.
+        let mut envelope = match &self.last_input {
+            Some(last_input) => GraphChangeCodec::derive_changes(
+                last_input,
+                &changes,
+                self.config.stream.clone(),
+                sequence,
+            )?,
+            None => GraphChangeCodec::encode_changes(
+                &changes,
+                self.config.stream.clone(),
+                sequence,
+                None,
+            )?,
+        };
         envelope.validate_lineage()?;
         GraphProducerProgress::annotate(&mut envelope, &self.identity, sequence)?;
         self.output.publish(&next, sequence)?;
@@ -407,10 +478,16 @@ impl NativeComponent for Optimization {
         if self.started {
             return Err(anyhow::anyhow!("optimization already started").into());
         }
+        if let (Some(source), false) = (self.snapshots.clone(), self.loaded) {
+            let mut batch = self.upstreams.load_all(source.as_ref(), self.clock).await?;
+            self.clock = self.ingest(std::mem::take(&mut batch.changes))?;
+            self.upstreams.commit(batch);
+            self.loaded = true;
+        }
         self.output.set_running(true)?;
         self.started = true;
         self.paused = false;
-        if self.last_input.is_some() {
+        if self.last_input.is_some() || self.loaded {
             self.mark_dirty();
         }
         self.reschedule();
@@ -462,6 +539,8 @@ impl NativeComponent for Optimization {
             self.last_signature = None;
             self.current_signature = None;
             self.current_provenance = serde_json::Value::Null;
+            self.main_unknown = false;
+            self.rollup = None;
             self.solution.clear();
             self.status = None;
             self.scenarios.clear();
@@ -542,9 +621,27 @@ impl NativeTransformer for Optimization {
             input.envelope.system().control().is_none(),
             "optimization transforms accept graph data, not scheduling or recovery controls"
         );
-        let changes = GraphChangeCodec::decode_changes(&input.envelope)?;
+        let decoded = GraphChangeCodec::decode_changes(&input.envelope)?;
+        let (changes, batch) = match self.snapshots.clone() {
+            Some(source) => {
+                let mut batch = self
+                    .upstreams
+                    .admit(source.as_ref(), &input.envelope, self.clock)
+                    .await?;
+                let mut changes = std::mem::take(&mut batch.changes);
+                if batch.apply_envelope {
+                    batch.include(&decoded);
+                    changes.extend(decoded);
+                }
+                (changes, Some(batch))
+            }
+            None => (decoded, None),
+        };
         let changed = !changes.is_empty();
         self.clock = self.ingest(changes)?;
+        if let Some(batch) = batch {
+            self.upstreams.commit(batch);
+        }
         self.last_input = Some(input.envelope);
         if changed {
             self.mark_dirty();
@@ -576,7 +673,8 @@ impl NativeTransformer for Optimization {
         if self.due().is_some_and(|due| due <= Instant::now()) {
             match &self.job {
                 None => self.launch()?,
-                Some(job) => job.cancel.store(true, Ordering::Release),
+                Some(job) if !self.atomic() => job.cancel.store(true, Ordering::Release),
+                Some(_) => {}
             }
         }
         self.reschedule();

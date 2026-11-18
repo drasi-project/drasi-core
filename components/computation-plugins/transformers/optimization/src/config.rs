@@ -50,6 +50,9 @@ pub struct OptimizationConfig {
     pub status_label: String,
     #[serde(default = "default_scenario_label")]
     pub scenario_label: String,
+    /// Publish a result only together with its scenario analysis.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub atomic_scenarios: bool,
     pub sets: Vec<SetDef>,
     pub variables: Vec<VariableDef>,
     #[serde(default)]
@@ -61,6 +64,40 @@ pub struct OptimizationConfig {
     /// Copies a set's first member onto the status and scenario rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<ProvenanceDef>,
+    /// Conditions on the inputs; when one does not hold the model is not
+    /// solved and the status is `unknown`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preconditions: Vec<PreconditionDef>,
+    /// Lists of solution rows copied onto the status row.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub summaries: Vec<SummaryDef>,
+}
+
+/// Bounds on the number of members of `set` that pass `where`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PreconditionDef {
+    pub name: String,
+    pub set: String,
+    #[serde(default, rename = "where", skip_serializing_if = "Vec::is_empty")]
+    pub filter: Vec<Condition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<u64>,
+}
+
+/// The nonzero variables of one family (that pass `where`), as a list on the status row.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SummaryDef {
+    pub name: String,
+    pub variable: String,
+    #[serde(default, rename = "where", skip_serializing_if = "Vec::is_empty")]
+    pub filter: Vec<Condition>,
+    /// Member properties of each entry; the variable's output properties when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub properties: Option<Vec<String>>,
 }
 
 /// Identifies the inputs a result was solved from.
@@ -104,6 +141,9 @@ fn default_scenario_label() -> String {
 }
 fn default_scale() -> f64 {
     1.0
+}
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 fn is_one(value: &f64) -> bool {
     *value == 1.0
@@ -601,6 +641,48 @@ impl OptimizationConfig {
                 provenance.set
             );
         }
+        let mut preconditions = BTreeSet::new();
+        for precondition in &self.preconditions {
+            validate_name("precondition", &precondition.name)?;
+            let context = format!("precondition {}", precondition.name);
+            ensure!(
+                preconditions.insert(precondition.name.as_str()),
+                "duplicate precondition {}",
+                precondition.name
+            );
+            ensure!(
+                sets.contains(precondition.set.as_str()),
+                "{context} uses unknown set {}",
+                precondition.set
+            );
+            ensure!(
+                precondition.min.is_some() || precondition.max.is_some(),
+                "{context} needs min, max or both"
+            );
+            if let (Some(min), Some(max)) = (precondition.min, precondition.max) {
+                ensure!(min <= max, "{context} min must not exceed max");
+            }
+            validate_conditions(&precondition.filter, &sets, &context)?;
+        }
+        let mut summaries = BTreeSet::new();
+        for summary in &self.summaries {
+            validate_name("summary", &summary.name)?;
+            let context = format!("summary {}", summary.name);
+            ensure!(
+                summaries.insert(summary.name.as_str()),
+                "duplicate summary {}",
+                summary.name
+            );
+            let indexed = *variables
+                .get(summary.variable.as_str())
+                .with_context(|| format!("{context} uses unknown variable {}", summary.variable))?;
+            ensure!(
+                indexed || (summary.filter.is_empty() && summary.properties.is_none()),
+                "{context}: scalar variable {} has no member to filter or copy",
+                summary.variable
+            );
+            validate_conditions(&summary.filter, &sets, &context)?;
+        }
         Ok(())
     }
 
@@ -710,6 +792,14 @@ impl OptimizationConfig {
             .constraint(constraint(json!({"type": "string", "minLength": 1})))
             .default(DEFAULT_SCENARIO_LABEL),
             ConfigOption::new(
+                "atomicScenarios",
+                Json,
+                false,
+                "Publish each result together with its scenario analysis, so status, solution and scenario rows always describe the same inputs. A running solve then finishes before the next starts.",
+            )
+            .constraint(constraint(json!({"type": "boolean"})))
+            .default(false),
+            ConfigOption::new(
                 "sets",
                 Array,
                 true,
@@ -754,6 +844,22 @@ impl OptimizationConfig {
                 "{set, properties?}: copies the set's first member (all non-$ properties, or the listed ones) onto the status and scenario elements as provenance.",
             )
             .constraint(constraint(json!({"type": "object"}))),
+            ConfigOption::new(
+                "preconditions",
+                Array,
+                false,
+                "Input checks {name, set, where?, min?, max?} on the number of set members passing where. If one fails the model is not solved: status 'unknown', no solution or scenario rows.",
+            )
+            .constraint(array())
+            .default(json!([])),
+            ConfigOption::new(
+                "summaries",
+                Array,
+                false,
+                "Solution lists {name, variable, where?, properties?} copied onto the status element under summaries.<name> while optimal.",
+            )
+            .constraint(array())
+            .default(json!([])),
         ])
         .unwrap_or_else(|error| unreachable!("constant optimization configuration: {error}"))
     }
