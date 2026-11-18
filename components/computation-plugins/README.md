@@ -34,6 +34,9 @@ checks every native library independently, including its build dependencies.
 | Transformer | [drasi-computation-transformer-view](transformers/view) | `drasi.standard/view` | Dynamic or Rust SDK; memory-backed maintained view and snapshots |
 | Transformer | [drasi-computation-transformer-arithmetic](transformers/arithmetic) | `drasi.standard/arithmetic` | Dynamic or Rust SDK |
 | Transformer | [drasi-computation-transformer-query](transformers/query) | `drasi.query/indexed` | Dynamic or Rust SDK; explicit ordinary-query adapter through Host |
+| Transformer | [drasi-computation-transformer-policy](transformers/policy) | `drasi.standard/policy` | Dynamic or Rust SDK; configured Rego decisions per input record, managed policy/data updates |
+| Transformer | [drasi-computation-transformer-optimization](transformers/optimization) | `drasi.standard/optimization` | Dynamic or Rust SDK; configured mixed-integer/linear model and what-if scenarios, solved in the background |
+| Transformer | [drasi-computation-transformer-geometry](transformers/geometry) | `drasi.standard/geometry` | Dynamic or Rust SDK; configured planar shapes and spatial relations between record sets |
 | Sink | [drasi-computation-sink-capture](sinks/capture) | `drasi.standard/capture` | Dynamic or Rust SDK |
 | Sink | [drasi-computation-sink-http](sinks/http) | `drasi.network/http-sink`, `drasi.network/http-delivery` | Dynamic or Rust SDK |
 | Sink | [drasi-computation-sink-grpc](sinks/grpc) | `drasi.network/grpc-sink` | Dynamic or Rust SDK |

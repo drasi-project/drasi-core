@@ -141,6 +141,9 @@ members = [
   "components/computation-plugins/sources/postgres",
   "components/computation-plugins/sources/sqlite",
   "components/computation-plugins/transformers/arithmetic",
+  "components/computation-plugins/transformers/geometry",
+  "components/computation-plugins/transformers/optimization",
+  "components/computation-plugins/transformers/policy",
   "components/computation-plugins/transformers/middleware",
   "components/computation-plugins/transformers/query",
   "components/computation-plugins/transformers/view",
@@ -209,6 +212,9 @@ drasi-computation-contracts = { version = "0.11.3", path = "components/computati
 drasi-query-common = { version = "0.11.3", path = "components/query-common" }
 drasi-computation-plugin-sdk = { version = "0.11.3", path = "components/computation-plugin-sdk" }
 drasi-computation-transformer-view = { version = "0.11.3", path = "components/computation-plugins/transformers/view" }
+drasi-computation-transformer-geometry = { version = "0.11.3", path = "components/computation-plugins/transformers/geometry" }
+drasi-computation-transformer-optimization = { version = "0.11.3", path = "components/computation-plugins/transformers/optimization" }
+drasi-computation-transformer-policy = { version = "0.11.3", path = "components/computation-plugins/transformers/policy" }
 drasi-computation-bootstrap-http = { version = "0.11.3", path = "components/computation-plugins/bootstrappers/http" }
 drasi-computation-bootstrap-mysql = { version = "0.11.3", path = "components/computation-plugins/bootstrappers/mysql" }
 drasi-computation-bootstrap-mssql = { path = "components/computation-plugins/bootstrappers/mssql" }
