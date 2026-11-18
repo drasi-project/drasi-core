@@ -28,6 +28,18 @@ The solver is [`good_lp`](https://crates.io/crates/good_lp) with the pure-Rust
 - **Deterministic output.** Sets are materialized in key order, and solver output
   is cleaned of numerical noise. Tie-breaking and output identities therefore do
   not depend on input order.
+- **Upstream snapshots.** A continuous query keeps its bootstrap results to
+  itself, so an optimization fed by queries would otherwise see only rows that
+  change after it starts. When the host binds an `output_snapshots` dependency:
+  - at the first start, every incoming edge on `in` is read from its producer's
+    snapshot, and that dataset is solved and published before any live input;
+  - live envelopes that a snapshot already covers (same producer epoch, sequence
+    at or below the snapshot's) are skipped;
+  - an upstream that restarts (a new producer epoch) is read again, and its
+    elements that are gone are removed.
+
+  This uses the SDK's `UpstreamSnapshots`. Without the dependency, behaviour is
+  unchanged.
 - **Lifecycle.** The output is volatile and owns no durable state.
   - `Pause` stops launching solves and stops publication; `Resume` catches up.
   - `Stop` abandons in-flight work; drain behaves like abort.

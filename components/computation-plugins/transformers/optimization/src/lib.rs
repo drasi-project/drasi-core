@@ -96,6 +96,7 @@ impl Factory for OptimizationFactory {
                 output_progress: Some(OutputProgress::Origin),
                 erases_owned_state: true,
                 management: true,
+                binds_inputs: true,
                 update_modes: vec![ComponentUpdateMode::InPlace, ComponentUpdateMode::Recreate],
                 ..Capabilities::default()
             },
@@ -105,7 +106,22 @@ impl Factory for OptimizationFactory {
     fn create(
         &self,
         request: &CreateRequest,
+        control: ControlSender,
+    ) -> anyhow::Result<CreatedComponent> {
+        self.create_with_output_snapshots(request, control, None)
+    }
+
+    /// With an `output_snapshots` dependency, the transformer initializes
+    /// from its upstream outputs' snapshots (see the README).
+    fn supports_output_snapshots(&self) -> bool {
+        true
+    }
+
+    fn create_with_output_snapshots(
+        &self,
+        request: &CreateRequest,
         _control: ControlSender,
+        snapshots: Option<drasi_computation_plugin_sdk::NativeOutputSnapshots>,
     ) -> anyhow::Result<CreatedComponent> {
         let config = OptimizationConfig::parse(request.configuration.clone())?;
         Ok(
@@ -113,6 +129,10 @@ impl Factory for OptimizationFactory {
                 self.metadata().descriptor(request.id.clone())?,
                 config,
                 request.scope.as_ref(),
+                &request.inputs,
+                snapshots.map(|snapshots| {
+                    Arc::new(snapshots) as Arc<dyn drasi_computation_plugin_sdk::SnapshotSource>
+                }),
             )?))
             .into(),
         )
