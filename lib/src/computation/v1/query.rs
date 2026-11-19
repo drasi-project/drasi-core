@@ -1737,18 +1737,22 @@ impl Transformer for ContinuousQueryTransformer {
 
     async fn on_wakeup(&mut self) -> anyhow::Result<Vec<OutputEnvelope>> {
         self.processing_context = Default::default();
+        // Box inherent futures before wrapping them: unoptimized builds otherwise copy
+        // the large query future through each observation frame and overflow 2 MiB stacks.
         if !self.pending_output.is_empty() {
             let observation = self.scheduled_observation("output_replay")?;
-            return observation.run_outputs(self.replay_output()).await;
+            return observation
+                .run_outputs(Box::pin(self.replay_output()))
+                .await;
         }
         if let Some(envelope) = self.pending_input_replay.front().cloned() {
             let observation = self.scheduled_observation("input_replay")?;
             let output = observation
-                .run_outputs(self.transform_input(InputEnvelope {
+                .run_outputs(Box::pin(self.transform_input(InputEnvelope {
                     execution_context: Default::default(),
                     port: PortId::try_new("in")?,
                     envelope,
-                }))
+                })))
                 .await?;
             self.pending_input_replay.pop_front();
             return Ok(output);

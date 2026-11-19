@@ -421,7 +421,10 @@ mod tests {
                 ),
             );
             let indexes = provider
-                .create_indexes("graph", &crate::test_helpers::named_component_id("retained"))
+                .create_indexes(
+                    "graph",
+                    &crate::test_helpers::named_component_id("retained"),
+                )
                 .await
                 .unwrap();
             let mut codec = EnvelopeCodec::new(NonZeroUsize::new(1 << 20).unwrap());

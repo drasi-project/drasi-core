@@ -386,12 +386,13 @@ mod tests {
     #[cfg(feature = "tracing-context")]
     async fn scoped_workers() {
         use crate::telemetry::{ExecutionContext, ExecutionScope, TelemetryScope, TraceContextV1};
+        const SOURCE_ID: &str = "00000000-0000-4000-8000-000000000001";
         let context = ExecutionContext::new(TraceContextV1::new([1; 16], [2; 8], 0, None).unwrap());
         let scope = ExecutionScope::new(context.clone()).with_component(
             TelemetryScope::graph("instance", "graph")
                 .unwrap()
                 .component(
-                    crate::ComponentId::try_new("source").unwrap(),
+                    crate::ComponentId::try_new(SOURCE_ID).unwrap(),
                     crate::ComponentRole::Source,
                     crate::ComponentSemanticKind::Source,
                 ),
@@ -404,7 +405,7 @@ mod tests {
                     tokio::task::yield_now().await;
                     let owner = ExecutionScope::current_component().unwrap();
                     assert_eq!(owner.generation, 7);
-                    assert_eq!(owner.identity.component_id().unwrap().as_str(), "source");
+                    assert_eq!(owner.identity.component_id().unwrap().as_str(), SOURCE_ID);
                 });
                 let expected = context.clone();
                 let child = spawn_scoped_worker(async move {

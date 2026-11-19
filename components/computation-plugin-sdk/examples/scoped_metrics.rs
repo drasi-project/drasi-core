@@ -36,7 +36,7 @@ fn main() -> anyhow::Result<()> {
         Some(recorder),
         Arc::new(PluginTelemetryConfig {
             scope: TelemetryScope::graph("example", "graph")?.component(
-                ComponentId::try_new("feed")?,
+                ComponentId::generate(),
                 ComponentRole::Source,
                 ComponentSemanticKind::Source,
             ),

@@ -705,25 +705,30 @@ impl ReactionBase {
                 .iter()
                 .filter(|diff| !matches!(diff, crate::channels::ResultDiff::Noop))
                 .count();
-            if change_count == 0 {
-                continue;
-            }
-            let telemetry = self.worker_telemetry().await;
-            let input = telemetry.reaction_input_context(query_id.as_str(), change_count, &context);
-            let mut work = telemetry.reaction_work();
-            let observation = telemetry
-                .reaction(&context, change_count)
-                .map_err(|error| log::warn!("Cannot observe reaction handling: {error}"))
-                .ok();
-            let result = match observation {
-                Some(observation) => observation.run(handler(Arc::clone(&event))).await,
-                None => handler(Arc::clone(&event)).await,
+            // Empty results carry no observable work, but still reach the handler and
+            // advance the checkpoint; only reaction telemetry is skipped for them.
+            let result = if change_count == 0 {
+                handler(Arc::clone(&event)).await
+            } else {
+                let telemetry = self.worker_telemetry().await;
+                let input =
+                    telemetry.reaction_input_context(query_id.as_str(), change_count, &context);
+                let mut work = telemetry.reaction_work();
+                let observation = telemetry
+                    .reaction(&context, change_count)
+                    .map_err(|error| log::warn!("Cannot observe reaction handling: {error}"))
+                    .ok();
+                let result = match observation {
+                    Some(observation) => observation.run(handler(Arc::clone(&event))).await,
+                    None => handler(Arc::clone(&event)).await,
+                };
+                if result.is_ok() {
+                    work.handled(query_id.as_str(), change_count, 1);
+                    input.completed();
+                }
+                work.finish(result.is_ok());
+                result
             };
-            if result.is_ok() {
-                work.handled(query_id.as_str(), change_count, 1);
-                input.completed();
-            }
-            work.finish(result.is_ok());
             match result {
                 Err(e) => {
                     error!(
