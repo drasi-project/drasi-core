@@ -82,11 +82,14 @@ def install_protoc(destination):
             raise ValueError("protoc archive exceeds the extracted size limit")
         for member in members:
             path = PurePosixPath(member.filename)
+            # On Windows, ZipInfo.filename converts backslashes to "/"; only
+            # orig_filename preserves the raw archive name.
+            raw_name = member.orig_filename
             if (
                 path.is_absolute()
                 or ".." in path.parts
-                or "\\" in member.filename
-                or ":" in member.filename
+                or "\\" in raw_name
+                or ":" in raw_name
                 or stat.S_ISLNK(member.external_attr >> 16)
             ):
                 raise ValueError(f"Unsafe protoc archive entry: {member.filename}")

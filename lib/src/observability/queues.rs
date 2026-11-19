@@ -420,7 +420,10 @@ mod tests {
                     RocksDbMemoryBudget::from_total_budget_bytes(32 << 20).unwrap(),
                 ),
             );
-            let indexes = provider.create_indexes("graph", "retained").await.unwrap();
+            let indexes = provider
+                .create_indexes("graph", &crate::test_helpers::named_component_id("retained"))
+                .await
+                .unwrap();
             let mut codec = EnvelopeCodec::new(NonZeroUsize::new(1 << 20).unwrap());
             codec.register_schema(GraphChangeCodec::schema()).unwrap();
             IndexedEnvelopeStore::try_new_with_options(
