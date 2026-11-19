@@ -139,6 +139,7 @@ macro_rules! metric {
 /// are different views, not additive totals or globally deduplicated events.
 pub const METRICS: &[MetricDefinition] = &[
     metric!("drasi.component.up", Gauge, One, Basic, true, [], "graph lifecycle/readiness owner", "One after successful start and required readiness; zero when stopped, failed, exhausted or quiesced, not while idle"),
+    metric!("drasi.component.info", Gauge, One, Basic, true, ["component_name"], "graph component registry", "One for the component's current configured name; zero for a name it no longer has after a rename or removal"),
     metric!("drasi.component.calls", Counter, One, Basic, true, ["operation"], "graph execution or actual service adapter", "One per invocation including failure/cancellation; wrapper and adapter must not double count"),
     metric!("drasi.component.inputs_processed", Counter, One, Basic, true, ["completion"], "actual processing owner", "Successful input envelopes at the declared accepted/handled/transformed boundary; not continuation invocations"),
     metric!("drasi.component.outputs_emitted", Counter, One, Basic, true, [], "output validation owner", "Validated output envelopes per attempt before fan-out, not subscriber deliveries"),
@@ -151,6 +152,7 @@ pub const METRICS: &[MetricDefinition] = &[
     metric!("drasi.queue.depth_max", Gauge, One, Basic, false, ["queue_id"], "physical queue provider", "Peak pending deliveries for the binding; not duplicated for shared edges or multicast"),
     metric!("drasi.queue.blocked_enqueues", Counter, One, Basic, false, ["queue_id"], "physical queue provider", "Provider-observed blocking events, not reconstructed from coalescing inspection"),
     metric!("drasi.queue.drops", Counter, One, Basic, false, ["queue_id"], "physical queue provider", "Provider-observed discarded deliveries; lossy acceptance can still discard"),
+    metric!("drasi.queue.edge_info", Gauge, One, Basic, false, ["queue_id", "from_component_id", "to_component_id"], "physical queue provider", "One for each graph edge bound to the physical queue; zero once that edge or the queue's binding is gone"),
     metric!("drasi.reaction.checkpoint_lag_events", Gauge, One, Persistence, true, ["reaction_id", "query_id"], "ordinary reaction checkpoint owner", "Known checkpoint lag only; no fabricated zero for opaque sinks"),
     metric!("drasi.errors", Counter, One, Basic, true, ["error_kind"], "failed operation owner", "One failed operation, not each reporting or propagation of its cause"),
     metric!("drasi.query.engine.duration", Histogram, Seconds, Basic, true, ["query_id", "phase"], "query evaluator", "Actual inner evaluation duration, excluding result hooks/commit and output-only replay"),

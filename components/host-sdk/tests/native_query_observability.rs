@@ -138,9 +138,7 @@ fn create_with_text(
     let factory = plugin
         .factories()
         .iter()
-        .find(|factory| {
-            factory.metadata().implementation.name.as_ref() == "drasi.experimental/indexed-query"
-        })
+        .find(|factory| factory.metadata().implementation.name.as_ref() == "drasi.query/indexed")
         .context("indexed query factory was not exported")?;
     execution.in_scope(|| {
         factory.create_component_with_processing(
@@ -276,19 +274,13 @@ async fn standalone_volatile_evaluation_does_not_invent_storage_commit() -> Resu
     let metrics = RecordingMetrics::default();
     let graph = graph(&metrics, "standalone-volatile", TelemetryProfile::Debug)?;
     let execution = binding(&graph, "standalone-volatile")?;
-    let factory = plugin
-        .factories()
-        .iter()
-        .find(|factory| {
-            factory.metadata().implementation.name.as_ref() == "drasi.experimental/volatile-query"
-        })
-        .context("volatile query factory")?;
-    let mut query = execution.in_scope(|| {
-        factory.create_component(
-        ComponentId::try_new(QUERY_ID)?,
-        serde_json::json!({"query": "MATCH (n:Item) RETURN n.value AS value", "volatile": true}),
-    )
-    })?;
+    let mut query = create(
+        &plugin,
+        &execution,
+        "standalone-volatile",
+        Arc::new(InMemoryComputationProvider),
+        true,
+    )?;
     query.initialize(&hooks::initialize_ctx()).await?;
     query.start(&hooks::start_ctx()).await?;
     let output = execution
@@ -331,9 +323,7 @@ async fn bootstrap_metrics(instance: &str) -> Result<()> {
     let factory = plugin
         .factories()
         .iter()
-        .find(|factory| {
-            factory.metadata().implementation.name.as_ref() == "drasi.experimental/indexed-query"
-        })
+        .find(|factory| factory.metadata().implementation.name.as_ref() == "drasi.query/indexed")
         .context("indexed query factory")?;
     let mut query = execution.in_scope(|| factory.create_component_with_processing(
         ComponentId::try_new(QUERY_ID)?,
@@ -574,9 +564,7 @@ async fn non_atomic_evaluation_and_publication_keep_one_input_and_result_count()
     let factory = plugin
         .factories()
         .iter()
-        .find(|factory| {
-            factory.metadata().implementation.name.as_ref() == "drasi.experimental/indexed-query"
-        })
+        .find(|factory| factory.metadata().implementation.name.as_ref() == "drasi.query/indexed")
         .context("indexed query factory")?;
     let mut query = execution.in_scope(|| factory.create_component_with_processing_publication(
         ComponentId::try_new(QUERY_ID)?,
@@ -691,9 +679,7 @@ async fn ordinary_query_processes_sequential_inputs(instance: &str) -> Result<()
     let native = plugin
         .factories()
         .iter()
-        .find(|factory| {
-            factory.metadata().implementation.name.as_ref() == "drasi.experimental/indexed-query"
-        })
+        .find(|factory| factory.metadata().implementation.name.as_ref() == "drasi.query/indexed")
         .cloned()
         .context("indexed query factory")?
         .for_ordinary_queries()?;
@@ -836,7 +822,7 @@ mod traces {
                 .with_context(ExecutionContext::new(TraceContextV1::new([41; 16], [42; 8], 1, None)?));
             let plugin = plugin()?;
             let factory = plugin.factories().iter()
-                .find(|factory| factory.metadata().implementation.name.as_ref() == "drasi.experimental/indexed-query")
+                .find(|factory| factory.metadata().implementation.name.as_ref() == "drasi.query/indexed")
                 .context("indexed query factory")?;
             let mut query = execution.in_scope(|| factory.create_component_with_processing(
                 ComponentId::try_new(QUERY_ID)?,
@@ -958,7 +944,7 @@ mod traces {
                 .iter()
                 .find(|factory| {
                     factory.metadata().implementation.name.as_ref()
-                        == "drasi.experimental/indexed-query"
+                        == "drasi.query/indexed"
                 })
                 .context("indexed query factory")?
                 .clone();

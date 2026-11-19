@@ -3193,10 +3193,16 @@ fn construct_pipe(
                                                 error.into(),
                                             ),
                                         })?;
+                                    let edge_info = telemetry.queue_edge_info(
+                                        &queue_id,
+                                        edge.definition.from.component.as_str(),
+                                        edge.definition.to.component.as_str(),
+                                    );
                                     provided.control =
                                         crate::computation::v1::bounded_pipe::observed_control(
                                             provided.control,
                                             binding,
+                                            edge_info,
                                         );
                                     controls.0.insert(index, provided.control.clone());
                                 }
@@ -7785,7 +7791,7 @@ fn handle_command<'a>(
                                 graph.snapshot.readiness_required.remove(&component);
                             }
                             graph.snapshot.revision = GraphRevision(revision);
-                            graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
+                            graph.publish_desired();
                             update(graph, |state| state.revision = GraphRevision(revision));
                         }
                         Ok(())
@@ -7844,7 +7850,7 @@ fn handle_command<'a>(
                             .expect("component").output_streams.insert(port, stream);
                         graph.snapshot.nodes = nodes.into();
                         graph.snapshot.revision = revision;
-                        graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
+                        graph.publish_desired();
                         update(graph, |state| state.revision = revision);
                         Ok(())
                     })();
@@ -8157,7 +8163,7 @@ fn handle_command<'a>(
                                     candidate.revision = GraphRevision(revision);
                                     graph.snapshot = candidate;
                                     graph.order = order;
-                                    graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
+                                    graph.publish_desired();
                                     update(graph, |state| state.revision = GraphRevision(revision));
                                     Ok(())
                                 })
@@ -8355,7 +8361,7 @@ fn handle_command<'a>(
                             graph.snapshot.revision = GraphRevision(graph.snapshot.revision.0.checked_add(1)
                                 .ok_or_else(|| topology("graph revision exhausted"))?);
                             graph.snapshot.lifecycle_policies.insert(component, policy);
-                            graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
+                            graph.publish_desired();
                             update(graph, |state| state.revision = graph.snapshot.revision);
                         }
                         Ok(graph.snapshot.revision)

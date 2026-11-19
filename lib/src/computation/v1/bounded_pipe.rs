@@ -62,10 +62,18 @@ pub struct ProvidedPipe {
 pub(crate) fn observed_control(
     control: Arc<dyn PipeControl>,
     binding: Option<Arc<crate::observability::QueueBinding>>,
+    edge_info: metrics::Gauge,
 ) -> Arc<dyn PipeControl> {
     struct ObservedControl {
         control: Arc<dyn PipeControl>,
         _binding: Arc<crate::observability::QueueBinding>,
+        edge_info: metrics::Gauge,
+    }
+    // The edge stays bound to its queue for exactly as long as this control lives.
+    impl Drop for ObservedControl {
+        fn drop(&mut self) {
+            self.edge_info.set(0.0);
+        }
     }
     #[async_trait]
     impl PipeControl for ObservedControl {
@@ -89,6 +97,7 @@ pub(crate) fn observed_control(
         Some(binding) => Arc::new(ObservedControl {
             control,
             _binding: binding,
+            edge_info,
         }),
         None => control,
     }

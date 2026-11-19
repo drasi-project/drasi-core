@@ -3949,7 +3949,7 @@ fn commit_desired(
         operations.forget_control(index);
     }
     drop(leases);
-    graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
+    graph.publish_desired();
     update(graph, |state| {
         state.revision = plan.desired.revision;
         for id in &plan.remove {

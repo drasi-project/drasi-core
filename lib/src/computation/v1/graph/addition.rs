@@ -1167,7 +1167,7 @@ pub(super) fn insert(
         .insert(id.clone(), resource_ids.clone());
     graph.resource_handles.extend(addition.bindings.resources);
     graph.next_resource_generation = next_resource_generation;
-    graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
+    graph.publish_desired();
     controller::update(graph, |state| {
         state.revision = revision;
         state.components.insert(

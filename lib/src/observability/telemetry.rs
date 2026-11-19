@@ -147,6 +147,7 @@ impl TelemetryOptions {
             plugin_limits,
             handled_branch,
             owners: Arc::new(Mutex::new(BTreeMap::new())),
+            component_names: Arc::default(),
         })
     }
 }
@@ -167,6 +168,16 @@ pub struct GraphTelemetry {
             BTreeMap<drasi_computation_contracts::ComponentId, Arc<super::ComponentObservations>>,
         >,
     >,
+    component_names: Arc<Mutex<ComponentNames>>,
+}
+
+/// `drasi.component.info` series: the current name gauge per component, plus
+/// the components and queue edges already warned about a failed registration.
+#[derive(Debug, Default)]
+struct ComponentNames {
+    current: BTreeMap<drasi_computation_contracts::ComponentId, (String, Option<metrics::Gauge>)>,
+    warned: std::collections::BTreeSet<drasi_computation_contracts::ComponentId>,
+    warned_edges: std::collections::BTreeSet<(String, String, String)>,
 }
 
 impl Default for GraphTelemetry {
@@ -182,11 +193,118 @@ impl Default for GraphTelemetry {
             plugin_limits: TelemetryLimits::default(),
             handled_branch: None,
             owners: Arc::new(Mutex::new(BTreeMap::new())),
+            component_names: Arc::default(),
         }
     }
 }
 
 impl GraphTelemetry {
+    /// Publishes each component's configured name as `drasi.component.info`:
+    /// one for the current name, zero for a name retired by rename or removal.
+    /// Names are metadata, so a registration failure is logged once per
+    /// component and never fails the graph operation that changed the name.
+    pub(crate) fn sync_component_names(
+        &self,
+        components: impl IntoIterator<
+            Item = (
+                drasi_computation_contracts::ComponentId,
+                drasi_computation_contracts::ComponentRole,
+                drasi_computation_contracts::ComponentSemanticKind,
+                String,
+            ),
+        >,
+    ) {
+        let (Some(context), Some(scope)) = (&self.metrics, &self.scope) else {
+            return;
+        };
+        let Ok(mut names) = self.component_names.lock() else {
+            log::error!("Component name telemetry state poisoned");
+            return;
+        };
+        let mut present = std::collections::BTreeSet::new();
+        for (id, role, kind, name) in components {
+            present.insert(id.clone());
+            if names
+                .current
+                .get(&id)
+                .is_some_and(|(current, _)| *current == name)
+            {
+                continue;
+            }
+            if let Some((_, Some(retired))) = names.current.remove(&id) {
+                retired.set(0.0);
+            }
+            let registered = context
+                .framework(
+                    &self.policy,
+                    &scope.component(id.clone(), role, kind),
+                    "drasi.component.info",
+                    [("component_name".to_string(), name.clone())],
+                )
+                .and_then(RegisteredMetric::gauge);
+            let gauge = match registered {
+                Ok(gauge) => {
+                    gauge.set(1.0);
+                    Some(gauge)
+                }
+                Err(error) => {
+                    if names.warned.insert(id.clone()) {
+                        log::warn!(
+                            "Omitting drasi.component.info for component {id}: {error}"
+                        );
+                    }
+                    None
+                }
+            };
+            names.current.insert(id, (name, gauge));
+        }
+        names.current.retain(|id, (_, gauge)| {
+            let keep = present.contains(id);
+            if let (false, Some(gauge)) = (keep, gauge) {
+                gauge.set(0.0);
+            }
+            keep
+        });
+    }
+
+    /// Registers `drasi.queue.edge_info` for one graph edge bound to a physical
+    /// queue and sets it to one. Like component names, this is metadata: a
+    /// registration failure is logged once per edge and yields a no-op gauge.
+    pub(crate) fn queue_edge_info(&self, queue_id: &str, from: &str, to: &str) -> metrics::Gauge {
+        let registered = self
+            .register(
+                "drasi.queue.edge_info",
+                vec![
+                    ("queue_id".into(), queue_id.into()),
+                    ("from_component_id".into(), from.into()),
+                    ("to_component_id".into(), to.into()),
+                ],
+            )
+            .and_then(RegisteredMetric::gauge);
+        match registered {
+            Ok(gauge) => {
+                gauge.set(1.0);
+                gauge
+            }
+            Err(error) => {
+                let first = self
+                    .component_names
+                    .lock()
+                    .map(|mut names| {
+                        names
+                            .warned_edges
+                            .insert((queue_id.into(), from.into(), to.into()))
+                    })
+                    .unwrap_or(true);
+                if first {
+                    log::warn!(
+                        "Omitting drasi.queue.edge_info for queue {queue_id} ({from} -> {to}): {error}"
+                    );
+                }
+                metrics::Gauge::noop()
+            }
+        }
+    }
     pub fn handled_branch_diagnostics(&self) -> Result<Option<HandledBranchDiagnostics>> {
         self.handled_branch
             .as_ref()

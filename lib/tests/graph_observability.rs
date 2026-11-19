@@ -1146,3 +1146,239 @@ async fn retained_and_multicast_backlog_counts_physical_records_not_subscribers_
     );
     graph.dispose().await.unwrap();
 }
+
+/// Stays pending, so the graph keeps running while the test drives its control.
+struct IdleSource(ComponentDescriptor);
+
+#[async_trait]
+impl ComputationComponent for IdleSource {
+    fn description(&self) -> ComponentDescription {
+        ComponentDescription::undeclared()
+    }
+    fn descriptor(&self) -> &ComponentDescriptor {
+        &self.0
+    }
+    drasi_lib::passive_component_lifecycle!();
+}
+
+#[async_trait]
+impl EnvelopeSource for IdleSource {
+    async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
+        std::future::pending().await
+    }
+}
+
+fn named_pipeline(metrics: &RecordingMetrics) -> ComputationGraph {
+    ComputationGraph::builder("names")
+        .with_telemetry(settings(TelemetryProfile::Basic, false, metrics))
+        .source(
+            name("source"),
+            Box::new(IdleSource(descriptor(&id("source"), &[], &["out"]))),
+        )
+        .sink(
+            name("one"),
+            Box::new(CollectSink::new(id("one"), "one", &["in"], Arc::default())),
+        )
+        .bind_stream(endpoint(&id("source"), "out"), stream("source"))
+        .connect(
+            edge(&id("source"), &id("one")),
+            Box::new(BoundedPipeConfig { capacity: 1 }),
+        )
+        .build()
+        .unwrap()
+}
+
+fn component_info(metrics: &RecordingMetrics, component: &str, component_name: &str) -> Vec<f64> {
+    metrics
+        .matching(
+            "drasi.component.info",
+            &[
+                ("component_id", id(component).as_str()),
+                ("component_name", component_name),
+            ],
+        )
+        .into_iter()
+        .map(|values| values.gauge)
+        .collect()
+}
+
+#[tokio::test]
+async fn component_info_reports_current_names_and_zeroes_retired_ones() {
+    let metrics = RecordingMetrics::default();
+    let mut graph = named_pipeline(&metrics);
+    let run = graph.run().unwrap();
+    let control = run.control();
+    let (_, ()) = tokio::join!(run, async {
+        control.deployment_report().await.unwrap();
+        assert_eq!(component_info(&metrics, "source", "source"), vec![1.0]);
+        assert_eq!(component_info(&metrics, "one", "one"), vec![1.0]);
+        assert!(metrics
+            .labels("drasi.component.info")
+            .iter()
+            .all(|labels| labels.contains_key("component_kind")));
+
+        control
+            .rename_component(&id("one"), name("renamed"))
+            .await
+            .unwrap();
+        assert_eq!(component_info(&metrics, "one", "one"), vec![0.0]);
+        assert_eq!(component_info(&metrics, "one", "renamed"), vec![1.0]);
+
+        let preview = control
+            .preview(
+                control.desired_snapshot().revision,
+                vec![DesiredMutation::RemoveComponents {
+                    selection: GraphSelection::Exact(vec![id("one")]),
+                    policy: RemovalPolicy::Cascade,
+                }],
+            )
+            .await
+            .unwrap();
+        control
+            .reconcile(preview, TopologyBindings::default())
+            .await
+            .unwrap();
+        assert_eq!(component_info(&metrics, "one", "renamed"), vec![0.0]);
+        assert_eq!(component_info(&metrics, "source", "source"), vec![1.0]);
+        control.cancel();
+    });
+    graph.dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn component_info_rename_to_an_overlong_name_still_succeeds() {
+    let metrics = RecordingMetrics::default();
+    let mut graph = named_pipeline(&metrics);
+    let run = graph.run().unwrap();
+    let control = run.control();
+    let long = "a".repeat(1_100);
+    let (_, ()) = tokio::join!(run, async {
+        control.deployment_report().await.unwrap();
+        control.rename_component(&id("one"), name(&long)).await.unwrap();
+        assert_eq!(
+            control
+                .desired_snapshot()
+                .component_by_id(&id("one"))
+                .unwrap()
+                .name
+                .as_str(),
+            long
+        );
+        assert_eq!(component_info(&metrics, "one", "one"), vec![0.0]);
+        assert!(metrics
+            .labels("drasi.component.info")
+            .iter()
+            .all(|labels| labels.get("component_name") != Some(&long)));
+        control.cancel();
+    });
+    graph.dispose().await.unwrap();
+}
+
+fn edge_info(metrics: &RecordingMetrics) -> Vec<(BTreeMap<String, String>, f64)> {
+    metrics
+        .labels("drasi.queue.edge_info")
+        .into_iter()
+        .map(|labels| {
+            let selection: Vec<(&str, &str)> = labels
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect();
+            let gauge = metrics.matching("drasi.queue.edge_info", &selection)[0].gauge;
+            (labels, gauge)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn queue_edge_info_names_both_ends_of_each_bound_edge() {
+    let metrics = RecordingMetrics::default();
+    let telemetry = settings(TelemetryProfile::Basic, false, &metrics);
+    let channel = QosChannel::volatile(QosChannelDefinition {
+        stream: stream("source"),
+        capacity: std::num::NonZeroUsize::new(8).unwrap(),
+        durable: false,
+        retention: RetentionPolicy::Backpressure,
+        subscribers: BTreeMap::from([
+            ("one".into(), SubscriptionStart::Earliest),
+            ("two".into(), SubscriptionStart::Earliest),
+        ]),
+    })
+    .unwrap();
+    let resource = ResourceId::try_new("physical-channel").unwrap();
+    let mut graph = ComputationGraph::builder("multicast-edges")
+        .with_telemetry(telemetry)
+        .declare_resource(ResourceSpecification {
+            id: resource.clone(),
+            role: ResourceRole::StateStore,
+            ownership: ResourceOwnership::Borrowed,
+            binding: "physical-channel".into(),
+        })
+        .unwrap()
+        .provide_resource(resource.clone(), channel.resource())
+        .unwrap()
+        .source(
+            name("source"),
+            Box::new(IdleSource(descriptor(&id("source"), &[], &["out"]))),
+        )
+        .sink(
+            name("one"),
+            Box::new(CollectSink::new(id("one"), "one", &["in"], Arc::default())),
+        )
+        .sink(
+            name("two"),
+            Box::new(CollectSink::new(id("two"), "two", &["in"], Arc::default())),
+        )
+        .bind_stream(endpoint(&id("source"), "out"), stream("source"))
+        .connect(
+            edge(&id("source"), &id("one")),
+            Box::new(channel.definition().pipe(resource.clone(), "one")),
+        )
+        .connect(
+            edge(&id("source"), &id("two")),
+            Box::new(channel.definition().pipe(resource, "two")),
+        )
+        .build()
+        .unwrap();
+    let run = graph.run().unwrap();
+    let control = run.control();
+    let (_, ()) = tokio::join!(run, async {
+        control.deployment_report().await.unwrap();
+        let edges = edge_info(&metrics);
+        assert_eq!(edges.len(), 2, "{edges:?}");
+        let queue = &edges[0].0["queue_id"];
+        let mut targets = Vec::new();
+        for (labels, gauge) in &edges {
+            assert_eq!(&labels["queue_id"], queue);
+            assert_eq!(labels["from_component_id"], id("source").as_str());
+            assert_eq!(*gauge, 1.0);
+            targets.push(labels["to_component_id"].clone());
+        }
+        targets.sort();
+        let mut expected = vec![id("one").to_string(), id("two").to_string()];
+        expected.sort();
+        assert_eq!(targets, expected);
+        control.cancel();
+    });
+    graph.dispose().await.unwrap();
+    assert!(edge_info(&metrics).iter().all(|(_, gauge)| *gauge == 0.0));
+}
+
+#[tokio::test]
+async fn queue_edge_info_reports_plain_edge_queues() {
+    let metrics = RecordingMetrics::default();
+    let mut graph = named_pipeline(&metrics);
+    let run = graph.run().unwrap();
+    let control = run.control();
+    let (_, ()) = tokio::join!(run, async {
+        control.deployment_report().await.unwrap();
+        let edges = edge_info(&metrics);
+        assert_eq!(edges.len(), 1, "{edges:?}");
+        let (labels, gauge) = &edges[0];
+        assert!(labels["queue_id"].starts_with("edge:"), "{labels:?}");
+        assert_eq!(labels["from_component_id"], id("source").as_str());
+        assert_eq!(labels["to_component_id"], id("one").as_str());
+        assert_eq!(*gauge, 1.0);
+        control.cancel();
+    });
+    graph.dispose().await.unwrap();
+}

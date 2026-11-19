@@ -2295,6 +2295,29 @@ impl ComputationGraph {
         self.open_run(false)
     }
 
+    /// Publishes the current desired snapshot and keeps the component-name
+    /// telemetry in step with it (every add, removal and rename publishes).
+    pub(super) fn publish_desired(&mut self) {
+        self.desired.send_replace(Arc::new(self.snapshot.clone()));
+        self.sync_component_names();
+    }
+
+    fn sync_component_names(&self) {
+        self.observability
+            .telemetry
+            .sync_component_names(self.snapshot.nodes.iter().map(|node| {
+                (
+                    node.descriptor.id().clone(),
+                    node.role,
+                    drasi_computation_contracts::ComponentSemanticKind::for_component(
+                        node.role,
+                        &node.descriptor,
+                    ),
+                    node.name.to_string(),
+                )
+            }));
+    }
+
     fn open_run(&mut self, auto_start: bool) -> GraphResult<GraphRun<'_>> {
         let state = self.state();
         if !matches!(state, GraphState::Ready | GraphState::Completed) {
@@ -2312,6 +2335,7 @@ impl ComputationGraph {
         self.inspector
             .publish(self.desired.borrow().clone(), self.observed());
         self.desired = watch::channel(Arc::new(self.snapshot.clone())).0;
+        self.sync_component_names();
         registry::publish(self);
         self.peers = if self.observability.telemetry.policy().metrics_enabled() {
             let telemetry = self.observability.telemetry.clone();
