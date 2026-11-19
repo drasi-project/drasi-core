@@ -108,6 +108,22 @@ pub fn definition() -> anyhow::Result<sdk::PluginDefinition> {
 
 struct Factory(ComponentRole);
 impl sdk::Factory for Factory {
+    fn configuration_details(&self) -> sdk::ConfigDetails {
+        sdk::ConfigDetails {
+            fields: sdk::Factory::metadata(self)
+                .configuration
+                .fields
+                .into_keys()
+                .map(|name| {
+                    let details = sdk::configuration::ConfigFieldDetails {
+                        description: format!("Fixture field {name}."),
+                        ..Default::default()
+                    };
+                    (name, details)
+                })
+                .collect(),
+        }
+    }
     fn describe(
         &self,
         _: &sdk::wire::DescribeRequest,
@@ -150,18 +166,20 @@ impl sdk::Factory for Factory {
                 })
                 .collect(),
             completion: (self.0 == ComponentRole::Sink).then_some(SinkCompletion::Handled),
-            capabilities: sdk::Capabilities::default(),
+            capabilities: sdk::Capabilities {
+                services: sdk::HostServices {
+                    sink_batching: self.0 == ComponentRole::Sink,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
         }
-    }
-
-    fn supports_sink_batching(&self) -> bool {
-        self.0 == ComponentRole::Sink
     }
 
     fn create(
         &self,
         request: &sdk::CreateRequest,
-        _: sdk::ControlSender,
+        _: sdk::ControlSender, _: sdk::ServiceBindings,
     ) -> anyhow::Result<sdk::CreatedComponent> {
         for field in ["trace", "sampled", "block"] {
             anyhow::ensure!(

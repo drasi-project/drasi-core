@@ -40,6 +40,22 @@ fn observations() -> &'static Mutex<Vec<Observation>> {
 
 struct Factory;
 impl sdk::Factory for Factory {
+    fn configuration_details(&self) -> sdk::ConfigDetails {
+        sdk::ConfigDetails {
+            fields: sdk::Factory::metadata(self)
+                .configuration
+                .fields
+                .into_keys()
+                .map(|name| {
+                    let details = sdk::configuration::ConfigFieldDetails {
+                        description: format!("Fixture field {name}."),
+                        ..Default::default()
+                    };
+                    (name, details)
+                })
+                .collect(),
+        }
+    }
     fn describe(
         &self,
         _: &sdk::wire::DescribeRequest,
@@ -64,7 +80,7 @@ impl sdk::Factory for Factory {
     fn create(
         &self,
         request: &sdk::CreateRequest,
-        _: sdk::ControlSender,
+        _: sdk::ControlSender, _: sdk::ServiceBindings,
     ) -> anyhow::Result<sdk::CreatedComponent> {
         let emitter = ScopedMetricEmitter::current()?;
         let counter = emitter.counter(

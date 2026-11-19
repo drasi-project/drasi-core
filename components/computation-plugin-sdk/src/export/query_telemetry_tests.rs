@@ -11,6 +11,22 @@ use drasi_computation_contracts::{
 struct QueryFactory(bool);
 
 impl Factory for QueryFactory {
+    fn configuration_details(&self) -> crate::ConfigDetails {
+        crate::ConfigDetails {
+            fields: Factory::metadata(self)
+                .configuration
+                .fields
+                .into_keys()
+                .map(|name| {
+                    let details = crate::configuration::ConfigFieldDetails {
+                        description: format!("Fixture field {name}."),
+                        ..Default::default()
+                    };
+                    (name, details)
+                })
+                .collect(),
+        }
+    }
     fn describe(
         &self,
         _request: &crate::wire::DescribeRequest,
@@ -50,7 +66,7 @@ impl Factory for QueryFactory {
         self.0
     }
 
-    fn create(&self, _: &CreateRequest, _: ControlSender) -> anyhow::Result<CreatedComponent> {
+    fn create(&self, _: &CreateRequest, _: ControlSender, _: crate::ServiceBindings,) -> anyhow::Result<CreatedComponent> {
         panic!("capability discovery must not construct a query")
     }
 }

@@ -526,6 +526,22 @@ fn missing_query_extension_is_optional_unless_explicitly_required() -> anyhow::R
 struct QueryFactory(bool);
 
 impl sdk::Factory for QueryFactory {
+    fn configuration_details(&self) -> sdk::ConfigDetails {
+        sdk::ConfigDetails {
+            fields: sdk::Factory::metadata(self)
+                .configuration
+                .fields
+                .into_keys()
+                .map(|name| {
+                    let details = sdk::configuration::ConfigFieldDetails {
+                        description: format!("Fixture field {name}."),
+                        ..Default::default()
+                    };
+                    (name, details)
+                })
+                .collect(),
+        }
+    }
     fn describe(
         &self,
         _request: &sdk::wire::DescribeRequest,
@@ -568,7 +584,7 @@ impl sdk::Factory for QueryFactory {
     fn create(
         &self,
         _: &sdk::CreateRequest,
-        _: sdk::ControlSender,
+        _: sdk::ControlSender, _: sdk::ServiceBindings,
     ) -> anyhow::Result<sdk::CreatedComponent> {
         panic!("required-capability validation must precede construction")
     }
