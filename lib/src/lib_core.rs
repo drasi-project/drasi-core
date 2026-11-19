@@ -922,7 +922,8 @@ impl DrasiLib {
                     .wait(
                         "closing configuration storage",
                         true,
-                        management.close_with_outcome(),
+                        // A terminal failure can never confirm cleanup; release anyway.
+                        management.close_with_outcome(processing_complete),
                     )
                     .await
                 {

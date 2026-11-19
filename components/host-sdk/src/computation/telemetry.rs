@@ -466,7 +466,9 @@ unsafe extern "C" fn begin_query(context: *mut c_void, bytes: abi::BorrowedBytes
                 .as_ref()
                 .ok_or(TelemetryError::Retired)?
                 .context();
-            let encoded_context = context.encode()?;
+            // The plugin only parents spans from this trace-only V1 encoding; the host
+            // keeps the full context, including handled-branch timing, for outputs.
+            let encoded_context = context.clone().without_handled_branch().encode()?;
             let mut queries = state.queries.lock().map_err(|_| TelemetryError::Poisoned)?;
             queries.next = queries.next.checked_add(1).ok_or(TelemetryError::Capacity(
                 "native query observation identities",

@@ -86,7 +86,12 @@ enum Command {
         oneshot::Sender<Result<Vec<ConfigurationSnapshotSummary>>>,
     ),
     DeleteSnapshot(String, u64, oneshot::Sender<Result<bool>>),
-    Close(oneshot::Sender<Result<()>>),
+    /// `confirm_cleanup` requires confirmed instance cleanup before a shutdown close;
+    /// a terminal shutdown failure releases the store without it.
+    Close {
+        reply: oneshot::Sender<Result<()>>,
+        confirm_cleanup: bool,
+    },
 }
 
 pub(crate) struct Management {
@@ -123,14 +128,21 @@ impl ManagementTask {
         }
     }
 
-    async fn close(&mut self, commands: &mpsc::Sender<Command>) -> Result<()> {
+    async fn close(
+        &mut self,
+        commands: &mpsc::Sender<Command>,
+        confirm_cleanup: bool,
+    ) -> Result<()> {
         loop {
             match &mut self.close {
                 CloseProgress::Open => match commands.reserve().await {
                     Ok(permit) => {
                         let (send, receive) = oneshot::channel();
                         self.close = CloseProgress::Requested(receive);
-                        permit.send(Command::Close(send));
+                        permit.send(Command::Close {
+                            reply: send,
+                            confirm_cleanup,
+                        });
                     }
                     Err(_) => {
                         self.close = CloseProgress::Joining(Some(ManagementError::Closed.into()));
@@ -699,12 +711,15 @@ impl Management {
             .await
     }
     pub(crate) async fn close(&self) -> Result<()> {
-        self.task.lock().await.close(&self.commands).await
+        self.task.lock().await.close(&self.commands, true).await
     }
 
-    pub(crate) async fn close_with_outcome(&self) -> (crate::ShutdownCompletion, Result<()>) {
+    pub(crate) async fn close_with_outcome(
+        &self,
+        confirm_cleanup: bool,
+    ) -> (crate::ShutdownCompletion, Result<()>) {
         let mut task = self.task.lock().await;
-        let result = task.close(&self.commands).await;
+        let result = task.close(&self.commands, confirm_cleanup).await;
         let completion =
             if task.close_acknowledged && matches!(&task.close, CloseProgress::Complete(_)) {
                 crate::ShutdownCompletion::Complete
@@ -1532,9 +1547,12 @@ impl Driver {
                     let result = self.store.delete_snapshot(&name, expected).await;
                     let _ = reply.send(result);
                 }
-                Command::Close(reply) => {
+                Command::Close {
+                    reply,
+                    confirm_cleanup,
+                } => {
                     let result = async {
-                        if self.shutdown.load(Ordering::Acquire) {
+                        if confirm_cleanup && self.shutdown.load(Ordering::Acquire) {
                             // Earlier admitted commands may have retained owners
                             // after the shutdown caller's processing check.
                             let graph = self.graph.shutdown_completion().await?;
