@@ -59,8 +59,8 @@ use tracing::Instrument;
 
 use crate::thread::SqliteCommand;
 use drasi_lib::context::workers::{
-    join_owned_worker_gracefully, spawn_owned_blocking_worker, spawn_owned_worker,
-    WorkerAlreadyOwned, WorkerCompletion,
+    join_owned_worker_gracefully, spawn_owned_component_blocking_worker,
+    spawn_owned_component_worker, WorkerAlreadyOwned, WorkerCompletion,
 };
 
 /// Cloneable handle for issuing SQL statements against the source-owned connection.
@@ -361,7 +361,7 @@ impl SqliteSource {
             tables: self.config.tables.clone(),
         };
         let source_id_for_thread = self.base.id.clone();
-        spawn_owned_blocking_worker(&self.database_worker, move || {
+        spawn_owned_component_blocking_worker(&self.database_worker, move || {
             let result = thread::run_sqlite_thread(thread_config, command_rx, event_tx, ready);
             if let Err(err) = &result {
                 log::error!("sqlite source thread '{source_id_for_thread}' failed: {err}");
@@ -405,7 +405,7 @@ impl SqliteSource {
             component_id = %source_id,
             component_type = "source"
         );
-        spawn_owned_worker(
+        spawn_owned_component_worker(
             &self.base.task_handle,
             async move {
                 while let Some(event) = event_rx.recv().await {
@@ -454,7 +454,7 @@ impl SqliteSource {
             let table_keys = self.config.table_keys.clone();
             let shutdown = self.shutdown_tx.subscribe();
             let status = self.base.status_handle();
-            spawn_owned_worker(&self.rest_worker, async move {
+            spawn_owned_component_worker(&self.rest_worker, async move {
                 let result =
                     rest_api::run_rest_api(listener, handle, tables, table_keys, shutdown).await;
                 if let Err(error) = &result {

@@ -405,7 +405,7 @@ async fn indexed_confirmation_cannot_discard_a_different_pending_output() -> Res
             1,
         )?)
         .await?;
-    let wrong = vec![OutputEnvelope {
+    let wrong = vec![OutputEnvelope { execution_context: Default::default(),
         port: output[0].port.clone(),
         envelope: output[0].envelope.reemit(999)?,
     }];
@@ -588,7 +588,7 @@ async fn process_exit_and_graph_replay() -> Result<()> {
             received.len() == 1,
             "graph must replay exactly one output without new input"
         );
-        vec![OutputEnvelope {
+        vec![OutputEnvelope { execution_context: Default::default(),
             port: PortId::try_new("out")?,
             envelope: received[0].clone(),
         }]

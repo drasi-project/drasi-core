@@ -28,7 +28,9 @@ use drasi_core::interface::OutboxPageLimits;
 use tokio::sync::{MappedMutexGuard, Mutex, MutexGuard, Notify};
 
 use super::journal_budget::JournalBudget;
-use super::{ChangeEnvelope, EnvelopeCodec, PipeError, ResourceCleanup};
+use super::{
+    ChangeEnvelope, EnvelopeCodec, EnvelopeMessage, ExecutionContext, PipeError, ResourceCleanup,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RetentionPolicy {
@@ -40,12 +42,16 @@ pub enum RetentionPolicy {
 pub struct StoredEnvelope {
     pub position: u64,
     pub envelope: ChangeEnvelope,
+    pub execution_context: ExecutionContext,
 }
 
 /// One bounded journal and consumer-progress boundary. Sharing one journal
 /// between simultaneously active bindings is rejected by generation leases.
 #[async_trait]
 pub trait RetainedEnvelopeStore: ResourceCleanup + Send + Sync {
+    fn observations(&self) -> Option<Arc<crate::observability::QueueObservations>> {
+        None
+    }
     fn capacity(&self) -> NonZeroUsize;
     /// Optional full binary-envelope byte quota, configured on the journal owner.
     fn max_bytes(&self) -> Option<NonZeroUsize> {
@@ -64,7 +70,15 @@ pub trait RetainedEnvelopeStore: ResourceCleanup + Send + Sync {
     fn revoke_generation(&self, generation: u64);
     fn generation(&self) -> u64;
     fn notify(&self) -> &Notify;
-    async fn append(&self, generation: u64, envelope: &ChangeEnvelope) -> Result<u64, PipeError>;
+    async fn append(&self, generation: u64, envelope: &ChangeEnvelope) -> Result<u64, PipeError> {
+        self.append_message(generation, &envelope.clone().into())
+            .await
+    }
+    async fn append_message(
+        &self,
+        generation: u64,
+        message: &EnvelopeMessage,
+    ) -> Result<u64, PipeError>;
     async fn next(&self, generation: u64, after: u64) -> Result<Option<StoredEnvelope>, PipeError>;
     async fn progress(&self, generation: u64) -> Result<u64, PipeError>;
     async fn acknowledge(&self, generation: u64, position: u64) -> Result<(), PipeError>;
@@ -90,12 +104,14 @@ fn check_generation(counter: &AtomicU64, generation: u64) -> Result<(), PipeErro
 #[derive(Default)]
 struct MemoryState {
     entries: BTreeMap<u64, ChangeEnvelope>,
+    contexts: BTreeMap<u64, ExecutionContext>,
     head: u64,
     progress: u64,
     budget: Option<JournalBudget>,
 }
 
 pub struct MemoryEnvelopeStore {
+    observations: Arc<crate::observability::QueueObservations>,
     state: std::sync::Mutex<MemoryState>,
     capacity: NonZeroUsize,
     max_bytes: Option<NonZeroUsize>,
@@ -127,6 +143,7 @@ impl MemoryEnvelopeStore {
         max_bytes: Option<NonZeroUsize>,
     ) -> Self {
         Self {
+            observations: Arc::default(),
             state: std::sync::Mutex::new(MemoryState {
                 budget: max_bytes.map(JournalBudget::new),
                 ..MemoryState::default()
@@ -158,6 +175,9 @@ impl MemoryEnvelopeStore {
 
 #[async_trait]
 impl RetainedEnvelopeStore for MemoryEnvelopeStore {
+    fn observations(&self) -> Option<Arc<crate::observability::QueueObservations>> {
+        Some(self.observations.clone())
+    }
     fn max_bytes(&self) -> Option<NonZeroUsize> {
         self.max_bytes
     }
@@ -202,7 +222,12 @@ impl RetainedEnvelopeStore for MemoryEnvelopeStore {
         &self.notify
     }
 
-    async fn append(&self, generation: u64, envelope: &ChangeEnvelope) -> Result<u64, PipeError> {
+    async fn append_message(
+        &self,
+        generation: u64,
+        message: &EnvelopeMessage,
+    ) -> Result<u64, PipeError> {
+        let envelope = &message.envelope;
         let mut state = self.lock()?;
         self.check(generation)?;
         let position = state
@@ -226,8 +251,16 @@ impl RetainedEnvelopeStore for MemoryEnvelopeStore {
                 return Err(PipeError::CapacityExhausted);
             }
         }
+        let discarded = state
+            .entries
+            .keys()
+            .take(remove)
+            .filter(|position| **position > state.progress)
+            .count();
         for _ in 0..remove {
-            state.entries.pop_first();
+            if let Some((position, _)) = state.entries.pop_first() {
+                state.contexts.remove(&position);
+            }
         }
         if let Some(append) = budget {
             state
@@ -237,7 +270,19 @@ impl RetainedEnvelopeStore for MemoryEnvelopeStore {
                 .apply(append);
         }
         state.entries.insert(position, envelope.clone());
+        if !message.execution_context.is_empty() {
+            state
+                .contexts
+                .insert(position, message.execution_context.clone());
+        }
         state.head = position;
+        self.observations.discarded(discarded);
+        self.observations
+            .set_depth(crate::observability::pending_depth(
+                state.head,
+                state.entries.keys().next().copied(),
+                state.progress,
+            ));
         drop(state);
         self.notify.notify_waiters();
         Ok(position)
@@ -264,6 +309,7 @@ impl RetainedEnvelopeStore for MemoryEnvelopeStore {
             .map(|(position, envelope)| StoredEnvelope {
                 position: *position,
                 envelope: envelope.clone(),
+                execution_context: state.contexts.get(position).cloned().unwrap_or_default(),
             }))
     }
 
@@ -282,6 +328,12 @@ impl RetainedEnvelopeStore for MemoryEnvelopeStore {
             )));
         }
         state.progress = position;
+        self.observations
+            .set_depth(crate::observability::pending_depth(
+                state.head,
+                state.entries.keys().next().copied(),
+                state.progress,
+            ));
         drop(state);
         self.notify.notify_waiters();
         Ok(())
@@ -297,6 +349,7 @@ impl ResourceCleanup for MemoryEnvelopeStore {
         }
         self.generation.store(0, Ordering::Release);
         state.entries.clear();
+        state.contexts.clear();
         state.budget = None;
         self.notify.notify_waiters();
         Ok(())
@@ -308,6 +361,7 @@ impl ResourceCleanup for MemoryEnvelopeStore {
 /// Committed bytes and progress are loaded once and updated only after commit.
 /// A smaller reopened capacity retains old obligations until they can be pruned.
 pub struct IndexedEnvelopeStore {
+    observations: Arc<crate::observability::QueueObservations>,
     indexes: ComputationIndexes,
     codec: Arc<EnvelopeCodec>,
     key: drasi_core::interface::OutputPartition,
@@ -324,6 +378,7 @@ pub struct IndexedEnvelopeStore {
 
 struct IndexedState {
     entries: BTreeMap<u64, Bytes>,
+    contexts: BTreeMap<u64, ExecutionContext>,
     oldest: Option<u64>,
     retained: usize,
     head: u64,
@@ -411,6 +466,7 @@ impl IndexedEnvelopeStore {
             )));
         }
         Ok(Self {
+            observations: Arc::new(crate::observability::QueueObservations::unknown()),
             indexes,
             codec,
             key: drasi_core::interface::OutputPartition::Journal(key),
@@ -526,6 +582,7 @@ impl IndexedEnvelopeStore {
             )));
         }
         Ok(IndexedState {
+            contexts: BTreeMap::new(),
             entries,
             oldest,
             retained,
@@ -543,7 +600,14 @@ impl IndexedEnvelopeStore {
         self.check()?;
         check_generation(&self.generation, generation)?;
         if state.is_none() {
-            *state = Some(self.load().await?);
+            let loaded = self.load().await?;
+            self.observations
+                .set_depth(crate::observability::pending_depth(
+                    loaded.head,
+                    loaded.oldest,
+                    loaded.progress,
+                ));
+            *state = Some(loaded);
         }
         check_generation(&self.generation, generation)?;
         Ok(MutexGuard::map(state, |state| {
@@ -592,6 +656,9 @@ impl Drop for WriteFence<'_> {
 
 #[async_trait]
 impl RetainedEnvelopeStore for IndexedEnvelopeStore {
+    fn observations(&self) -> Option<Arc<crate::observability::QueueObservations>> {
+        Some(self.observations.clone())
+    }
     fn max_bytes(&self) -> Option<NonZeroUsize> {
         self.max_bytes
     }
@@ -631,7 +698,12 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
         &self.notify
     }
 
-    async fn append(&self, generation: u64, envelope: &ChangeEnvelope) -> Result<u64, PipeError> {
+    async fn append_message(
+        &self,
+        generation: u64,
+        message: &EnvelopeMessage,
+    ) -> Result<u64, PipeError> {
+        let envelope = &message.envelope;
         let bytes = self
             .codec
             .encode(envelope)
@@ -733,9 +805,29 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
         }) {
             state.entries.insert(position, bytes);
         }
+        state
+            .contexts
+            .retain(|position, _| *position >= retain_from);
+        if !message.execution_context.is_empty() {
+            state
+                .contexts
+                .insert(position, message.execution_context.clone());
+        }
+        self.observations
+            .discarded(crate::observability::discarded_pending(
+                state.oldest,
+                retain_from,
+                state.progress,
+            ));
         state.retained = state.retained - remove + 1;
         state.oldest = Some(retain_from);
         state.head = position;
+        self.observations
+            .set_depth(crate::observability::pending_depth(
+                state.head,
+                state.oldest,
+                state.progress,
+            ));
         fence.complete = true;
         self.notify.notify_waiters();
         Ok(position)
@@ -799,6 +891,7 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
             .map(|(position, bytes)| {
                 Ok(StoredEnvelope {
                     position: *position,
+                    execution_context: state.contexts.get(position).cloned().unwrap_or_default(),
                     envelope: self
                         .codec
                         .decode(bytes)
@@ -858,6 +951,12 @@ impl RetainedEnvelopeStore for IndexedEnvelopeStore {
             });
         }
         state.progress = position;
+        self.observations
+            .set_depth(crate::observability::pending_depth(
+                state.head,
+                state.oldest,
+                state.progress,
+            ));
         fence.complete = true;
         self.notify.notify_waiters();
         Ok(())

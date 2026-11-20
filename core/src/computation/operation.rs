@@ -63,6 +63,7 @@ pub(crate) async fn in_operation<T>(
     resources: &ComputationIndexes,
     recovery_required: &AtomicBool,
     atomic: bool,
+    observer: Option<&Arc<dyn super::QueryObserver>>,
     operation: impl Future<Output = Result<T>>,
 ) -> Result<T> {
     if recovery_required.load(Ordering::Acquire)
@@ -81,7 +82,15 @@ pub(crate) async fn in_operation<T>(
     let session = &resources.indexes().session_control;
     let result = match session.begin().await {
         Ok(()) => match operation.await {
-            Ok(value) => match session.commit().await {
+            Ok(value) => match super::observation::observe(
+                observer,
+                super::QueryOperation::Commit,
+                None,
+                session.commit(),
+                |_| None,
+            )
+            .await
+            {
                 Ok(()) => Ok(value),
                 Err(error) => {
                     recovery_required.store(true, Ordering::Release);
@@ -112,6 +121,7 @@ pub(crate) async fn in_operation<T>(
 /// commit fences this owner. After dropping/awaiting the operation, call
 /// [`Self::shutdown`] to join provider I/O before opening a replacement.
 pub struct ComputationTransaction {
+    observer: std::sync::RwLock<Option<Arc<dyn super::QueryObserver>>>,
     resources: ComputationIndexes,
     lock: Arc<tokio::sync::Mutex<()>>,
     retirement: Mutex<Weak<RetirementGate>>,
@@ -128,7 +138,15 @@ impl ComputationTransaction {
     /// Own the actual provider bundle without upgrading its durability or
     /// transaction guarantees. Failed non-atomic operations fence the owner.
     pub fn for_processing(resources: ComputationIndexes) -> Self {
+        Self::for_query_with_observer(resources, None)
+    }
+
+    pub(crate) fn for_query_with_observer(
+        resources: ComputationIndexes,
+        observer: Option<Arc<dyn super::QueryObserver>>,
+    ) -> Self {
         Self {
+            observer: std::sync::RwLock::new(observer),
             atomic: resources.atomic_result_transaction().is_ok(),
             resources,
             lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -137,12 +155,19 @@ impl ComputationTransaction {
         }
     }
 
-    pub(crate) fn for_query(resources: ComputationIndexes) -> Self {
-        Self::for_processing(resources)
-    }
-
     pub fn resources(&self) -> &ComputationIndexes {
         &self.resources
+    }
+
+    pub(crate) fn set_observer(
+        &self,
+        observer: Option<Arc<dyn super::QueryObserver>>,
+    ) -> Result<()> {
+        *self
+            .observer
+            .write()
+            .map_err(|_| crate::interface::IndexError::CorruptedData)? = observer;
+        Ok(())
     }
 
     /// Hold this actual standalone owner's operation gate through a decision.
@@ -252,31 +277,66 @@ impl ComputationTransaction {
         }
     }
 
-    pub async fn run<T>(&self, operation: impl Future<Output = Result<T>>) -> Result<T> {
+    pub fn run<'a, T: 'a>(
+        &'a self,
+        operation: impl Future<Output = Result<T>> + 'a,
+    ) -> impl Future<Output = Result<T>> + 'a {
+        self.run_observed(operation, None)
+    }
+
+    /// Observe this operation's actual session commit without changing the
+    /// owner's observer or extending observation over staging/lock acquisition.
+    pub async fn run_observed<T>(
+        &self,
+        operation: impl Future<Output = Result<T>>,
+        observer: Option<&Arc<dyn super::QueryObserver>>,
+    ) -> Result<T> {
         let _lock = self.lock_operation().await?;
+        let configured = if observer.is_none() {
+            self.observer
+                .read()
+                .map_err(|_| crate::interface::IndexError::CorruptedData)?
+                .clone()
+        } else {
+            None
+        };
         in_operation(
             &self.resources,
             &self.recovery_required,
             self.atomic,
+            observer.or(configured.as_ref()),
             operation,
         )
         .await
     }
 
-    pub async fn run_with_mutations<T>(
+    pub fn run_with_mutations<'a, T: 'a>(
+        &'a self,
+        operation: impl Future<Output = Result<(T, Vec<Box<dyn super::TransactionGroupMutation>>)>> + 'a,
+    ) -> impl Future<Output = Result<T>> + 'a {
+        self.run_with_mutations_observed(operation, None)
+    }
+
+    /// Stage shared mutations under the same gate, observing the one actual
+    /// provider commit rather than each participating journal separately.
+    pub async fn run_with_mutations_observed<T>(
         &self,
         operation: impl Future<Output = Result<(T, Vec<Box<dyn super::TransactionGroupMutation>>)>>,
+        observer: Option<&Arc<dyn super::QueryObserver>>,
     ) -> Result<T> {
         let group = self
             .resources
             .group_session
             .as_ref()
             .ok_or(ComputationQueryError::TransactionMismatch)?;
-        self.run(async {
-            let (value, mutations) = operation.await?;
-            group.stage_mutations(mutations).await?;
-            Ok(value)
-        })
+        self.run_observed(
+            async {
+                let (value, mutations) = operation.await?;
+                group.stage_mutations(mutations).await?;
+                Ok(value)
+            },
+            observer,
+        )
         .await
     }
 

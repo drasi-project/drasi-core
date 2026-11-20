@@ -45,6 +45,7 @@ struct ProviderState {
 }
 
 pub(super) struct Coordinator {
+    execution_scope: crate::telemetry::ExecutionScope,
     plugin: Arc<PluginState>,
     index: usize,
     request: CreateRequest,
@@ -77,7 +78,13 @@ impl Coordinator {
     }
 
     fn invoke<T>(&self, operation: impl FnOnce() -> anyhow::Result<T>) -> Result<T, Failure> {
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation)) {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if crate::telemetry::ExecutionScope::current_plugin_telemetry().is_some() {
+                operation()
+            } else {
+                self.execution_scope.in_scope(operation)
+            }
+        })) {
             Ok(result) => result.map_err(Failure::from),
             Err(_) => {
                 self.damaged.quarantine();
@@ -447,6 +454,8 @@ unsafe extern "C" fn create(
             );
             let engine = coordination.create_bootstrap_coordinator(&request, readers.clone())?;
             Ok(Arc::new(Coordinator {
+                execution_scope: crate::telemetry::ExecutionScope::capture()
+                    .with_context(Default::default()),
                 plugin: factory.plugin.clone(),
                 index: factory.index,
                 request,
@@ -646,7 +655,12 @@ unsafe extern "C" fn stop(raw: *mut c_void, out: *mut abi::OperationHandle) -> S
             .retiring = true;
         let runtime = io_runtime()?;
         let damaged = owner.damaged.clone();
-        let operation = transport::export_component_operation(
+        let scope = owner.execution_scope.has_plugin_telemetry().then(|| {
+            owner
+                .execution_scope
+                .with_context(crate::telemetry::ExecutionContext::current())
+        });
+        let operation = crate::telemetry_transport::export_operation(
             async move {
                 let _guard = guard;
                 if !owner.stopped.load(Ordering::Acquire) {
@@ -658,6 +672,7 @@ unsafe extern "C" fn stop(raw: *mut c_void, out: *mut abi::OperationHandle) -> S
             Some(runtime),
             damaged,
             true,
+            scope,
         );
         unsafe { transport::write_out(out, operation) }
     })

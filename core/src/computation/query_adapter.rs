@@ -35,6 +35,7 @@ use crate::{
 /// through the existing builder. An arbitrary prebuilt legacy query cannot be
 /// paired with unrelated indexes or a descriptive transaction token.
 pub struct ComputationQuery {
+    observer: Option<Arc<dyn super::QueryObserver>>,
     inner: QueryEvaluator,
     transaction: Arc<ComputationTransaction>,
     scheduling: Arc<dyn FutureQueue>,
@@ -101,18 +102,51 @@ impl QueryEvaluator {
         }
     }
 
+    /// Observe only evaluator work within the caller's processing transaction,
+    /// excluding result hooks and the host-owned commit.
+    pub async fn evaluate_input_batch_observed<const SOURCE_TRANSACTION: bool>(
+        &self,
+        input: QueryInputBatch,
+        observer: Option<&Arc<dyn super::QueryObserver>>,
+    ) -> Result<Vec<QueryPartEvaluationContext>> {
+        super::observation::observe(
+            observer,
+            super::QueryOperation::Evaluate,
+            Some(input.changes.len()),
+            self.evaluate_input_batch::<SOURCE_TRANSACTION>(input),
+            |results| {
+                Some(
+                    results
+                        .iter()
+                        .filter(|result| !matches!(result, QueryPartEvaluationContext::Noop))
+                        .count(),
+                )
+            },
+        )
+        .await
+    }
+
     /// Pop and evaluate one future under the caller's processing transaction.
     pub async fn evaluate_next_future(&self) -> Result<Option<Arc<ComputationFutureResult>>> {
+        self.evaluate_next_future_observed(None).await
+    }
+
+    /// Observe evaluation only after a queued future was actually popped.
+    pub async fn evaluate_next_future_observed(
+        &self,
+        observer: Option<&Arc<dyn super::QueryObserver>>,
+    ) -> Result<Option<Arc<ComputationFutureResult>>> {
         let Some(future_ref) = self.future_queue().pop().await? else {
             return Ok(None);
         };
         Ok(Some(Arc::new(ComputationFutureResult {
             results: self
-                .evaluate_input_batch::<false>(
+                .evaluate_input_batch_observed::<false>(
                     vec![SourceChange::Future {
                         future_ref: future_ref.clone(),
                     }]
                     .into(),
+                    observer,
                 )
                 .await?,
             future: future_ref,
@@ -160,6 +194,14 @@ impl FutureQueue for ScheduledQueue {
 
 impl ComputationQuery {
     pub async fn try_build(builder: QueryBuilder, resources: ComputationIndexes) -> Result<Self> {
+        Self::try_build_with_observer(builder, resources, None).await
+    }
+
+    pub async fn try_build_with_observer(
+        builder: QueryBuilder,
+        resources: ComputationIndexes,
+        observer: Option<Arc<dyn super::QueryObserver>>,
+    ) -> Result<Self> {
         let set = resources.indexes();
         let inner = builder
             .with_element_index(set.element_index.clone())
@@ -171,12 +213,16 @@ impl ComputationQuery {
         if !Arc::ptr_eq(inner.element_index(), &set.element_index) {
             return Err(ComputationQueryError::TransactionMismatch);
         }
-        let transaction = Arc::new(ComputationTransaction::for_query(resources));
+        let transaction = Arc::new(ComputationTransaction::for_query_with_observer(
+            resources,
+            observer.clone(),
+        ));
         let scheduling = Arc::new(ScheduledQueue {
             transaction: Arc::downgrade(&transaction),
             queue: inner.future_queue(),
         });
         Ok(Self {
+            observer,
             inner,
             transaction,
             scheduling,
@@ -185,6 +231,14 @@ impl ComputationQuery {
 
     pub fn resources(&self) -> &ComputationIndexes {
         self.transaction.resources()
+    }
+
+    /// Bind observations before activation/processing, including for queries
+    /// constructed before their hosting runtime's telemetry scope exists.
+    pub fn set_observer(&mut self, observer: Option<Arc<dyn super::QueryObserver>>) -> Result<()> {
+        self.transaction.set_observer(observer.clone())?;
+        self.observer = observer;
+        Ok(())
     }
 
     /// Observe this actual execution owner without extending its storage lifetime.
@@ -252,14 +306,20 @@ impl ComputationQuery {
         &self,
         input: QueryInputBatch,
     ) -> Result<Vec<QueryPartEvaluationContext>> {
-        self.inner.evaluate_input_batch::<false>(input).await
+        self.inner
+            .evaluate_input_batch_observed::<false>(input, self.observer.as_ref())
+            .await
     }
 
     async fn evaluate_source_transaction(
         &self,
         input: QueryInputBatch,
     ) -> Result<Arc<[QueryPartEvaluationContext]>> {
-        Ok(self.inner.evaluate_input_batch::<true>(input).await?.into())
+        Ok(self
+            .inner
+            .evaluate_input_batch_observed::<true>(input, self.observer.as_ref())
+            .await?
+            .into())
     }
 
     pub async fn process_source_change(
@@ -442,7 +502,9 @@ impl ComputationQuery {
     }
 
     async fn evaluate_due_future(&self) -> Result<Option<Arc<ComputationFutureResult>>> {
-        self.inner.evaluate_next_future().await
+        self.inner
+            .evaluate_next_future_observed(self.observer.as_ref())
+            .await
     }
 
     pub async fn process_due_futures_with_transaction_group<F, Fut>(

@@ -54,6 +54,15 @@ pub(crate) fn component_id(value: u128) -> crate::config::ComponentId {
     crate::config::ComponentId::from_uuid(uuid::Uuid::from_u128(value))
 }
 
+/// Stable fixture identity derived from a component name.
+pub(crate) fn named_component_id(name: &str) -> crate::computation::v1::ComponentId {
+    use crate::computation::v1::ComponentId;
+    let namespace = ComponentId::from_uuid(uuid::Uuid::from_u128(
+        0x53b06f53_7ab5_4b95_a64d_6deec593e69d,
+    ));
+    ComponentId::derive_owned(&namespace, name).expect("fixture component identity")
+}
+
 pub(crate) fn native_query_value(
     value: &drasi_core::evaluation::variable_value::VariableValue,
 ) -> serde_json::Value {

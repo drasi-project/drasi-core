@@ -422,8 +422,10 @@ impl Reaction for RabbitMQReaction {
         // Load persisted checkpoints for dedup and progress tracking.
         let initial_checkpoints = self.base.read_all_checkpoints().await.unwrap_or_default();
         let base_clone = self.base.clone_shared();
+        let telemetry = self.base.worker_telemetry().await;
 
         let processing_task_handle = tokio::spawn(async move {
+            telemetry.scope(async {
             let sanitized_conn = Self::sanitize_connection_string(&connection_string);
 
             // Establish initial connection
@@ -475,10 +477,10 @@ impl Reaction for RabbitMQReaction {
                         debug!("[{reaction_id}] Received shutdown signal, exiting processing loop");
                         break;
                     }
-                    result = priority_queue.dequeue() => result,
+                    result = priority_queue.dequeue_message() => result,
                 };
 
-                let query_result = query_result_arc.as_ref();
+                let query_result = query_result_arc.payload.as_ref();
 
                 if !matches!(status_handle.get_status().await, ComponentStatus::Running) {
                     break;
@@ -610,8 +612,20 @@ impl Reaction for RabbitMQReaction {
                 let result_count = query_result.results.len();
                 debug!("[{reaction_id}] Processing {result_count} results from query '{query_id}'");
 
+                let change_count = query_result.results.iter()
+                    .filter(|diff| !matches!(diff, ResultDiff::Noop)).count();
+                let observation = if change_count == 0 {
+                    None
+                } else {
+                    telemetry.reaction(&query_result_arc.execution_context, change_count)
+                        .map_err(|e| log::warn!("Failed to observe RabbitMQ publication: {e}")).ok()
+                };
+                let processing = telemetry.reaction_input_context(query_id.as_str(), change_count, &query_result_arc.execution_context);
+                let mut work = (change_count > 0).then(|| telemetry.reaction_work());
+                let process = async {
                 let mut publish_failed = false;
-                for result in &query_result.results {
+                for (ordinal, result) in query_result.results.iter()
+                    .filter(|result| !matches!(result, ResultDiff::Noop)).enumerate() {
                     match result {
                         ResultDiff::Add { data, .. } => {
                             if let Some(spec) = query_config.added.as_ref() {
@@ -634,6 +648,8 @@ impl Reaction for RabbitMQReaction {
                                 {
                                     error!("[{reaction_id}] Failed to publish result: {e}");
                                     publish_failed = true;
+                                } else {
+                                    processing.handled_rows(&[ordinal]);
                                 }
                             }
                         }
@@ -658,6 +674,8 @@ impl Reaction for RabbitMQReaction {
                                 {
                                     error!("[{reaction_id}] Failed to publish result: {e}");
                                     publish_failed = true;
+                                } else {
+                                    processing.handled_rows(&[ordinal]);
                                 }
                             }
                         }
@@ -687,6 +705,8 @@ impl Reaction for RabbitMQReaction {
                                 {
                                     error!("[{reaction_id}] Failed to publish result: {e}");
                                     publish_failed = true;
+                                } else {
+                                    processing.handled_rows(&[ordinal]);
                                 }
                             }
                         }
@@ -711,6 +731,8 @@ impl Reaction for RabbitMQReaction {
                                 {
                                     error!("[{reaction_id}] Failed to publish result: {e}");
                                     publish_failed = true;
+                                } else {
+                                    processing.handled_rows(&[ordinal]);
                                 }
                             }
                         }
@@ -720,6 +742,9 @@ impl Reaction for RabbitMQReaction {
                     }
                 }
 
+                if let Some(work) = &mut work {
+                    work.finish(!publish_failed);
+                }
                 // Advance checkpoint only if all publishes succeeded.
                 if !publish_failed {
                     let config_hash = checkpoints
@@ -732,10 +757,20 @@ impl Reaction for RabbitMQReaction {
                     };
                     if let Err(e) = base_clone.write_checkpoint(query_id, &cp).await {
                         error!("[{reaction_id}] Failed to write checkpoint for query '{query_id}': {e}");
+                        return Err(e);
                     } else {
                         checkpoints.insert(query_id.clone(), cp);
                     }
                 }
+                if publish_failed {
+                    anyhow::bail!("One or more RabbitMQ publishes failed");
+                }
+                Ok(())
+                };
+                let _ = match observation {
+                    Some(observation) => observation.run(process).await,
+                    None => process.await,
+                };
             }
 
             info!("[{reaction_id}] RabbitMQ reaction stopped");
@@ -745,6 +780,7 @@ impl Reaction for RabbitMQReaction {
                     Some("RabbitMQ reaction stopped".to_string()),
                 )
                 .await;
+            }).await;
         });
 
         self.base.set_processing_task(processing_task_handle).await;

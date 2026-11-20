@@ -258,6 +258,7 @@ mod tests {
         .expect("encode")
         .expect("one row");
         InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in").expect("port"),
             envelope,
         }

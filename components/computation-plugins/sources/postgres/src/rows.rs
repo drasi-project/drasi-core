@@ -453,6 +453,7 @@ impl RowEmission {
             )?,
         };
         Ok(OutputEnvelope {
+            execution_context: drasi_computation_contracts::telemetry::ExecutionContext::current(),
             port: PortId::try_new("out")?,
             envelope,
         })

@@ -216,7 +216,7 @@ fn input_of(sequence: u64, rooms: usize) -> Result<InputEnvelope> {
     let changes: Vec<_> = (0..rooms)
         .map(|n| room(&format!("r{n}"), &format!("room {n}")))
         .collect();
-    Ok(InputEnvelope {
+    Ok(InputEnvelope { execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: drasi_computation_contracts::GraphChangeCodec::encode_changes(
             &changes,

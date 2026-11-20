@@ -336,6 +336,7 @@ async fn transform_one(
     let original_annotations: Vec<_> = input.annotations().entries().collect();
     let mut outputs = subject
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: port("in"),
             envelope: input.clone(),
         })
@@ -467,6 +468,7 @@ async fn assert_processing_failure(
     let original = invalid.changes().operations().to_vec();
     let error = subject
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: port("in"),
             envelope: invalid.clone(),
         })
@@ -480,6 +482,7 @@ async fn assert_processing_failure(
     assert!(
         subject
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: port("in"),
                 envelope: valid.clone(),
             })
@@ -608,6 +611,7 @@ async fn processing_requires_start() {
     );
     assert!(subject
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: port("in"),
             envelope: input,
         })
@@ -1014,6 +1018,7 @@ impl EnvelopeSource for GraphSource {
     async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
         assert!(self.started);
         Ok(self.events.pop_front().map(|envelope| OutputEnvelope {
+            execution_context: Default::default(),
             port: port("out"),
             envelope,
         }))
@@ -2682,6 +2687,7 @@ async fn ordered_decoder_parse_json_promote_relabel_chain_uses_configured_names(
     let mut wrong_order = running(middleware, &["promote", "parse", "decode", "label"]).await;
     let error = wrong_order
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: port("in"),
             envelope: input,
         })

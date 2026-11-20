@@ -29,9 +29,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 fn init_logging() {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 }
 
 async fn wait_for_query_results(

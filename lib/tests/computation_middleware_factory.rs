@@ -39,6 +39,25 @@ use drasi_core::{
     },
 };
 use drasi_lib::computation::v1::*;
+use drasi_lib::observability::{TelemetryOptions, TelemetryProfile, TelemetrySettings};
+use tracing::instrument::WithSubscriber;
+
+#[derive(Default)]
+struct CapturedSpans(Mutex<Vec<u8>>);
+
+impl std::io::Write for &CapturedSpans {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|_| std::io::Error::other("span capture lock poisoned"))?
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 struct Pass(Arc<AtomicUsize>);
 
@@ -148,6 +167,17 @@ impl EnvelopeSink for Sink {
 
 #[tokio::test]
 async fn declared_factory_uses_the_supplied_shared_registry_in_a_complete_graph() {
+    let captured = Arc::new(CapturedSpans::default());
+    let subscriber = tracing::Dispatch::new(
+        tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NEW)
+            .with_writer(captured.clone())
+            .finish(),
+    );
+    let factory = Arc::new(MiddlewareTransformerFactory::default());
+    let implementation = factory.descriptor().implementation.name.clone();
     let calls = Arc::new(AtomicUsize::new(0));
     let mut registry = MiddlewareTypeRegistry::new();
     registry.register(Arc::new(Pass(calls.clone())));
@@ -170,55 +200,73 @@ async fn declared_factory_uses_the_supplied_shared_registry_in_a_complete_graph(
         None,
     )
     .expect("input");
-    let mut graph = ComputationGraph::builder("middleware-factory")
-        .declare_resource(ResourceSpecification {
-            id: resource.clone(),
-            role: ResourceRole::Middleware,
-            ownership: ResourceOwnership::Borrowed,
-            binding: Arc::from("middleware"),
-        })
-        .expect("declaration")
-        .provide_resource(
-            resource.clone(),
-            ResourceHandle::new(
-                ResourceRole::Middleware,
-                Arc::new(QueryMiddlewareResource(Arc::new(registry))),
-            ),
-        )
-        .expect("resource")
-        .fixture_source(Box::new(Source {
-            descriptor: port_descriptor(77, "out", PortDirection::Output),
-            output: Some(OutputEnvelope {
-                port: PortId::try_new("out").expect("port"),
-                envelope: input,
-            }),
-        }))
-        .component(
-            ComponentName::try_new("normalize").expect("fixture name"),
-            definition.specification(resource).expect("specification"),
-            Arc::new(MiddlewareTransformerFactory::default()),
-        )
-        .fixture_sink(Box::new(Sink {
-            descriptor: port_descriptor(101, "in", PortDirection::Input),
-            received: received.clone(),
-        }))
-        .bind_stream(
-            endpoint(77, "out"),
-            StreamId::try_new("source/out").expect("stream"),
-        )
-        .bind_stream(endpoint(760, "out"), definition.output_stream)
-        .connect(
-            EdgeDefinition::new(endpoint(77, "out"), endpoint(760, "in")),
-            Box::new(BoundedPipeConfig { capacity: 1 }),
-        )
-        .connect(
-            EdgeDefinition::new(endpoint(760, "out"), endpoint(101, "in")),
-            Box::new(BoundedPipeConfig { capacity: 1 }),
-        )
-        .build()
-        .expect("graph");
-    graph.start().expect("start").await.expect("run");
-    graph.dispose().await.expect("dispose");
+    let mut graph = tracing::dispatcher::with_default(&subscriber, || {
+        ComputationGraph::builder("middleware-factory")
+            .with_telemetry(
+                TelemetryOptions::new(
+                    TelemetrySettings::new(TelemetryProfile::Basic).with_metrics(false),
+                )
+                .with_instance_id("factory-test"),
+            )
+            .declare_resource(ResourceSpecification {
+                id: resource.clone(),
+                role: ResourceRole::Middleware,
+                ownership: ResourceOwnership::Borrowed,
+                binding: Arc::from("middleware"),
+            })
+            .expect("declaration")
+            .provide_resource(
+                resource.clone(),
+                ResourceHandle::new(
+                    ResourceRole::Middleware,
+                    Arc::new(QueryMiddlewareResource(Arc::new(registry))),
+                ),
+            )
+            .expect("resource")
+            .fixture_source(Box::new(Source {
+                descriptor: port_descriptor(77, "out", PortDirection::Output),
+                output: Some(OutputEnvelope {
+                    execution_context: Default::default(),
+                    port: PortId::try_new("out").expect("port"),
+                    envelope: input,
+                }),
+            }))
+            .component(
+                ComponentName::try_new("normalize").expect("fixture name"),
+                definition.specification(resource).expect("specification"),
+                factory,
+            )
+            .fixture_sink(Box::new(Sink {
+                descriptor: port_descriptor(101, "in", PortDirection::Input),
+                received: received.clone(),
+            }))
+            .bind_stream(
+                endpoint(77, "out"),
+                StreamId::try_new("source/out").expect("stream"),
+            )
+            .bind_stream(endpoint(760, "out"), definition.output_stream)
+            .connect(
+                EdgeDefinition::new(endpoint(77, "out"), endpoint(760, "in")),
+                Box::new(BoundedPipeConfig { capacity: 1 }),
+            )
+            .connect(
+                EdgeDefinition::new(endpoint(760, "out"), endpoint(101, "in")),
+                Box::new(BoundedPipeConfig { capacity: 1 }),
+            )
+            .build()
+            .expect("graph")
+    });
+    graph
+        .start()
+        .expect("start")
+        .with_subscriber(subscriber.clone())
+        .await
+        .expect("run");
+    graph
+        .dispose()
+        .with_subscriber(subscriber)
+        .await
+        .expect("dispose");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let received = received.lock().expect("received");
     assert_eq!(received.len(), 1);
@@ -230,6 +278,14 @@ async fn declared_factory_uses_the_supplied_shared_registry_in_a_complete_graph(
             .len(),
         1
     );
+    let output =
+        String::from_utf8(captured.0.lock().expect("captured spans").clone()).expect("UTF-8");
+    let processing = output
+        .lines()
+        .find(|line| line.contains("transformer.process"))
+        .expect("transformer processing span");
+    assert!(processing.contains("implementation="), "{processing}");
+    assert!(processing.contains(implementation.as_ref()), "{processing}");
 }
 
 #[test]
@@ -368,6 +424,7 @@ fn raw_source_input(sequence: u64, skip: bool) -> InputEnvelope {
         None,
     );
     InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").expect("port"),
         envelope: GraphChangeCodec::encode_source_event(
             Arc::new(event),
@@ -422,6 +479,7 @@ async fn expansion_is_not_deduplicated_and_filtered_events_advance_downstream_pr
     assert_eq!(expanded[0].envelope.changes().operations().len(), 2);
     let result = query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in").expect("port"),
             envelope: expanded.remove(0).envelope,
         })
@@ -445,6 +503,7 @@ async fn expansion_is_not_deduplicated_and_filtered_events_advance_downstream_pr
     let filtered = &filtered[0].envelope;
     assert!(query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in").expect("port"),
             envelope: filtered.clone(),
         })
@@ -461,6 +520,7 @@ async fn expansion_is_not_deduplicated_and_filtered_events_advance_downstream_pr
     .expect("payload-bearing duplicate of the filtered producer position");
     assert!(query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in").expect("port"),
             envelope: duplicate,
         })

@@ -273,6 +273,14 @@ async fn build_reaction(
     .expect("Failed to build reaction")
 }
 
+fn sensor_query_name() -> drasi_lib::ComponentName {
+    drasi_lib::ComponentName::try_new("sensor-query").expect("fixture component name")
+}
+
+fn sensor_query_id() -> drasi_lib::ComponentId {
+    drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000045").expect("fixture UUID")
+}
+
 fn add_result(
     query_id: drasi_lib::ComponentId,
     sequence: u64,
@@ -534,12 +542,11 @@ async fn test_reaction_executes_added_procedure() {
         let mssql_config = mssql.config().clone();
         setup_stored_procedures(&mssql_config).await;
 
-        let query_id = "sensor-query";
-        let reaction = build_reaction(&mssql_config, query_id).await;
+        let reaction = build_reaction(&mssql_config, sensor_query_name()).await;
         reaction.start().await.expect("reaction should start");
 
         reaction
-            .enqueue_query_result(add_result(query_id, 1, "sensor-001", 25.5))
+            .enqueue_query_result(add_result(sensor_query_id(), 1, "sensor-001", 25.5))
             .await
             .expect("enqueue should succeed");
 
@@ -575,20 +582,25 @@ async fn test_reaction_executes_all_operations() {
         let mssql_config = mssql.config().clone();
         setup_stored_procedures(&mssql_config).await;
 
-        let query_id = "sensor-query";
-        let reaction = build_reaction(&mssql_config, query_id).await;
+        let reaction = build_reaction(&mssql_config, sensor_query_name()).await;
         reaction.start().await.expect("reaction should start");
 
         reaction
-            .enqueue_query_result(add_result(query_id, 1, "sensor-001", 25.5))
+            .enqueue_query_result(add_result(sensor_query_id(), 1, "sensor-001", 25.5))
             .await
             .expect("ADD enqueue should succeed");
         reaction
-            .enqueue_query_result(update_result(query_id, 2, "sensor-001", 25.5, 26.5))
+            .enqueue_query_result(update_result(
+                sensor_query_id(),
+                2,
+                "sensor-001",
+                25.5,
+                26.5,
+            ))
             .await
             .expect("UPDATE enqueue should succeed");
         reaction
-            .enqueue_query_result(delete_result(query_id, 3, "sensor-001"))
+            .enqueue_query_result(delete_result(sensor_query_id(), 3, "sensor-001"))
             .await
             .expect("DELETE enqueue should succeed");
 
@@ -632,13 +644,12 @@ async fn test_reaction_binds_special_characters_safely() {
         let mssql_config = mssql.config().clone();
         setup_stored_procedures(&mssql_config).await;
 
-        let query_id = "sensor-query";
-        let reaction = build_reaction(&mssql_config, query_id).await;
+        let reaction = build_reaction(&mssql_config, sensor_query_name()).await;
         reaction.start().await.expect("reaction should start");
 
         let malicious = "sensor'; DROP TABLE sensor_log; --";
         reaction
-            .enqueue_query_result(add_result(query_id, 1, malicious, 25.5))
+            .enqueue_query_result(add_result(sensor_query_id(), 1, malicious, 25.5))
             .await
             .expect("enqueue should succeed");
 

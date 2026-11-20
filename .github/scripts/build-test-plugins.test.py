@@ -19,7 +19,7 @@ FIXTURES = {
     "native_recovery", "native_consumer_progress_metadata",
     "native_bootstrap_coordination_metadata", "native_bootstrap_coordination_partial",
     "native_activation_credentials", "native_custom_query", "native_scheduling",
-    "instance_host_fixture",
+    "native_worker_failure", "instance_host_fixture",
 }
 FAKE_CARGO = r"""#!/usr/bin/env python3
 import json, os, pathlib, sys
@@ -61,7 +61,8 @@ elif package == "drasi-host-sdk":
     assert "--examples" in args
     for name in ("native_recovery", "native_consumer_progress_metadata",
                  "native_bootstrap_coordination_metadata", "native_bootstrap_coordination_partial",
-                 "native_activation_credentials", "native_custom_query", "native_scheduling"):
+                 "native_activation_credentials", "native_custom_query", "native_scheduling",
+                 "native_worker_failure"):
         artifact(name, True)
 else:
     assert package == "drasi-instance-host"

@@ -79,6 +79,7 @@ fn progress_partition() -> drasi_lib::StorePartition {
 
 fn input(envelope: ChangeEnvelope) -> InputEnvelope {
     InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").unwrap(),
         envelope,
     }

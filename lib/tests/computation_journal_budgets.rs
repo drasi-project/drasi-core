@@ -63,12 +63,12 @@ fn subscribe(channel: &Arc<QosChannel>, subscriber: &str) -> Result<ProvidedPipe
 async fn handle(receiver: &mut dyn EnvelopeReceiver, sequence: u64) -> Result<()> {
     let delivery = tokio::time::timeout(Duration::from_secs(5), receiver.receive())
         .await
-        .with_context(|| format!("waiting for journal sequence {sequence}"))??
+        .with_context(|| format!("timed out receiving journal sequence {sequence}"))??
         .expect("pending delivery");
     assert_eq!(delivery.envelope().system().sequence(), sequence);
     delivery
         .into_parts()
-        .1
+        .2
         .expect("acknowledgement")
         .complete(HandlingOutcome::Handled)
         .await?;
@@ -435,7 +435,31 @@ mod durable {
                         &[sequence as u16],
                     )
                 };
-                store.append(generation, &envelope).await?;
+                let context = drasi_lib::observability::ExecutionContext::new(
+                    drasi_lib::observability::TraceContextV1::new(
+                        [1; 16],
+                        sequence.to_be_bytes(),
+                        1,
+                        None,
+                    )?,
+                );
+                store
+                    .append_message(generation, &EnvelopeMessage::new(envelope, context))
+                    .await?;
+            }
+            for sequence in [1, 7, 17, 1] {
+                let stored = store
+                    .next(generation, sequence - 1)
+                    .await?
+                    .expect("live paged record");
+                assert_eq!(
+                    stored
+                        .execution_context
+                        .trace()
+                        .expect("live context")
+                        .span_id(),
+                    sequence.to_be_bytes()
+                );
             }
             assert!(matches!(
                 store.append(generation, &large(18)).await,
@@ -473,6 +497,10 @@ mod durable {
                     .await?
                     .expect("complete replay");
                 assert_eq!(stored.position, sequence);
+                assert!(
+                    stored.execution_context.is_empty(),
+                    "reconstruction must not restore trace history"
+                );
                 assert_eq!(stored.envelope.system().sequence(), sequence);
                 store.acknowledge(generation, sequence).await?;
             }
@@ -667,7 +695,7 @@ mod durable {
         for sequence in 1..=17 {
             let delivery = receiver.receive().await?.expect("admitted output");
             assert_eq!(delivery.envelope().system().sequence(), sequence);
-            let (envelope, acknowledgement) = delivery.into_parts();
+            let (envelope, _, acknowledgement) = delivery.into_parts();
             acknowledgement
                 .expect("ack")
                 .complete(HandlingOutcome::Handled)
@@ -749,7 +777,7 @@ mod durable {
                 payloads.push(Arc::downgrade(delivery.envelope().event()));
                 delivery
                     .into_parts()
-                    .1
+                    .2
                     .expect("acknowledgement")
                     .complete(HandlingOutcome::Handled)
                     .await?;
@@ -985,7 +1013,7 @@ mod durable {
             payloads.push(Arc::downgrade(delivery.envelope().event()));
             delivery
                 .into_parts()
-                .1
+                .2
                 .expect("ack")
                 .complete(HandlingOutcome::Handled)
                 .await?;

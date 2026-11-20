@@ -515,6 +515,16 @@ async fn request_scope(
         return next.run(request).await;
     }
     let shared = &ingress.shared;
+    let scope = shared.execution_scope.with_w3c_headers(
+        request
+            .headers()
+            .get("traceparent")
+            .map(|value| value.as_bytes()),
+        request
+            .headers()
+            .get("tracestate")
+            .map(|value| value.as_bytes()),
+    );
     let webhook_route = ingress.settings().webhooks.is_some() && !path.starts_with("/sources/");
     let peer = request
         .extensions()
@@ -567,7 +577,8 @@ async fn request_scope(
             }
         },
     };
-    next.run(Request::from_parts(parts, axum::body::Body::from(bytes)))
+    scope
+        .scope(next.run(Request::from_parts(parts, axum::body::Body::from(bytes))))
         .await
 }
 

@@ -180,7 +180,7 @@ fn node(source: &str, label: &str, properties: Value, sequence: u64) -> Element 
 }
 
 fn input(source: &str, change: SourceChange, sequence: u64) -> Result<InputEnvelope> {
-    Ok(InputEnvelope {
+    Ok(InputEnvelope { execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_change(
             change,
@@ -344,7 +344,7 @@ pub fn canonical_replacement() -> Result<Case> {
     let before = json!({"name":"Alice","extra":"old"});
     let after = json!({"name":"Bob","extra":null});
     let stream = StreamId::try_new("people/out")?;
-    let replacement = InputEnvelope {
+    let replacement = InputEnvelope { execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: ChangeEnvelope::new(
             emission_id(&stream, 2)?,
@@ -438,7 +438,7 @@ pub fn ordered_batch() -> Result<Case> {
         .query("MATCH (n:Person) RETURN n.name AS name, n.extra AS extra")
         .build()?,
         steps: vec![Step {
-            input: InputEnvelope {
+            input: InputEnvelope { execution_context: Default::default(),
                 port: PortId::try_new("in")?,
                 envelope: ChangeEnvelope::new(
                     emission_id(&stream, 1)?,

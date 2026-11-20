@@ -9,7 +9,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use drasi_computation_contracts::{
-    workers::{join_owned_worker_gracefully, spawn_owned_blocking_worker, WorkerCompletion},
+    workers::{join_owned_worker_gracefully, spawn_owned_scoped_blocking_worker, WorkerCompletion},
     BootstrapLabels, ChangeEnvelope, ComponentId, ComputationBootstrapSnapshot, GraphChangeCodec,
     StreamId,
 };
@@ -253,7 +253,7 @@ impl QuiescentBootstrapProvider for SqliteBootstrapProvider {
             outputs,
             shutdown: run.shutdown.subscribe(),
         };
-        spawn_owned_blocking_worker(&self.shared.worker, move || {
+        spawn_owned_scoped_blocking_worker(&self.shared.worker, move || {
             let result = work.read();
             if let Err(error) = &result {
                 log::error!("SQLite file snapshot failed: {error:#}");

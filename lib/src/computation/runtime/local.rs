@@ -532,7 +532,7 @@ impl Runtime {
             status.error.is_none() && status.resource_errors.is_empty(),
             "component removal is incomplete: {status:?}"
         );
-        self.logs.remove_component_by_key(&log_key).await;
+        self.logs.remove_component_by_key(&log_key).await?;
         self.notify();
         Ok(receipt)
     }

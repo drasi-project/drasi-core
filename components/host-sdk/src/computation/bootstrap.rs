@@ -44,6 +44,7 @@ pub type NativeBootstrapFactories = std::collections::BTreeMap<
 >;
 
 pub struct NativeBootstrapFactory {
+    telemetry: Option<abi::telemetry::PluginTelemetryV2>,
     metadata: BootstrapFactoryMetadata,
     index: u32,
     extension: PluginBootstrapV1,
@@ -60,6 +61,7 @@ impl NativeBootstrapFactory {
         codec: Arc<BinaryEnvelopeCodec>,
     ) -> Self {
         Self {
+            telemetry: None,
             metadata,
             index,
             extension,
@@ -84,6 +86,14 @@ impl NativeBootstrapFactory {
         self.coordination = extension.filter(|_| self.metadata.pairing.is_some());
         Ok(self)
     }
+    pub(super) fn with_telemetry(
+        mut self,
+        telemetry: Option<abi::telemetry::PluginTelemetryV2>,
+    ) -> Self {
+        self.telemetry = telemetry;
+        self
+    }
+
     /// Whether the factory's providers are opened from a paired source's
     /// coordinator (declared by `BootstrapFactoryMetadata::pairing`).
     pub fn requires_source_bootstrap(&self) -> bool {
@@ -239,29 +249,36 @@ impl NativeBootstrapFactory {
                 )
             })
             .transpose()?;
-        unsafe {
-            if let Some(pairing) = &pairing {
-                take_status(self
-                    .coordination
-                    .expect("paired")
-                    .create_bootstrap
-                    .expect("validated")(
-                    self.plugin.state(),
-                    self.index,
-                    abi::BorrowedBytes::new(&bytes),
-                    &pairing.table(),
-                    &mut raw,
-                ))?;
-            } else {
-                take_status(self.extension.create.expect("validated")(
-                    self.plugin.state(),
-                    self.index,
-                    abi::BorrowedBytes::new(&bytes),
-                    table.as_ref().map_or(std::ptr::null(), |table| table),
-                    &mut raw,
-                ))?;
+        let telemetry_binding = super::telemetry::NativeTelemetryBinding::capture(
+            self.telemetry,
+            self.metadata.implementation.name.as_ref(),
+        )?;
+        super::telemetry::scope(telemetry_binding.as_ref(), || {
+            unsafe {
+                if let Some(pairing) = &pairing {
+                    take_status(self
+                        .coordination
+                        .expect("paired")
+                        .create_bootstrap
+                        .expect("validated")(
+                        self.plugin.state(),
+                        self.index,
+                        abi::BorrowedBytes::new(&bytes),
+                        &pairing.table(),
+                        &mut raw,
+                    ))?;
+                } else {
+                    take_status(self.extension.create.expect("validated")(
+                        self.plugin.state(),
+                        self.index,
+                        abi::BorrowedBytes::new(&bytes),
+                        table.as_ref().map_or(std::ptr::null(), |table| table),
+                        &mut raw,
+                    ))?;
+                }
             }
-        }
+            Ok(())
+        })?;
         let vtable = unsafe { checked_table(raw.vtable)? };
         anyhow::ensure!(
             !raw.state.is_null()
@@ -273,6 +290,7 @@ impl NativeBootstrapFactory {
         Ok(Arc::new(NativeBootstrapProxy {
             inner: Arc::new(Remote {
                 raw,
+                _telemetry: telemetry_binding,
                 _plugin: self.plugin.clone(),
                 progress,
                 _binding: binding,
@@ -293,6 +311,7 @@ impl NativeBootstrapFactory {
 
 struct Remote {
     raw: BootstrapHandle,
+    _telemetry: Option<super::telemetry::NativeTelemetryBinding>,
     _plugin: Arc<PluginOwner>,
     progress: Option<Arc<QuerySourceProgress>>,
     _binding: Option<ProgressBinding>,
@@ -335,17 +354,20 @@ impl Remote {
         );
         self.stopped.store(false, Ordering::Release);
         let mut raw = abi::OperationHandle::null();
-        unsafe {
-            take_status(self.table().begin.expect("validated")(
-                self.raw.state,
-                code,
-                generation,
-                state.map_or(std::ptr::null(), |state| state),
-                &mut raw,
-            ))
-            .map_err(super::proxy::native_operation_cause)?;
-            OperationFuture::new(raw).map_err(super::proxy::native_operation_cause)
-        }
+        super::telemetry::scope(self._telemetry.as_ref(), || {
+            unsafe {
+                take_status(self.table().begin.expect("validated")(
+                    self.raw.state,
+                    code,
+                    generation,
+                    state.map_or(std::ptr::null(), |state| state),
+                    &mut raw,
+                ))
+                .map_err(super::proxy::native_operation_cause)?;
+            }
+            Ok(())
+        })?;
+        unsafe { OperationFuture::new(raw).map_err(super::proxy::native_operation_cause) }
     }
     fn cancel(&self) {
         self.cancel_snapshot(0);

@@ -318,7 +318,9 @@ Sources and reactions are **owned by DrasiLib** after calling `with_source()` / 
 
 | Method | Type | Default |
 |--------|------|---------|
-| `with_id(impl Into<String>)` | Stable instance identity | `"drasi-lib"` (the config struct separately defaults to a UUID) |
+| `with_id(impl Into<String>)` | Stable instance identity; use distinct IDs for coexisting instances | `"drasi-lib"` (the config struct separately defaults to a UUID) |
+| `with_telemetry(TelemetryOptions)` | Runtime-only trace/metric collection policy | `Off` |
+| `with_component_logging(ComponentLogRuntime)` | Supply host-composed capture instead of automatic setup | Automatic default logging |
 | `with_query_factory(Arc<dyn ComponentFactory>)` | Explicit ordinary-query implementation | None; no linked fallback |
 | `with_source(impl Source + 'static)` | Source plugin (chainable) | — |
 | `with_reaction(impl Reaction + 'static)` | Reaction plugin (chainable) | — |
@@ -783,6 +785,12 @@ async fn start(&self) -> Result<()> {
 
 DrasiLib provides component-aware logging built on [tracing](https://docs.rs/tracing/). Logging is **initialized automatically** when you call `build()` — no manual setup required.
 
+Logging is independent of new tracing/metrics collection. Both new signals
+default to `Off`; enabling them never changes the log filter. Automatic setup
+installs no metric recorder or exporter. Invalid log directives and conflicts
+with an unrelated host subscriber/logger are returned as initialization errors,
+not silently ignored.
+
 Control verbosity with `RUST_LOG`:
 
 ```bash
@@ -790,6 +798,54 @@ RUST_LOG=info cargo run              # Default level
 RUST_LOG=debug cargo run             # Verbose
 RUST_LOG=drasi_lib=debug cargo run   # Debug only drasi-lib
 ```
+
+### Ownership and custom hosts
+
+`init_default_subscriber()` explicitly initializes or borrows the same default
+service used by library construction. Use it before constructing components if
+their constructor-time logs matter. All default library instances share its
+owned worker; stopping one instance does not stop another's logging.
+
+For custom setup, `init_component_logging()` or
+`ComponentLogRuntime::new(LogPolicy::new("info")?)` creates capture without
+installing globals. Compose `logging.layer()` into the host subscriber, configure
+the host's `log` bridge, then supply `logging.clone()` to
+`DrasiLib::builder().with_component_logging(...)`. Apply formatting/export filters
+per layer, not as a global filter that hides component-routing spans.
+The [compiled Stockroom example](docs/developer-guide/stockroom/src/main.rs)
+demonstrates composition, setup-failure cleanup and awaited application shutdown.
+
+Keep the logging runtime until all its instances have finished. Await
+`logging.shutdown(timeout)` to close admission, drain accepted records and join
+its worker. Timeout or cancellation retains cleanup ownership so shutdown can
+be retried. Default-service shutdown is terminal: its installed global subscriber
+cannot be replaced, and subsequent automatic setup returns `LoggingError::Closed`.
+`logging.flush()` waits for earlier accepted messages without closing capture.
+Full/closed transport losses are exposed by `logging.losses()` and non-recursive,
+rate-limited stderr diagnostics. These logs are not a durable audit ledger.
+
+Migration notes:
+
+- `get_or_init_global_registry()` is passive; use a logging initializer when
+  setup is intended. Plain library construction still initializes defaults.
+- Standalone examples and component integration tests initialize the Drasi
+  default service instead of installing a competing `env_logger`. The examples
+  use the same INFO/stdout defaults as plain library construction; `RUST_LOG`
+  remains the verbosity override. Custom stderr output is demonstrated by
+  Stockroom's explicitly composed host.
+- `ComponentLogLayer::new` takes a runtime, not a registry. Prefer
+  `ComponentLogRuntime::layer()` for the independently filtered layer.
+- Source/reaction runtime contexts include an optional host-local `log_binding`.
+  Their constructors remain usable; struct literals must supply this field.
+  The binding does not cross the legacy ABI. Host callbacks use its actual key
+  and destination instead of a mandatory global registry or plugin-supplied key.
+- Log-history removal now returns a result and is ordered after accepted capture
+  messages, so queued stop logs do not recreate history that was just removed.
+- Legacy plugin forwarding uses log-only policy, never the subscriber's maximum
+  span level. Callbacks enforce target/level policy before history admission.
+  Span/field directives cannot be reconstructed at that boundary and are
+  reported as unsupported; use a static target/level capture policy for legacy
+  plugins. Forwarded console messages use the `drasi_plugin` target.
 
 ### Subscribing to Component Logs
 
@@ -816,11 +872,428 @@ pub struct LogMessage {
     pub message: String,
     pub instance_id: String,          // DrasiLib instance that owns the component
     pub component_id: String,         // e.g., "my-source"
-    pub component_type: ComponentType, // Source, Query, or Reaction
+    pub component_type: ComponentLogType, // Includes native execution roles
 }
 ```
 
 Standard `log::info!()` and `tracing::info!()` macros both work inside plugin code — logs are automatically routed to the component that spawned the task.
+
+## Telemetry foundations
+
+For a short end-to-end setup, see
+[Enable observability in your application](docs/developer-guide/README.md#enable-observability-in-your-application).
+
+`observability` exposes shared catalogue descriptors, `TelemetryProfile`,
+`TelemetrySettings`, `TelemetryOptions`, parent-based sampling decisions and
+validated metric registration. The existing snapshot-oriented `metrics` module,
+inspection APIs and profiler are unchanged.
+
+| Profile | Eligible observations |
+|---|---|
+| `Off` | No new tracing or metrics; ordinary logging remains available |
+| `Basic` | Basic catalogue entries |
+| `Debug` | Basic plus debug operation detail |
+| `Persistence` | Basic plus supported persistence entries |
+
+Enabled profiles instrument the owning graph's actual operation boundaries:
+
+| Detail | Supported spans |
+|---|---|
+| Basic | Source publication, transformer/query processing, single/batch sink handling, bootstrap, scheduled/replay attempts, ordinary reaction workers, start/stop/reconfigure, and control requests |
+| Debug | Query input/output preparation and finalization, inner evaluation, query-owned commits, pipe acceptance, output confirmation, and supported acknowledgements |
+
+Publication excludes idle `next()` waiting; batch handling excludes collection.
+Processing excludes later forwarding, confirmation, and acknowledgement. Sink
+completion stays `accepted` or `handled` according to its declared contract.
+Query input processing and input-driven continuations use `query.process`;
+transformers use `transformer.process`, and bounded service work retains
+`component.process`.
+`query.evaluate` measures the evaluator-only boundary, not the full query
+callback. Query and transformer processing were previously named `component.process`:
+update span-name filters and saved searches accordingly. Component identities, causal
+parentage, timing boundaries and metric names/labels are unchanged.
+Debug output confirmation similarly uses `query.confirm_outputs` or
+`transformer.confirm_outputs`, with `component.confirm_outputs` retained for
+unclassified components. Update filters that used the generic confirmation name.
+This is the producing component's hook after outgoing acceptance, not proof
+that downstream reactions have completed. The metric operation label remains
+`confirm_outputs`.
+Graph-owned operation spans for components constructed from a registered
+factory specification also include `implementation`, the host-assigned
+implementation name (for example `drasi.standard/arithmetic`). Directly
+constructed components without a registered factory identity omit it; no type
+is guessed from an instance ID or payload. This is a trace attribute, not a
+metric label or part of the span name.
+Ordinary reaction enqueue acceptance is not completed reaction processing.
+Output-only replay does not imply another evaluation. `component.scheduled`
+starts only for an actual bounded future-queue, input-replay or output-replay unit;
+idle wakeups and final empty drain probes have no processing trace. Scheduled
+attempts use new roots, never a stored historical event parent. Real replay
+bookkeeping commits can still have debug spans.
+
+For actual query input processing, Debug adds bounded `query.prepare_input`,
+`query.prepare_output` and `query.finalize` measurement windows around progress/
+checkpoint validation and decoding, result projection/serialization/staging,
+and post-commit cache/watermark/profiling publication respectively. They include
+elapsed async waits, not just CPU work. No per-row spans or additional metric
+instruments are introduced; Basic/Off/Persistence do not collect these phases.
+They preserve the caller's execution context, so live output and downstream
+handling remain causally parented to the processing/scheduled attempt, not its
+last detail span. Unsampled parents are not overridden, and phase detail does
+not create unrelated root traces when no operation context is available.
+
+These phases do not exhaustively account for `query.process`: Core transaction
+gating/session begin, result/transaction orchestration, scheduling, and
+instrumentation/export/boundary overhead can remain between named spans.
+Preparation/finalization can contain their own bookkeeping commit in duplicate
+or non-atomic paths; do not sum overlapping child durations or interpret a
+residual as CPU time. Existing evaluation/commit meanings and metric ownership
+are unchanged. Output-only replay and empty wakeup probes are not reclassified
+as fresh input processing.
+
+`query.bootstrap` is one aggregate root linked to its initiating start operation.
+It includes awaited initialization and completion, with bounded
+`bootstrap.snapshot` detail and aggregate counts, not a span per snapshot row.
+Restart/rebootstrap suppresses per-row evaluator and commit detail too. Tracing
+does not change startup readiness or cancellation-safe provider cleanup.
+
+Ordinary reaction workers emit `reaction.process` or `reaction.process_batch`
+around actual effects, separately from enqueue acceptance. Batches choose a
+shared parent or bounded links before sampling; collection is outside handling.
+The trace scope can include checkpoint/policy work. Separate worker metric
+guards account for actual handling before checkpointing; neither observation
+adds acknowledgements or stronger delivery guarantees.
+
+The common component instruments count operation attempts, successfully processed
+input envelopes, and validated output envelopes before fan-out. Source dispatch
+counts successful publication attempts accepted by all bound destinations.
+Successful idempotent admission retries are publication attempts but do not
+produce new envelopes or physical queue entries. Call durations use local
+monotonic clocks and record success, error or cancellation independently of
+tracing. The `up` gauge follows lifecycle/readiness, not idle or backpressure.
+
+Queue observations use one graph-scoped identity per physical owner, including
+shared ranked queues and multicast. Volatile depth describes queued deliveries;
+QoS/retained depth describes unique retained records still owed to at least one
+non-retired consumer, including delivered-but-unacknowledged work. Completed
+retained history is excluded. Disconnection does not retire an obligation.
+Only confirmed durable mutations update these observations; page-cache movement,
+staging and receipt lookups do not. Blocking counts once per waiting attempt;
+drops exclude eviction of already completed history. Queue gauges reset when
+their binding ends, and counters retain their stable host series.
+Custom providers may expose `PipeControl::observations()`; custom retained stores
+may expose `RetainedEnvelopeStore::observations()`. Unsupported capabilities
+remain absent, not fabricated zeros. Existing pipe inspection snapshots retain
+their original semantics.
+
+Query and ordinary reaction metrics use the same host-owned recorder, even
+without tracing, sampling, or the optional OpenTelemetry adapter:
+
+| Instrument | Meaning |
+|---|---|
+| `drasi.query.events_processed{query_id,phase}` | Completed, nonduplicate data input envelopes, not source changes or timer notifications |
+| `drasi.query.results_emitted{query_id,change_kind}` | Newly published add/update/delete result-row changes before fan-out, not replayed envelopes |
+| `drasi.query.engine.duration{query_id,phase}` | Seconds per actual evaluation attempt, including failure/cancellation, excluding preparation, hooks, commit, and forwarding |
+| `drasi.reaction.results_processed{reaction_id,query_id}` | Successfully handled non-Noop result-row changes at the ordinary worker, not queue acceptance or checkpoint advancement |
+
+`phase` is `bootstrap` or `steady`. Bootstrap records successful snapshot inputs
+and actual evaluation, but loading the live view does not emit result-stream
+rows. It retains aggregate tracing without per-row spans. Scheduled evaluation
+records engine time and new results, but no new data input. Prepared input replay
+uses the normal nonduplicate path; output-only replay records no new query input,
+evaluation, or computed results. These are process-local observations, not
+durable exactly-once totals.
+
+The Persistence profile additionally exposes:
+
+- `drasi.query.commit.duration{query_id,phase,outcome}`: real query-owned commit
+  attempts in seconds, including actual bootstrap/replay bookkeeping commits.
+- `drasi.query.outbox.entries{query_id}` and `drasi.query.live_results{query_id}`:
+  known framework retention/cardinality, including in-memory providers, not disk
+  or storage-engine statistics. Removed bindings clear previously known gauges.
+- `drasi.reaction.checkpoint_lag_events{reaction_id,query_id}`: current query
+  result-sequence head minus a confirmed checkpoint in the same epoch. It updates
+  on both head and checkpoint changes, including while handling is blocked.
+  Staged bootstrap checkpoints and enqueue progress do not advance it.
+- `drasi.reaction.dedup_skips`, `drasi.reaction.gaps_detected`, and
+  `drasi.reaction.recovery_triggers{policy}`: actual per-reaction/query recovery
+  decisions; policy is `strict`, `auto_reset`, or `auto_skip_gap`.
+
+Unknown, unsupported, or epoch-mismatched checkpoint lag is absent, not a
+fabricated zero. A recorder may retain the last series after observations stop.
+Existing reaction snapshots retain their compatibility behavior, including the
+runtime adapter's acceptance-based progress; they are not the source of the new
+confirmed-checkpoint gauge. Existing query/lifecycle snapshots and profiling
+metadata remain available with telemetry Off.
+
+Handling success is independent of checkpoint success: completed rows remain
+counted if a later checkpoint write fails and can count again when retried.
+Partial batches count only positively completed rows; dropped/failed rows do not
+become successes under AutoSkipGap. Whole-input handled counts wait for all of
+that input's rows, including across split batches. Application-channel forwarding
+is a local boundary, not application-consumer completion.
+
+Bounded reaction/service work records common calls/durations/errors at the
+worker. Once that component uses work observations, its service `run` lifetime
+is not an additional owner of propagated processing errors. Checkpoint write
+failures are observed separately as storage errors. Idle service loops do not
+create work samples.
+
+Native metric callbacks and completed-span/log collection use the separately
+negotiated shared telemetry family. `require_native_metrics()` checks the actual
+plugin capability at construction. Exporters remain host-owned; none is installed
+automatically. Opaque native/legacy workers do not gain internal metrics merely
+from host wrappers.
+
+### Opt-in handled-branch latency
+
+Add `.with_handled_branch_latency(HandledBranchLimits::default())` to
+`TelemetrySettings` and supply the existing host-owned metric registration context.
+This explicitly enables `drasi.pipeline.end_to_end.duration`; every profile still
+leaves it off by default, and metric exclusions/disablement take precedence.
+Tracing, OTel and sampling are independent.
+
+One sample is the elapsed monotonic time from a fresh envelope's framework source
+publication/admission entry to successful handling of one complete query-output
+envelope at one sink. Source polling and upstream event age are excluded; graph
+queueing, query processing/commit, batching and effect work are included. Each
+fan-out sink and each distinct query output completes independently. `phase` is
+`steady`; bootstrap, scheduled-only and reconstructed replay without a valid
+original timing owner produce no sample. Metric labels never contain timing
+tokens, generations, event/trace IDs or row ordinals.
+
+Failed, dropped, partially handled and acceptance-only branches do not record a
+success. A live retry keeps the original start; successful completion records
+once before later checkpoint/acknowledgement work. Split worker batches retain
+stable original non-Noop row ordinals. Query-results outlets and ordinary
+application-channel forwarding are not terminal handling. Graph forwarding sinks
+must override `observes_handled_branch_latency()` to return false; this does not
+change their existing delivery contract, counters or trace topology.
+
+Tracking has finite per-graph origin/lease/branch and byte budgets, with no
+age-based expiry or eviction of admitted work. Default limits are 16,384
+accounting records and 8 MiB of record/key/row data; allocator/map overhead is
+additionally count-bounded, not included in that byte count. Capacity loss omits
+new timing, not business data, and seals new branch admission for that origin
+without discarding its admitted branches. Final live ownership releases timing
+and retry receipts; completed QoS history retains no timing owner.
+
+`GraphTelemetry::handled_branch_diagnostics()` exposes current charges,
+completion/rejection counts and coverage gaps without traces or an exporter.
+The histogram describes successful tracked branches, not upstream latency,
+all-branches completion, durable exactly-once totals, or an unbiased distribution
+when coverage is lost. Native propagation requires the V3 capability; older
+plugins remain supported with an explicit timing propagation gap. A terminal
+native handled callback can still be timed at the host boundary.
+
+Use `TelemetrySettings::new(profile).with_metrics(false)` for tracing-only
+policy, or `.with_tracing(false)` for metrics-only policy. Metric exclusions are
+literal substrings, not globs; an empty substring excludes all metrics. Trace
+sampling never samples metrics. A child inherits its parent's decision; a new
+root consults the configured policy once. Sampling ratios must be finite and
+within `[0, 1]`.
+
+With `otel-context`, compose `TelemetrySampler(host_root_sampler)` into the host
+tracer provider and supply `OpenTelemetryContextAdapter`. The wrapper inherits
+parent decisions and applies configured Never/Ratio policies to new roots.
+An incompatible host sampler is reported explicitly rather than silently
+ignoring a requested root policy. No provider/subscriber is installed for you.
+
+Batch handling uses a child when all callback inputs have the same valid context;
+otherwise it uses an explicit root linked to distinct contextual inputs. Mixed
+contextual/context-free inputs and different parents in one trace use links too.
+Links, identity and `links_truncated` are supplied before sampling; unsampled
+batch context still reaches static/native callbacks. `with_trace_link_limits`
+accepts positive count/encoded-byte budgets (defaults: 128 links, 64 KiB).
+Configure these no larger than the host adapter/processor/exporter limits.
+Link truncation never changes the handler's inputs.
+
+The host creates one `MetricRegistrationContext` per supplied
+`Arc<dyn metrics::Recorder + Send + Sync>` and clones it into all graphs and
+static SDK integrations targeting that recorder. Pass it through
+`TelemetryOptions::with_metric_context(...)` before components register/cache
+handles. No global installation is required when the recorder is supplied.
+Do not construct independent contexts to bypass cross-instance conflicts.
+Cached no-op handles are not rebound when a recorder is installed later.
+
+Registration is atomic across callers: the same emitted name must retain its
+type, unit and label schema. Label order is normalized; different permitted
+identity values form distinct series. Disabled/excluded registrations consume
+no state and do not call the recorder. Contexts for different recorders are
+independent. Definitions are retained for the recorder's lifetime, not evicted
+on component replacement.
+
+`RegistrationLimits::default()` permits 256 name bytes, 1,024 description bytes,
+16 labels (including identity), 64 bytes per label key, 1,024 bytes per label
+value, 1,024 instrument definitions and 16,384 distinct series per context.
+Limits must be positive; exhaustion and invalid enabled registrations return
+typed errors. Dimensionless catalogue units map to facade `Unit::Count`;
+durations use `Unit::Seconds`. Generation, trace IDs, sequences and raw errors
+are not metric labels.
+
+Library graphs use the library instance ID. Direct graphs with either signal
+enabled require `TelemetryOptions::with_instance_id(...)`; construction with
+telemetry off stays passive. Hosts own namespace uniqueness. Policies,
+registration contexts and logging bindings are runtime-only and never enter
+graph definitions, business payloads or replay hashes. Factories receive the
+actual owning graph's policy/scope through `ConstructionContext::telemetry()`,
+including additions and replacements; a temporary assembly graph is not the
+owner.
+
+Resource-only telemetry bindings derive stable UUID identities in a dedicated
+namespace from their resource IDs, scoped by the actual instance and graph.
+These transport identities do not create graph nodes or synthetic component
+measurements, and their lifetime remains owned by the resource.
+
+## Portable execution context
+
+### Shared native telemetry
+
+Supply a host-owned `NativeSpanCollector` using
+`TelemetryOptions::with_native_span_collector(...)` to collect native internal
+spans. Collection is bounded and nonblocking at submission; metrics do not use
+its queue. Ordinary logs still use `ComponentLogRuntime`, independently of
+tracing and sampling. Native log records preserve original timestamps, target,
+safe fields and optional trace context in `LogMessage::metadata`. Existing
+constructors and old serialized log fields remain available; Rust callers using
+`LogMessage` struct literals must initialize the new optional field.
+
+With `otel-context`, wrap a host processor in `OpenTelemetrySpanProcessor`,
+compose a clone and its `sampler()` into the host tracer provider, and supply
+another clone to `NativeSpanCollector::new`. Both paths share the processor and
+resource; native IDs, parentage and timestamps are not recreated as new spans.
+Use bounded batch processors/exporters for production. After stopping producers,
+await collector shutdown and logging drain before shutting down the provider.
+Stopping an instance does not shut down a collector shared with another instance.
+
+The optional adapter is aligned with OpenTelemetry API/SDK 0.33.1 and
+`tracing-opentelemetry` 0.34.0 for the Server OBS-01 compatibility baseline.
+Exporter construction remains host-owned and is not enabled by this feature.
+Rebuild native context/telemetry fixtures after dependency or SDK changes;
+existing shared libraries are not rebuilt by a host's path dependencies.
+
+Component factories use `ConstructionContext::plugin_metrics(kind)` to cache a
+`ScopedMetricEmitter`. Native SDK factories use that same emitter API through
+their negotiated binding. Counters accumulate across replacement, including
+generation-local `absolute()` reports; custom gauges reset and old handles are
+fenced. `require_native_metrics()` is validated against the actual plugin
+capability before construction. See the [native SDK guide](../components/computation-plugin-sdk/README.md#telemetry-registration-foundations)
+for API and compatibility details.
+
+For a runnable HTTP source -> arithmetic transformer -> query -> handled
+callback trace, see the [observability demonstration](examples/observability/README.md).
+The current demo statically registers native SDK components and includes a live
+metrics/correlated-log dashboard, local Jaeger, and an exact trace-shape verifier.
+PostgreSQL CDC is a separate optional scenario. `TRACE_SAMPLING=never`
+demonstrates metrics/logging independently of sampled traces.
+
+Execution context is transient metadata accompanying work, not the envelope's
+persisted `ProcessingContext`/annotations. It holds an optional sending trace ID,
+span ID, flags and bounded W3C trace state. Unsampled contexts remain valid.
+No live span, arbitrary baggage, transaction, acknowledgement or timing token
+travels in the carrier.
+
+The runtime restores the receiving component's execution/logging scope on every
+poll and transports context through inputs, outputs, pipes, batches and admission.
+Bounded live sidecars preserve journal context across page-cache eviction.
+Persistent reconstruction has no historical execution context. Event codecs,
+query results, receipt digests and acknowledgement semantics are unchanged.
+Default logging and existing metrics behavior are unchanged too.
+
+Use `TelemetryOptions::with_context_adapter(...)` to supply a host-owned
+`TraceContextAdapter`. `require_distributed_tracing()` validates that an adapter
+is present and requires native context capability where native components are
+bound. The optional `otel-context` feature supplies `OpenTelemetryContextAdapter`;
+the host composes its `tracing-opentelemetry` layer with context activation enabled
+and owns collection/export/shutdown. No helper installs a subscriber or exporter.
+An adapter alone does not enable a collection profile or native span collection.
+Graph-owned operation spans are emitted once on the host in static and native
+builds; native component-authored children still require their own local tracing
+integration, and production transport of completed native spans is separate.
+
+`ExecutionScope::capture()` captures local execution bindings for explicitly
+spawned work. The shared `spawn_owned_component_worker` helper keeps those
+bindings but clears the startup operation's parent for a long-lived worker.
+Use `spawn_owned_scoped_worker` for short child work such as one snapshot, or
+`spawn_owned_scoped_blocking_worker` for its blocking equivalent. The original
+ownership-only helpers remain available and do not implicitly capture context.
+For a queue, retain each item's `ExecutionContext`, then use the receiving scope's
+`with_context(...)`. An explicitly empty scope clears inherited context.
+The component identity is the actual runtime construction/logging identity:
+an ordinary instance uses its instance ID, while a standalone graph's execution
+scope remains its graph ID. A separate configured telemetry namespace does not
+rename existing component log keys.
+
+Ordinary dispatchers and priority queues have transient `ChangeMessage<T>`
+sidecars. Use `recv_message`, `dequeue_message`, and `try_dequeue_message` in
+workers; payload-only convenience methods intentionally discard context.
+Persisted replay has an empty historical context, while replay-then-live
+receivers preserve subsequent live sidecars. No event/WAL/checkpoint format
+or receipt digest contains this metadata.
+
+`ReactionBase::worker_telemetry()` provides the receiving component's binding.
+Use its `reaction`/`reaction_batch` observation at actual handling, not while
+waiting for a queue. Services can use `WorkerTelemetry::capture().service_work`
+for a bounded unit; do not instrument a status watcher or the whole service
+lifetime as processing. Scope futures per poll and blocking closures with
+`ExecutionScope::in_scope`; never hold an entered guard across an await.
+
+For a reaction's real async processing loop:
+
+```rust,ignore
+let telemetry = base.worker_telemetry().await;
+let message = base.priority_queue.dequeue_message().await;
+telemetry.reaction(&message.execution_context, message.payload.results.len())?
+    .run(process_result(message.payload))
+    .await?;
+```
+
+For one bounded blocking snapshot operation, preserve its context while keeping
+the join handle in the existing owner:
+
+```rust,ignore
+drasi_lib::context::workers::spawn_owned_scoped_blocking_worker(
+    &snapshot_worker,
+    move || read_snapshot(),
+).await?;
+```
+
+Providers that start snapshot work during preparation can use
+`BootstrapTrace::current()` and call `start()` immediately before that actual
+initialization, then scope the work with its returned context. Calling this for
+replay-only preparation would create a false bootstrap trace. The
+`ComputationBootstrapProvider::bind_bootstrap_trace` hook passes the same lazy
+run to subscription-owned initialization; it is host-local, not an ABI frame.
+
+### Rust API migration
+
+- `InputEnvelope` and `OutputEnvelope` now have `execution_context`. Prefer
+  `new(port, envelope)` and `with_execution_context(...)` to two-field literals.
+- Constructors are context-free. Forward an input's context explicitly, or use
+  `OutputEnvelope::with_current_context()` inside a restored producing scope.
+  Graph-owned processing fills a missing output context from that actual
+  producing operation, not a later unrelated caller. Replay explicitly creates
+  a fresh attempt context rather than borrowing a historical input parent.
+  A graph-owned source publication can explicitly create and carry its own
+  operation context; that does not reconstruct historical traces.
+- `EnvelopeSender` implementors must implement `send_message(EnvelopeMessage)`.
+  `send`/`send_batch` remain context-free conveniences; `send_messages` preserves
+  context through accepted-prefix failures and unattempted suffixes.
+- `Delivery::into_parts()` returns `(envelope, execution_context, acknowledgement)`.
+  Failure ownership includes the carrier; dropping it is not an acknowledgement.
+- Custom `RetainedEnvelopeStore` implementations must implement `append_message`
+  and return context in `StoredEnvelope`, retaining it only in bounded live state.
+  Never change persisted event bytes to carry it.
+- `SourceAdmission::admit` captures the current execution context at publication;
+  `admit_message` accepts an explicit carrier. Retry identity remains event-only.
+
+Native context transport uses a negotiated extension, not appended fields in
+frozen vtables or legacy Source/Reaction payloads. Missing required capabilities
+fail explicitly. Negotiated telemetry V2 supports completed native spans, logs,
+and scoped metric callbacks with host-owned collection and export.
+Legacy Source/Reaction cdylibs without context transport
+retain their loading/logging behavior, but cannot provide transparent worker
+trace continuity through their unchanged ABI.
 
 ---
 

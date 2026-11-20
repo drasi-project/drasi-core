@@ -421,8 +421,13 @@ impl MiddlewareTransformer {
         Ok(())
     }
 
-    fn outputs(&self, envelope: super::ChangeEnvelope) -> Vec<OutputEnvelope> {
+    fn outputs(
+        &self,
+        envelope: super::ChangeEnvelope,
+        context: super::ExecutionContext,
+    ) -> Vec<OutputEnvelope> {
         vec![OutputEnvelope {
+            execution_context: context,
             port: self.output_port.clone(),
             envelope,
         }]
@@ -439,11 +444,13 @@ impl MiddlewareTransformer {
             self.pending.pop_front();
             self.wakeup
                 .set(!self.pending.is_empty() || self.deferred.is_some());
-            return Ok(self.outputs(output));
+            return Ok(self.outputs(output, super::ExecutionContext::default()));
         }
         if let Some(input) = self.deferred.take() {
             self.wakeup.set(false);
-            return self.process(input).await;
+            let scope = crate::observability::ExecutionScope::capture()
+                .with_context(input.execution_context.clone());
+            return scope.scope(self.process(input)).await;
         }
         self.wakeup.set(false);
         Ok(Vec::new())
@@ -462,7 +469,9 @@ impl MiddlewareTransformer {
                 )
                 .await?;
             self.publish_progress()?;
-            return Ok(output.map_or_else(Vec::new, |envelope| self.outputs(envelope)));
+            return Ok(output.map_or_else(Vec::new, |envelope| {
+                self.outputs(envelope, input.execution_context.clone())
+            }));
         }
         let sequence = self
             .sequence
@@ -486,7 +495,7 @@ impl MiddlewareTransformer {
         )?;
         GraphProducerProgress::annotate(&mut envelope, &self.identity, sequence)?;
         self.sequence = sequence;
-        Ok(self.outputs(envelope))
+        Ok(self.outputs(envelope, input.execution_context))
     }
 }
 
@@ -1070,6 +1079,7 @@ mod tests {
 
     fn input(sequence: u64) -> InputEnvelope {
         InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in").expect("port"),
             envelope: GraphChangeCodec::encode_change(
                 SourceChange::Insert {

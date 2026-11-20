@@ -77,6 +77,7 @@ fn input(sequence: u64) -> Result<InputEnvelope> {
         properties: ElementPropertyMap::new(),
     };
     Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: drasi_computation_contracts::GraphChangeCodec::encode_change(
             SourceChange::Insert { element },

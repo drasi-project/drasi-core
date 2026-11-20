@@ -49,6 +49,7 @@ pub fn progress_record(
         sequence,
     };
     Ok(OutputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("out")?,
         envelope: GraphChangeCodec::encode_source_progress(
             source,
@@ -264,6 +265,7 @@ impl Iterator for Emission {
             )
             .with_source_position(position.encode()?);
             Ok(OutputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("out")?,
                 envelope: GraphChangeCodec::encode_source_event(
                     Arc::new(event),

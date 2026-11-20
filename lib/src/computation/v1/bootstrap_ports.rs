@@ -106,7 +106,7 @@ impl BootstrapPorts {
         let Some(delivery) = receiver.receive().await? else {
             return Ok(None);
         };
-        let (envelope, acknowledgement) = delivery.into_parts();
+        let (envelope, _, acknowledgement) = delivery.into_parts();
         if let Some(acknowledgement) = acknowledgement {
             acknowledgement
                 .complete(super::HandlingOutcome::Handled)

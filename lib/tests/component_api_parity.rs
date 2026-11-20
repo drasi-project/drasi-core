@@ -448,6 +448,7 @@ async fn preconstructed_native_query_exposes_its_existing_results_without_a_cata
         core.start().await?;
         sender
             .send(OutputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("out")?,
                 envelope: GraphChangeCodec::encode_change(
                     SourceChange::Insert {

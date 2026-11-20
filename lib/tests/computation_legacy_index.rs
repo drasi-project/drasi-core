@@ -37,6 +37,7 @@ fn definition(query: &str) -> ContinuousQueryDefinition {
 }
 fn input() -> InputEnvelope {
     InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").expect("port"),
         envelope: GraphChangeCodec::encode_change(
             SourceChange::Insert {

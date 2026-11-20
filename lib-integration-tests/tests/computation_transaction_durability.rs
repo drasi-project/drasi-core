@@ -226,6 +226,7 @@ async fn transaction_unstarted(
 
 fn input(sequence: u64, value: i64) -> Result<InputEnvelope> {
     Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_change(
             SourceChange::Insert {
@@ -295,6 +296,7 @@ impl EnvelopeSource for ReplaySource {
             return Ok(None);
         }
         Ok(Some(OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out")?,
             envelope: input(self.sequence, self.sequence as i64 + 2)?.envelope,
         }))
@@ -574,6 +576,7 @@ async fn deliver(
     assert_eq!(output.len(), 1);
     Ok(query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: output[0].envelope.clone(),
         })

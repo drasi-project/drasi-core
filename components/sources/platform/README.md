@@ -23,6 +23,15 @@ The Platform Source provides integration between external Drasi platform sources
 3. **Event Replay**: Replay historical events from Redis Streams for query initialization
 4. **Cross-Service Communication**: Enable event-driven communication between Drasi components
 
+## Incoming trace context
+
+CloudEvents `traceparent` and optional `tracestate` extension attributes are
+extracted through the shared SDK. All changes or controls from one CloudEvent
+keep that event's trace ID, sender parent and sampling decision during dispatch.
+Missing context clears an earlier event's parent. Malformed metadata logs a
+warning and is ignored without rejecting business data. Arbitrary `trace_id`
+fields in change payloads are not interpreted as tracing metadata.
+
 ## Architecture
 
 ```

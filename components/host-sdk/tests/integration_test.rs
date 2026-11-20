@@ -393,6 +393,7 @@ async fn state_store_context_ownership_across_actual_plugin_initialization() {
             identity_provider: None,
             snapshot_fetcher: None,
             resource_observer: None,
+            log_binding: None,
             component_directory: None,
         })
         .await;
@@ -2515,6 +2516,7 @@ async fn test_source_with_null_identity_provider() {
         identity_provider: None,
         wal_provider: None,
         resource_observer: None,
+        log_binding: None,
     };
 
     // This should not crash — identity_provider is None
@@ -2575,6 +2577,7 @@ async fn test_source_with_identity_provider_injection() {
         identity_provider: Some(provider),
         wal_provider: None,
         resource_observer: None,
+        log_binding: None,
     };
 
     // This should not crash — identity_provider is passed through FFI
@@ -2710,6 +2713,7 @@ async fn test_identity_provider_cross_cdylib_clone_stress() {
         identity_provider: Some(provider),
         wal_provider: None,
         resource_observer: None,
+        log_binding: None,
     };
 
     // Drives CLONE_STRESS clone_box()+get_credentials() calls across both cdylib boundaries.
@@ -2856,6 +2860,7 @@ async fn test_reaction_identity_provider_cross_cdylib_clone_stress() {
         identity_provider: Some(provider),
         snapshot_fetcher: None,
         resource_observer: None,
+        log_binding: None,
         component_directory: None,
     };
 
@@ -2933,6 +2938,7 @@ async fn test_reaction_enqueue_query_result() {
         identity_provider: None,
         snapshot_fetcher: None,
         resource_observer: None,
+        log_binding: None,
         component_directory: None,
     };
     reaction.bind_runtime_context(context).await;
@@ -3023,6 +3029,7 @@ async fn test_reaction_enqueue_multiple_query_results() {
         identity_provider: None,
         snapshot_fetcher: None,
         resource_observer: None,
+        log_binding: None,
         component_directory: None,
     };
     reaction.bind_runtime_context(context).await;
@@ -3103,6 +3110,7 @@ async fn test_reaction_enqueue_query_result_with_data() {
         identity_provider: None,
         snapshot_fetcher: None,
         resource_observer: None,
+        log_binding: None,
         component_directory: None,
     };
     reaction.bind_runtime_context(context).await;
@@ -3211,6 +3219,7 @@ async fn test_reaction_start_stop_stress() {
             identity_provider: None,
             snapshot_fetcher: None,
             resource_observer: None,
+            log_binding: None,
             component_directory: None,
         };
         reaction.bind_runtime_context(context).await;
@@ -4110,6 +4119,7 @@ async fn test_ffi_repeated_lifecycle_does_not_fill_unread_plugin_status_channels
             identity_provider: None,
             snapshot_fetcher: None,
             resource_observer: None,
+            log_binding: None,
             component_directory: None,
         })
         .await;
@@ -4397,6 +4407,7 @@ async fn test_cdylib_durable_http_replays_from_sequence_zero() {
             identity_provider: None,
             wal_provider: Some(wal.clone()),
             resource_observer: None,
+            log_binding: None,
         })
         .await;
     source.initialize().await.expect("source initialization");

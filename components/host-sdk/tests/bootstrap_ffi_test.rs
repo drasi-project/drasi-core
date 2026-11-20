@@ -393,6 +393,7 @@ async fn test_ffi_snapshot_fetcher_vtable() {
         identity_provider: None,
         snapshot_fetcher: Some(mock_fetcher.clone()),
         resource_observer: None,
+        log_binding: None,
         component_directory: None,
     };
     reaction.bind_runtime_context(context).await;

@@ -412,7 +412,7 @@ impl sdk::NativeTransformer for Delay {
         Ok(self
             .pending
             .clone()
-            .map(|envelope| OutputEnvelope {
+            .map(|envelope| OutputEnvelope { execution_context: Default::default(),
                 port: PortId::try_new("out").expect("fixture output"),
                 envelope,
             })
@@ -442,7 +442,7 @@ impl sdk::NativeTransformer for Delay {
             .reemit(emission)?;
         self.pending = Some(output.clone());
         self.replay = false;
-        Ok(vec![OutputEnvelope {
+        Ok(vec![OutputEnvelope { execution_context: Default::default(),
             port: PortId::try_new("out")?,
             envelope: output,
         }])

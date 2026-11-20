@@ -11,11 +11,20 @@
 //! [`abi::logging`] table, so the same `log::info!` reaches the host either
 //! way. A host that does not install a logger leaves the library's facade
 //! disabled, exactly as an application without a logger would.
+//!
+//! The library has a single `log` logger, shared with native telemetry: a
+//! record written inside a component's telemetry scope is captured for that
+//! component, and every other record is forwarded to the host's logger.
 
 use crate::{abi, transport::Failure};
 use std::sync::OnceLock;
 
-struct HostLogger(abi::logging::HostLoggerV1);
+struct HostLogger {
+    table: abi::logging::HostLoggerV1,
+    // Native telemetry can raise the library's global maximum level, so the
+    // host's own level is kept separately.
+    level: log::LevelFilter,
+}
 
 // The table is host-owned for the process lifetime and its callback is
 // callable from any thread.
@@ -26,14 +35,14 @@ static HOST_LOGGER: OnceLock<HostLogger> = OnceLock::new();
 
 impl log::Log for HostLogger {
     fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-        metadata.level() <= log::max_level()
+        metadata.level() <= self.level
     }
 
     fn log(&self, record: &log::Record<'_>) {
         if !self.enabled(record.metadata()) {
             return;
         }
-        let Some(callback) = self.0.log else {
+        let Some(callback) = self.table.log else {
             return;
         };
         let message = record.args().to_string();
@@ -42,7 +51,7 @@ impl log::Log for HostLogger {
         // process lifetime; both byte strings are borrowed for the call.
         unsafe {
             callback(
-                self.0.context,
+                self.table.context,
                 level_code(record.level()),
                 abi::BorrowedBytes::new(target.as_bytes()),
                 abi::BorrowedBytes::new(message.as_bytes()),
@@ -94,14 +103,22 @@ pub unsafe fn install_host_logger(table: *const abi::logging::HostLoggerV1) -> R
         return Err(Failure::protocol("unsupported host logger table"));
     }
     let mut installed = false;
-    let logger = HOST_LOGGER.get_or_init(|| {
+    HOST_LOGGER.get_or_init(|| {
         installed = true;
-        HostLogger(table)
+        HostLogger {
+            table,
+            level: level_filter(table.max_level),
+        }
     });
-    if installed && log::set_logger(logger).is_ok() {
-        log::set_max_level(level_filter(table.max_level));
+    if installed && crate::telemetry_capture::install_logger().is_ok() {
+        log::set_max_level(log::max_level().max(level_filter(table.max_level)));
     }
     Ok(())
+}
+
+/// The host's logger, once the host has installed one.
+pub(crate) fn host_logger() -> Option<&'static dyn log::Log> {
+    HOST_LOGGER.get().map(|logger| logger as &dyn log::Log)
 }
 
 #[cfg(test)]

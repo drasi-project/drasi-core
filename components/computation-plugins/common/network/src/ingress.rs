@@ -18,7 +18,8 @@ use crate::config::IngressConfig;
 use crate::security::{Authenticator, RateLimiter};
 use anyhow::{Context, Result};
 use drasi_computation_contracts::workers::{
-    join_owned_worker_gracefully, spawn_owned_worker, WorkerCleanupError, WorkerCompletion,
+    join_owned_worker_gracefully, spawn_owned_component_worker, WorkerCleanupError,
+    WorkerCompletion,
 };
 use drasi_computation_contracts::{
     ComponentDescriptor, ComponentId, GraphChangeCodec, GraphProducerIdentity,
@@ -27,6 +28,7 @@ use drasi_computation_contracts::{
 use drasi_computation_plugin_sdk::lifecycle::{
     CancellationToken as LifecycleCancellation, LifecycleError, LifecycleResult, StopMode,
 };
+use drasi_computation_plugin_sdk::telemetry::{ExecutionContext, ExecutionScope};
 use drasi_computation_plugin_sdk::{NativeAdmission, Scope};
 use drasi_core_types::models::SourceChange;
 use drasi_http_common::adaptive_batcher::{AdaptiveBatchConfig, ThroughputMonitor};
@@ -185,6 +187,9 @@ pub struct Ingress {
     /// in-flight admissions stop waiting and answer that their outcome is
     /// uncertain.
     pub(crate) abort: CancellationToken,
+    /// The component's telemetry binding with no inherited operation
+    /// context; transports enter it with each request's propagated context.
+    pub execution_scope: ExecutionScope,
     live: Arc<Live<LiveSettings>>,
     sender: Option<mpsc::Sender<OutputEnvelope>>,
     mode: AdmissionMode,
@@ -376,6 +381,7 @@ impl Ingress {
         let sender = self.sender.as_ref().ok_or_else(|| {
             IngressError::new(IngressErrorKind::Failed, "volatile ingress is unavailable")
         })?;
+        let execution_context = ExecutionContext::current();
         let submit = async {
             let mut sequence = sequence.lock().await;
             let first = *sequence;
@@ -408,6 +414,7 @@ impl Ingress {
             *sequence = first + count as u64;
             for (permit, envelope) in permits.zip(envelopes) {
                 permit.send(OutputEnvelope {
+                    execution_context: execution_context.clone(),
                     port: output_port().clone(),
                     envelope,
                 });
@@ -438,6 +445,7 @@ impl Ingress {
             ))
         })?;
         let mut accepted = 0;
+        let execution_context = ExecutionContext::current();
         let submit = async {
             let mut sequence = sequence.lock().await;
             for change in changes {
@@ -462,6 +470,7 @@ impl Ingress {
                 // while waiting for capacity cannot consume an event sequence.
                 *sequence = next;
                 permit.send(OutputEnvelope {
+                    execution_context: execution_context.clone(),
                     port: output_port().clone(),
                     envelope,
                 });
@@ -798,6 +807,7 @@ impl SourceRuntime {
         let ingress = Arc::new(Ingress {
             config: self.config.clone(),
             source_id: self.descriptor.id().clone(),
+            execution_scope: ExecutionScope::capture().with_context(ExecutionContext::default()),
             sender,
             shutdown: shutdown.clone(),
             abort: CancellationToken::new(),
@@ -829,7 +839,7 @@ impl SourceRuntime {
             address,
             addresses,
         });
-        spawn_owned_worker(&running.listener, async move {
+        spawn_owned_component_worker(&running.listener, async move {
             let _cancel = stopped.clone().drop_guard();
             let result = AssertUnwindSafe(work)
                 .catch_unwind()

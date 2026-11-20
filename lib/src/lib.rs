@@ -243,6 +243,8 @@ mod lifecycle_events_tests;
 /// ```
 pub use lib_core::DrasiLib;
 
+pub use lib_core::{ShutdownCompletion, ShutdownOutcome};
+
 /// Error types for drasi-lib
 pub use error::{DrasiError, Result};
 
@@ -264,8 +266,11 @@ pub use channels::DispatchMode;
 /// Log level and log message types for component log streaming
 pub use observability::{ComponentLogType, LogLevel, LogMessage};
 
-/// Tracing initialization function - call to set up component log routing
-pub use observability::get_or_init_global_registry;
+pub use observability::{
+    get_or_init_global_registry, init_component_logging, init_default_subscriber,
+    ComponentLogRuntime, GraphTelemetry, LogPolicy, LoggingError, MetricRegistrationContext,
+    TelemetryOptions, TelemetryProfile, TelemetrySettings,
+};
 
 // ============================================================================
 // Configuration Types

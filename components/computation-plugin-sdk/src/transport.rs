@@ -148,6 +148,7 @@ pub fn owned_bytes(bytes: Vec<u8>) -> OwnedBytes {
     if bytes.is_empty() {
         return OwnedBytes::empty();
     }
+
     let bytes = Box::new(bytes);
     OwnedBytes {
         data: bytes.as_ptr(),
@@ -158,6 +159,40 @@ pub fn owned_bytes(bytes: Vec<u8>) -> OwnedBytes {
 }
 unsafe extern "C" fn release_bytes(context: *mut c_void) {
     drop_boundary(|| unsafe { drop(Box::from_raw(context.cast::<Vec<u8>>())) });
+}
+
+fn reply_with_timing(
+    result: Result<Vec<u8>, Failure>,
+    timing: Option<Arc<dyn crate::telemetry::HandledBranchTransport>>,
+) -> Reply {
+    let Some(timing) = timing else {
+        return reply_result(result);
+    };
+    struct TimedBuffer {
+        bytes: Vec<u8>,
+        _timing: Arc<dyn crate::telemetry::HandledBranchTransport>,
+    }
+    unsafe extern "C" fn release_timed(context: *mut c_void) {
+        drop_boundary(|| unsafe { drop(Box::from_raw(context.cast::<TimedBuffer>())) });
+    }
+    match result {
+        Ok(bytes) if bytes.len() <= abi::MAX_MESSAGE_BYTES => {
+            let buffer = Box::new(TimedBuffer {
+                bytes,
+                _timing: timing,
+            });
+            Reply {
+                status: Status::ok(),
+                payload: OwnedBytes {
+                    data: buffer.bytes.as_ptr(),
+                    len: buffer.bytes.len(),
+                    context: Box::into_raw(buffer).cast(),
+                    release: Some(release_timed),
+                },
+            }
+        }
+        result => reply_result(result),
+    }
 }
 
 /// # Safety
@@ -409,6 +444,7 @@ struct Operation {
     cleanup: bool,
     /// Lifecycle hook token, signalled before the future is dropped on cancel.
     cancellation: Option<drasi_computation_contracts::lifecycle::CancellationToken>,
+    timing: Option<Arc<dyn crate::telemetry::HandledBranchTransport>>,
 }
 
 impl Operation {
@@ -443,7 +479,7 @@ pub fn export_operation(
     future: impl Future<Output = Result<Vec<u8>, Failure>> + Send + 'static,
     runtime: Option<Arc<tokio::runtime::Runtime>>,
 ) -> OperationHandle {
-    export_owned_operation(future, runtime, None, false, None)
+    export_owned_operation(future, runtime, None, false, None, None)
 }
 
 pub(crate) fn export_component_operation(
@@ -452,19 +488,37 @@ pub(crate) fn export_component_operation(
     damaged: Arc<PanicState>,
     cleanup: bool,
 ) -> OperationHandle {
-    export_owned_operation(future, runtime, Some(damaged), cleanup, None)
+    export_owned_operation(future, runtime, Some(damaged), cleanup, None, None)
 }
 
 /// A component operation whose hook observes `cancellation`. ABI cancel signals
-/// the token before dropping the future.
+/// the token before dropping the future. `timing` is retained with the reply.
 pub(crate) fn export_cancellable_operation(
     future: impl Future<Output = Result<Vec<u8>, Failure>> + Send + 'static,
     runtime: Option<Arc<tokio::runtime::Runtime>>,
     damaged: Arc<PanicState>,
     cleanup: bool,
     cancellation: drasi_computation_contracts::lifecycle::CancellationToken,
+    timing: Option<Arc<dyn crate::telemetry::HandledBranchTransport>>,
 ) -> OperationHandle {
-    export_owned_operation(future, runtime, Some(damaged), cleanup, Some(cancellation))
+    export_owned_operation(
+        future,
+        runtime,
+        Some(damaged),
+        cleanup,
+        Some(cancellation),
+        timing,
+    )
+}
+
+pub(crate) fn export_timing_operation(
+    future: impl Future<Output = Result<Vec<u8>, Failure>> + Send + 'static,
+    runtime: Option<Arc<tokio::runtime::Runtime>>,
+    damaged: Arc<PanicState>,
+    cleanup: bool,
+    timing: Option<Arc<dyn crate::telemetry::HandledBranchTransport>>,
+) -> OperationHandle {
+    export_owned_operation(future, runtime, Some(damaged), cleanup, None, timing)
 }
 
 fn export_owned_operation(
@@ -473,6 +527,7 @@ fn export_owned_operation(
     damaged: Option<Arc<PanicState>>,
     cleanup: bool,
     cancellation: Option<drasi_computation_contracts::lifecycle::CancellationToken>,
+    timing: Option<Arc<dyn crate::telemetry::HandledBranchTransport>>,
 ) -> OperationHandle {
     let future: Work = if let Some(state) = damaged.as_ref().filter(|_| !cleanup) {
         let mut changed = state.changed.subscribe();
@@ -494,6 +549,7 @@ fn export_owned_operation(
             damaged,
             cleanup,
             cancellation,
+            timing,
         }))
         .cast(),
         vtable: &OPERATION_VTABLE,
@@ -569,11 +625,14 @@ unsafe extern "C" fn poll_operation(state: *mut c_void, wake: *const abi::Wake) 
         let dropped_panicked = operation.drop_work();
         abi::PollResult {
             state: abi::POLL_READY,
-            reply: reply_result(if dropped_panicked || operation.quarantined() {
-                Err(Failure::panicked())
-            } else {
-                result
-            }),
+            reply: reply_with_timing(
+                if dropped_panicked || operation.quarantined() {
+                    Err(Failure::panicked())
+                } else {
+                    result
+                },
+                operation.timing.take(),
+            ),
         }
     }));
     result.unwrap_or_else(|_| {

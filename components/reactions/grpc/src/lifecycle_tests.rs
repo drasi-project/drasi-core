@@ -11,6 +11,23 @@ use crate::{test_server, BatchingConfig, GrpcReaction, GrpcReactionConfig};
 #[path = "../../tests/lifecycle_support.rs"]
 mod support;
 
+#[path = "../../tests/worker_telemetry.rs"]
+mod worker_telemetry;
+
+const TRACE_REACTION_ID: &str = "00000000-0000-0000-0000-000000000289";
+const TRACE_SPLIT_REACTION_ID: &str = "00000000-0000-0000-0000-00000000028a";
+const TRACE_ERROR_REACTION_ID: &str = "00000000-0000-0000-0000-00000000028b";
+
+fn component_id(value: &str) -> drasi_core::ComponentId {
+    drasi_core::ComponentId::try_new(value).expect("fixture UUID")
+}
+
+fn query_inputs() -> Vec<drasi_lib::config::ComponentReference> {
+    vec![drasi_lib::config::ComponentReference::by_name(
+        drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+    )]
+}
+
 fn reaction(endpoint: &str, adaptive: bool) -> GrpcReaction {
     GrpcReaction::new(
         drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000287")
@@ -40,6 +57,268 @@ fn reaction(endpoint: &str, adaptive: bool) -> GrpcReaction {
         },
     )
     .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_tracing_preserves_batch_origins_in_fixed_and_adaptive_modes() {
+    use drasi_lib::observability::ExecutionContext;
+    for adaptive in [false, true] {
+        for same_origin in [false, true] {
+            let server = test_server::start_held().await;
+            let reaction = Arc::new(
+                GrpcReaction::new(
+                    component_id(TRACE_REACTION_ID),
+                    query_inputs(),
+                    GrpcReactionConfig {
+                        endpoint: server.endpoint.clone(),
+                        max_retries: 0,
+                        batching: if adaptive {
+                            BatchingConfig::Adaptive {
+                                adaptive_min_batch_size: 2,
+                                adaptive_max_batch_size: 2,
+                                adaptive_window_size: 10,
+                                adaptive_batch_timeout_ms: 10_000,
+                            }
+                        } else {
+                            BatchingConfig::Fixed {
+                                batch_size: 2,
+                                batch_flush_timeout_ms: 10_000,
+                            }
+                        },
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+            );
+            let recording = worker_telemetry::Recording::default();
+            let origins = [
+                worker_telemetry::context(1),
+                worker_telemetry::context(if same_origin { 1 } else { 2 }),
+                ExecutionContext::default(),
+                ExecutionContext::default(),
+            ];
+            recording
+                .run_metrics(reaction.clone(), async {
+                    for (index, origin) in origins.iter().enumerate() {
+                        let mut result = support::result(index as u64 + 1);
+                        if index == 1 {
+                            result.sequence = 1;
+                        }
+                        worker_telemetry::enqueue(reaction.as_ref(), result, origin.clone()).await;
+                    }
+                    assert_eq!(
+                        server
+                            .recorder
+                            .wait_for_items(2, Duration::from_secs(3))
+                            .await,
+                        2
+                    );
+                    assert!(
+                        recording.finished().is_empty(),
+                        "remote acknowledgement is pending"
+                    );
+                    assert_eq!(
+                        recording
+                            .metrics
+                            .count("drasi.reaction.results_processed", &[]),
+                        0
+                    );
+                    server.recorder.release_responses(2);
+                    recording.wait_for_finished(2).await;
+                    assert_eq!(server.recorder.total_items().await, 4);
+                })
+                .await;
+            let spans = recording.finished();
+            assert_eq!(
+                recording
+                    .metrics
+                    .count(
+                        "drasi.reaction.results_processed",
+                        &[("query_id", worker_telemetry::QUERY_ID)]
+                    ),
+                4
+            );
+            assert_eq!(
+                recording.metrics.count(
+                    "drasi.component.inputs_processed",
+                    &[("completion", "handled")]
+                ),
+                4
+            );
+            assert_eq!(spans.len(), 2);
+            assert!(spans
+                .iter()
+                .all(|span| span.name == "reaction.process_batch"
+                    && span.fields["component_id"] == TRACE_REACTION_ID
+                    && span.fields["outcome"] == "success"
+                    && span.fields["completion"] == "handled"
+                    && span.fields["input_count"] == "2"
+                    && span.fields["change_count"] == "2"));
+            let parents = recording.parents();
+            if same_origin {
+                assert_eq!(parents[0].context, origins[0]);
+                assert!(parents[0].links.is_empty());
+            } else {
+                assert!(parents[0].context.is_empty());
+                assert_eq!(parents[0].links.len(), 2);
+                assert!(parents[0].links.contains(origins[0].trace().unwrap()));
+                assert!(parents[0].links.contains(origins[1].trace().unwrap()));
+            }
+            assert!(parents[1].context.is_empty());
+            assert!(parents[1].links.is_empty());
+            server.shutdown().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn worker_tracing_counts_inputs_not_diffs_when_a_result_splits_across_batches() {
+    for adaptive in [false, true] {
+        let server = test_server::start().await;
+        let reaction = Arc::new(
+            GrpcReaction::new(
+                component_id(TRACE_SPLIT_REACTION_ID),
+                query_inputs(),
+                GrpcReactionConfig {
+                    endpoint: server.endpoint.clone(),
+                    batching: if adaptive {
+                        BatchingConfig::Adaptive {
+                            adaptive_min_batch_size: 1,
+                            adaptive_max_batch_size: 2,
+                            adaptive_window_size: 10,
+                            adaptive_batch_timeout_ms: 20,
+                        }
+                    } else {
+                        BatchingConfig::Fixed {
+                            batch_size: 2,
+                            batch_flush_timeout_ms: 20,
+                        }
+                    },
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+        let recording = worker_telemetry::Recording::default();
+        recording
+            .run_metrics(reaction.clone(), async {
+                let mut result = support::result(7);
+                result.results = (1..=3)
+                    .map(|row_signature| drasi_lib::channels::ResultDiff::Add {
+                        data: serde_json::json!({"id": row_signature}),
+                        row_signature,
+                    })
+                    .collect();
+                worker_telemetry::enqueue(reaction.as_ref(), result, worker_telemetry::context(1))
+                    .await;
+                recording.wait_for_finished(2).await;
+                assert_eq!(server.recorder.total_items().await, 3);
+                assert_eq!(
+                    reaction
+                        .base
+                        .read_checkpoint(&component_id(worker_telemetry::QUERY_ID))
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .sequence,
+                    7
+                );
+            })
+            .await;
+        let spans = recording.finished();
+        assert_eq!(
+            recording
+                .metrics
+                .count("drasi.reaction.results_processed", &[]),
+            3
+        );
+        assert_eq!(
+            recording.metrics.count(
+                "drasi.component.inputs_processed",
+                &[("completion", "handled")]
+            ),
+            1
+        );
+        assert_eq!(spans.len(), 2);
+        assert!(spans
+            .iter()
+            .all(|span| span.fields["input_count"] == "1" && span.fields["outcome"] == "success"));
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| span.fields["change_count"].parse::<usize>().unwrap())
+                .sum::<usize>(),
+            3
+        );
+        assert!(recording.parents().iter().all(|parent| parent.context
+            == worker_telemetry::context(1)
+            && parent.links.is_empty()));
+        server.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn worker_tracing_records_grpc_failure_before_skip_or_stop() {
+    use drasi_lib::{channels::ComponentStatus, ReactionRecoveryPolicy};
+    for adaptive in [false, true] {
+        for policy in [
+            ReactionRecoveryPolicy::Strict,
+            ReactionRecoveryPolicy::AutoSkipGap,
+        ] {
+            let server = test_server::start_with_failures(1).await;
+            let reaction = Arc::new(
+                GrpcReaction::builder(component_id(TRACE_ERROR_REACTION_ID))
+                    .with_query_inputs(query_inputs())
+                    .with_config(GrpcReactionConfig {
+                        endpoint: server.endpoint.clone(),
+                        max_retries: 0,
+                        batching: if adaptive {
+                            BatchingConfig::Adaptive {
+                                adaptive_min_batch_size: 1,
+                                adaptive_max_batch_size: 1,
+                                adaptive_window_size: 10,
+                                adaptive_batch_timeout_ms: 10,
+                            }
+                        } else {
+                            BatchingConfig::Fixed {
+                                batch_size: 1,
+                                batch_flush_timeout_ms: 10,
+                            }
+                        },
+                        ..Default::default()
+                    })
+                    .with_recovery_policy(policy)
+                    .build()
+                    .unwrap(),
+            );
+            let recording = worker_telemetry::Recording::default();
+            recording
+                .run(reaction.clone(), async {
+                    worker_telemetry::enqueue(
+                        reaction.as_ref(),
+                        support::result(7),
+                        worker_telemetry::context(1),
+                    )
+                    .await;
+                    recording.wait_for_finished(1).await;
+                    assert_eq!(recording.finished()[0].fields["outcome"], "error");
+                    let checkpoint = reaction
+                        .base
+                        .read_checkpoint(&component_id(worker_telemetry::QUERY_ID))
+                        .await
+                        .unwrap();
+                    if policy == ReactionRecoveryPolicy::Strict {
+                        assert!(checkpoint.is_none());
+                        assert!(matches!(reaction.status().await, ComponentStatus::Error));
+                    } else {
+                        assert_eq!(checkpoint.unwrap().sequence, 7);
+                        assert!(matches!(reaction.status().await, ComponentStatus::Running));
+                    }
+                })
+                .await;
+            server.shutdown().await;
+        }
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

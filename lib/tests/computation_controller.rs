@@ -522,10 +522,13 @@ struct PollAuditedSender {
 
 #[async_trait]
 impl EnvelopeSender for PollAuditedSender {
-    async fn send(&self, envelope: Envelope) -> std::result::Result<EnqueueReceipt, SendFailure> {
+    async fn send_message(
+        &self,
+        message: EnvelopeMessage,
+    ) -> std::result::Result<EnqueueReceipt, SendFailure> {
         self.sends.fetch_add(1, Ordering::SeqCst);
         // Tokio's transport budget must not substitute for the graph's work budget.
-        tokio::task::unconstrained(self.inner.send(envelope)).await
+        tokio::task::unconstrained(self.inner.send_message(message)).await
     }
 }
 

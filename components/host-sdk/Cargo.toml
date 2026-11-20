@@ -8,6 +8,7 @@ license = "Apache-2.0"
 
 [features]
 default = []
+otel-context = ["drasi-lib/otel-context", "drasi-computation-plugin-sdk/otel-context"]
 registry = ["oci-client", "tokio/fs", "x509-parser", "p256", "p384", "pem", "base64"]
 fetcher = ["reqwest", "url", "tokio/fs"]
 watcher = ["notify", "notify-debouncer-mini"]
@@ -64,6 +65,12 @@ notify-debouncer-mini = { version = "0.4", optional = true }
 workspace = true
 
 [dev-dependencies]
+uuid = "=1.29.0"
+metrics = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-opentelemetry = { version = "=0.34.0", default-features = false }
+opentelemetry = { version = "=0.33.1", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "=0.33.1", default-features = false, features = ["trace", "testing"] }
 drasi-computation-bootstrap-mssql = { workspace = true }
 drasi-computation-source-mssql = { workspace = true }
 drasi-computation-sink-storedproc-mssql = { workspace = true }
@@ -93,7 +100,7 @@ drasi-wal-redb = { workspace = true }
 tempfile = "3"
 libloading = "0.8"
 rusqlite = { version = "0.32", features = ["bundled"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "io-util", "test-util", "process"] }
 reqwest = { version = "0.12", features = ["json", "stream"] }
 tokio-util = { version = "0.7", features = ["io"] }
 serial_test = "3"
@@ -128,6 +135,11 @@ name = "native_activation_credentials"
 path = "tests/fixtures/native_activation_credentials.rs"
 crate-type = ["cdylib"]
 test = false
+
+[[test]]
+name = "native_execution_context"
+path = "tests/native_execution_context.rs"
+required-features = ["otel-context"]
 
 [[example]]
 name = "native_recovery"

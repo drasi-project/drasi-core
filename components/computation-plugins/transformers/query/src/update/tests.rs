@@ -45,6 +45,7 @@ fn change(sequence: u64) -> anyhow::Result<InputEnvelope> {
     let mut properties = ElementPropertyMap::new();
     properties.insert("value", ElementValue::Integer(i64::try_from(sequence)?));
     Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_change(
             SourceChange::Insert {

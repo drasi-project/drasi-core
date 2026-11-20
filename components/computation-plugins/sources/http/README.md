@@ -19,3 +19,13 @@ cargo build -p drasi-computation-source-http --features dynamic-plugin
 Minimal configuration: `{"stream": "orders"}` listens on `127.0.0.1:9000`.
 Listening on another address requires `authToken`, webhook route
 authentication, or an explicit `allowUnauthenticated: true`.
+
+## Incoming trace context
+
+Standard events, batches, webhooks and durable admission extract W3C
+`traceparent` and optional `tracestate` through the shared SDK. An incoming
+trace ID and sampling decision are preserved; `source.publish` gets a new
+span ID with the supplied sender span as its parent. Missing headers start
+normal context-free ingestion. Malformed metadata logs a warning and is
+ignored without rejecting the event. Context is transient, never part of
+event data or durable receipt identity.

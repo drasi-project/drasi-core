@@ -126,9 +126,11 @@ impl Default for ReactionMetrics {
 /// Point-in-time snapshot of [`ReactionMetrics`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReactionMetricsSnapshot {
-    /// Latest checkpoint sequence persisted for this (reaction, query) pair.
+    /// Compatibility progress for this pair. The runtime adapter currently
+    /// reports enqueue acceptance here, not confirmed worker persistence.
     pub checkpoint_sequence: u64,
-    /// Difference between the query's latest outbox sequence and the checkpoint.
+    /// Difference between the query head and compatibility progress above.
+    /// The exported checkpoint-lag gauge observes confirmed checkpoints separately.
     pub checkpoint_lag: u64,
     /// Number of events skipped because their sequence was already processed.
     pub dedup_skip_count: u64,

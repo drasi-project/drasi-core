@@ -8,8 +8,9 @@ use crate::{
     NativeSink as EnvelopeSink, NativeSource as EnvelopeSource, NativeTransformer as Transformer,
 };
 use drasi_computation_contracts::{
-    BinaryEnvelopeCodec, ConsumerProgressView, PluginIdentity, PortDirection, Record, RecordImage,
-    RecordReference, Schema, SourceProgressView, WakeupSource,
+    BinaryEnvelopeCodec, ComponentRole, ComponentSemanticKind, ConsumerProgressView,
+    PluginIdentity, PortDirection, Record, RecordImage, RecordReference, Schema,
+    SourceProgressView, WakeupSource,
 };
 use std::{
     ffi::c_void,
@@ -32,6 +33,7 @@ mod management;
 mod output_follow;
 mod output_reads;
 #[cfg(test)]
+mod query_telemetry_tests;
 mod service_tests;
 mod source_schema;
 mod update;
@@ -77,6 +79,11 @@ pub trait Factory: Send + Sync + 'static {
         &self,
         request: &crate::wire::DescribeRequest,
     ) -> anyhow::Result<drasi_computation_contracts::ComponentDescription>;
+    /// Pure opt-in to implemented evaluator/phase instrumentation, queried only
+    /// through telemetry V4. This does not change frozen base factory metadata.
+    fn supports_query_instrumentation(&self) -> bool {
+        false
+    }
     /// The factory planner, present exactly when `Capabilities::update_modes`
     /// is nonempty.
     fn update_planner(&self) -> Option<&dyn UpdatePlanner> {
@@ -513,6 +520,18 @@ impl ExportedPlugin {
     pub fn batching(&self) -> *const abi::batching::PluginBatchingV1 {
         &PLUGIN_BATCHING
     }
+    pub fn telemetry(&self) -> *const abi::telemetry::PluginTelemetryV1 {
+        &PLUGIN_TELEMETRY
+    }
+    pub fn telemetry_v2(&self) -> *const abi::telemetry::PluginTelemetryV2 {
+        &PLUGIN_TELEMETRY_V2
+    }
+    pub fn telemetry_v3(&self) -> *const abi::telemetry::PluginTelemetryV3 {
+        &PLUGIN_TELEMETRY_V3
+    }
+    pub fn telemetry_v4(&self) -> *const abi::telemetry::PluginTelemetryV4 {
+        &PLUGIN_TELEMETRY_V4
+    }
     pub fn recovery(&self) -> *const abi::recovery::PluginRecoveryV1 {
         &PLUGIN_RECOVERY
     }
@@ -587,6 +606,25 @@ static PLUGIN_VTABLE: abi::PluginVTable = abi::PluginVTable {
     release: Some(release_plugin),
     factory: Some(get_factory),
     validate_record: Some(validate_record),
+};
+
+static PLUGIN_TELEMETRY: abi::telemetry::PluginTelemetryV1 = abi::telemetry::PluginTelemetryV1 {
+    header: Header::new::<abi::telemetry::PluginTelemetryV1>(),
+    version: abi::telemetry::VERSION,
+    capabilities: abi::telemetry::CONTEXT,
+    reserved: 0,
+    begin: Some(begin_context),
+    begin_consumer: Some(begin_consumer_context),
+};
+
+static PLUGIN_TELEMETRY_V2: abi::telemetry::PluginTelemetryV2 = abi::telemetry::PluginTelemetryV2 {
+    header: Header::new::<abi::telemetry::PluginTelemetryV2>(),
+    version: abi::telemetry::VERSION_V2,
+    capabilities: abi::telemetry::ALL,
+    reserved: 0,
+    begin: Some(begin_context),
+    begin_consumer: Some(begin_consumer_context),
+    with_scope: Some(crate::telemetry_bridge::with_scope),
 };
 
 static PLUGIN_BATCHING: abi::batching::PluginBatchingV1 = abi::batching::PluginBatchingV1 {
@@ -700,9 +738,59 @@ unsafe extern "C" fn begin_consumer(
     transaction: *const abi::Transaction,
     out: *mut abi::OperationHandle,
 ) -> Status {
+    unsafe { begin_consumer_operation(raw, code, input, transaction, out, None) }
+}
+
+unsafe extern "C" fn begin_consumer_context(
+    raw: *mut c_void,
+    code: u32,
+    input: BorrowedBytes,
+    transaction: *const abi::Transaction,
+    out: *mut abi::OperationHandle,
+) -> Status {
+    transport::status_boundary(|| {
+        let request = crate::telemetry_transport::decode_request(unsafe {
+            transport::borrowed_bytes(input, abi::MAX_MESSAGE_BYTES)?
+        })
+        .map_err(|error| Failure::protocol(error.to_string()))?;
+        unsafe {
+            transport::take_status(begin_consumer_operation(
+                raw,
+                code,
+                BorrowedBytes::new(&request.payload),
+                transaction,
+                out,
+                Some(request.contexts),
+            ))
+        }
+    })
+}
+
+unsafe fn begin_consumer_operation(
+    raw: *mut c_void,
+    code: u32,
+    input: BorrowedBytes,
+    transaction: *const abi::Transaction,
+    out: *mut abi::OperationHandle,
+    contexts: Option<crate::telemetry_transport::OperationContexts>,
+) -> Status {
     transport::status_boundary(|| {
         require_output(out)?;
         let instance = unsafe { state_ref::<Arc<Instance>>(raw)? }.clone();
+        let scope = contexts
+            .as_ref()
+            .map(|contexts| {
+                instance
+                    .execution_scope
+                    .with_context(contexts.operation.clone())
+            })
+            .or_else(|| Some(instance.execution_scope.with_context(Default::default())));
+        if let Some(contexts) = &contexts {
+            contexts
+                .require_inputs(usize::from(code == abi::consumer::BEGIN_BATCH))
+                .map_err(Failure::from)?;
+        }
+        let contextual = contexts.is_some();
         if instance.damaged.is_damaged() {
             return Err(Failure::panicked());
         }
@@ -747,7 +835,7 @@ unsafe extern "C" fn begin_consumer(
         let guard = BusyGuard(instance.clone());
         let runtime = io_runtime()?;
         let damaged = instance.damaged.clone();
-        let operation = transport::export_component_operation(
+        let operation = crate::telemetry_transport::export_operation(
             async move {
                 let _guard = guard;
                 let state = instance.consumer.as_ref().expect("validated");
@@ -756,7 +844,7 @@ unsafe extern "C" fn begin_consumer(
                 if !instance.running.load(Ordering::Acquire) {
                     return Err(Failure::closed());
                 }
-                state
+                let payload = state
                     .run(async {
                         if code == abi::consumer::BEGIN_BATCH {
                             let guarantee = match &*instance.component.lock().await {
@@ -769,6 +857,11 @@ unsafe extern "C" fn begin_consumer(
                                     &instance.codec,
                                     &instance.metadata.descriptor,
                                     guarantee,
+                                    crate::telemetry_transport::input_context(
+                                        contexts.as_ref(),
+                                        0,
+                                        1,
+                                    )?,
                                 )
                                 .map_err(Failure::from);
                         }
@@ -782,11 +875,14 @@ unsafe extern "C" fn begin_consumer(
                         let mut component = instance.component.lock().await;
                         state.handle(&mut component, &input, context.as_ref()).await
                     })
-                    .await
+                    .await?;
+                crate::telemetry_transport::encode_reply(payload, &[], contextual)
+                    .map_err(Failure::from)
             },
             Some(runtime),
             damaged,
             false,
+            scope,
         );
         unsafe { transport::write_out(out, operation) }
     })
@@ -1075,6 +1171,7 @@ unsafe extern "C" fn release_factory(state: *mut c_void) {
 }
 
 struct Instance {
+    execution_scope: crate::telemetry::ExecutionScope,
     component: tokio::sync::Mutex<Component>,
     // Fixed descriptor/capabilities; inspected queries come from the read binding.
     metadata: InstanceMetadata,
@@ -1220,11 +1317,12 @@ unsafe extern "C" fn create_component(
         if bindings.reserved != 0 || bindings.consumer > 1 {
             return Err(Failure::protocol("invalid native service bindings"));
         }
-        let request: CreateRequest = crate::activation_credentials::decode_create_request(unsafe {
-            transport::borrowed_bytes(input, abi::MAX_MESSAGE_BYTES)?
-        })
-        .map_err(Failure::from)?;
         let metadata = &state.plugin.definition.metadata.factories[state.index];
+        let (request, execution_scope, contextual) = crate::telemetry_transport::decode_creation(
+            unsafe { transport::borrowed_bytes(input, abi::MAX_MESSAGE_BYTES)? },
+            metadata,
+        )
+        .map_err(Failure::from)?;
         let create = || -> anyhow::Result<Arc<Instance>> {
             validate_create_request(state, &request)?;
             let resolved = metadata.for_configuration(&request.configuration)?;
@@ -1255,6 +1353,7 @@ unsafe extern "C" fn create_component(
                             bindings.admission,
                             state.plugin.codec.clone(),
                         )
+                        .map(|admission| admission.with_context_transport(contextual))
                     })
                     .transpose()?,
                 output_snapshots: (!bindings.output_snapshots.is_null())
@@ -1501,6 +1600,8 @@ unsafe extern "C" fn create_component(
                 _ => None,
             };
             Ok(Arc::new(Instance {
+                execution_scope: execution_scope
+                    .with_context(crate::telemetry::ExecutionContext::default()),
                 metadata: InstanceMetadata {
                     descriptor: metadata.descriptor(request.id.clone())?,
                     capabilities: metadata.capabilities.clone(),
@@ -1535,7 +1636,7 @@ unsafe extern "C" fn create_component(
                 consumer,
             }))
         };
-        let instance = create().map_err(Failure::from)?;
+        let instance = execution_scope.in_scope(create).map_err(Failure::from)?;
         unsafe {
             transport::write_out(
                 out,
@@ -1636,7 +1737,9 @@ unsafe extern "C" fn configuration(state: *mut c_void) -> Reply {
             )
         })?;
         let configuration = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            component.base().configuration().map_err(Failure::from)
+            instance
+                .execution_scope
+                .in_scope(|| component.base().configuration().map_err(Failure::from))
         })) {
             Ok(result) => {
                 if result
@@ -1712,6 +1815,113 @@ unsafe extern "C" fn begin(
     transaction: *const abi::Transaction,
     out: *mut abi::OperationHandle,
 ) -> Status {
+    unsafe { begin_operation(state, code, input, transaction, out, None) }
+}
+
+static PLUGIN_TELEMETRY_V3: abi::telemetry::PluginTelemetryV3 = abi::telemetry::PluginTelemetryV3 {
+    header: Header::new::<abi::telemetry::PluginTelemetryV3>(),
+    version: abi::telemetry::VERSION_V3,
+    capabilities: abi::telemetry::CONTEXT | abi::telemetry::HANDLED_TIMING,
+    reserved: 0,
+    begin: Some(begin_timing),
+};
+
+static PLUGIN_TELEMETRY_V4: abi::telemetry::PluginTelemetryV4 = abi::telemetry::PluginTelemetryV4 {
+    header: Header::new::<abi::telemetry::PluginTelemetryV4>(),
+    version: abi::telemetry::VERSION_V4,
+    capabilities: abi::telemetry::CONTEXT | abi::telemetry::QUERY_OBSERVATIONS,
+    reserved: 0,
+    supports_factory: Some(supports_query_factory),
+    with_scope: Some(crate::telemetry_bridge::with_query_scope),
+};
+
+unsafe extern "C" fn supports_query_factory(state: *mut c_void, out: *mut u32) -> Status {
+    transport::status_boundary(|| {
+        let state = unsafe { state_ref::<FactoryState>(state)? };
+        let factory = state
+            .plugin
+            .definition
+            .factories
+            .get(state.index)
+            .ok_or_else(|| Failure::protocol("invalid native query factory index"))?;
+        let supported = factory.supports_query_instrumentation();
+        let metadata = &state.plugin.definition.metadata.factories[state.index];
+        if supported
+            && (metadata.role != ComponentRole::Transformer
+                || metadata.semantic_kind() != ComponentSemanticKind::Query)
+        {
+            return Err(Failure::protocol(
+                "query instrumentation requires a semantic query transformer",
+            ));
+        }
+        unsafe { transport::write_out(out, u32::from(supported)) }
+    })
+}
+
+unsafe extern "C" fn begin_timing(
+    state: *mut c_void,
+    code: u32,
+    input: BorrowedBytes,
+    transaction: *const abi::Transaction,
+    host: *const abi::telemetry::HostTimingV3,
+    out: *mut abi::OperationHandle,
+) -> Status {
+    transport::status_boundary(|| {
+        let client =
+            unsafe { crate::timing_transport::Client::new(host) }.map_err(Failure::from)?;
+        let request = crate::timing_transport::decode_request(
+            unsafe { transport::borrowed_bytes(input, abi::MAX_MESSAGE_BYTES)? },
+            client.as_ref(),
+        )
+        .map_err(Failure::from)?;
+        crate::telemetry::ExecutionScope::capture()
+            .with_timing_transport(Some(client))
+            .in_scope(|| unsafe {
+                transport::take_status(begin_operation(
+                    state,
+                    code,
+                    BorrowedBytes::new(&request.payload),
+                    transaction,
+                    out,
+                    Some(request.contexts),
+                ))
+            })
+    })
+}
+
+unsafe extern "C" fn begin_context(
+    state: *mut c_void,
+    code: u32,
+    input: BorrowedBytes,
+    transaction: *const abi::Transaction,
+    out: *mut abi::OperationHandle,
+) -> Status {
+    transport::status_boundary(|| {
+        let request = crate::telemetry_transport::decode_request(unsafe {
+            transport::borrowed_bytes(input, abi::MAX_MESSAGE_BYTES)?
+        })
+        .map_err(|error| Failure::protocol(error.to_string()))?;
+        unsafe {
+            transport::take_status(begin_operation(
+                state,
+                code,
+                BorrowedBytes::new(&request.payload),
+                transaction,
+                out,
+                Some(request.contexts),
+            ))
+        }
+    })
+}
+
+unsafe fn begin_operation(
+    state: *mut c_void,
+    code: u32,
+    input: BorrowedBytes,
+    transaction: *const abi::Transaction,
+    out: *mut abi::OperationHandle,
+    contexts: Option<crate::telemetry_transport::OperationContexts>,
+) -> Status {
     transport::status_boundary(|| {
         require_output(out)?;
         let instance = unsafe { state_ref::<Arc<Instance>>(state)? }.clone();
@@ -1731,7 +1941,7 @@ unsafe extern "C" fn begin(
         } else {
             Some(unsafe { RetainedTransaction::new(transaction)? })
         };
-        let operation = start_operation(instance, code, input, transaction)?;
+        let operation = start_contextual_operation(instance, code, input, transaction, contexts)?;
         unsafe { transport::write_out(out, operation) }
     })
 }
@@ -1753,8 +1963,35 @@ fn start_operation(
     input: Vec<u8>,
     transaction: Option<RetainedTransaction>,
 ) -> Result<abi::OperationHandle, Failure> {
+    start_contextual_operation(instance, code, input, transaction, None)
+}
+
+/// [`start_operation`] carrying the execution contexts negotiated through the
+/// telemetry table, if any.
+fn start_contextual_operation(
+    instance: Arc<Instance>,
+    code: u32,
+    input: Vec<u8>,
+    transaction: Option<RetainedTransaction>,
+    contexts: Option<crate::telemetry_transport::OperationContexts>,
+) -> Result<abi::OperationHandle, Failure> {
     let c = &instance.factory.capabilities;
     use abi::operation::*;
+    if !matches!(
+        code,
+        TRANSFORM | HANDLE | SNAPSHOT | HANDLE_BATCH | DELIVERY_COMPLETED
+    ) {
+        if let Some(contexts) = &contexts {
+            contexts.require_empty_inputs().map_err(Failure::from)?;
+        }
+    }
+    let scope = match contexts.as_ref() {
+        Some(contexts) => instance
+            .execution_scope
+            .with_context(contexts.operation.clone())
+            .with_timing_transport(crate::telemetry::ExecutionScope::current_timing_transport()),
+        None => instance.execution_scope.with_context(Default::default()),
+    };
     let cleanup = matches!(code, STOP | DISPOSE);
     if !cleanup && instance.damaged.is_damaged() {
         return Err(Failure::panicked());
@@ -1852,13 +2089,15 @@ fn start_operation(
         input,
         context,
         token: token.clone(),
+        contexts,
     };
+    let timing = crate::telemetry::ExecutionScope::current_timing_transport();
     // Select before boxing so ordinary operations retain no consumer future.
     // A worker-failure wait is cancelled at every processing boundary; it
     // touches no delivery, so it must not mark the consumer interrupted.
     let operation = if instance.consumer.is_some() && code != WORKER_FAILURE {
         transport::export_cancellable_operation(
-            async move {
+            scope.scope(async move {
                 let _guard = guard;
                 let consumer = instance.consumer.as_ref().expect("checked consumer");
                 consumer
@@ -1870,22 +2109,24 @@ fn start_operation(
                         independent,
                     ))
                     .await
-            },
+            }),
             Some(runtime),
             damaged,
             cleanup,
             token,
+            timing,
         )
     } else {
         transport::export_cancellable_operation(
-            async move {
+            scope.scope(async move {
                 let _guard = guard;
                 execute_guarded(instance, call, transaction, acknowledged, independent).await
-            },
+            }),
             Some(runtime),
             damaged,
             cleanup,
             token,
+            timing,
         )
     };
     Ok(operation)
@@ -1897,6 +2138,8 @@ struct Call {
     input: Vec<u8>,
     context: Option<wire::LifecycleRequest>,
     token: crate::lifecycle::CancellationToken,
+    /// Execution contexts negotiated through the telemetry table, if any.
+    contexts: Option<crate::telemetry_transport::OperationContexts>,
 }
 
 impl Call {
@@ -1968,6 +2211,20 @@ async fn execute(
     transaction: Option<RetainedTransaction>,
     acknowledged: bool,
 ) -> anyhow::Result<Vec<u8>> {
+    let contextual = call.contexts.is_some();
+    let mut output_contexts = Vec::new();
+    let payload =
+        execute_payload(instance, call, transaction, &mut output_contexts, acknowledged).await?;
+    crate::telemetry_transport::encode_reply(payload, &output_contexts, contextual)
+}
+
+async fn execute_payload(
+    instance: Arc<Instance>,
+    call: Call,
+    transaction: Option<RetainedTransaction>,
+    output_contexts: &mut Vec<crate::telemetry::ExecutionContext>,
+    acknowledged: bool,
+) -> anyhow::Result<Vec<u8>> {
     use abi::operation::*;
     let code = call.code;
     if acknowledged {
@@ -1987,6 +2244,7 @@ async fn execute(
         return Err(Failure::failed(reason).retryable().into());
     }
     let input = &call.input;
+    let contexts = &call.contexts;
     if !matches!(code, STOP | DISPOSE) {
         if let Some(coordinator) = &instance.coordinator {
             coordinator.check_active()?;
@@ -2317,6 +2575,16 @@ async fn execute(
                     PortDirection::Output,
                 )?;
             }
+            if contexts.is_some()
+                || output
+                    .as_ref()
+                    .is_some_and(|output| !output.execution_context.is_empty())
+            {
+                *output_contexts = output
+                    .iter()
+                    .map(|output| output.execution_context.clone())
+                    .collect();
+            }
             return wire::encode(
                 &output
                     .as_ref()
@@ -2328,8 +2596,10 @@ async fn execute(
             let transformer = component.transformer_mut()?;
             let outputs = match code {
                 TRANSFORM => {
-                    let input =
+                    let mut input =
                         wire::decode::<wire::Envelope>(input)?.into_input(&instance.codec)?;
+                    input.execution_context =
+                        crate::telemetry_transport::input_context(contexts.as_ref(), 0, 1)?;
                     wire::check_port(
                         &instance.metadata.descriptor,
                         &input.port,
@@ -2353,6 +2623,16 @@ async fn execute(
                     &output.envelope,
                     PortDirection::Output,
                 )?;
+            }
+            if contexts.is_some()
+                || outputs
+                    .iter()
+                    .any(|output| !output.execution_context.is_empty())
+            {
+                *output_contexts = outputs
+                    .iter()
+                    .map(|output| output.execution_context.clone())
+                    .collect();
             }
             let query_observation = if instance.factory.capabilities.query_observations {
                 let port = &instance.factory.capabilities.output_queries[0];
@@ -2395,9 +2675,18 @@ async fn execute(
         }
         DELIVERY_COMPLETED => {
             let outputs: Vec<wire::Envelope> = wire::decode(input)?;
+            if let Some(contexts) = contexts {
+                contexts.require_inputs(outputs.len())?;
+            }
+            let total = outputs.len();
             let outputs = outputs
                 .into_iter()
-                .map(|output| output.into_output(&instance.codec))
+                .enumerate()
+                .map(|(index, output)| {
+                    Ok(output.into_output(&instance.codec)?.with_execution_context(
+                        crate::telemetry_transport::input_context(contexts.as_ref(), index, total)?,
+                    ))
+                })
                 .collect::<anyhow::Result<Vec<_>>>()?;
             for output in &outputs {
                 wire::check_port(
@@ -2427,9 +2716,18 @@ async fn execute(
                 batch.len() <= 1024,
                 "native sink batch input limit exceeded"
             );
+            if let Some(contexts) = contexts {
+                contexts.require_inputs(batch.len())?;
+            }
+            let total = batch.len();
             let inputs = batch
                 .into_iter()
-                .map(|input| input.into_input(&instance.codec))
+                .enumerate()
+                .map(|(index, input)| {
+                    Ok(input.into_input(&instance.codec)?.with_execution_context(
+                        crate::telemetry_transport::input_context(contexts.as_ref(), index, total)?,
+                    ))
+                })
                 .collect::<anyhow::Result<Vec<_>>>()?;
             let policy = sink
                 .batching()?
@@ -2451,7 +2749,13 @@ async fn execute(
                     "native consumer operations require their negotiated delivery service"
                 );
             };
-            let input = wire::decode::<wire::Envelope>(input)?.into_input(&instance.codec)?;
+            let input = wire::decode::<wire::Envelope>(input)?
+                .into_input(&instance.codec)?
+                .with_execution_context(crate::telemetry_transport::input_context(
+                    contexts.as_ref(),
+                    0,
+                    1,
+                )?);
             wire::check_port(
                 &instance.metadata.descriptor,
                 &input.port,

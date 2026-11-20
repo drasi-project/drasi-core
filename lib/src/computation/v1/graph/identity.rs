@@ -235,7 +235,7 @@ impl ComputationGraph {
         self.nodes[index].name = name;
         self.snapshot.nodes = nodes.into();
         self.snapshot.revision = revision;
-        self.desired.send_replace(Arc::new(self.snapshot.clone()));
+        self.publish_desired();
         controller::update(self, |state| {
             state.revision = revision;
             for id in state.components.keys().cloned().collect::<Vec<_>>() {

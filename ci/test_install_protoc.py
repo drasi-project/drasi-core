@@ -115,8 +115,12 @@ class ProtocInstallerTests(unittest.TestCase):
     def test_unsafe_archive_paths_are_rejected(self):
         for path in ["../escape", "/absolute", "C:/escape", "dir\\escape"]:
             with self.subTest(path=path):
+                # ZipInfo(name) converts the host separator, which would drop the
+                # backslash on Windows; assign the raw archive name instead.
+                entry = zipfile.ZipInfo()
+                entry.filename = path
                 with self.assertRaisesRegex(ValueError, "Unsafe protoc archive entry"):
-                    self.install_fixture(fixture_archive(extra=[(path, b"unsafe")]))
+                    self.install_fixture(fixture_archive(extra=[(entry, b"unsafe")]))
                 self.assertFalse(self.destination.exists())
         self.assertFalse((self.root / "escape").exists())
 

@@ -192,7 +192,7 @@ impl EnvelopeSource for Component {
             .await
             .recv()
             .await
-            .map(|envelope| OutputEnvelope {
+            .map(|envelope| OutputEnvelope { execution_context: Default::default(),
                 port: port("out"),
                 envelope,
             }))

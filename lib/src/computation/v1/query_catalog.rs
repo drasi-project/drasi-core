@@ -36,6 +36,7 @@ pub(super) struct LocalQueryOutput {
 pub(super) struct CatalogQuery {
     pub generation: u64,
     pub output: Arc<super::query_api::QueryApiOutput>,
+    pub telemetry: Arc<crate::observability::QueryProgressObservations>,
 }
 
 #[cfg(test)]
@@ -68,17 +69,17 @@ struct DeliveryConfiguration {
 #[derive(Clone)]
 enum Subscriber {
     Channel {
-        sender: tokio::sync::mpsc::Sender<ChangeEnvelope>,
+        sender: tokio::sync::mpsc::Sender<super::EnvelopeMessage>,
         lag: Arc<ChannelLag>,
     },
-    Broadcast(tokio::sync::broadcast::Sender<ChangeEnvelope>),
+    Broadcast(tokio::sync::broadcast::Sender<super::EnvelopeMessage>),
 }
 enum SubscriberReceiver {
     Channel {
-        receiver: tokio::sync::mpsc::Receiver<ChangeEnvelope>,
+        receiver: tokio::sync::mpsc::Receiver<super::EnvelopeMessage>,
         lag: Arc<ChannelLag>,
     },
-    Broadcast(tokio::sync::broadcast::Receiver<ChangeEnvelope>),
+    Broadcast(tokio::sync::broadcast::Receiver<super::EnvelopeMessage>),
 }
 
 /// Publications a bounded (Channel) subscriber missed while its query's
@@ -174,7 +175,12 @@ impl CatalogSubscription {
     /// publications while its query's observers were released for a stop
     /// receives its buffered publications first and then the same typed
     /// `RecvError::Lagged` gap that a broadcast subscriber reports.
+    #[cfg(test)]
     pub(crate) async fn receive(&mut self) -> anyhow::Result<ChangeEnvelope> {
+        Ok(self.receive_message().await?.envelope)
+    }
+
+    pub(crate) async fn receive_message(&mut self) -> anyhow::Result<super::EnvelopeMessage> {
         match &mut self.receiver {
             SubscriberReceiver::Channel { receiver, lag } => loop {
                 use tokio::sync::mpsc::error::TryRecvError;
@@ -204,19 +210,26 @@ impl CatalogSubscription {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn receive_after_head(&mut self) -> anyhow::Result<ChangeEnvelope> {
+        Ok(self.receive_message_after_head().await?.envelope)
+    }
+
+    pub(crate) async fn receive_message_after_head(
+        &mut self,
+    ) -> anyhow::Result<super::EnvelopeMessage> {
         loop {
-            let envelope = self.receive().await?;
+            let message = self.receive_message().await?;
             if let Some(head) = &self.head {
-                if QueryChangeCodec::query_generation(&envelope)? == head.generation
-                    && QueryRecoveryIdentity::from_query_output(&envelope)?.incarnation()
+                if QueryChangeCodec::query_generation(&message.envelope)? == head.generation
+                    && QueryRecoveryIdentity::from_query_output(&message.envelope)?.incarnation()
                         == head.incarnation
-                    && QueryChangeCodec::query_sequence(&envelope)? <= head.sequence
+                    && QueryChangeCodec::query_sequence(&message.envelope)? <= head.sequence
                 {
                     continue;
                 }
             }
-            return Ok(envelope);
+            return Ok(message);
         }
     }
 }
@@ -267,7 +280,9 @@ impl Drop for QueryRegistration {
                 .get(&self.id)
                 .is_some_and(|entry| entry.generation == self.generation)
             {
-                state.entries.remove(&self.id);
+                if let Some(entry) = state.entries.remove(&self.id) {
+                    entry.telemetry.publish(None);
+                }
                 catalog.changed.send_modify(|version| *version += 1);
             }
         }
@@ -306,15 +321,40 @@ impl QueryResultsCatalog {
     /// Publishes to every current subscriber. A bounded subscriber without
     /// capacity backpressures publication until `observers` is released for a
     /// stop; it then lags instead (see [`CatalogSubscription::receive`]).
+    #[cfg(test)]
     pub(super) async fn publish_observed(
         &self,
         envelope: ChangeEnvelope,
         observers: &ObserverGate,
     ) -> anyhow::Result<()> {
-        let id = QueryChangeCodec::metadata(&envelope)?.query_id;
-        if self.get(&id)?.is_none() {
-            anyhow::bail!("query publication is not registered in this catalogue");
-        }
+        self.publish_message(
+            super::EnvelopeMessage::new(envelope, crate::observability::ExecutionContext::current()),
+            observers,
+        )
+        .await
+    }
+
+    async fn publish_message(
+        &self,
+        message: super::EnvelopeMessage,
+        observers: &ObserverGate,
+    ) -> anyhow::Result<()> {
+        let envelope = &message.envelope;
+        let id = QueryChangeCodec::metadata(envelope)?.query_id;
+        let query = self.get(&id)?.ok_or_else(|| {
+            anyhow::anyhow!("query publication is not registered in this catalogue")
+        })?;
+        let identity = QueryRecoveryIdentity::from_query_output(envelope)?;
+        query
+            .telemetry
+            .publish(Some(crate::observability::QueryHead {
+                sequence: QueryChangeCodec::query_sequence(envelope)?,
+                epoch: crate::observability::QueryEpoch {
+                    generation: QueryChangeCodec::query_generation(envelope)?,
+                    config_hash: identity.configuration_hash(),
+                    incarnation: identity.incarnation(),
+                },
+            }));
         let subscribers: Vec<_> = self
             .0
             .state
@@ -326,7 +366,7 @@ impl QueryResultsCatalog {
             .map(|(key, subscriber)| (key.clone(), subscriber.clone()))
             .collect();
         let deliveries = subscribers.into_iter().map(|(key, subscriber)| {
-            let envelope = envelope.clone();
+            let message = message.clone();
             async move {
                 let delivered = match subscriber {
                     Subscriber::Channel { sender, lag } => {
@@ -347,7 +387,7 @@ impl QueryResultsCatalog {
                             };
                             match permit {
                                 Ok(Some(permit)) => {
-                                    permit.send(envelope);
+                                    permit.send(message);
                                     Delivered::Sent
                                 }
                                 Ok(None) => {
@@ -358,7 +398,7 @@ impl QueryResultsCatalog {
                             }
                         }
                     }
-                    Subscriber::Broadcast(sender) => match sender.send(envelope) {
+                    Subscriber::Broadcast(sender) => match sender.send(message) {
                         Ok(_) => Delivered::Sent,
                         Err(_) => Delivered::Closed,
                     },
@@ -380,7 +420,7 @@ impl QueryResultsCatalog {
                 log::trace!("Retired a closed native query output subscription");
             }
         }
-        if self.0.events.send(envelope).is_err() {
+        if self.0.events.send(message.envelope).is_err() {
             log::trace!("Native query publication has no live subscribers; retained results remain available");
         }
         Ok(())
@@ -477,6 +517,16 @@ impl QueryResultsCatalog {
 
     async fn read_head(query: &CatalogQuery) -> anyhow::Result<QuerySubscriptionHead> {
         let (sequence, generation, incarnation) = query.output.head().await?;
+        query
+            .telemetry
+            .publish(Some(crate::observability::QueryHead {
+                sequence,
+                epoch: crate::observability::QueryEpoch {
+                    generation,
+                    config_hash: query.output.configuration_hash(),
+                    incarnation,
+                },
+            }));
         Ok(QuerySubscriptionHead {
             sequence,
             generation,
@@ -632,6 +682,9 @@ impl ComputationComponent for QueryResultsOutlet {
 }
 #[async_trait::async_trait]
 impl EnvelopeSink for QueryResultsOutlet {
+    fn observes_handled_branch_latency(&self) -> bool {
+        false
+    }
     fn completion(&self) -> SinkCompletion {
         SinkCompletion::Handled
     }
@@ -642,7 +695,10 @@ impl EnvelopeSink for QueryResultsOutlet {
     }
     async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
         self.catalog
-            .publish_observed(input.envelope, &self.observers)
+            .publish_message(
+                super::EnvelopeMessage::new(input.envelope, input.execution_context),
+                &self.observers,
+            )
             .await
     }
 }
@@ -784,9 +840,16 @@ impl QueryResultsCatalog {
         state.next_generation = generation
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("query reader generation exhausted"))?;
-        state
-            .entries
-            .insert(id.clone(), CatalogQuery { generation, output });
+        if let Some(previous) = state.entries.insert(
+            id.clone(),
+            CatalogQuery {
+                generation,
+                output,
+                telemetry: Arc::new(Default::default()),
+            },
+        ) {
+            previous.telemetry.publish(None);
+        }
         self.0.changed.send_modify(|version| *version += 1);
         Ok(QueryRegistration {
             catalog: Arc::downgrade(&self.0),
@@ -1077,6 +1140,7 @@ mod tests {
         Ok(query
             .transform(InputEnvelope {
                 port: PortId::try_new("in")?,
+                execution_context: Default::default(),
                 envelope: GraphChangeCodec::encode_change(
                     SourceChange::Insert {
                         element: Element::Node {
@@ -1311,6 +1375,7 @@ mod tests {
             query.start(&lifecycle_contexts::start()).await?;
             let input = |sequence, name: &str| -> anyhow::Result<InputEnvelope> {
                 Ok(InputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("in")?,
                     envelope: GraphChangeCodec::encode_change(
                         SourceChange::Insert {
@@ -1550,6 +1615,7 @@ mod tests {
         for sequence in 1..=2 {
             query
                 .transform(InputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("in").unwrap(),
                     envelope: GraphChangeCodec::encode_change(
                         SourceChange::Insert {

@@ -284,7 +284,7 @@ async fn handle_query(channel: &Arc<QosChannel>, definition: &QosChannelDefiniti
         );
         delivery
             .into_parts()
-            .1
+            .2
             .expect("ack")
             .complete(HandlingOutcome::Handled)
             .await?;
@@ -336,6 +336,7 @@ async fn retained_query_output_recovers_partial_separate_store_handoff_without_d
     producer.bind_output_destinations(&bindings).await?;
     let output = producer
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: event(1)?,
         })
@@ -443,6 +444,7 @@ async fn query_output_bindings_cannot_be_reset_or_reopened_without_tracking() ->
             producer.bind_output_destinations(&bindings).await?;
             producer
                 .transform(InputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("in")?,
                     envelope: event(1)?,
                 })
@@ -617,6 +619,7 @@ impl ComputationComponent for BindingSource {
 impl EnvelopeSource for BindingSource {
     async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
         Ok(self.events.pop_front().map(|envelope| OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out").expect("output port"),
             envelope,
         }))

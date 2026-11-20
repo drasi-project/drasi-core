@@ -24,6 +24,7 @@ use log::{debug, error, info, warn};
 use reqwest::Client;
 
 use drasi_lib::channels::ComponentStatus;
+use drasi_lib::observability::ExecutionContext;
 use drasi_lib::reactions::common::base::ReactionBase;
 use drasi_lib::ReactionRecoveryPolicy;
 
@@ -31,7 +32,7 @@ use crate::adaptive_batcher::{AdaptiveBatcher, AdaptiveBatcherConfig};
 use crate::batch::send_coalesced_batch;
 use crate::config::{HttpQueryConfig, HttpReactionConfig};
 use crate::output::DefaultChangeNotification;
-use crate::process::{build_handlebars, render_batch_item};
+use crate::process::{build_handlebars, render_batch_item, DeliveryOutcome};
 use drasi_lib::reactions::common::{batch_checkpoint_candidates, CheckpointState, FailureAction};
 
 /// One coalesced batch item: the rendered wire payload plus the identity needed
@@ -44,6 +45,11 @@ pub(crate) struct BatchItem {
     pub query_id: drasi_lib::ComponentId,
     pub sequence: u64,
     pub is_terminal: bool,
+    pub execution_context: ExecutionContext,
+    // Sequence IDs can repeat on replay; this identifies the dequeued input.
+    pub input_id: u64,
+    pub processing: drasi_lib::observability::ReactionInput,
+    pub ordinal: usize,
 }
 
 /// Run forwarding and batching concurrently inside the owned processor.
@@ -59,6 +65,8 @@ pub(crate) async fn run_adaptive_loop(
     checkpoints: CheckpointState,
     policy: ReactionRecoveryPolicy,
 ) {
+    let telemetry = base.worker_telemetry().await;
+    telemetry.scope(async {
     let status_handle = base.status_handle();
     let capacity = runtime_adaptive.recommended_channel_capacity();
     let (batch_tx, batch_rx) = tokio::sync::mpsc::channel::<BatchItem>(capacity);
@@ -80,6 +88,7 @@ pub(crate) async fn run_adaptive_loop(
         let base = base.clone_shared();
         let errored = errored.clone();
         let mut checkpoints = checkpoints;
+        let telemetry = telemetry.clone();
         async move {
             let mut batcher = AdaptiveBatcher::new(batch_rx, runtime_adaptive);
             let mut total_batches = 0u64;
@@ -103,14 +112,31 @@ pub(crate) async fn run_adaptive_loop(
                 // `batch_checkpoint_candidates` for the at-least-once rationale.
                 let mut payloads = Vec::with_capacity(batch_size);
                 let mut meta = Vec::with_capacity(batch_size);
+                let mut contexts = HashMap::new();
+                let mut inputs = Vec::with_capacity(batch_size);
                 for item in batch {
+                    contexts.entry(item.input_id)
+                        .or_insert(item.execution_context);
                     meta.push((item.query_id, item.sequence, item.is_terminal));
                     payloads.push(item.payload);
+                    inputs.push((item.processing, item.ordinal));
                 }
                 let (completed, seen) = batch_checkpoint_candidates(meta);
 
-                match deliver_batch(&client, &config, &reaction_id, payloads).await {
-                    Ok(()) => {
+                let observation = telemetry.reaction_batch(contexts.values(), contexts.len(), batch_size)
+                    .map_err(|e| warn!("Failed to observe HTTP batch: {e}")).ok();
+                let mut work = telemetry.reaction_batch_work();
+                let deliver = async {
+                let outcome = deliver_batch(&client, &config, &reaction_id, payloads).await;
+                let failed = !matches!(&outcome, Ok(DeliveryOutcome::Delivered));
+                if !failed {
+                    for (input, ordinal) in inputs {
+                        input.handled_rows(&[ordinal]);
+                    }
+                }
+                work.finish(!failed);
+                match outcome {
+                    Ok(_) => {
                         // Advance each represented query to its max fully-acked
                         // (terminal) sequence after the side effect committed.
                         if let Err(e) = checkpoints
@@ -128,7 +154,7 @@ pub(crate) async fn run_adaptive_loop(
                                  stopped per recovery policy",
                             )
                             .await;
-                            return;
+                            return Err(true);
                         }
                     }
                     Err(e) => match FailureAction::from_policy(policy) {
@@ -142,7 +168,7 @@ pub(crate) async fn run_adaptive_loop(
                                  the batch replays from the outbox on restart",
                             )
                             .await;
-                            return;
+                            return Err(true);
                         }
                         FailureAction::SkipAndContinue => {
                             warn!(
@@ -159,6 +185,15 @@ pub(crate) async fn run_adaptive_loop(
                             }
                         }
                     },
+                }
+                if failed { Err(false) } else { Ok(()) }
+                };
+                let outcome = match observation {
+                    Some(observation) => observation.run(deliver).await,
+                    None => deliver.await,
+                };
+                if matches!(outcome, Err(true)) {
+                    return;
                 }
 
                 if total_batches.is_multiple_of(100) {
@@ -180,6 +215,7 @@ pub(crate) async fn run_adaptive_loop(
     let handlebars = build_handlebars();
 
     let forward = async {
+        let mut next_input_id = 0u64;
         // Main: pull from priority queue, render each item, forward to batcher
         loop {
             let query_result_arc = tokio::select! {
@@ -194,9 +230,9 @@ pub(crate) async fn run_adaptive_loop(
                     debug!("[{reaction_id}] Batcher exited; exiting adaptive loop");
                     break;
                 }
-                result = base.priority_queue.dequeue() => result,
+                result = base.priority_queue.dequeue_message() => result,
             };
-            let query_result = query_result_arc.as_ref();
+            let query_result = query_result_arc.payload.as_ref();
 
             if query_result.results.is_empty() {
                 continue;
@@ -204,6 +240,8 @@ pub(crate) async fn run_adaptive_loop(
 
             let query_id = &query_result.query_id;
             let seq = query_result.sequence;
+            let input_id = next_input_id;
+            next_input_id = next_input_id.wrapping_add(1);
 
             // Convert this QueryResult's diffs into rendered batch items up-front
             // (dropping Noops). The batcher unit is one rendered item, so
@@ -216,6 +254,7 @@ pub(crate) async fn run_adaptive_loop(
                 .filter_map(|d| DefaultChangeNotification::from_diff(query_result, d))
                 .collect();
             let last_idx = notifications.len().saturating_sub(1);
+            let processing = telemetry.reaction_input_context(query_id.as_str(), notifications.len(), &query_result_arc.execution_context);
 
             let mut batcher_closed = false;
             let route = routes.get(query_id);
@@ -232,6 +271,10 @@ pub(crate) async fn run_adaptive_loop(
                     query_id: query_id.clone(),
                     sequence: seq,
                     is_terminal: i == last_idx,
+                    execution_context: query_result_arc.execution_context.clone(),
+                    input_id,
+                    processing: processing.clone(),
+                    ordinal: i,
                 };
                 if batch_tx.send(item).await.is_err() {
                     error!("[{reaction_id}] Failed to send to batch channel — batcher exited");
@@ -261,6 +304,7 @@ pub(crate) async fn run_adaptive_loop(
             Some("HTTP reaction processing task stopped".to_string()),
         )
         .await;
+    }).await;
 }
 
 /// Set the reaction to `Error` and record that a fail-stop occurred so the main
@@ -281,7 +325,7 @@ async fn fail_stop(
 /// POST the whole batch to the configured `batch_endpoint` as a single
 /// Pattern C [`crate::output::BatchEnvelope`].
 ///
-/// A permanent server rejection (poison) resolves to `Ok(())` — the batch is
+/// A permanent server rejection (poison) resolves to `Ok(Dropped)` — the batch is
 /// dropped and the checkpoint advances, with the drop logged inside
 /// [`send_coalesced_batch`]. Only transient/sustained failures surface as `Err`
 /// (subject to the recovery policy).
@@ -290,7 +334,7 @@ async fn deliver_batch(
     config: &HttpReactionConfig,
     reaction_id: &drasi_lib::ComponentId,
     batch: Vec<serde_json::Value>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<DeliveryOutcome> {
     let Some(batch_endpoint) = config.batch_endpoint.as_ref() else {
         anyhow::bail!("adaptive HTTP delivery requires batchEndpoint");
     };
@@ -304,5 +348,4 @@ async fn deliver_batch(
         reaction_id.as_str(),
     )
     .await
-    .map(|_outcome| ())
 }

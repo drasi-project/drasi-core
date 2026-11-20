@@ -387,14 +387,35 @@ pub(super) fn construct(
     )?;
     let id = id.clone();
     let timeout = graph.resource_construction_timeout;
+    let (telemetry_owner, telemetry) = graph
+        .observability
+        .telemetry
+        .resource_binding(
+            &graph.execution_scope,
+            &graph.snapshot.id,
+            id.as_str(),
+            identity.generation,
+            graph.observability.logging.clone(),
+        )
+        .map_err(|error| GraphError::ResourceCreation {
+            resource: id.clone(),
+            source: error.into(),
+        })?;
+    let scope = crate::observability::ExecutionScope::capture()
+        .with_component(
+            telemetry.config().scope.clone(),
+            telemetry.config().generation,
+        )
+        .with_plugin_telemetry(Some(telemetry));
     Ok(graph.tasks.resources.start(
         identity,
         ResourceOperation::Construct,
         None,
         move |value| async move {
-            let handle = tokio::time::timeout(timeout, async {
-                constructor.construct_with_dependencies(&dependencies).await
-            })
+            let handle = tokio::time::timeout(
+                timeout,
+                scope.scope(async { constructor.construct_with_dependencies(&dependencies).await }),
+            )
             .await
             .map_err(|error| GraphError::ResourceCreation {
                 resource: id.clone(),
@@ -405,6 +426,7 @@ pub(super) fn construct(
                 resource: id.clone(),
                 source,
             })?;
+            let handle = handle.with_telemetry_owner(telemetry_owner);
             let actual = handle.role();
             value
                 .lock()

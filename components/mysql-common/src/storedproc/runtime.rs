@@ -521,6 +521,7 @@ mod tests {
         )?;
         drasi_computation_contracts::GraphProducerProgress::annotate(&mut envelope, &producer, 3)?;
         Ok(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope,
         })

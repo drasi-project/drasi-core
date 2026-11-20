@@ -250,8 +250,9 @@ impl proto::admission_service_server::AdmissionService for AdmissionService {
         request: Request<proto::AdmitRequest>,
     ) -> Result<Response<proto::AdmitResponse>, Status> {
         let _permit = self.permit()?;
+        let scope = crate::component::request_scope(&self.0.ingress, &request);
         Ok(Response::new(admit_response(
-            admit(&self.0, request.into_inner()).await,
+            scope.scope(admit(&self.0, request.into_inner())).await,
         )))
     }
 
@@ -264,13 +265,14 @@ impl proto::admission_service_server::AdmissionService for AdmissionService {
         let permit = self.0.stream_permit()?;
         let services = self.0.clone();
         let peer = peer(&request);
+        let scope = crate::component::request_scope(&services.ingress, &request);
         let mut input = request.into_inner();
         let output = async_stream::try_stream! {
             let _permit = permit;
             loop {
                 let Some(request) = services.next_message(&mut input).await? else { break; };
                 services.ingress.rate_limit(peer).map_err(|error| status(&error))?;
-                let result = admit(&services, request).await;
+                let result = scope.scope(admit(&services, request)).await;
                 let failed = result.is_err();
                 yield admit_response(result);
                 if failed { break; }

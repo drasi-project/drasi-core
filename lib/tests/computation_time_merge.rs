@@ -75,6 +75,7 @@ fn event(source: &str, sequence: u64, timestamp: i64) -> ChangeEnvelope {
 
 fn input(envelope: ChangeEnvelope) -> InputEnvelope {
     InputEnvelope {
+        execution_context: Default::default(),
         port: port("in"),
         envelope,
     }
@@ -460,6 +461,7 @@ async fn invalid_inputs_and_replays_do_not_change_admitted_state() {
     ));
     assert!(merger
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: port("wrong"),
             envelope: event("a", 1, 10)
         })
@@ -506,6 +508,7 @@ async fn confirmation_is_exact_and_restart_replays_without_resequencing_logical_
     merger.start(&lifecycle_contexts::start()).await.unwrap(); // Idempotent start must not clear the in-flight obligation.
     assert!(merger.delivery_completed(&[]).await.is_err());
     let wrong = vec![OutputEnvelope {
+        execution_context: Default::default(),
         port: port("late"),
         envelope: batch[0].envelope.clone(),
     }];

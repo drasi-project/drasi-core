@@ -85,6 +85,7 @@ pub struct SourcePluginHost {
     observations: PluginObservations,
     expected_subscriptions: AtomicUsize,
     subscription_observer: Option<Arc<dyn SourceSubscriptionObserver>>,
+    log_binding: Mutex<Option<crate::observability::ComponentLogBinding>>,
     preparation: Option<Arc<dyn SourcePreparation>>,
 }
 
@@ -301,6 +302,7 @@ impl SourcePluginHost {
             observations,
             expected_subscriptions: AtomicUsize::new(1),
             subscription_observer: None,
+            log_binding: Mutex::new(None),
             preparation: None,
         })
     }
@@ -324,6 +326,17 @@ impl SourcePluginHost {
     }
     pub fn services(&self) -> &LegacyPluginServices {
         &self.services
+    }
+
+    pub(crate) fn set_log_binding(
+        &self,
+        binding: crate::observability::ComponentLogBinding,
+    ) -> anyhow::Result<()> {
+        *self
+            .log_binding
+            .lock()
+            .map_err(|_| anyhow::anyhow!("source log binding poisoned"))? = Some(binding);
+        Ok(())
     }
     pub fn bootstrap_resource(&self) -> anyhow::Result<Option<ResourceHandle>> {
         Ok(self
@@ -409,6 +422,11 @@ impl SourcePluginHost {
             self.services.identity.clone(),
         );
         context.wal_provider = self.services.wal.clone();
+        context.log_binding = self
+            .log_binding
+            .lock()
+            .map_err(|_| anyhow::anyhow!("source log binding poisoned"))?
+            .clone();
         let source = self.source()?;
         self.with_observations(async {
             source.bind_runtime_context(context).await;
@@ -626,6 +644,7 @@ pub struct LegacySourceSubscription {
     progress: Option<Arc<QuerySourceProgress>>,
     phase: watch::Sender<SubscriptionPhase>,
     state: Mutex<SubscriptionState>,
+    bootstrap_execution: Mutex<Option<crate::observability::BootstrapTrace>>,
 }
 
 impl LegacySourceSubscription {
@@ -663,6 +682,7 @@ impl LegacySourceSubscription {
             id: subscriber_id.to_owned(),
             progress,
             phase: watch::channel(SubscriptionPhase::New).0,
+            bootstrap_execution: Mutex::new(Default::default()),
             state: Mutex::new(SubscriptionState {
                 bootstrap: None,
                 result: None,
@@ -844,7 +864,13 @@ impl LegacySourceSubscription {
                     .lock()
                     .map_err(|_| anyhow::anyhow!("subscription ownership poisoned"))?
                     .requested_position = settings.request_position_handle;
-                let response = match source.subscribe(settings).await {
+                let bootstrap_execution = self.bootstrap_execution.lock()
+                    .map_err(|_| anyhow::anyhow!("bootstrap execution context poisoned"))?
+                    .clone();
+                let response = match match bootstrap_execution {
+                    Some(trace) => trace.scope(source.subscribe(settings)).await?,
+                    None => source.subscribe(settings).await,
+                } {
                     Ok(response) => response,
                     Err(error)
                         if error
@@ -1128,8 +1154,10 @@ impl EnvelopeSource for SourcePluginAdapter {
                     if let Some(progress) = &mut progress { let _ = progress.changed().await; }
                     else { std::future::pending::<()>().await; }
                 } => continue,
-                event = receiver.recv() => event?,
+                event = receiver.recv_message() => event?,
             };
+            let execution_context = event.execution_context;
+            let event = event.payload;
             if matches!(
                 &event.event,
                 SourceEvent::Control(crate::channels::SourceControl::Subscription { .. })
@@ -1151,6 +1179,7 @@ impl EnvelopeSource for SourcePluginAdapter {
             )?;
             self.sequence.store(sequence, Ordering::Release);
             return Ok(Some(OutputEnvelope {
+                execution_context,
                 port: PortId::try_new("out")?,
                 envelope,
             }));
@@ -1169,6 +1198,19 @@ impl LegacySourceBootstrap {
 }
 #[async_trait]
 impl ComputationBootstrapProvider for LegacySourceBootstrap {
+    fn bind_bootstrap_trace(
+        &self,
+        trace: crate::observability::BootstrapTrace,
+    ) -> anyhow::Result<()> {
+        for subscription in &self.subscriptions {
+            *subscription
+                .bootstrap_execution
+                .lock()
+                .map_err(|_| anyhow::anyhow!("bootstrap execution context poisoned"))? =
+                Some(trace.clone());
+        }
+        Ok(())
+    }
     fn input_origin(&self, stream: &StreamId) -> anyhow::Result<Option<super::OutputEndpoint>> {
         for subscription in &self.subscriptions {
             if stream == &StreamId::try_new(format!("{}/bootstrap", subscription.stream))? {
@@ -1546,6 +1588,13 @@ impl ComponentFactory for SourcePluginAdapterFactory {
             .ok_or_else(|| {
                 ComponentCreationError::terminal(anyhow::anyhow!("missing source host"))
             })?;
+        if source.owned {
+            if let Some(binding) = context.component_log_binding() {
+                source
+                    .set_log_binding(binding)
+                    .map_err(ComponentCreationError::terminal)?;
+            }
+        }
         let subscription = context
             .resources::<LegacySourceSubscription>("subscription")
             .map_err(ComponentCreationError::terminal)?

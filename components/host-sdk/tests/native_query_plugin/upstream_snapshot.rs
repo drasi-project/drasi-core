@@ -52,7 +52,7 @@ impl EnvelopeSource for GatedSource {
             return Ok(None);
         };
         self.release.notified().await;
-        Ok(Some(OutputEnvelope {
+        Ok(Some(OutputEnvelope { execution_context: Default::default(),
             port: PortId::try_new("out")?,
             envelope,
         }))
