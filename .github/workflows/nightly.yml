@@ -103,9 +103,6 @@ jobs:
       sign: true
       dry_run: false
       skip_visibility: false
-    secrets:
-      PACKAGES_ADMIN_TOKEN: ${{ secrets.PACKAGES_ADMIN_TOKEN }}
-
   handoff:
     name: Emit complete producer handoff
     needs: [prepare, package, publish-plugins]

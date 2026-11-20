@@ -92,8 +92,6 @@ jobs:
 
       - name: Verify plugin directory is public (read-only)
         if: ${{ (steps.check_release.outputs.is_release == 'true' || inputs.force_publish == true) && inputs.dry_run != true }}
-        env:
-          GH_TOKEN: ${{ secrets.PACKAGES_ADMIN_TOKEN }}
         run: .github/scripts/package-visibility.sh verify-public drasi-plugin-directory
 
       - name: Clear cargo registry index cache
@@ -152,5 +150,3 @@ jobs:
       candidate_sha256: ${{ needs.release-plz.outputs.candidate_sha256 }}
       sign: true
       dry_run: false
-    secrets:
-      PACKAGES_ADMIN_TOKEN: ${{ secrets.PACKAGES_ADMIN_TOKEN }}

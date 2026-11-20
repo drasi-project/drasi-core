@@ -242,8 +242,8 @@ rather than duplicating it between callers.
 | Dependencies | Committed lockfile baseline; release preparation reconciles workspace versions without a broad refresh | Same configuration and baseline policy; no fresh-dependency mode |
 | Prepared candidate | Shared freeze helper runs before crate publication; its artifact and hash feed every plugin target | Same helper runs after version preparation; its artifact and hash feed packaging and every plugin target |
 | Crates | `release-plz release` publishes crates and creates official release records; `publish_no_verify = true` skips the isolated verification build | `cargo package --locked` verifies extracted package sources and retains archives; no crates.io writes or official release records |
-| Plugins and catalog | Shared eight-target publisher, native/glibc checks, signing, verification, and public visibility checks | Same implementation and required checks, but plugins, catalog, and signatures use the isolated nightly namespace and unique run/attempt plugin tags |
-| Completion | Successful crate publication gates plugins; required plugin/catalog failures fail the workflow | Packaging and all publication/visibility checks gate the complete-inventory handoff; downstream runtime E2E remains separate |
+| Plugins and catalog | Shared eight-target publisher, native/glibc checks, signing, verification, and anonymous public-pull checks | Same implementation and required checks, but plugins, catalog, and signatures use the isolated nightly namespace and unique run/attempt plugin tags |
+| Completion | Successful crate publication gates plugins; required plugin/catalog failures fail the workflow | Packaging and all publication/pullability checks gate the complete-inventory handoff; downstream runtime E2E remains separate |
 
 Both callers use the trusted workflow checkout's `xtask` for binary-backed ABI
 preflight and publication, regardless of the selected build revision. The SDK
@@ -360,28 +360,19 @@ This runs automatically during the release process - no manual invocation needed
 
 - `GITHUB_TOKEN`: Automatically provided, used for creating PRs and releases
 - `CARGO_REGISTRY_TOKEN`: Must be configured in repository secrets for publishing to crates.io
-- `PACKAGES_ADMIN_TOKEN`: PAT classic with `read:packages`, access to the organization's container packages, and organization SSO authorization if required. The existing secret name is retained for compatibility; it is used only for read-only package visibility verification, not administration or publication.
 
 ##### Public package setup
 
-GitHub's [Get a package REST endpoint](https://docs.github.com/en/rest/packages/packages#get-a-package) supports reading package metadata; there is no supported `PATCH` visibility endpoint. The workflows use explicit `GET` requests before publishing to verify that `drasi-plugin-directory` exists, is readable, and has `visibility: public`. After all plugin builds and pushes succeed, they verify every published package is public. A successful check proves read access and public visibility, **not package administration rights**.
+The workflows use anonymous pull-scoped GHCR tokens to verify that `drasi-plugin-directory` and, after publication, every plugin package can be pulled publicly. The check lists tags and fetches an image manifest; it does not change package visibility or require a personal access token.
 
-A package administrator must use each package's **Package settings** → **Change visibility** to select **Public** ([GitHub instructions](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility)). This is a manual setup step, including for `drasi-plugin-directory`; newly created plugin packages may need it after their first push. Then rerun verification. The script fails rather than changing visibility or ignoring private/internal packages.
+A package administrator must use each package's **Package settings** → **Change visibility** to select **Public** ([GitHub instructions](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility)). This is a manual setup step, including for `drasi-plugin-directory`; newly created plugin packages may need it after their first push. Then rerun verification. The script fails rather than changing visibility or ignoring missing/private packages.
 
-To verify explicitly, run `.github/scripts/package-visibility.sh verify-public drasi-plugin-directory source/http` with `GH_TOKEN` supplied securely from the configured token. `PACKAGE_VISIBILITY_ORG` overrides the default `drasi-project` organization. Missing credentials, unreadable/missing packages, and unexpected visibility responses fail closed. The publication steps still use `GITHUB_TOKEN` with `packages: write`, and signing still requires `id-token: write`.
-
-##### Rotating `PACKAGES_ADMIN_TOKEN`
-
-Repository maintainers are responsible for manual rotation before expiry. GitHub Actions does not renew the token automatically. Rotation is not a fix for an unsupported API endpoint.
-
-1. Check the expiry in [GitHub's classic PAT settings](https://github.com/settings/tokens). Before it expires, create a replacement classic PAT with `read:packages` from an account with read access to the Drasi container packages. Authorize it for organization SSO if required.
-2. Replace the repository secret using `gh secret set PACKAGES_ADMIN_TOKEN --repo drasi-project/drasi-core` and enter the token at the hidden prompt. Do not put it in source code, command arguments, or logs.
-3. Using the replacement token, verify read access to `drasi-plugin-directory` with `GET /orgs/drasi-project/packages/container/drasi-plugin-directory`, then revoke the previous token.
+To verify explicitly, run `.github/scripts/package-visibility.sh verify-public drasi-plugin-directory source/http`. `PACKAGE_VISIBILITY_ORG` overrides the default `drasi-project` organization. Missing/private packages and unexpected GHCR responses fail closed. The publication steps still use `GITHUB_TOKEN` with `packages: write`, and signing still requires `id-token: write`.
 
 ### [publish-plugins.yml](publish-plugins.yml)
-- **Purpose**: Builds and publishes the plugin architecture matrix and verifies public GHCR package visibility without changing it.
+- **Purpose**: Builds and publishes the plugin architecture matrix and verifies anonymous GHCR pull access without changing package visibility.
 - **Triggers**: Called by `release-plz.yml` after crate publication, called by `nightly.yml`, or dispatched manually.
-- **Inputs**: `sign` controls cosign signing; `dry_run` skips publication and visibility checks; `skip_visibility` skips the visibility preflight, package listing, and final verification.
+- **Inputs**: `sign` controls cosign signing; `dry_run` skips publication and pullability checks; `skip_visibility` skips the preflight, package listing, and final verification.
 - **Candidate inputs**: Internal callers provide the same-run prepared artifact and manifest hash; standalone dispatch prepares one locked candidate before the matrix.
 - **Nightly behavior**: Uses the same eight targets, native setup, GNU glibc 2.28 checks, and required cosign signing/verification as production, but writes only to the dedicated test namespace described below.
 
@@ -429,7 +420,7 @@ artifacts remain diagnostic outputs, and the handoff rejects them rather than
 treating them as trusted-main candidates.
 
 The sequence is preparation, verified local packaging, eight-target signed plugin
-publication plus public visibility checks, then complete-inventory validation.
+publication plus anonymous public-pull checks, then complete-inventory validation.
 Packaging uses Cargo's supported multi-package selection for all publishable,
 release-enabled workspace crates, including their unpublished dependency versions.
 Internal `publish = false` and release-plz exclusions remain excluded. Cargo checks
@@ -447,9 +438,9 @@ plugin repositories, catalogs, version tags and GitHub Releases are unchanged.
 Before enabling this path, an administrator must provision the test directory
 package and grant the workflow access. The directory must be public; newly
 created test plugin packages may also require the administrator's public-visibility
-step. The existing `PACKAGES_ADMIN_TOKEN` is used only for GET checks of
-namespace-qualified names. Missing access or visibility fails the rehearsal;
-the workflow does not change credentials or package settings.
+step. Anonymous GHCR pull checks apply to namespace-qualified names. Missing
+packages or anonymous pull access fails the rehearsal; the workflow does not
+change credentials or package settings.
 
 #### Exact producer handoff to test-infra
 
