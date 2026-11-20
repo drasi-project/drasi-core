@@ -487,7 +487,7 @@ mod tests {
             default_template: None,
         };
 
-        let result = LogReaction::new(
+        let reaction = LogReaction::new(
             drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000198")
                 .expect("fixture UUID"),
             vec![
@@ -499,9 +499,10 @@ mod tests {
                 ),
             ],
             config,
-        );
-        assert!(result.is_err());
-        let err = result.err().expect("expected error");
+        )
+        .expect("route keys are checked at start");
+        bind_test_context(&reaction).await;
+        let err = reaction.start().await.expect_err("unknown route");
         assert!(err
             .to_string()
             .contains("does not match any subscribed query"));
@@ -566,6 +567,30 @@ mod tests {
         assert!(err.to_string().contains("Invalid"));
     }
 
+    async fn bind_test_context(reaction: &LogReaction) {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let query_ids = reaction
+            .base
+            .queries
+            .iter()
+            .map(|_| drasi_core::ComponentId::generate())
+            .collect();
+        reaction
+            .bind_runtime_context(drasi_lib::context::ReactionRuntimeContext::new(
+                "instance",
+                reaction.base.id.clone(),
+                query_ids,
+                None,
+                tx,
+                None,
+            ))
+            .await;
+    }
+
+    async fn result_start(reaction: &LogReaction) -> anyhow::Error {
+        reaction.start().await.expect_err("unknown route")
+    }
+
     #[tokio::test]
     async fn test_builder_route_validation() {
         let sensor_config = QueryConfig {
@@ -577,7 +602,7 @@ mod tests {
             deleted: None,
         };
 
-        let result = LogReaction::builder(
+        let reaction = LogReaction::builder(
             drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000019b")
                 .expect("fixture UUID"),
         )
@@ -585,10 +610,10 @@ mod tests {
             drasi_core::ComponentName::try_new("query1").expect("fixture component name"),
         )
         .with_route("unsubscribed-query", sensor_config)
-        .build();
-
-        assert!(result.is_err());
-        let err = result.err().expect("expected error");
+        .build()
+        .expect("route keys are checked at start");
+        bind_test_context(&reaction).await;
+        let err = result_start(&reaction).await;
         assert!(err
             .to_string()
             .contains("does not match any subscribed query"));

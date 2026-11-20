@@ -54,6 +54,37 @@ fn make_query_result(query_id: drasi_core::ComponentId, diffs: Vec<ResultDiff>) 
     result
 }
 
+fn fixture_query_id(name: &str) -> drasi_core::ComponentId {
+    let id = match name {
+        "q1" => Q1_ID,
+        "source.orders" => "00000000-0000-0000-0000-0000000003b4",
+        "orders" => "00000000-0000-0000-0000-0000000000e3",
+        "shipments" => "00000000-0000-0000-0000-0000000003c9",
+        other => panic!("missing fixture query id for {other}"),
+    };
+    drasi_core::ComponentId::try_new(id).expect("fixture UUID")
+}
+
+/// Bind the fixture query IDs so output-template routes resolve at start.
+async fn bind_fixture_queries(r: &HttpReaction) {
+    let query_ids = r
+        .query_inputs()
+        .iter()
+        .map(|query| fixture_query_id(&query.as_name().expect("named query").to_string()))
+        .collect();
+    let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(async move { while update_rx.recv().await.is_some() {} });
+    r.bind_runtime_context(drasi_lib::context::ReactionRuntimeContext::new(
+        "instance",
+        r.id().clone(),
+        query_ids,
+        None,
+        update_tx,
+        None,
+    ))
+    .await;
+}
+
 async fn enqueue_add(r: &HttpReaction, query_id: drasi_core::ComponentId, data: serde_json::Value) {
     let qr = make_query_result(
         query_id,
@@ -217,6 +248,7 @@ async fn standard_uses_per_query_template() {
         .build()
         .unwrap(),
     );
+    bind_fixture_queries(&r).await;
     r.start().await.unwrap();
     enqueue_add(
         &r,
@@ -276,6 +308,7 @@ async fn standard_body_render_error_uses_default_envelope_on_configured_route() 
         .build()
         .unwrap(),
     );
+    bind_fixture_queries(&r).await;
     r.start().await.unwrap();
     enqueue_add(
         &r,
@@ -382,6 +415,7 @@ async fn standard_update_template_receives_before_and_after() {
         .build()
         .unwrap(),
     );
+    bind_fixture_queries(&r).await;
     r.start().await.unwrap();
     enqueue_update(
         &r,
@@ -437,6 +471,7 @@ async fn standard_delete_template_receives_before() {
         .build()
         .unwrap(),
     );
+    bind_fixture_queries(&r).await;
     r.start().await.unwrap();
     enqueue_delete(
         &r,
@@ -742,6 +777,7 @@ async fn adaptive_with_output_template_renders_batch_items() {
         .build()
         .unwrap(),
     );
+    bind_fixture_queries(&r).await;
     r.start().await.unwrap();
 
     let qr = make_query_result(
@@ -919,6 +955,7 @@ async fn ssrf_guard_blocks_absolute_url_with_mismatched_host() {
         .build()
         .unwrap(),
     );
+    bind_fixture_queries(&r).await;
     r.start().await.unwrap();
 
     // Single QueryResult with two diffs guarantees in-order processing by the
@@ -1293,6 +1330,7 @@ async fn template_context_exposes_query_id_metadata_and_operation() {
         .build()
         .unwrap(),
     );
+    bind_fixture_queries(&r).await;
     r.start().await.unwrap();
 
     let mut metadata = HashMap::new();
@@ -1361,6 +1399,7 @@ async fn route_resolves_via_last_dotted_segment() {
         .build()
         .unwrap(),
     );
+    bind_fixture_queries(&r).await;
     r.start().await.unwrap();
     enqueue_add(
         &r,
@@ -1630,6 +1669,7 @@ async fn standard_absolute_url_matching_base_is_allowed() {
         .build()
         .unwrap(),
     );
+    bind_fixture_queries(&r).await;
     r.start().await.unwrap();
     enqueue_add(
         &r,
@@ -1684,6 +1724,7 @@ async fn standard_url_render_failure_falls_back_to_changes_endpoint() {
         .build()
         .unwrap(),
     );
+    bind_fixture_queries(&r).await;
     r.start().await.unwrap();
     enqueue_add(
         &r,
@@ -1739,6 +1780,7 @@ async fn standard_header_render_failure_drops_only_that_header() {
         .build()
         .unwrap(),
     );
+    bind_fixture_queries(&r).await;
     r.start().await.unwrap();
     enqueue_add(
         &r,
@@ -1800,6 +1842,7 @@ async fn standard_routes_two_queries_to_distinct_endpoints() {
         .build()
         .unwrap(),
     );
+    bind_fixture_queries(&r).await;
     r.start().await.unwrap();
     enqueue_add(
         &r,

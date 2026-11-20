@@ -298,6 +298,7 @@ pub struct ReactionPluginHost {
     resource_observer: Mutex<Option<Arc<dyn crate::context::ComponentResourceObserver>>>,
     log_binding: Mutex<Option<crate::observability::ComponentLogBinding>>,
     telemetry: Mutex<crate::observability::WorkerTelemetry>,
+    component_directory: Mutex<Option<Arc<dyn crate::context::ComponentDirectory>>>,
 }
 
 pub(crate) struct RuntimeReactionMetrics {
@@ -458,6 +459,7 @@ impl ReactionPluginHost {
             resource_observer: Mutex::new(None),
             log_binding: Mutex::new(None),
             telemetry: Mutex::new(Default::default()),
+            component_directory: Mutex::new(None),
         }))
     }
     pub fn id(&self) -> &ComponentId {
@@ -497,6 +499,16 @@ impl ReactionPluginHost {
         } else {
             resource
         }
+    }
+    /// Release the plugin's external resources, then erase the reaction's own
+    /// stored state.
+    pub(crate) async fn erase_owned_state(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.owned,
+            "borrowed reaction state must be removed by its owner"
+        );
+        self.reaction()?.delete_owned_resources().await?;
+        self.services.erase_component_state(&self.id).await
     }
     fn reaction(&self) -> anyhow::Result<Arc<dyn Reaction>> {
         Ok(self
@@ -1025,6 +1037,17 @@ impl ReactionPluginHost {
             Some(observer);
         Ok(())
     }
+    pub(crate) fn set_component_directory(
+        &self,
+        directory: Arc<dyn crate::context::ComponentDirectory>,
+    ) -> anyhow::Result<()> {
+        *self
+            .component_directory
+            .lock()
+            .map_err(|_| anyhow::anyhow!("reaction component directory binding poisoned"))? =
+            Some(directory);
+        Ok(())
+    }
     async fn initialize_locked(
         &self,
         life: &mut ReactionLife,
@@ -1058,6 +1081,11 @@ impl ReactionPluginHost {
                 .log_binding
                 .lock()
                 .map_err(|_| anyhow::anyhow!("reaction log binding poisoned"))?
+                .clone();
+            context.component_directory = self
+                .component_directory
+                .lock()
+                .map_err(|_| anyhow::anyhow!("reaction component directory binding poisoned"))?
                 .clone();
             context.snapshot_fetcher = Some(Arc::new(Fetcher {
                 catalog: self.catalog.clone(),
@@ -1103,7 +1131,9 @@ impl ReactionPluginHost {
                     anyhow::bail!("obsolete query reset generation");
                 }
                 if generation == *previous_generation && result.sequence <= *sequence {
-                    if let Some(subscription) = self.telemetry().subscription(result.query_id.as_str()) {
+                    if let Some(subscription) =
+                        self.telemetry().subscription(result.query_id.as_str())
+                    {
                         subscription.dedup();
                     }
                     if let Some(metrics) = self
@@ -1176,7 +1206,9 @@ impl ReactionPluginHost {
             !life.disposed && !life.needs_stop,
             "reaction resource deletion requires a stopped, undisposed owner"
         );
-        self.reaction()?.delete_owned_resources().await
+        let result = self.erase_owned_state().await;
+        drop(life);
+        result
     }
     pub(crate) async fn start_component(&self) -> anyhow::Result<()> {
         self.start().await
@@ -1400,11 +1432,7 @@ impl ComputationComponent for ReactionPluginAdapter {
 
 impl ReactionPluginAdapter {
     async fn erase_owned_state(&mut self) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            self.host.owned,
-            "borrowed reaction state must be removed by its owner"
-        );
-        self.host.reaction()?.delete_owned_resources().await
+        self.host.erase_owned_state().await
     }
 }
 #[async_trait]

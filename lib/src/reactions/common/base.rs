@@ -144,6 +144,38 @@ pub struct ReactionBase {
     /// Original raw config JSON from the descriptor, preserving ConfigValue
     /// envelopes (secrets, env vars) for lossless persistence roundtrips.
     raw_config: Option<serde_json::Value>,
+    /// Route keys resolved to query IDs; retained for this object's lifetime.
+    route_keys: Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<ComponentId>>>>,
+}
+
+struct RouteInput {
+    id: ComponentId,
+    declared: Option<String>,
+    current: Option<String>,
+}
+
+impl RouteInput {
+    fn label(&self) -> String {
+        self.current
+            .clone()
+            .or_else(|| self.declared.clone())
+            .unwrap_or_else(|| self.id.to_string())
+    }
+}
+
+fn resolve_route_key(key: &str, inputs: &[RouteInput]) -> Vec<ComponentId> {
+    let dotted = format!(".{key}");
+    inputs
+        .iter()
+        .filter(|input| {
+            input.id.as_str() == key
+                || [&input.declared, &input.current]
+                    .into_iter()
+                    .flatten()
+                    .any(|name| name == key || name.ends_with(&dotted))
+        })
+        .map(|input| input.id.clone())
+        .collect()
 }
 
 impl ReactionBase {
@@ -168,6 +200,7 @@ impl ReactionBase {
             shutdown_tx: Arc::new(RwLock::new(None)),
             identity_provider: Arc::new(RwLock::new(None)),
             raw_config: None,
+            route_keys: Arc::default(),
         }
     }
 
@@ -338,6 +371,7 @@ impl ReactionBase {
             shutdown_tx: self.shutdown_tx.clone(),
             identity_provider: self.identity_provider.clone(),
             raw_config: self.raw_config.clone(),
+            route_keys: self.route_keys.clone(),
         }
     }
 
@@ -373,6 +407,68 @@ impl ReactionBase {
             .ok_or_else(|| anyhow::anyhow!("reaction query bindings have not been initialized"))?
             .query_ids
             .clone())
+    }
+
+    /// Map user-facing route keys to the permanent IDs of this reaction's queries.
+    ///
+    /// A key selects a query by its ID, its declared or current name, or the last
+    /// dotted segment of that name. Each key is resolved once per reaction object,
+    /// so routing survives a later rename; a reconstructed object resolves again.
+    /// Fails when a key matches no query, or two keys select the same query.
+    pub async fn bind_routes<'a, T: Clone + 'a>(
+        &self,
+        routes: impl IntoIterator<Item = (&'a String, &'a T)>,
+    ) -> Result<std::collections::HashMap<ComponentId, T>> {
+        let mut routes = routes.into_iter().peekable();
+        if routes.peek().is_none() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let context =
+            self.context.read().await.clone().ok_or_else(|| {
+                anyhow::anyhow!("reaction query bindings have not been initialized")
+            })?;
+        let inputs: Vec<RouteInput> = context
+            .query_bindings()
+            .into_iter()
+            .enumerate()
+            .map(|(index, binding)| RouteInput {
+                declared: self
+                    .queries
+                    .get(index)
+                    .and_then(|reference| reference.as_name())
+                    .map(ToString::to_string),
+                current: binding.name.map(|name| name.to_string()),
+                id: binding.id,
+            })
+            .collect();
+        let mut cache = self
+            .route_keys
+            .lock()
+            .map_err(|_| anyhow::anyhow!("reaction route bindings poisoned"))?;
+        let mut bound = std::collections::HashMap::new();
+        let mut selected_by = std::collections::HashMap::<ComponentId, &String>::new();
+        for (key, value) in routes {
+            let ids = match cache.get(key) {
+                Some(ids) => ids.clone(),
+                None => {
+                    let ids = resolve_route_key(key, &inputs);
+                    anyhow::ensure!(
+                        !ids.is_empty(),
+                        "Route '{key}' does not match any subscribed query. Subscribed queries: {:?}",
+                        inputs.iter().map(RouteInput::label).collect::<Vec<_>>()
+                    );
+                    cache.insert(key.clone(), ids.clone());
+                    ids
+                }
+            };
+            for id in ids {
+                if let Some(previous) = selected_by.insert(id.clone(), key) {
+                    anyhow::bail!("Routes '{previous}' and '{key}' both select query {id}");
+                }
+                bound.insert(id, value.clone());
+            }
+        }
+        Ok(bound)
     }
 
     /// Get current status.
@@ -1293,6 +1389,106 @@ mod tests {
         );
         let base = ReactionBase::new(params);
         assert_eq!(base.query_inputs(), &queries[..]);
+    }
+
+    struct Names(std::sync::Mutex<Vec<(ComponentId, drasi_core_types::ComponentName)>>);
+
+    impl crate::context::ComponentDirectory for Names {
+        fn name_of(&self, id: &ComponentId) -> Option<drasi_core_types::ComponentName> {
+            let names = self.0.lock().unwrap();
+            names
+                .iter()
+                .find(|(known, _)| known == id)
+                .map(|(_, name)| name.clone())
+        }
+        fn id_of(&self, name: &drasi_core_types::ComponentName) -> Option<ComponentId> {
+            let names = self.0.lock().unwrap();
+            names
+                .iter()
+                .find(|(_, known)| known == name)
+                .map(|(id, _)| id.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn bind_routes_maps_names_to_ids_and_survives_rename() {
+        let name = |value: &str| drasi_core_types::ComponentName::try_new(value).unwrap();
+        let values = ComponentId::generate();
+        let orders = ComponentId::generate();
+        let base = ReactionBase::new(ReactionBaseParams::new(
+            ComponentId::generate(),
+            vec![
+                ComponentReference::by_id(values.clone()),
+                ComponentReference::by_id(orders.clone()),
+            ],
+        ));
+        let directory = Arc::new(Names(std::sync::Mutex::new(vec![
+            (values.clone(), name("values")),
+            (orders.clone(), name("shop.orders")),
+        ])));
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let mut context = ReactionRuntimeContext::new(
+            "instance",
+            base.id.clone(),
+            vec![values.clone(), orders.clone()],
+            None,
+            tx,
+            None,
+        );
+        context.component_directory = Some(directory.clone());
+        base.bind_runtime_context(context).await;
+
+        let routes: std::collections::HashMap<String, u8> =
+            [("values".to_string(), 1), ("orders".to_string(), 2)].into();
+        let bound = base.bind_routes(&routes).await.unwrap();
+        assert_eq!(bound.get(&values), Some(&1));
+        assert_eq!(bound.get(&orders), Some(&2));
+
+        let by_id: std::collections::HashMap<String, u8> = [(values.to_string(), 3)].into();
+        assert_eq!(
+            base.bind_routes(&by_id).await.unwrap().get(&values),
+            Some(&3)
+        );
+
+        // Keys resolved earlier keep their IDs after a rename.
+        directory.0.lock().unwrap()[0].1 = name("renamed");
+        let bound = base.bind_routes(&routes).await.unwrap();
+        assert_eq!(bound.get(&values), Some(&1));
+
+        let unknown: std::collections::HashMap<String, u8> = [("missing".to_string(), 1)].into();
+        let error = base.bind_routes(&unknown).await.unwrap_err().to_string();
+        assert!(error.contains("Route 'missing' does not match"), "{error}");
+
+        let duplicate: std::collections::HashMap<String, u8> =
+            [("renamed".to_string(), 1), (values.to_string(), 2)].into();
+        let error = base.bind_routes(&duplicate).await.unwrap_err().to_string();
+        assert!(error.contains("both select query"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn bind_routes_uses_declared_names_without_a_directory() {
+        let values = ComponentId::generate();
+        let base = ReactionBase::new(ReactionBaseParams::new(
+            ComponentId::generate(),
+            vec![ComponentReference::by_name(
+                drasi_core_types::ComponentName::try_new("values").unwrap(),
+            )],
+        ));
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        base.bind_runtime_context(ReactionRuntimeContext::new(
+            "instance",
+            base.id.clone(),
+            vec![values.clone()],
+            None,
+            tx,
+            None,
+        ))
+        .await;
+        let routes: std::collections::HashMap<String, u8> = [("values".to_string(), 1)].into();
+        assert_eq!(
+            base.bind_routes(&routes).await.unwrap().get(&values),
+            Some(&1)
+        );
     }
 
     #[tokio::test]

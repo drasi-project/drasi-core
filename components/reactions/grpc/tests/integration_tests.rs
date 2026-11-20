@@ -1582,25 +1582,33 @@ async fn per_query_routes_select_templates_over_the_wire() {
     .with_output_templates(templates)
     .build()
     .expect("builder");
+    let order_query_id = drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003b4")
+        .expect("fixture UUID");
+    let widget_query_id = drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003b5")
+        .expect("fixture UUID");
+    let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(async move { while update_rx.recv().await.is_some() {} });
+    reaction
+        .bind_runtime_context(drasi_lib::context::ReactionRuntimeContext::new(
+            "instance",
+            reaction.id().clone(),
+            vec![order_query_id.clone(), widget_query_id.clone()],
+            None,
+            update_tx,
+            None,
+        ))
+        .await;
     reaction.start().await.expect("start");
 
     // `source.orders` resolves to the `orders` route via last-segment fallback.
-    let mut order_result = make_query_result(
-        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003b4")
-            .expect("fixture UUID"),
-        vec![add(json!({"id": "o1"}), 1)],
-    );
+    let mut order_result = make_query_result(order_query_id, vec![add(json!({"id": "o1"}), 1)]);
     order_result.query_name = Some(query_name("source.orders"));
     reaction
         .enqueue_query_result(order_result)
         .await
         .expect("enqueue order");
     // `widgets` has no matching route and falls through to the default template.
-    let mut widget_result = make_query_result(
-        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000003b5")
-            .expect("fixture UUID"),
-        vec![add(json!({"id": "w1"}), 2)],
-    );
+    let mut widget_result = make_query_result(widget_query_id, vec![add(json!({"id": "w1"}), 2)]);
     widget_result.query_name = Some(query_name("widgets"));
     reaction
         .enqueue_query_result(widget_result)

@@ -212,6 +212,7 @@ impl Runtime {
             .accept_auto(crate::management::AuthoringOperation::Edit {
                 generations: BTreeMap::from([(id.clone(), generation)]),
                 delete_owned_resources: BTreeSet::new(),
+                replay: None,
                 edit: Box::new(move |desired| {
                     if let Some(record) = desired.ordinary.iter_mut().find(|record| record.id == id)
                     {
@@ -273,6 +274,7 @@ impl Runtime {
             crate::management::AuthoringOperation::Edit {
                 generations: BTreeMap::from([(id.clone(), generation)]),
                 delete_owned_resources: BTreeSet::new(),
+                replay: None,
                 edit: Box::new(move |desired| {
                     let current = desired
                         .ordinary
@@ -327,12 +329,87 @@ impl Runtime {
         Ok(native)
     }
 
+    /// Remove one source, query or reaction through the configuration owner.
+    /// A retry with the same request ID and options returns the original receipt,
+    /// even after the component is gone.
+    pub(crate) async fn remove_requested(
+        &self,
+        id: &ComponentId,
+        removal: crate::management::ComponentRemoval,
+    ) -> anyhow::Result<crate::management::AcceptanceReceipt> {
+        let crate::management::ComponentRemoval {
+            request_id,
+            expected_revision,
+            erase_data,
+        } = removal;
+        let replay = serde_json::to_vec(&("remove-component", id, erase_data))?;
+        if let Some(request) = &request_id {
+            let owner = self.configuration_owner()?;
+            let owner = owner
+                .get()
+                .ok_or_else(|| anyhow::anyhow!("configuration owner is unavailable"))?;
+            if owner.receipt(request.clone()).await?.is_some() {
+                let receipt = owner
+                    .accept_with(
+                        expected_revision,
+                        Some(request.clone()),
+                        crate::management::AuthoringOperation::Edit {
+                            generations: BTreeMap::new(),
+                            edit: Box::new(|_| Ok(())),
+                            delete_owned_resources: BTreeSet::new(),
+                            replay: Some(replay),
+                        },
+                    )
+                    .await?;
+                let status = owner.wait_applied(receipt.revision).await?;
+                anyhow::ensure!(
+                    status.error.is_none() && status.resource_errors.is_empty(),
+                    "component removal is incomplete: {status:?}"
+                );
+                return Ok(receipt);
+            }
+        }
+        let kind = {
+            let publication = self.control()?.registry_snapshot();
+            publication
+                .desired
+                .nodes
+                .iter()
+                .find(|node| node.descriptor.id() == id)
+                .and_then(|node| Self::public_component_kind(&publication.desired, node))
+                .ok_or_else(|| crate::error::ComponentNotFoundError::new("component", id.clone()))?
+        };
+        self.remove_owned_with(
+            id,
+            kind,
+            erase_data || kind == "query",
+            request_id,
+            expected_revision,
+            Some(replay),
+        )
+        .await
+    }
+
     pub(super) async fn remove_owned(
         &self,
         id: &ComponentId,
         kind: &str,
         cleanup: bool,
     ) -> anyhow::Result<()> {
+        self.remove_owned_with(id, kind, cleanup, None, None, None)
+            .await
+            .map(drop)
+    }
+
+    async fn remove_owned_with(
+        &self,
+        id: &ComponentId,
+        kind: &str,
+        cleanup: bool,
+        request: Option<String>,
+        expected: Option<u64>,
+        replay: Option<Vec<u8>>,
+    ) -> anyhow::Result<crate::management::AcceptanceReceipt> {
         let kind = match kind {
             "source" => "source",
             "query" => "query",
@@ -385,10 +462,13 @@ impl Runtime {
         let owner = owner
             .get()
             .ok_or_else(|| anyhow::anyhow!("configuration owner is unavailable"))?;
-        let receipt =
-            owner
-                .accept_auto(crate::management::AuthoringOperation::Edit {
+        let receipt = owner
+            .accept_with(
+                expected,
+                request,
+                crate::management::AuthoringOperation::Edit {
                     generations: members,
+                    replay,
                     delete_owned_resources: if cleanup {
                         BTreeSet::from([id.clone()])
                     } else {
@@ -444,8 +524,9 @@ impl Runtime {
                         )?;
                         Ok(())
                     }),
-                })
-                .await?;
+                },
+            )
+            .await?;
         let status = owner.wait_applied(receipt.revision).await?;
         anyhow::ensure!(
             status.error.is_none() && status.resource_errors.is_empty(),
@@ -453,6 +534,6 @@ impl Runtime {
         );
         self.logs.remove_component_by_key(&log_key).await?;
         self.notify();
-        Ok(())
+        Ok(receipt)
     }
 }

@@ -833,10 +833,31 @@ fn build_fails_on_invalid_header_template() {
     );
 }
 
-#[test]
-fn build_fails_on_unknown_route_key() {
+async fn bind_test_context(reaction: &HttpReaction) {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    let query_ids = reaction
+        .base
+        .queries
+        .iter()
+        .map(|_| drasi_core::ComponentId::generate())
+        .collect();
+    reaction
+        .bind_runtime_context(drasi_lib::context::ReactionRuntimeContext::new(
+            "instance",
+            reaction.base.id.clone(),
+            query_ids,
+            None,
+            tx,
+            None,
+        ))
+        .await;
+}
+
+#[tokio::test]
+async fn start_fails_on_unknown_route_key() {
     let spec = spec_with("/x", "", HashMap::new());
-    let err = HttpReaction::builder(
+    let reaction = HttpReaction::builder(
         drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
             .expect("fixture UUID"),
     )
@@ -845,10 +866,14 @@ fn build_fails_on_unknown_route_key() {
     )
     .with_query_template("not-subscribed", spec)
     .build()
-    .err()
-    .expect("build should fail");
+    .expect("route keys are checked at start");
+    bind_test_context(&reaction).await;
+    let err = reaction.start().await.expect_err("unknown route");
     assert!(
-        err.to_string().contains("not-subscribed"),
+        err.to_string().contains("not-subscribed")
+            && err
+                .to_string()
+                .contains("does not match any subscribed query"),
         "error should name the offending route: {err}"
     );
 }
@@ -998,7 +1023,7 @@ fn render_batch_item_uses_body_template_when_present() {
         serde_json::json!({"id": "x"}),
     );
     let hb = build_handlebars();
-    let item = render_batch_item(&hb, &cfg, &n, "r");
+    let item = render_batch_item(&hb, &cfg, cfg.routes().get("q1"), &n, "r");
     assert_eq!(item, serde_json::json!({"id": "x", "kind": "templated"}));
 }
 
@@ -1013,7 +1038,7 @@ fn render_batch_item_falls_back_to_default_envelope_without_template() {
         serde_json::json!({"id": "x"}),
     );
     let hb = build_handlebars();
-    let item = render_batch_item(&hb, &cfg, &n, "r");
+    let item = render_batch_item(&hb, &cfg, None, &n, "r");
     // Default change-notification envelope (Pattern A item) shape.
     assert_eq!(item.get("operation"), Some(&serde_json::json!("ADD")));
     assert_eq!(
@@ -1050,13 +1075,13 @@ fn render_batch_item_falls_back_when_template_renders_invalid_json() {
         serde_json::json!({"id": "x"}),
     );
     let hb = build_handlebars();
-    let item = render_batch_item(&hb, &cfg, &n, "r");
+    let item = render_batch_item(&hb, &cfg, cfg.routes().get("q1"), &n, "r");
     assert_eq!(item.get("operation"), Some(&serde_json::json!("ADD")));
     assert_eq!(item.get("after"), Some(&serde_json::json!({"id": "x"})));
 }
 
 #[test]
-fn render_batch_item_resolves_default_template_and_last_segment() {
+fn render_batch_item_uses_default_template_and_resolved_route() {
     // Default template applies when no route matches.
     let cfg = cfg_with_routes(
         Some(added_template(r#"{"d":"{{after.id}}"}"#)),
@@ -1071,11 +1096,11 @@ fn render_batch_item_resolves_default_template_and_last_segment() {
     );
     let hb = build_handlebars();
     assert_eq!(
-        render_batch_item(&hb, &cfg, &n, "r"),
+        render_batch_item(&hb, &cfg, None, &n, "r"),
         serde_json::json!({"d": "z"})
     );
 
-    // A route keyed by the last dotted segment is used for a dotted query name.
+    // The route resolved for the emitting query is used.
     let cfg = cfg_with_routes(
         None,
         HashMap::from([(
@@ -1084,7 +1109,7 @@ fn render_batch_item_resolves_default_template_and_last_segment() {
         )]),
     );
     assert_eq!(
-        render_batch_item(&hb, &cfg, &n, "r"),
+        render_batch_item(&hb, &cfg, cfg.routes().get("q1"), &n, "r"),
         serde_json::json!({"seg": "z"})
     );
 }
@@ -1725,14 +1750,14 @@ async fn descriptor_creates_reaction_with_output_templates() {
 }
 
 #[tokio::test]
-async fn descriptor_rejects_route_key_not_matching_a_query() {
+async fn descriptor_route_key_not_matching_a_query_fails_at_start() {
     use drasi_plugin_sdk::ReactionPluginDescriptor;
     let d = crate::descriptor::HttpReactionDescriptor;
     let cfg = serde_json::json!({
         "baseUrl": "http://example.com",
         "outputTemplates": { "routes": { "nope": { "added": { "template": "x" } } } }
     });
-    let err = d
+    let reaction = d
         .create_reaction(
             &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
                 .expect("fixture UUID"),
@@ -1743,8 +1768,20 @@ async fn descriptor_rejects_route_key_not_matching_a_query() {
             true,
         )
         .await
-        .err()
-        .expect("unknown route key must be rejected");
+        .expect("route keys are checked at start");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    reaction
+        .bind_runtime_context(drasi_lib::context::ReactionRuntimeContext::new(
+            "instance",
+            reaction.id().clone(),
+            vec![drasi_core::ComponentId::generate()],
+            None,
+            tx,
+            None,
+        ))
+        .await;
+    let err = reaction.start().await.expect_err("unknown route key");
     assert!(err.to_string().contains("nope"), "{err}");
 }
 

@@ -230,12 +230,45 @@ impl PostgresStoredProcReactionConfig {
         self.port.unwrap_or(5432)
     }
 
-    /// Validate the configuration.
+    /// Resolve the command template for an operation from a per-query route
+    /// already resolved by query ID, falling back to `default_template` when
+    /// the route has no command for that operation.
+    pub fn route_template_spec<'a>(
+        &'a self,
+        route: Option<&'a QueryConfig>,
+        operation: common::OperationType,
+    ) -> Option<&'a TemplateSpec> {
+        route
+            .and_then(|config| Self::get_spec_from_config(config, operation))
+            .or_else(|| {
+                self.default_template
+                    .as_ref()
+                    .and_then(|config| Self::get_spec_from_config(config, operation))
+            })
+    }
+
+    /// Validate the configuration against a list of query ids:
+    /// [`Self::validate_settings`] plus a check that every `routes` key
+    /// matches a query id (or its last dotted segment).
+    pub fn validate(&self, query_ids: &[String]) -> anyhow::Result<()> {
+        self.validate_settings()?;
+        for key in self.routes.keys() {
+            let matches = query_ids.iter().any(|q| q == key || last_segment(q) == key);
+            if !matches {
+                anyhow::bail!(
+                    "route '{key}' does not match any subscribed query id (or its last dotted segment)"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate the configuration without matching route keys to queries.
     ///
     /// Checks authentication, database name, that at least one command is
-    /// configured, that every template compiles, and that every `routes` key
-    /// matches a subscribed query id (or its last dotted segment).
-    pub fn validate(&self, query_ids: &[String]) -> anyhow::Result<()> {
+    /// configured, and that every template compiles. Route keys are resolved
+    /// to query IDs when the reaction starts.
+    pub fn validate_settings(&self) -> anyhow::Result<()> {
         // Check authentication configuration
         if self.identity_provider.is_none() && self.user.is_empty() {
             anyhow::bail!("Either identity_provider or user/password must be provided");
@@ -261,13 +294,6 @@ impl PostgresStoredProcReactionConfig {
         }
         for (key, qc) in &self.routes {
             validate_query_config(qc).map_err(|e| anyhow::anyhow!("route '{key}': {e}"))?;
-
-            let matches = query_ids.iter().any(|q| q == key || last_segment(q) == key);
-            if !matches {
-                anyhow::bail!(
-                    "route '{key}' does not match any subscribed query id (or its last dotted segment)"
-                );
-            }
         }
 
         Ok(())

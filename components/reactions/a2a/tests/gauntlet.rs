@@ -655,7 +655,7 @@ fn run_config(report: &mut Report) {
 
     for (i, (name, config, cap, ok)) in cases.iter().enumerate() {
         let id = format!("CF{:03}", i + 1);
-        let actual = config.validate(&[], *cap).is_ok();
+        let actual = config.validate(*cap).is_ok();
         if actual == *ok {
             report.pass(id, "config", *name);
         } else {

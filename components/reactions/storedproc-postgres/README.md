@@ -354,14 +354,15 @@ template is configured for an operation, the event is skipped.
 
 For each `(query_id, operation)` the reaction resolves the command template in this order:
 
-1. a `routes` entry keyed by the **full** query id,
-2. a `routes` entry keyed by the query id's **last dotted segment** (so `source.my_query`
-   can be routed via a `my_query` key),
-3. the shared `default_template`.
+1. the `routes` entry resolved to the result's query ID,
+2. the shared `default_template`.
 
-If none of these supplies a template for the operation, the event is skipped. Every
-`routes` key must match a subscribed query id (or its last dotted segment); an unmatched
-key is rejected when the reaction is built.
+If neither supplies a template for the operation, the event is skipped.
+
+When the reaction starts, each route key is resolved to the permanent ID of a subscribed
+query. A key may be the query's ID, its name, or the last dotted segment of its name (so
+`my_query` selects `source.my_query`). An unknown key, or two keys selecting the same query,
+makes `start()` fail. Results are then routed by query ID, so a renamed query keeps its route.
 
 ### Per-Query Templates
 

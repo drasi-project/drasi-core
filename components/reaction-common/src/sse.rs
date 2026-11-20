@@ -6,6 +6,7 @@
 
 use anyhow::{Context, Result};
 use drasi_computation_contracts::exchange::{QueryResult, ResultDiff};
+use drasi_computation_contracts::ComponentId;
 use handlebars::Handlebars;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -26,9 +27,10 @@ pub struct SseEvent {
     pub payload: String,
 }
 
+/// Renders results using routes keyed by permanent query ID.
 pub struct SseRenderer {
     base_path: String,
-    routes: HashMap<String, QueryConfig>,
+    routes: HashMap<ComponentId, QueryConfig>,
     default_template: Option<QueryConfig>,
     handlebars: Handlebars<'static>,
 }
@@ -65,7 +67,7 @@ pub fn default_payload(result: &QueryResult, timestamp: i64) -> Value {
 impl SseRenderer {
     pub fn new(
         base_path: String,
-        routes: HashMap<String, QueryConfig>,
+        routes: HashMap<ComponentId, QueryConfig>,
         default_template: Option<QueryConfig>,
     ) -> Self {
         let mut handlebars = Handlebars::new();
@@ -78,10 +80,11 @@ impl SseRenderer {
         }
     }
 
+    /// Validate body and path template syntax. Route keys are matched to
+    /// queries when the reaction starts.
     pub fn validate(
         routes: &HashMap<String, QueryConfig>,
         default_template: Option<&QueryConfig>,
-        queries: &[String],
     ) -> Result<()> {
         let mut handlebars = Handlebars::new();
         register_json_helper(&mut handlebars);
@@ -112,22 +115,23 @@ impl SseRenderer {
         if let Some(config) = default_template {
             validate(config).context("Invalid default template")?;
         }
-        if !queries.is_empty() {
-            for route in routes.keys() {
-                anyhow::ensure!(
-                    queries
-                        .iter()
-                        .any(|query| query == route || query.ends_with(&format!(".{route}"))),
-                    "Route '{route}' does not match any subscribed query. Subscribed queries: {queries:?}"
-                );
-            }
-        }
         Ok(())
     }
 
     pub fn static_paths(&self) -> BTreeSet<String> {
-        let mut paths = BTreeSet::from([self.base_path.clone()]);
-        for config in self.routes.values().chain(self.default_template.iter()) {
+        Self::configured_static_paths(
+            &self.base_path,
+            self.routes.values().chain(self.default_template.iter()),
+        )
+    }
+
+    /// Static paths declared by `configs`, independent of how routes are keyed.
+    pub fn configured_static_paths<'a>(
+        base_path: &str,
+        configs: impl IntoIterator<Item = &'a QueryConfig>,
+    ) -> BTreeSet<String> {
+        let mut paths = BTreeSet::from([base_path.to_owned()]);
+        for config in configs {
             for spec in [
                 config.added.as_ref(),
                 config.updated.as_ref(),
@@ -142,7 +146,7 @@ impl SseRenderer {
                     .as_deref()
                     .filter(|path| !path.contains("{{"))
                 {
-                    paths.insert(self.resolve_path(path));
+                    paths.insert(resolve_path(base_path, path));
                 }
             }
         }
@@ -150,11 +154,7 @@ impl SseRenderer {
     }
 
     fn resolve_path(&self, path: &str) -> String {
-        if path.starts_with('/') {
-            path.to_owned()
-        } else {
-            format!("{}/{path}", self.base_path)
-        }
+        resolve_path(&self.base_path, path)
     }
 
     pub fn render(
@@ -177,15 +177,9 @@ impl SseRenderer {
         timestamp: i64,
         mut report_error: impl FnMut(String),
     ) -> Vec<(SseEvent, Option<usize>)> {
-        let alias = crate::input_alias(result.input_alias.as_deref(), result.query_name.as_ref());
-        let config = alias
-            .and_then(|alias| {
-                self.routes.get(alias).or_else(|| {
-                    alias
-                        .rsplit_once('.')
-                        .and_then(|(_, last)| self.routes.get(last))
-                })
-            })
+        let config = self
+            .routes
+            .get(&result.query_id)
             .or(self.default_template.as_ref());
         let Some(config) = config else {
             return vec![(
@@ -289,6 +283,14 @@ impl SseRenderer {
             events.push((SseEvent { path, payload }, Some(ordinal)));
         }
         events
+    }
+}
+
+fn resolve_path(base_path: &str, path: &str) -> String {
+    if path.starts_with('/') {
+        path.to_owned()
+    } else {
+        format!("{base_path}/{path}")
     }
 }
 

@@ -189,17 +189,6 @@ fn make_query_result(query_id: drasi_lib::ComponentId, diffs: Vec<ResultDiff>) -
     QueryResult::new(query_id, 0, Utc::now(), diffs, HashMap::new())
 }
 
-fn named_query_result(name: &str) -> QueryResult {
-    let mut result = make_query_result(
-        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
-            .expect("fixture UUID"),
-        Vec::new(),
-    );
-    result.query_name =
-        Some(drasi_lib::ComponentName::try_new(name).expect("fixture component name"));
-    result
-}
-
 // ============================================================================
 // Unit tests — configuration
 // ============================================================================
@@ -384,34 +373,42 @@ fn test_resolve_prefers_route_over_default() {
         ..Default::default()
     };
     assert_eq!(
-        config.resolve_command_template(&named_query_result("user-query"), OperationType::Add),
+        config.resolve_command_template(config.routes.get("user-query"), OperationType::Add),
         Some("CALL route_add({{param after.id}})".to_string())
     );
     assert_eq!(
-        config.resolve_command_template(&named_query_result("other-query"), OperationType::Add),
+        config.resolve_command_template(None, OperationType::Add),
         Some("CALL default_add({{param after.id}})".to_string())
     );
 }
 
 #[test]
-fn test_resolve_matches_last_dotted_segment() {
-    let mut routes = HashMap::new();
-    routes.insert(
-        "my_query".to_string(),
-        QueryConfig {
-            added: Some(TemplateSpec::new("CALL seg_add({{param after.id}})")),
-            updated: None,
-            deleted: None,
-        },
-    );
+fn test_resolve_route_falls_back_to_default_per_operation() {
+    let route = QueryConfig {
+        added: Some(TemplateSpec::new("CALL route_add({{param after.id}})")),
+        updated: Some(TemplateSpec::new("  ")),
+        deleted: None,
+    };
     let config = MySqlStoredProcReactionConfig {
-        routes,
+        default_template: Some(QueryConfig {
+            added: None,
+            updated: Some(TemplateSpec::new("CALL default_update({{param after.id}})")),
+            deleted: None,
+        }),
         ..Default::default()
     };
     assert_eq!(
-        config.resolve_command_template(&named_query_result("source.my_query"), OperationType::Add),
-        Some("CALL seg_add({{param after.id}})".to_string())
+        config.resolve_command_template(Some(&route), OperationType::Add),
+        Some("CALL route_add({{param after.id}})".to_string())
     );
+    // An empty route template counts as unconfigured.
+    assert_eq!(
+        config.resolve_command_template(Some(&route), OperationType::Update),
+        Some("CALL default_update({{param after.id}})".to_string())
+    );
+    assert!(config
+        .resolve_command_template(Some(&route), OperationType::Delete)
+        .is_none());
 }
 
 #[test]
@@ -425,12 +422,12 @@ fn test_resolve_returns_none_when_unconfigured() {
         ..Default::default()
     };
     assert!(config
-        .resolve_command_template(&named_query_result("q"), OperationType::Delete)
+        .resolve_command_template(None, OperationType::Delete)
         .is_none());
 }
 
 #[tokio::test]
-async fn test_builder_rejects_unknown_route_key() {
+async fn test_unknown_route_key_fails_at_start() {
     let mut routes = HashMap::new();
     routes.insert(
         "not-subscribed".to_string(),
@@ -446,7 +443,7 @@ async fn test_builder_rejects_unknown_route_key() {
         routes,
         ..Default::default()
     };
-    let result = MySqlStoredProcReaction::builder(
+    let reaction = MySqlStoredProcReaction::builder(
         drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
             .expect("fixture UUID"),
     )
@@ -455,9 +452,27 @@ async fn test_builder_rejects_unknown_route_key() {
     )
     .with_config(config)
     .build()
-    .await;
-    let err = result.expect_err("build should fail").to_string();
-    assert!(err.contains("route key 'not-subscribed'"));
+    .await
+    .expect("route keys are checked at start");
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    reaction
+        .bind_runtime_context(drasi_lib::context::ReactionRuntimeContext::new(
+            "instance",
+            reaction.id().clone(),
+            vec![drasi_lib::ComponentId::generate()],
+            None,
+            tx,
+            None,
+        ))
+        .await;
+    let err = reaction
+        .start()
+        .await
+        .expect_err("unknown route key")
+        .to_string();
+    assert!(err.contains("does not match any subscribed query"), "{err}");
 }
 
 #[tokio::test]

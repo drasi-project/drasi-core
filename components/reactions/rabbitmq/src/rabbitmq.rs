@@ -63,10 +63,7 @@ impl RabbitMQReaction {
         queries: Vec<drasi_lib::config::ComponentReference>,
         config: RabbitMQReactionConfig,
     ) -> anyhow::Result<Self> {
-        Self::validate_config(
-            &drasi_lib::reactions::common::input_aliases(&queries),
-            &config,
-        )?;
+        Self::validate_config(&config)?;
         let params = ReactionBaseParams::new(id, queries);
         Ok(Self {
             base: ReactionBase::new(params),
@@ -81,10 +78,7 @@ impl RabbitMQReaction {
         config: RabbitMQReactionConfig,
         priority_queue_capacity: usize,
     ) -> anyhow::Result<Self> {
-        Self::validate_config(
-            &drasi_lib::reactions::common::input_aliases(&queries),
-            &config,
-        )?;
+        Self::validate_config(&config)?;
         let params = ReactionBaseParams::new(id, queries)
             .with_priority_queue_capacity(priority_queue_capacity);
         Ok(Self {
@@ -101,10 +95,7 @@ impl RabbitMQReaction {
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
     ) -> anyhow::Result<Self> {
-        Self::validate_config(
-            &drasi_lib::reactions::common::input_aliases(&queries),
-            &config,
-        )?;
+        Self::validate_config(&config)?;
         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
         if let Some(capacity) = priority_queue_capacity {
             params = params.with_priority_queue_capacity(capacity);
@@ -151,26 +142,13 @@ impl RabbitMQReaction {
         Ok(())
     }
 
-    fn validate_config(queries: &[String], config: &RabbitMQReactionConfig) -> anyhow::Result<()> {
+    /// Validate configuration and template syntax. Route keys are matched to queries at start.
+    fn validate_config(config: &RabbitMQReactionConfig) -> anyhow::Result<()> {
         config.validate()?;
 
         for (query_id, query_config) in &config.query_configs {
             Self::validate_query_config(query_config)
                 .map_err(|e| anyhow::anyhow!("Invalid template in route '{query_id}': {e}"))?;
-        }
-
-        if !config.query_configs.is_empty() && !queries.is_empty() {
-            for route_query in config.query_configs.keys() {
-                let dotted_route = format!(".{route_query}");
-                let matches = queries
-                    .iter()
-                    .any(|q| q == route_query || q.ends_with(&dotted_route));
-                if !matches {
-                    return Err(anyhow::anyhow!(
-                        "Route '{route_query}' does not match any subscribed query. Subscribed queries: {queries:?}"
-                    ));
-                }
-            }
         }
 
         Ok(())
@@ -412,6 +390,7 @@ impl Reaction for RabbitMQReaction {
     }
 
     async fn start(&self) -> Result<()> {
+        let query_configs = self.base.bind_routes(&self.config.query_configs).await?;
         log_component_start("RabbitMQ Reaction", &self.base.id);
 
         let reaction_id = self.base.id.clone();
@@ -429,7 +408,6 @@ impl Reaction for RabbitMQReaction {
 
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
         let status_handle = self.base.status_handle();
-        let query_configs = self.config.query_configs.clone();
         let exchange_type = self.config.exchange_type.clone();
         let exchange_durable = self.config.exchange_durable;
         let message_persistent = self.config.message_persistent;
@@ -598,13 +576,7 @@ impl Reaction for RabbitMQReaction {
                     query_result.input_alias.as_deref(),
                     query_result.query_name.as_ref(),
                 );
-                let query_config = alias.and_then(|alias| {
-                    query_configs.get(alias).or_else(|| {
-                        alias
-                            .rsplit_once('.')
-                            .and_then(|(_, last)| query_configs.get(last))
-                    })
-                });
+                let query_config = query_configs.get(query_id);
                 let routing_alias = alias
                     .map(str::to_owned)
                     .unwrap_or_else(|| query_id.to_string());

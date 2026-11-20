@@ -2,7 +2,7 @@
 
 This guide states what a native bootstrap provider (a `BootstrapFactory`
 and the providers it creates) must do beyond compiling against the
-computation SDK (ABI 5.0). It applies to every crate in this directory and to
+computation SDK (ABI 0.1). It applies to every crate in this directory and to
 the coordinators of the sources they pair with. The SQLite crates are the
 reference implementation of a paired family; the HTTP crate is the reference
 for an unpaired provider.

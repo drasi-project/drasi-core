@@ -30,7 +30,7 @@ use drasi_lib::ReactionRecoveryPolicy;
 
 use crate::adaptive_batcher::{AdaptiveBatcher, AdaptiveBatcherConfig};
 use crate::batch::{merge_metadata, BatchKey};
-use crate::config::GrpcReactionConfig;
+use crate::config::{GrpcQueryConfig, GrpcReactionConfig};
 use crate::connection::create_client_with_retry;
 use crate::proto::{ProtoQueryResultItem, ReactionServiceClient};
 use crate::send::send_batch_with_retry;
@@ -57,6 +57,7 @@ pub(crate) struct AdaptiveRunnerParams {
     pub adaptive: AdaptiveBatchConfig,
     pub base: ReactionBase,
     pub config: GrpcReactionConfig,
+    pub routes: HashMap<drasi_lib::ComponentId, GrpcQueryConfig>,
     pub shutdown_rx: oneshot::Receiver<()>,
     pub checkpoints: CheckpointState,
     pub policy: ReactionRecoveryPolicy,
@@ -70,6 +71,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
         adaptive,
         base,
         config,
+        routes,
         mut shutdown_rx,
         checkpoints,
         policy,
@@ -338,6 +340,7 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
             let seq = query_result.sequence;
 
             let emission = QueryEmissionContext::from(query_result.as_ref());
+            let route = routes.get(&query_result.query_id);
 
             // Build all items first so the last one can be flagged terminal; the
             // checkpoint only advances once a result's terminal item is acked.
@@ -348,9 +351,13 @@ pub(crate) async fn run(params: AdaptiveRunnerParams) {
                     debug!("[{reaction_id}] Ignoring noop result");
                     continue;
                 }
-                let Some(built) =
-                    build_proto_item(&cfg_for_loop, engine_for_loop.as_ref(), &emission, diff)
-                else {
+                let Some(built) = build_proto_item(
+                    &cfg_for_loop,
+                    engine_for_loop.as_ref(),
+                    route,
+                    &emission,
+                    diff,
+                ) else {
                     continue;
                 };
                 let effective_metadata = merge_metadata(&base_metadata, &built.request_metadata);

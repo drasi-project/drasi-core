@@ -107,7 +107,7 @@ The SSE Reaction supports per-query configuration, allowing you to customize tem
 
 You can set a default template configuration that applies to all queries when no query-specific route is defined. This is useful when you have multiple queries and want to use the same custom templates for all of them, instead of the built-in default format.
 
-**Important:** Template validation occurs at creation time. If a template is invalid (malformed Handlebars syntax), the builder will return an error. Additionally, if you define routes for queries that aren't subscribed to, the builder will return an error.
+**Important:** Template validation occurs at creation time. If a template is invalid (malformed Handlebars syntax), the builder will return an error. Route keys are matched to subscribed queries when the reaction starts; a route that matches no subscribed query makes `start()` fail.
 
 #### QueryConfig
 
@@ -220,26 +220,27 @@ This maintains backward compatibility with existing configurations.
 
 #### Validation
 
-The SSE Reaction performs validation at build time:
+The SSE Reaction validates configuration in two stages:
 
-1. **Template Validation**: All Handlebars templates (in routes and default template) are validated for correct syntax. If a template is invalid, the builder returns an error.
+1. **Template Validation (build time)**: All Handlebars templates (in routes and default template) are validated for correct syntax. If a template is invalid, the builder returns an error.
 
-2. **Route Validation**: All routes must correspond to subscribed queries. The builder checks that each route matches either:
-   - An exact query ID
-   - The last segment of a dotted query ID (e.g., route "query1" matches query "source.query1")
-   
-   If a route doesn't match any subscribed query, the builder returns an error.
+2. **Route Binding (start time)**: Each route key is resolved to the permanent ID of a subscribed query. A key matches a query by:
+   - Its query ID
+   - Its declared or current name
+   - The last segment of a dotted name (e.g., route "query1" matches query "source.query1")
+
+   Results are then routed by query ID, so a route keeps applying after the query is renamed. If a route doesn't match any subscribed query, or two routes select the same query, `start()` returns an error.
 
 **Example of validation error:**
 
 ```rust
-// This will fail because "query2" is not subscribed
-let result = SseReaction::builder("test")
-    .with_query("query1")
+// Building succeeds, but starting fails because "query2" is not subscribed
+let reaction = SseReaction::builder(id)
+    .with_query_by_name(ComponentName::try_new("query1")?)
     .with_route("query2", some_config)
-    .build();
+    .build()?;
 
-assert!(result.is_err());
+assert!(reaction.start().await.is_err());
 ```
 
 ## Output Schema

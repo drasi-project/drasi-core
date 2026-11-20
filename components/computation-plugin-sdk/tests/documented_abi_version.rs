@@ -50,7 +50,7 @@ fn documents() -> Vec<PathBuf> {
 }
 
 /// The version token that follows `marker` (skipping Markdown emphasis), such
-/// as `5.0.0` in `ABI **5.0.0**`.
+/// as `0.1.0` in `ABI **0.1.0**`.
 fn versions_after<'a>(line: &'a str, marker: &str) -> Vec<&'a str> {
     line.match_indices(marker)
         .filter_map(|(index, _)| {
@@ -101,14 +101,14 @@ fn documented_native_abi_and_wire_versions_match_the_sdk() {
 #[test]
 fn version_tokens_are_read_through_markdown_emphasis() {
     assert_eq!(
-        versions_after("Native ABI **5.0.0**, here", "ABI "),
-        ["5.0.0"]
+        versions_after("Native ABI **0.1.0**, here", "ABI "),
+        ["0.1.0"]
     );
-    assert_eq!(versions_after("native ABI 5.0). It", "ABI "), ["5.0"]);
-    assert_eq!(versions_after("the ABI 5 SDK", "ABI "), ["5"]);
+    assert_eq!(versions_after("native ABI 0.1). It", "ABI "), ["0.1"]);
+    assert_eq!(versions_after("the ABI 7 SDK", "ABI "), ["7"]);
     assert_eq!(
-        versions_after("Native ABI is **5.0.0**.", "ABI is "),
-        ["5.0.0"]
+        versions_after("Native ABI is **0.1.0**.", "ABI is "),
+        ["0.1.0"]
     );
     assert!(versions_after("the ABI marker", "ABI ").is_empty());
 }

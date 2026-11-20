@@ -14,20 +14,22 @@
 //! All entry points and callbacks must contain panics. Libraries are pinned for
 //! process lifetime; this ABI does not provide hot unloading.
 //!
-//! Read and validate the header before reading the rest of a table. V4 tables
-//! may only grow by appending fields in a later minor version: a host accepts the
-//! same major and an older or equal minor, and rejects a newer minor or another
-//! major before invoking any callback. Sizes must match the accepted minor's layout. Metadata and tables remain valid until their owning handle is released.
+//! Read and validate the header before reading the rest of a table. Until 1.0
+//! every minor version is breaking: a host accepts only its own major and minor,
+//! and the version stays at 0.1.0 while the design is iterated. From 1.0, tables
+//! may only grow by appending fields in a later minor version, and a host accepts
+//! the same major with an older or equal minor. Anything else is rejected before
+//! any callback. Sizes must match the accepted minor's layout. Metadata and tables remain valid until their owning handle is released.
 //! Calls on one operation are serialized by its owner; wake/retain/release may be
 //! called concurrently. A poll must be cooperative and must never wait for I/O.
 
 use std::{ffi::c_void, fmt, mem::size_of, ptr};
 
-pub const ABI_VERSION: &str = "5.0.0";
-pub const ABI_MAJOR: u16 = 5;
-pub const ABI_MINOR: u16 = 0;
-pub const ABI_MAGIC: u64 = 0x4452_4153_4943_4735; // DRASICG5
-pub const WIRE_VERSION: u32 = 5;
+pub const ABI_VERSION: &str = "0.1.0";
+pub const ABI_MAJOR: u16 = 0;
+pub const ABI_MINOR: u16 = 1;
+pub const ABI_MAGIC: u64 = 0x4452_4153_4943_4730; // DRASICG0
+pub const WIRE_VERSION: u32 = 1;
 pub const METADATA_SYMBOL: &[u8] = b"drasi_computation_plugin_metadata\0";
 pub const ENTRY_SYMBOL: &[u8] = b"drasi_computation_plugin_entry\0";
 pub const MAX_METADATA_BYTES: usize = 1024 * 1024;
@@ -59,16 +61,24 @@ pub const ABI_VERSION_MARKER: [u8; ABI_VERSION_MARKER_LEN] = {
 
 /// The single native compatibility rule, shared by metadata validation at load
 /// time and registry resolution before download: a `major.minor.patch` version
-/// with this host's major and an older or equal minor.
+/// with this host's major and an accepted minor.
 pub fn accepts_abi_version(version: &str) -> bool {
     let mut parts = version.split('.').map(str::parse::<u16>);
     match (parts.next(), parts.next(), parts.next(), parts.next()) {
         (Some(Ok(major)), Some(Ok(minor)), Some(Ok(_)), None) => {
-            #[allow(clippy::absurd_extreme_comparisons)]
-            let accepted_minor = minor <= ABI_MINOR;
-            major == ABI_MAJOR && accepted_minor
+            major == ABI_MAJOR && accepts_minor(minor)
         }
         _ => false,
+    }
+}
+
+/// Before 1.0 every minor is breaking, so only this minor is accepted.
+#[allow(clippy::absurd_extreme_comparisons)]
+const fn accepts_minor(minor: u16) -> bool {
+    if ABI_MAJOR == 0 {
+        minor == ABI_MINOR
+    } else {
+        minor <= ABI_MINOR
     }
 }
 
@@ -109,18 +119,21 @@ impl Header {
         }
     }
 
-    /// Accepts the same family and major, and an older or equal minor whose
-    /// layout size is known. Only minor 0 exists in 5.x, so its size is exact.
+    /// Accepts the same family and major, and an accepted minor whose layout
+    /// size is known. Only minor 1 exists in 0.x, so its size is exact.
     pub fn validate<T>(&self) -> Result<(), InvalidHeader> {
         let current = Self::new::<T>();
         if self.magic == current.magic
             && self.major == current.major
-            && self.minor <= current.minor
+            && accepts_minor(self.minor)
             && self.size == Self::size_for_minor::<T>(self.minor)
         {
             Ok(())
         } else {
-            Err(InvalidHeader(*self))
+            Err(InvalidHeader {
+                found: *self,
+                expected: current,
+            })
         }
     }
 
@@ -130,15 +143,32 @@ impl Header {
 }
 
 #[derive(Debug)]
-pub struct InvalidHeader(pub Header);
+pub struct InvalidHeader {
+    pub found: Header,
+    pub expected: Header,
+}
 
 impl fmt::Display for InvalidHeader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "incompatible native computation ABI header: {:?}",
-            self.0
-        )
+        let Self { found, expected } = self;
+        if found.magic == expected.magic
+            && found.major == expected.major
+            && found.minor == expected.minor
+        {
+            write!(
+                f,
+                "incompatible native computation ABI header: table size {} does not match \
+                 this build's {} for ABI {ABI_VERSION}; the plugin was built from a different \
+                 revision of the ABI and must be rebuilt",
+                found.size, expected.size
+            )
+        } else {
+            write!(
+                f,
+                "incompatible native computation ABI header: found {found:?}, expected \
+                 {expected:?} (ABI {ABI_VERSION}); rebuild the plugin against this host's ABI"
+            )
+        }
     }
 }
 impl std::error::Error for InvalidHeader {}
@@ -509,13 +539,15 @@ mod tests {
         for bad in [
             Header { magic: 0, ..good },
             Header {
-                magic: 0x4452_4153_4943_4734,
-                major: 4,
+                magic: 0x4452_4153_4943_4735,
+                major: 5,
+                minor: 0,
                 ..good
             },
-            Header { major: 4, ..good },
-            Header { major: 6, ..good },
-            Header { minor: 1, ..good },
+            Header { major: 5, ..good },
+            Header { major: 1, ..good },
+            Header { minor: 0, ..good },
+            Header { minor: 2, ..good },
             Header { size: 16, ..good },
             Header {
                 size: good.size + 8,
@@ -536,7 +568,8 @@ mod tests {
         assert!(accepts_abi_version(&format!("{ABI_MAJOR}.{ABI_MINOR}.99")));
         for version in [
             format!("{ABI_MAJOR}.{}.0", ABI_MINOR + 1),
-            format!("{}.0.0", ABI_MAJOR - 1),
+            format!("{ABI_MAJOR}.{}.0", ABI_MINOR - 1),
+            "5.0.0".to_owned(),
             format!("{}.0.0", ABI_MAJOR + 1),
             format!("{ABI_MAJOR}.{ABI_MINOR}"),
             format!("{ABI_MAJOR}.{ABI_MINOR}.0.0"),

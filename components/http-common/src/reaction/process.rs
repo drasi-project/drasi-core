@@ -26,7 +26,7 @@ use serde_json::{Map, Value};
 use std::time::Duration;
 
 use crate::reaction::config::{
-    parse_http_method, resolve_http_url, HttpCallSpec, HttpReactionConfig, TemplateRouting,
+    parse_http_method, resolve_http_url, HttpCallSpec, HttpQueryConfig, HttpReactionConfig,
 };
 use crate::reaction::output::{DefaultChangeNotification, Operation};
 
@@ -160,8 +160,9 @@ fn build_context(notification: &DefaultChangeNotification) -> Map<String, Value>
 
 /// Render a single batch item for adaptive (coalesced) delivery.
 ///
-/// Resolves the body template for this notification (per-query route → last
-/// dotted segment → default template) and renders it to a JSON value. When no
+/// Resolves the body template from the notification's already-resolved
+/// per-query `route`, falling back to the default template, and renders it to
+/// a JSON value. When no
 /// body template applies, or rendering produces invalid JSON, falls back to the
 /// default [`DefaultChangeNotification`] envelope so an item is never dropped.
 ///
@@ -171,19 +172,11 @@ fn build_context(notification: &DefaultChangeNotification) -> Map<String, Value>
 pub fn render_batch_item(
     handlebars: &Handlebars<'static>,
     config: &HttpReactionConfig,
+    route: Option<&HttpQueryConfig>,
     notification: &DefaultChangeNotification,
     reaction_name: &str,
 ) -> Value {
-    let alias = drasi_reaction_common::input_alias(
-        notification.input_alias.as_deref(),
-        notification.query_name.as_ref(),
-    );
-    let spec = match alias {
-        Some(alias) => config.get_template_spec(alias, notification.operation_type()),
-        None => config.default_template().and_then(|template| {
-            HttpReactionConfig::get_spec_from_config(template, notification.operation_type())
-        }),
-    };
+    let spec = config.route_template_spec(route, notification.operation_type());
     let query_id = &notification.query_id;
 
     let template = match spec {

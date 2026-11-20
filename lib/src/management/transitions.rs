@@ -16,6 +16,16 @@ pub struct RecoveryTransitionRequired {
     components: BTreeSet<ComponentId>,
 }
 
+impl RecoveryTransitionRequired {
+    pub(super) fn resources(&self) -> &BTreeSet<ResourceId> {
+        &self.resources
+    }
+
+    pub(super) fn components(&self) -> &BTreeSet<ComponentId> {
+        &self.components
+    }
+}
+
 /// One explicit removal authorization, recorded with the accepted definition and
 /// request receipt. Every resource and component in the protected domain must be
 /// named and removed. Reusing a prior authorization grants no new permission.

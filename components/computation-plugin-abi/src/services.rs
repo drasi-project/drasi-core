@@ -92,7 +92,7 @@ mod tests {
         let none = ServiceBindingsV1::none();
         none.header.validate::<ServiceBindingsV1>().unwrap();
         assert!(none.admission.is_null() && none.processing.is_null() && none.consumer == 0);
-        assert_eq!(ABI_VERSION, "5.0.0");
-        assert_eq!(WIRE_VERSION, 5);
+        assert_eq!(ABI_VERSION, "0.1.0");
+        assert_eq!(WIRE_VERSION, 1);
     }
 }

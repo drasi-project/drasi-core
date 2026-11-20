@@ -32,7 +32,9 @@ use drasi_lib::reactions::common::{OperationType, TemplateRouting};
 use drasi_lib::recovery::ReactionRecoveryPolicy;
 use drasi_lib::Reaction;
 
-use crate::config::{EventGridReactionConfig, EventGridSchema, OutputFormat, EVENT_GRID_SCOPE};
+use crate::config::{
+    EventGridQueryConfig, EventGridReactionConfig, EventGridSchema, OutputFormat, EVENT_GRID_SCOPE,
+};
 use crate::event::{
     deterministic_id, unpacked_notification, ChangeOp, EventEnvelope, CHANGE_EVENT_TYPE,
 };
@@ -51,15 +53,15 @@ impl EventGridReaction {
         EventGridReactionBuilder::new(id)
     }
 
-    /// Create a new Event Grid reaction from a config, validating it against
-    /// `queries`. Mirrors the builder's `build()` so direct construction cannot
-    /// produce an invalid reaction that only fails at `start()`.
+    /// Create a new Event Grid reaction from a config, validating its settings
+    /// and templates. Mirrors the builder's `build()`; route keys are matched
+    /// to subscribed queries when the reaction starts.
     pub fn new(
         id: drasi_lib::ComponentId,
         queries: Vec<drasi_lib::config::ComponentReference>,
         config: EventGridReactionConfig,
     ) -> Result<Self> {
-        config.validate(&drasi_lib::reactions::common::input_aliases(&queries), None)?;
+        config.validate_settings(None)?;
         let params = ReactionBaseParams::new(id.clone(), queries);
         Ok(Self {
             base: ReactionBase::new(params),
@@ -174,6 +176,7 @@ fn operation_type(diff: &ResultDiff) -> Option<OperationType> {
 pub(crate) fn build_events(
     reaction_id: &drasi_lib::ComponentId,
     config: &EventGridReactionConfig,
+    routes: &HashMap<drasi_lib::ComponentId, EventGridQueryConfig>,
     handlebars: &Handlebars<'static>,
     query_result: &QueryResult,
 ) -> Vec<EventEnvelope> {
@@ -231,7 +234,7 @@ pub(crate) fn build_events(
                     continue;
                 };
 
-                let spec = config.get_result_template_spec(query_result, operation);
+                let spec = config.route_template_spec(routes.get(query_id), operation);
                 let (data, metadata) = match spec {
                     Some(spec) if !spec.template.is_empty() => {
                         let context = build_context(query_result, op, diff, &time);
@@ -432,22 +435,29 @@ impl Reaction for EventGridReaction {
             self.base.id, self.config.endpoint, self.config.schema, self.config.format
         );
 
-        if let Err(e) = self.config.validate(
-            &drasi_lib::reactions::common::input_aliases(&self.base.queries),
-            None,
-        ) {
-            error!(
-                "[{}] Invalid Event Grid reaction config: {e:#}",
-                self.base.id
-            );
-            self.base
-                .set_status(
-                    ComponentStatus::Error,
-                    Some(format!("Invalid Event Grid reaction config: {e:#}")),
-                )
-                .await;
-            return Err(e);
-        }
+        let validated = match self.config.validate_settings(None) {
+            Ok(()) => match self.config.output_templates.as_ref() {
+                Some(templates) => self.base.bind_routes(&templates.routes).await,
+                None => Ok(HashMap::new()),
+            },
+            Err(e) => Err(e),
+        };
+        let routes = match validated {
+            Ok(routes) => routes,
+            Err(e) => {
+                error!(
+                    "[{}] Invalid Event Grid reaction config: {e:#}",
+                    self.base.id
+                );
+                self.base
+                    .set_status(
+                        ComponentStatus::Error,
+                        Some(format!("Invalid Event Grid reaction config: {e:#}")),
+                    )
+                    .await;
+                return Err(e);
+            }
+        };
 
         // Fail fast if neither access key nor an identity provider is available.
         let has_access_key = self
@@ -522,7 +532,8 @@ impl Reaction for EventGridReaction {
                             continue;
                         }
 
-                        let events = build_events(&reaction_id, &config, &handlebars, query_result);
+                        let events =
+                            build_events(&reaction_id, &config, &routes, &handlebars, query_result);
                         if events.is_empty() {
                             continue;
                         }

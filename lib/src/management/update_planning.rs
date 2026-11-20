@@ -263,9 +263,13 @@ impl Driver {
         desired: &DesiredInstance,
         control: &GraphControl,
         publication: &GraphRegistrySnapshot,
+        drained: Option<&RecoveryTransitionRequired>,
     ) -> Result<BTreeSet<ComponentId>> {
         let previous = &self.current.desired.topology;
-        let changed_resources = changed_resource_recipes(previous, &desired.topology);
+        let mut changed_resources = changed_resource_recipes(previous, &desired.topology);
+        if let Some(drained) = drained {
+            changed_resources.retain(|resource| !drained.resources().contains(resource));
+        }
         if changed_resources.is_empty() {
             return Ok(BTreeSet::new());
         }
@@ -388,10 +392,12 @@ impl Driver {
         desired: &DesiredInstance,
         request: &str,
         pending: &BTreeMap<ResourceId, ResourceHandle>,
+        drained: Option<&RecoveryTransitionRequired>,
     ) -> Result<Vec<AcceptedComponentUpdate>> {
         let control = self.graph.get().await?.control();
         let publication = control.registry_snapshot();
-        let resource_users = self.assess_resource_updates(desired, &control, &publication)?;
+        let resource_users =
+            self.assess_resource_updates(desired, &control, &publication, drained)?;
         let names = super::super::ordinary::identities(desired)
             .into_iter()
             .map(|identity| (identity.name, identity.id))
@@ -399,6 +405,9 @@ impl Driver {
         let mut updates = Vec::new();
         let mut query_changes = Vec::new();
         for proposed in &desired.ordinary {
+            if drained.is_some_and(|drained| drained.components().contains(&proposed.id)) {
+                continue;
+            }
             let Some(current) = self
                 .current
                 .desired
@@ -538,6 +547,9 @@ impl Driver {
         }
         for proposed in &desired.topology.components {
             let id = proposed.descriptor.id();
+            if drained.is_some_and(|drained| drained.components().contains(id)) {
+                continue;
+            }
             let Some(current) = self
                 .current
                 .desired

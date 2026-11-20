@@ -962,6 +962,7 @@ pub(super) fn preview_with_updates(
         }
         if (definition_changed || forced.contains(id) || updating.contains(id))
             && live_update
+            && !graph.component_retired(id)
             && !retries.contains(id)
             && !updates.contains_key(id)
         {

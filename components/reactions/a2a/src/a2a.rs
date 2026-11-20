@@ -108,10 +108,7 @@ impl Reaction for A2AReaction {
             self.base.id, self.config.endpoint
         );
 
-        if let Err(error) = self.config.validate(
-            &drasi_lib::reactions::common::input_aliases(&self.base.queries),
-            None,
-        ) {
+        if let Err(error) = self.config.validate(None) {
             error!("[{}] Invalid A2A reaction config: {error:#}", self.base.id);
             self.base
                 .set_status(

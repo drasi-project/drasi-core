@@ -75,7 +75,7 @@ struct McpState {
     reaction_id: ComponentId,
     config: McpReactionConfig,
     query_ids: Vec<ComponentId>,
-    query_aliases: HashMap<ComponentId, String>,
+    routes: HashMap<ComponentId, QueryConfig>,
     sessions: Arc<RwLock<HashMap<String, SessionState>>>,
     subscriptions: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     subscribers_by_uri: Arc<RwLock<HashMap<String, HashSet<String>>>>,
@@ -402,12 +402,7 @@ impl Reaction for McpReaction {
             return Err(WorkerAlreadyOwned.into());
         }
         let query_ids = self.base.query_ids().await?;
-        let aliases = drasi_lib::reactions::common::input_aliases(self.base.query_inputs());
-        anyhow::ensure!(
-            query_ids.len() == aliases.len(),
-            "MCP query bindings do not match their declarations"
-        );
-        let query_aliases = query_ids.iter().cloned().zip(aliases).collect();
+        let routes = self.base.bind_routes(&self.config.routes).await?;
         log_component_start("MCP Reaction", &self.base.id);
 
         info!(
@@ -463,7 +458,7 @@ impl Reaction for McpReaction {
             reaction_id: self.base.id.clone(),
             config: self.config.clone(),
             query_ids,
-            query_aliases,
+            routes,
             sessions: self.sessions.clone(),
             subscriptions: self.subscriptions.clone(),
             subscribers_by_uri: self.subscribers_by_uri.clone(),
@@ -496,7 +491,6 @@ impl Reaction for McpReaction {
 
         let status_handle = self.base.status_handle();
         let priority_queue = self.base.priority_queue.clone();
-        let query_configs = self.config.routes.clone();
         let processing_state = state.clone();
         let telemetry = self.base.worker_telemetry().await;
 
@@ -533,8 +527,7 @@ impl Reaction for McpReaction {
                 }
 
                 let query_id = query_result.query_id.clone();
-                let query_config = drasi_lib::reactions::common::input_alias(query_result.input_alias.as_deref(), query_result.query_name.as_ref())
-                    .and_then(|alias| get_query_config(alias, &query_configs));
+                let query_config = processing_state.routes.get(&query_id);
                 let uri = format!("drasi://query/{query_id}");
 
                 debug!(
@@ -800,22 +793,6 @@ fn template_for(config: Option<&QueryConfig>, kind: DiffKind) -> Option<Notifica
             })
         }),
     }
-}
-
-fn get_query_config<'a>(
-    query_id: &str,
-    routes: &'a HashMap<String, QueryConfig>,
-) -> Option<&'a QueryConfig> {
-    routes.get(query_id).or_else(|| {
-        if query_id.contains('.') {
-            query_id
-                .rsplit('.')
-                .next()
-                .and_then(|name| routes.get(name))
-        } else {
-            None
-        }
-    })
 }
 
 async fn apply_diff(
@@ -1375,10 +1352,7 @@ async fn handle_single_request(
                             Some(uri) => uri,
                             None => continue,
                         };
-                        let query_config = state
-                            .query_aliases
-                            .get(query_id)
-                            .and_then(|alias| get_query_config(alias, &state.config.routes));
+                        let query_config = state.routes.get(query_id);
                         let (name, description) = match query_config {
                             Some(config) => (
                                 config.title.clone().unwrap_or_else(|| query_id.to_string()),
@@ -1698,7 +1672,7 @@ mod tests {
                 .expect("fixture UUID"),
             config: McpReactionConfig::default(),
             query_ids: vec![query.clone()],
-            query_aliases: HashMap::from([(query, "query1".into())]),
+            routes: HashMap::new(),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
             subscribers_by_uri: Arc::new(RwLock::new(HashMap::new())),
@@ -1765,7 +1739,7 @@ mod tests {
                 .expect("fixture UUID"),
             config: McpReactionConfig::default(),
             query_ids: vec![first.clone(), second.clone()],
-            query_aliases: HashMap::from([(first, "query1".into()), (second, "query2".into())]),
+            routes: HashMap::new(),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
             subscribers_by_uri: Arc::new(RwLock::new(HashMap::new())),
@@ -1868,7 +1842,7 @@ mod tests {
                 .expect("fixture UUID"),
             config: McpReactionConfig::default(),
             query_ids: vec![query.clone()],
-            query_aliases: HashMap::from([(query, "query1".into())]),
+            routes: HashMap::new(),
             sessions: Arc::new(RwLock::new(sessions)),
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
             subscribers_by_uri: Arc::new(RwLock::new(HashMap::new())),
@@ -1993,6 +1967,27 @@ mod tests {
         assert_ne!(reaction.bound_port_handle().load(Ordering::SeqCst), 0);
         reaction.stop().await?;
         assert_eq!(reaction.bound_port_handle().load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unknown_route_fails_start_before_binding_listener() -> Result<()> {
+        let reaction = McpReaction::builder(
+            drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000055")
+                .expect("fixture UUID"),
+        )
+        .with_query_by_name(drasi_lib::ComponentName::try_new("query1")?)
+        .with_port(0)
+        .with_route("unknown", QueryConfig::default())
+        .build()?;
+        initialize_reaction(&reaction, vec![ComponentId::generate()]).await?;
+        let error = reaction.start().await.unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("does not match any subscribed query"));
+        assert_eq!(reaction.bound_port_handle().load(Ordering::SeqCst), 0);
+        assert!(reaction.server_task.read().await.is_none());
+        assert!(!*reaction.cleanup_required.lock().await);
         Ok(())
     }
 

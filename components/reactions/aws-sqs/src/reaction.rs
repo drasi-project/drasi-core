@@ -115,19 +115,11 @@ impl SqsReaction {
     }
 
     fn resolve_query_config<'a>(
-        alias: Option<&str>,
-        routes: &'a HashMap<String, QueryConfig>,
+        query_id: &drasi_lib::ComponentId,
+        routes: &'a HashMap<drasi_lib::ComponentId, QueryConfig>,
         default_template: &'a Option<QueryConfig>,
     ) -> Option<&'a QueryConfig> {
-        alias
-            .and_then(|alias| {
-                routes.get(alias).or_else(|| {
-                    alias
-                        .rsplit_once('.')
-                        .and_then(|(_, last)| routes.get(last))
-                })
-            })
-            .or(default_template.as_ref())
+        routes.get(query_id).or(default_template.as_ref())
     }
 
     fn build_context(
@@ -341,6 +333,7 @@ impl Reaction for SqsReaction {
         if *cleanup_required || self.base.processing_task.read().await.is_some() {
             return Err(drasi_lib::context::workers::WorkerAlreadyOwned.into());
         }
+        let routes = self.base.bind_routes(&self.config.routes).await?;
         *cleanup_required = true;
         log_component_start("SQS Reaction", &self.base.id);
         info!(
@@ -368,7 +361,6 @@ impl Reaction for SqsReaction {
         let queue_url = self.config.queue_url.clone();
         let fifo_queue = self.config.fifo_queue;
         let message_group_id_template = self.config.message_group_id_template.clone();
-        let routes = self.config.routes.clone();
         let default_template = self.config.default_template.clone();
 
         // Construct before readiness; credentials and queue access are still
@@ -414,7 +406,7 @@ impl Reaction for SqsReaction {
                 let query_id = &query_result.query_id;
                 let Some(query_config) =
                     Self::resolve_query_config(
-                        drasi_lib::reactions::common::input_alias(query_result.input_alias.as_deref(), query_result.query_name.as_ref()),
+                        query_id,
                         &routes,
                         &default_template,
                     )
@@ -598,46 +590,34 @@ mod tests {
     }
     use crate::config::{QueryConfig, TemplateSpec};
 
-    #[test]
-    fn resolve_query_config_exact_match() {
-        let mut routes = HashMap::new();
-        routes.insert(
-            "q1".to_string(),
-            QueryConfig {
-                added: Some(TemplateSpec::new("body-q1")),
-                ..Default::default()
-            },
-        );
-        let default = None;
-        let result = SqsReaction::resolve_query_config(Some("q1"), &routes, &default);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().added.as_ref().unwrap().body, "body-q1");
+    fn query_id() -> drasi_lib::ComponentId {
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-00000000002b")
+            .expect("fixture UUID")
     }
 
     #[test]
-    fn resolve_query_config_subdomain_match() {
-        let mut routes = HashMap::new();
-        routes.insert(
-            "q1".to_string(),
+    fn resolve_query_config_matches_query_id() {
+        let routes = HashMap::from([(
+            query_id(),
             QueryConfig {
                 added: Some(TemplateSpec::new("body-q1")),
                 ..Default::default()
             },
-        );
+        )]);
         let default = None;
-        let result = SqsReaction::resolve_query_config(Some("source.q1"), &routes, &default);
+        let result = SqsReaction::resolve_query_config(&query_id(), &routes, &default);
         assert!(result.is_some());
         assert_eq!(result.unwrap().added.as_ref().unwrap().body, "body-q1");
     }
 
     #[test]
     fn resolve_query_config_no_match_uses_default() {
-        let routes = HashMap::new();
+        let routes = HashMap::from([(drasi_lib::ComponentId::generate(), QueryConfig::default())]);
         let default = Some(QueryConfig {
             added: Some(TemplateSpec::new("default-body")),
             ..Default::default()
         });
-        let result = SqsReaction::resolve_query_config(Some("unknown"), &routes, &default);
+        let result = SqsReaction::resolve_query_config(&query_id(), &routes, &default);
         assert!(result.is_some());
         assert_eq!(result.unwrap().added.as_ref().unwrap().body, "default-body");
     }
@@ -646,7 +626,7 @@ mod tests {
     fn resolve_query_config_no_match_no_default_returns_none() {
         let routes = HashMap::new();
         let default = None;
-        let result = SqsReaction::resolve_query_config(Some("unknown"), &routes, &default);
+        let result = SqsReaction::resolve_query_config(&query_id(), &routes, &default);
         assert!(result.is_none());
     }
 

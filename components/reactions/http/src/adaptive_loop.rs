@@ -30,7 +30,7 @@ use drasi_lib::ReactionRecoveryPolicy;
 
 use crate::adaptive_batcher::{AdaptiveBatcher, AdaptiveBatcherConfig};
 use crate::batch::send_coalesced_batch;
-use crate::config::HttpReactionConfig;
+use crate::config::{HttpQueryConfig, HttpReactionConfig};
 use crate::output::DefaultChangeNotification;
 use crate::process::{build_handlebars, render_batch_item, DeliveryOutcome};
 use drasi_lib::reactions::common::{batch_checkpoint_candidates, CheckpointState, FailureAction};
@@ -58,6 +58,7 @@ pub(crate) async fn run_adaptive_loop(
     reaction_id: drasi_lib::ComponentId,
     base: ReactionBase,
     config: HttpReactionConfig,
+    routes: HashMap<drasi_lib::ComponentId, HttpQueryConfig>,
     runtime_adaptive: AdaptiveBatcherConfig,
     client: Client,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
@@ -256,9 +257,15 @@ pub(crate) async fn run_adaptive_loop(
             let processing = telemetry.reaction_input_context(query_id.as_str(), notifications.len(), &query_result_arc.execution_context);
 
             let mut batcher_closed = false;
+            let route = routes.get(query_id);
             for (i, notification) in notifications.iter().enumerate() {
-                let payload =
-                    render_batch_item(&handlebars, &config, notification, reaction_id.as_str());
+                let payload = render_batch_item(
+                    &handlebars,
+                    &config,
+                    route,
+                    notification,
+                    reaction_id.as_str(),
+                );
                 let item = BatchItem {
                     payload,
                     query_id: query_id.clone(),

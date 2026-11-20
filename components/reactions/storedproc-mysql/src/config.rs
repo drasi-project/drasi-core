@@ -212,38 +212,29 @@ impl MySqlStoredProcReactionConfig {
         self.port.unwrap_or(3306)
     }
 
-    /// Resolve the command template for a specific query and operation type.
-    ///
-    /// Resolution order (per the Reaction Developer Guide §11):
-    /// 1. `routes[query_id]` for the operation.
-    /// 2. `routes[last dotted segment of query_id]` for the operation.
-    /// 3. `default_template` for the operation.
+    /// Resolve the command template for an operation from a per-query route
+    /// already resolved by query ID, falling back to `default_template` when
+    /// the route has no command for that operation.
     ///
     /// Empty templates are treated as "not configured" and skipped.
     pub fn resolve_command_template(
         &self,
-        emission: &drasi_lib::channels::QueryResult,
+        route: Option<&QueryConfig>,
         operation: common::OperationType,
     ) -> Option<String> {
-        match common::input_alias(
-            emission.input_alias.as_deref(),
-            emission.query_name.as_ref(),
-        ) {
-            Some(alias) => drasi_mysql_common::storedproc::resolve_template(
-                &self.routes,
-                self.default_template.as_ref(),
-                alias,
-                operation,
-            ),
-            None => self
-                .default_template
-                .as_ref()
-                .and_then(|config| Self::get_spec_from_config(config, operation)),
-        }
-        .map(|template| template.template.clone())
+        let select = |config: &QueryConfig| {
+            Self::get_spec_from_config(config, operation)
+                .filter(|spec| !spec.template.trim().is_empty())
+                .map(|spec| spec.template.clone())
+        };
+        route
+            .and_then(select)
+            .or_else(|| self.default_template.as_ref().and_then(select))
     }
 
-    /// Validate the configuration.
+    /// Validate the configuration. Route keys are resolved to query IDs when
+    /// the reaction starts; see [`Self::validate_routes`] for a name-based
+    /// check against a list of query ids.
     pub fn validate(&self) -> anyhow::Result<()> {
         // A user is only required when no identity provider is configured;
         // identity-provider authentication resolves credentials at runtime.

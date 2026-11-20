@@ -479,6 +479,40 @@ fn test_config_validation_accepts_route_by_last_segment() {
     assert!(result.is_ok());
 }
 
+#[tokio::test]
+async fn test_unknown_route_key_fails_at_start() {
+    let reaction = MsSqlStoredProcReaction::builder(
+        drasi_lib::ComponentId::try_new("00000000-0000-0000-0000-000000000045")
+            .expect("fixture UUID"),
+    )
+    .with_connection("localhost", 1433, "test_db", "test_user", "pw")
+    .with_query_by_name(drasi_lib::ComponentName::try_new("q1").expect("fixture name"))
+    .with_route("not-subscribed", template("EXEC p {{param after.id}}"))
+    .with_auto_start(false)
+    .build()
+    .await
+    .expect("route keys are checked at start");
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    reaction
+        .bind_runtime_context(drasi_lib::context::ReactionRuntimeContext::new(
+            "instance",
+            reaction.id().clone(),
+            vec![drasi_lib::ComponentId::generate()],
+            None,
+            tx,
+            None,
+        ))
+        .await;
+    let err = reaction.start().await.expect_err("unknown route key");
+    assert!(
+        err.to_string()
+            .contains("does not match any subscribed query"),
+        "{err}"
+    );
+}
+
 #[test]
 fn test_config_custom_port() {
     let config = MsSqlStoredProcReactionConfig {

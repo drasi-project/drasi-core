@@ -103,8 +103,24 @@ fn test_tls_requires_amqps() {
     assert!(result.is_err());
 }
 
-#[test]
-fn test_validate_config_rejects_mismatched_route() {
+async fn bind_test_context(reaction: &RabbitMQReaction) {
+    use drasi_lib::Reaction;
+    let (tx, _rx) = tokio::sync::mpsc::channel(4);
+    reaction
+        .bind_runtime_context(drasi_lib::context::ReactionRuntimeContext::new(
+            "instance",
+            reaction.id().clone(),
+            vec![drasi_core::ComponentId::generate()],
+            None,
+            tx,
+            None,
+        ))
+        .await;
+}
+
+#[tokio::test]
+async fn test_start_rejects_mismatched_route() {
+    use drasi_lib::Reaction;
     let mut routes = HashMap::new();
     routes.insert("unknown-query".to_string(), QueryPublishConfig::default());
 
@@ -113,18 +129,27 @@ fn test_validate_config_rejects_mismatched_route() {
         ..Default::default()
     };
 
-    let result = RabbitMQReaction::new(
+    let reaction = RabbitMQReaction::new(
         drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
             .expect("fixture UUID"),
         vec![drasi_lib::config::ComponentReference::by_name(
             drasi_core::ComponentName::try_new("my-query").expect("fixture component name"),
         )],
         config,
-    );
-    assert!(result.is_err());
-    let err_msg = result.err().unwrap().to_string();
+    )
+    .expect("route keys are checked at start");
+    bind_test_context(&reaction).await;
+    let err_msg = reaction
+        .start()
+        .await
+        .expect_err("unknown route")
+        .to_string();
     assert!(err_msg.contains("unknown-query"));
     assert!(err_msg.contains("does not match"));
+    assert_eq!(
+        reaction.status().await,
+        drasi_lib::channels::ComponentStatus::Stopped
+    );
 }
 
 #[test]

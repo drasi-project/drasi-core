@@ -57,6 +57,11 @@ outputTemplates:
           action: create
 ```
 
+Route keys may be a subscribed query's ID, its name, or the last dotted segment
+of its name. They are resolved to query IDs when the reaction starts; an unknown
+key makes `start()` fail. A route's missing operations fall back to the default
+template.
+
 Template variables: `after`, `before`, `data`, `query_name` / `query_id`,
 `operation` (`ADD`/`UPDATE`/`DELETE`), `timestamp`. The `metadata` map is applied
 as CloudEvent extension attributes (CloudEvents schema only; dropped with a

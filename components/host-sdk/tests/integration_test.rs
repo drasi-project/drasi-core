@@ -394,6 +394,7 @@ async fn state_store_context_ownership_across_actual_plugin_initialization() {
             snapshot_fetcher: None,
             resource_observer: None,
             log_binding: None,
+            component_directory: None,
         })
         .await;
     reaction.initialize().await.unwrap();
@@ -1232,6 +1233,7 @@ fn create_global_callback_source(
         identity_provider: std::ptr::null(),
         snapshot_fetcher: std::ptr::null(),
         wal_provider: std::ptr::null(),
+        component_directory: std::ptr::null(),
         log_callback: None,
         log_ctx: std::ptr::null_mut(),
         lifecycle_callback: None,
@@ -2859,6 +2861,7 @@ async fn test_reaction_identity_provider_cross_cdylib_clone_stress() {
         snapshot_fetcher: None,
         resource_observer: None,
         log_binding: None,
+        component_directory: None,
     };
 
     // Drives CLONE_STRESS clone_box()+get_credentials() calls across both cdylib boundaries
@@ -2936,6 +2939,7 @@ async fn test_reaction_enqueue_query_result() {
         snapshot_fetcher: None,
         resource_observer: None,
         log_binding: None,
+        component_directory: None,
     };
     reaction.bind_runtime_context(context).await;
     reaction
@@ -3026,6 +3030,7 @@ async fn test_reaction_enqueue_multiple_query_results() {
         snapshot_fetcher: None,
         resource_observer: None,
         log_binding: None,
+        component_directory: None,
     };
     reaction.bind_runtime_context(context).await;
     reaction
@@ -3106,6 +3111,7 @@ async fn test_reaction_enqueue_query_result_with_data() {
         snapshot_fetcher: None,
         resource_observer: None,
         log_binding: None,
+        component_directory: None,
     };
     reaction.bind_runtime_context(context).await;
     reaction
@@ -3214,6 +3220,7 @@ async fn test_reaction_start_stop_stress() {
             snapshot_fetcher: None,
             resource_observer: None,
             log_binding: None,
+            component_directory: None,
         };
         reaction.bind_runtime_context(context).await;
         reaction
@@ -4113,6 +4120,7 @@ async fn test_ffi_repeated_lifecycle_does_not_fill_unread_plugin_status_channels
             snapshot_fetcher: None,
             resource_observer: None,
             log_binding: None,
+            component_directory: None,
         })
         .await;
     reaction

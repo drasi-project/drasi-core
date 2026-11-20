@@ -357,6 +357,21 @@ fn encode(value: &str) -> String {
 }
 
 impl LegacyPluginServices {
+    /// Erase the component's own state-store partition. Plugin-owned external
+    /// resources are released by the plugin's `delete_owned_resources` hook.
+    pub(crate) async fn erase_component_state(&self, id: &ComponentId) -> anyhow::Result<()> {
+        if let Some(store) = &self.state_store {
+            let removed = store
+                .clear_store(&StorePartition::component(id.clone()))
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("failed to erase stored state for component {id}: {error}")
+                })?;
+            log::info!("Erased {removed} stored keys for component {id}");
+        }
+        Ok(())
+    }
+
     pub fn empty(scope: impl Into<Arc<str>>) -> Self {
         Self {
             scope: scope.into(),

@@ -14,6 +14,8 @@
 
 //! Standard per-result delivery loop.
 
+use std::collections::HashMap;
+
 use handlebars::Handlebars;
 use log::{debug, error, info, warn};
 use reqwest::Client;
@@ -22,7 +24,7 @@ use drasi_lib::channels::ComponentStatus;
 use drasi_lib::reactions::common::base::ReactionBase;
 use drasi_lib::ReactionRecoveryPolicy;
 
-use crate::config::{HttpReactionConfig, TemplateRouting};
+use crate::config::{HttpQueryConfig, HttpReactionConfig};
 use crate::output::DefaultChangeNotification;
 use crate::process::{post_default_notification, process_result, DeliveryOutcome};
 use drasi_lib::reactions::common::{CheckpointState, FailureAction};
@@ -34,6 +36,7 @@ pub(crate) async fn run_standard_loop(
     reaction_id: drasi_lib::ComponentId,
     base: ReactionBase,
     config: HttpReactionConfig,
+    routes: HashMap<drasi_lib::ComponentId, HttpQueryConfig>,
     client: Client,
     handlebars: Handlebars<'static>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
@@ -90,7 +93,7 @@ pub(crate) async fn run_standard_loop(
             };
 
             let outcome = match config
-                .get_result_template_spec(query_result, notification.operation_type())
+                .route_template_spec(routes.get(query_id), notification.operation_type())
             {
                 Some(spec) => {
                     process_result(

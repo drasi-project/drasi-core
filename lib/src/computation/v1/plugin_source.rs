@@ -547,7 +547,8 @@ impl SourcePluginHost {
             !life.disposed && !life.needs_stop && life.users.is_empty(),
             "source resource deletion requires a stopped, undisposed owner"
         );
-        self.source()?.delete_owned_resources().await
+        self.source()?.delete_owned_resources().await?;
+        self.services.erase_component_state(&self.id).await
     }
 }
 #[async_trait]

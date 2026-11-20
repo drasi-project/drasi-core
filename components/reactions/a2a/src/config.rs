@@ -72,11 +72,7 @@ impl A2AReactionConfig {
     /// `endpoint` is trusted input. Loopback and private addresses are allowed
     /// so local A2A agents can be used. Do not populate it from untrusted
     /// sources.
-    pub fn validate(
-        &self,
-        _query_ids: &[String],
-        priority_queue_capacity: Option<usize>,
-    ) -> anyhow::Result<()> {
+    pub fn validate(&self, priority_queue_capacity: Option<usize>) -> anyhow::Result<()> {
         if self.endpoint.trim().is_empty() {
             anyhow::bail!("`endpoint` must not be empty");
         }

@@ -95,6 +95,24 @@ fn make_named_query_result(
     result
 }
 
+/// Bind a runtime context resolving the reaction's queries, in order, to `ids`.
+async fn bind_queries(reaction: &MySqlStoredProcReaction, ids: &[&str]) {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    reaction
+        .bind_runtime_context(drasi_lib::context::ReactionRuntimeContext::new(
+            "instance",
+            reaction.id().clone(),
+            ids.iter()
+                .map(|id| drasi_lib::ComponentId::try_new(*id).expect("fixture UUID"))
+                .collect(),
+            None,
+            tx,
+            None,
+        ))
+        .await;
+}
+
 fn add_user_template(proc: &str) -> QueryConfig {
     QueryConfig {
         added: Some(TemplateSpec::new(format!(
@@ -141,6 +159,14 @@ async fn test_route_overrides_default_template() {
     .build()
     .await
     .expect("build");
+    bind_queries(
+        &reaction,
+        &[
+            "00000000-0000-0000-0000-00000000039b",
+            "00000000-0000-0000-0000-00000000039c",
+        ],
+    )
+    .await;
     reaction.start().await.expect("start");
 
     reaction
@@ -218,6 +244,7 @@ async fn test_route_matches_last_dotted_segment() {
     .build()
     .await
     .expect("build");
+    bind_queries(&reaction, &["00000000-0000-0000-0000-00000000039d"]).await;
     reaction.start().await.expect("start");
 
     reaction

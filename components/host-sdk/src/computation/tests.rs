@@ -1180,7 +1180,7 @@ fn rejects_missing_or_incompatible_native_metadata_before_entry() {
     unsafe impl Sync for SharedMetadata {}
     static BAD: SharedMetadata = SharedMetadata(abi::Metadata {
         header: abi::Header {
-            major: 0,
+            major: abi::ABI_MAJOR + 1,
             ..abi::Header::new::<abi::Metadata>()
         },
         target: abi::BorrowedBytes::empty(),

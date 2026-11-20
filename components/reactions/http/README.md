@@ -351,11 +351,9 @@ Adaptive (batched) example:
 `output_templates` lets each query customise how its result changes are delivered. For each
 result, the reaction selects a template in this order:
 
-1. `output_templates.routes[<query_id>]` — a per-query override keyed by the full query id.
-2. `output_templates.routes[<last dotted segment>]` — for a query id such as `source.orders`,
-   `routes.orders` is accepted when no full-id route matches.
-3. `output_templates.default_template` — a shared fallback, if present.
-4. A built-in default: `POST {base_url}/changes/{query_id}` with the standard
+1. The `output_templates.routes` entry resolved to the result's query ID (see below).
+2. `output_templates.default_template` — a shared fallback, if present.
+3. A built-in default: `POST {base_url}/changes/{query_id}` with the standard
    [`DefaultChangeNotification`](#defaultchangenotification-envelope-single-notification-path)
    envelope as the body (used when neither of the above matches the operation).
 
@@ -388,8 +386,10 @@ let orders = HttpQueryConfig {
 };
 ```
 
-Route keys are validated at build time against the subscribed query ids and their last
-dotted segments.
+When the reaction starts, each route key is resolved to the permanent ID of a subscribed
+query. A key may be the query's ID, its name, or the last dotted segment of its name (so
+`my_query` selects `source.my_query`). An unknown key, or two keys selecting the same query,
+makes `start()` fail. Results are then routed by query ID, so a renamed query keeps its route.
 
 ---
 

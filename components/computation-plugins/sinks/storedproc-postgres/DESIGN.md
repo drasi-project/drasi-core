@@ -2,7 +2,7 @@
 
 `drasi-computation-sink-storedproc-postgres` provides one native
 ComputationGraph factory, `drasi.postgres/storedproc` (implementation `1`,
-configuration version `1`, native ABI 5.0). This document describes how it
+configuration version `1`, native ABI 0.1). This document describes how it
 works. [CONFIGURATION.md](CONFIGURATION.md) lists every setting and how to
 operate the sink.
 

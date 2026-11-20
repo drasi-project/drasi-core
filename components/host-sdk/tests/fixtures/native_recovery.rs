@@ -8,6 +8,7 @@ mod native_bootstrap;
 mod native_consumer;
 mod native_consumer_progress;
 mod native_deprovision;
+mod native_durable_source;
 mod native_input_bindings;
 mod native_processing;
 
@@ -255,6 +256,7 @@ sdk::export_computation_plugin!(sdk::PluginDefinition::new(
         Arc::new(native_consumer::Factory(sdk::ConsumerMode::External)),
         Arc::new(native_consumer::Factory(sdk::ConsumerMode::Transactional)),
         Arc::new(native_deprovision::Factory),
+        Arc::new(native_durable_source::Factory),
         Arc::new(native_input_bindings::Factory),
         Arc::new(native_input_bindings::ConsumerFactory),
         Arc::new(native_input_bindings::TransactionalFactory),

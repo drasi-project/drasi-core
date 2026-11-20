@@ -55,7 +55,7 @@ reset acknowledgement still need a graph-owned protocol; see
 Externally supplied objects without an update-capable recipe use explicit graph
 changes and remove/add instead. Their normal stop/disposal hooks still run.
 The ordinary Source/Reaction ABI **0.19.0** exposes lifecycle hooks but does not
-advertise factory-managed updates. Native ABI **5.0.0** carries factory plans and
+advertise factory-managed updates. Native ABI **0.1.0** carries factory plans and
 retained-object updates; earlier native ABI layouts are rejected. The generic
 native adapter rejects update assessment requiring unresolved configuration
 references or construction-time input bindings rather than inventing values.
@@ -594,7 +594,7 @@ The result is that the rest of the server code works with normal Rust trait obje
 Plugin-side `NativeComponent` interfaces and shared messages no longer depend on
 the runtime. This host package is where those operations become graph-owned
 components, runtime configuration schemas and actual storage/progress bindings.
-The current native ABI is **5.0.0**, with wire version **5**. Rebuild native
+The current native ABI is **0.1.0**, with wire version **1**. Rebuild native
 libraries against the matching SDK; binaries built for another ABI major are
 rejected before any plugin callback.
 
@@ -644,7 +644,7 @@ that selection with `register_query_factory`. Missing or ambiguous selection is
 an error, never a linked-reference fallback. See the
 [query plugin guide](../computation-plugins/transformers/query/README.md).
 
-Native ABI 5.0 uses wire version 5: bounded MessagePack and bulk binary envelope
+Native ABI 0.1 uses wire version 1: bounded MessagePack and bulk binary envelope
 buffers. Build native libraries and the host from matching sources; unknown
 wire versions are rejected before plugin entry. Native response buffers remain
 producer-owned while being decoded, then are released through their callback;
@@ -786,8 +786,9 @@ inferred from a package version, plugin type or missing field.
 `PluginResolver` rejects an artifact before download when its family or ABI is
 missing, unknown or incompatible, using the same rule as the binary loader:
 ordinary artifacts need the host's FFI ABI major.minor plus matching SDK, core
-and lib package major.minor; native artifacts need the host's native ABI major
-with an older or equal minor and the host target. Explicitly pinned references
+and lib package major.minor; native artifacts need the host's native ABI version
+(the same major and minor before 1.0; afterwards the same major with an older
+or equal minor) and the host target. Explicitly pinned references
 are checked the same way, and the resolved digest is the one whose annotations
 were checked. `download_plugin` then requires the manifest annotation, metadata
 layer and the binary's own marker (`drasi-plugin-ffi-abi=` or

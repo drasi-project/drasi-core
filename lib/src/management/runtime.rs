@@ -46,6 +46,9 @@ pub(crate) enum AuthoringOperation {
         generations: BTreeMap<ComponentId, ComponentGeneration>,
         edit: Box<dyn FnOnce(&mut DesiredInstance) -> Result<()> + Send>,
         delete_owned_resources: BTreeSet<ComponentId>,
+        /// Stable description of the requested change. When present, a retry
+        /// with the same request ID and key returns the original receipt.
+        replay: Option<Vec<u8>>,
     },
 }
 
@@ -59,6 +62,8 @@ enum Command {
         reply: oneshot::Sender<Result<AcceptanceReceipt>>,
     },
     AcceptAuto {
+        expected: Option<u64>,
+        request: Option<String>,
         operation: AuthoringOperation,
         activation: crate::computation::instance::StartupCancellation,
         reply: oneshot::Sender<Result<AcceptanceReceipt>>,
@@ -419,7 +424,26 @@ impl Management {
         &self,
         operation: AuthoringOperation,
     ) -> Result<AcceptanceReceipt> {
+        self.accept_with(None, None, operation).await
+    }
+
+    /// Accept against the current revision and a fresh request ID unless the
+    /// caller supplies them.
+    pub(crate) async fn accept_with(
+        &self,
+        expected: Option<u64>,
+        request: Option<String>,
+        operation: AuthoringOperation,
+    ) -> Result<AcceptanceReceipt> {
+        if let Some(request) = &request {
+            anyhow::ensure!(
+                !request.is_empty() && request.len() <= 1024,
+                "request ID must contain 1..=1024 bytes"
+            );
+        }
         self.request(|reply| Command::AcceptAuto {
+            expected,
+            request,
             operation,
             activation: self.graph.startup_cancellation(),
             reply,
@@ -921,10 +945,6 @@ impl Driver {
                 }
             }
         }
-        let updates = match &prior_receipt {
-            Some(receipt) => receipt.updates.clone(),
-            None => self.plan_updates(&desired, &request, &provided).await?,
-        };
         let mut required_transition = None;
         if !retry {
             if expected != self.current.revision {
@@ -950,6 +970,15 @@ impl Driver {
                 required_transition = Some(required.clone());
             }
         }
+        // A verified-drain transition retires and reconstructs its recovery
+        // domain, so its resources are not live updates.
+        let updates = match &prior_receipt {
+            Some(receipt) => receipt.updates.clone(),
+            None => {
+                self.plan_updates(&desired, &request, &provided, required_transition.as_ref())
+                    .await?
+            }
+        };
         let control = graph.get().await?.control();
         let allow_pending = match &desired.retirement {
             Some(authorization)
@@ -1444,6 +1473,8 @@ impl Driver {
                     }
                 }
                 Command::AcceptAuto {
+                    expected,
+                    request,
                     operation,
                     activation,
                     reply,
@@ -1451,8 +1482,12 @@ impl Driver {
                     let previous = self.current.revision;
                     let result = async {
                         self.refresh_committed().await?;
-                        let request = self.store.new_request_id().await?;
-                        self.accept(self.current.revision, request, operation).await
+                        let request = match request {
+                            Some(request) => request,
+                            None => self.store.new_request_id().await?,
+                        };
+                        let expected = expected.unwrap_or(self.current.revision);
+                        self.accept(expected, request, operation).await
                     }
                     .await;
                     let accepted = result.is_ok() || self.current.revision != previous;

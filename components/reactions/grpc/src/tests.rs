@@ -421,8 +421,8 @@ fn test_builder_rejects_invalid_template_at_construction() {
     );
 }
 
-#[test]
-fn test_builder_rejects_unknown_route_key_at_construction() {
+#[tokio::test]
+async fn test_unknown_route_key_fails_at_start() {
     use crate::config::OutputTemplates;
     use drasi_lib::reactions::common::{QueryConfig, TemplateSpec};
 
@@ -441,19 +441,31 @@ fn test_builder_rejects_unknown_route_key_at_construction() {
         default_template: None,
         routes,
     };
-    let err = match GrpcReaction::builder(
+    let reaction = GrpcReaction::builder(
         drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000028c")
             .expect("fixture UUID"),
     )
     .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
     .with_output_templates(templates)
     .build()
-    {
-        Ok(_) => panic!("expected build to reject the unknown route key"),
-        Err(e) => e,
-    };
+    .expect("route keys are checked at start");
+    let (tx, _rx) = tokio::sync::mpsc::channel(4);
+    reaction
+        .bind_runtime_context(drasi_lib::context::ReactionRuntimeContext::new(
+            "instance",
+            reaction.id().clone(),
+            vec![drasi_core::ComponentId::generate()],
+            None,
+            tx,
+            None,
+        ))
+        .await;
+    let err = reaction.start().await.expect_err("unknown route");
     assert!(
-        err.to_string().contains("not-subscribed"),
+        err.to_string().contains("not-subscribed")
+            && err
+                .to_string()
+                .contains("does not match any subscribed query"),
         "unexpected error: {err}"
     );
 }
@@ -1126,6 +1138,7 @@ mod integration {
             batch_flush_timeout_ms: 10_000,
             base: base.clone_shared(),
             config,
+            routes: std::collections::HashMap::new(),
             shutdown_rx: sd_rx,
             checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
@@ -1186,6 +1199,7 @@ mod integration {
             batch_flush_timeout_ms: 10_000,
             base: base.clone_shared(),
             config,
+            routes: std::collections::HashMap::new(),
             shutdown_rx: sd_rx,
             checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
@@ -1240,6 +1254,7 @@ mod integration {
             adaptive: AdaptiveBatchConfig::default(),
             base: base.clone_shared(),
             config,
+            routes: std::collections::HashMap::new(),
             shutdown_rx: sd_rx,
             checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
@@ -1299,6 +1314,7 @@ mod integration {
             batch_flush_timeout_ms: 10_000,
             base: base.clone_shared(),
             config,
+            routes: std::collections::HashMap::new(),
             shutdown_rx: sd_rx,
             checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
@@ -1359,6 +1375,7 @@ mod integration {
             batch_flush_timeout_ms: 10_000,
             base: base.clone_shared(),
             config,
+            routes: std::collections::HashMap::new(),
             shutdown_rx: sd_rx,
             checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::AutoSkipGap,
@@ -1412,6 +1429,7 @@ mod integration {
             adaptive: AdaptiveBatchConfig::default(),
             base: base.clone_shared(),
             config,
+            routes: std::collections::HashMap::new(),
             shutdown_rx: sd_rx,
             checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
@@ -1463,6 +1481,7 @@ mod integration {
             adaptive: AdaptiveBatchConfig::default(),
             base: base.clone_shared(),
             config,
+            routes: std::collections::HashMap::new(),
             shutdown_rx: sd_rx,
             checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::AutoSkipGap,
@@ -1523,6 +1542,7 @@ mod integration {
             adaptive,
             base: base.clone_shared(),
             config,
+            routes: std::collections::HashMap::new(),
             shutdown_rx: sd_rx,
             checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
@@ -1622,6 +1642,7 @@ mod integration {
             batch_flush_timeout_ms: 10_000,
             base: base.clone_shared(),
             config,
+            routes: std::collections::HashMap::new(),
             shutdown_rx: sd_rx,
             checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
@@ -1667,6 +1688,7 @@ mod integration {
             batch_flush_timeout_ms: 100,
             base: base.clone_shared(),
             config,
+            routes: std::collections::HashMap::new(),
             shutdown_rx: sd_rx,
             checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
@@ -1713,6 +1735,7 @@ mod integration {
             batch_flush_timeout_ms: 10_000,
             base: base.clone_shared(),
             config,
+            routes: std::collections::HashMap::new(),
             shutdown_rx: sd_rx,
             checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
@@ -1776,6 +1799,7 @@ mod integration {
             batch_flush_timeout_ms: 10_000,
             base: base.clone_shared(),
             config,
+            routes: std::collections::HashMap::new(),
             shutdown_rx: sd_rx,
             checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::AutoSkipGap,
@@ -1842,6 +1866,7 @@ mod integration {
             batch_flush_timeout_ms: 10_000,
             base: base.clone_shared(),
             config,
+            routes: std::collections::HashMap::new(),
             shutdown_rx: sd_rx,
             checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
@@ -1886,6 +1911,7 @@ mod integration {
             adaptive: AdaptiveBatchConfig::default(),
             base: base.clone_shared(),
             config,
+            routes: std::collections::HashMap::new(),
             shutdown_rx: sd_rx,
             checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
@@ -1928,6 +1954,7 @@ mod integration {
             adaptive: AdaptiveBatchConfig::default(),
             base: base.clone_shared(),
             config,
+            routes: std::collections::HashMap::new(),
             shutdown_rx: sd_rx,
             checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,
@@ -1983,6 +2010,7 @@ mod integration {
             adaptive: AdaptiveBatchConfig::default(),
             base: base.clone_shared(),
             config,
+            routes: std::collections::HashMap::new(),
             shutdown_rx: sd_rx,
             checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::AutoSkipGap,
@@ -2042,6 +2070,7 @@ mod integration {
             adaptive: AdaptiveBatchConfig::default(),
             base: base.clone_shared(),
             config,
+            routes: std::collections::HashMap::new(),
             shutdown_rx: sd_rx,
             checkpoints: CheckpointState::load(&base).await,
             policy: drasi_lib::ReactionRecoveryPolicy::Strict,

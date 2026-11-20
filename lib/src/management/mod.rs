@@ -248,7 +248,40 @@ impl ManagementStatus {
     }
 }
 
+/// Options for [`crate::DrasiLib::remove_component`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ComponentRemoval {
+    /// Idempotency key. A retry with the same ID and options returns the
+    /// original receipt; a different operation under the same ID conflicts.
+    /// `None` allocates a fresh request ID.
+    pub request_id: Option<String>,
+    /// Reject the removal unless the accepted configuration is at this revision.
+    /// `None` uses the current revision.
+    pub expected_revision: Option<u64>,
+    /// Erase the component's stored state (state-store partition, checkpoints,
+    /// recovery metadata) and let its plugin release external resources.
+    /// Queries always erase their state.
+    pub erase_data: bool,
+}
+
 impl crate::DrasiLib {
+    /// Remove a source, query or reaction by UUID through the configuration owner
+    /// and wait until it has stopped and, when requested, its data is erased.
+    ///
+    /// Components that other components depend on are rejected. Retries with the
+    /// same [`ComponentRemoval::request_id`] are safe after success or failure.
+    pub async fn remove_component(
+        &self,
+        id: &ComponentId,
+        removal: ComponentRemoval,
+    ) -> crate::Result<AcceptanceReceipt> {
+        self.state_guard.require_initialized()?;
+        self.computation_runtime
+            .remove_requested(id, removal)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Accept updates and new ID-omitting definitions through one atomic request.
     /// A matching retry returns all original assignments without recreating members.
     pub async fn apply_configuration(

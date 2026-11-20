@@ -202,7 +202,7 @@ mod tests {
         assert_eq!(size_of::<crate::ComponentVTable>(), 16 + 5 * pointer);
         assert_eq!(size_of::<crate::FactoryVTable>(), 16 + 4 * pointer);
         assert_eq!(size_of::<crate::OperationVTable>(), 16 + 3 * pointer);
-        assert_eq!(crate::ABI_VERSION, "5.0.0");
-        assert_eq!(crate::WIRE_VERSION, 5);
+        assert_eq!(crate::ABI_VERSION, "0.1.0");
+        assert_eq!(crate::WIRE_VERSION, 1);
     }
 }

@@ -231,13 +231,11 @@ impl EventGridReactionBuilder {
     /// Returns an error if the configuration is invalid — for example a missing,
     /// malformed, or non-`https` endpoint (see `allowHttp`), a zero `timeoutMs`
     /// or `priorityQueueCapacity`, the `template` format selected without any
-    /// templates, an invalid Handlebars template, or a template route that
-    /// matches no subscribed query.
+    /// templates, or an invalid Handlebars template. Template route keys are
+    /// matched to subscribed queries when the reaction starts.
     pub fn build(self) -> anyhow::Result<EventGridReaction> {
-        self.config.validate(
-            &drasi_lib::reactions::common::input_aliases(&self.queries),
-            self.priority_queue_capacity,
-        )?;
+        self.config
+            .validate_settings(self.priority_queue_capacity)?;
         Ok(EventGridReaction::from_builder(
             self.id,
             self.queries,

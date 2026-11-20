@@ -230,6 +230,41 @@ mod tests {
         .build();
         assert!(result.is_err());
     }
+
+    #[tokio::test]
+    async fn test_unknown_route_fails_start() {
+        let reaction = AzureStorageReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000073")
+                .expect("fixture UUID"),
+        )
+        .with_account_name("account")
+        .with_access_key("key")
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("q1").expect("fixture component name"),
+        )
+        .with_route("unknown", QueryConfig::default())
+        .build()
+        .expect("route keys are checked at start");
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        reaction
+            .bind_runtime_context(drasi_lib::context::ReactionRuntimeContext::new(
+                "instance",
+                reaction.id().clone(),
+                vec![drasi_core::ComponentId::generate()],
+                None,
+                tx,
+                None,
+            ))
+            .await;
+        let err = reaction.start().await.expect_err("unknown route");
+        assert!(err
+            .to_string()
+            .contains("does not match any subscribed query"));
+        assert_eq!(
+            reaction.status().await,
+            drasi_lib::channels::ComponentStatus::Stopped
+        );
+    }
 }
 
 #[cfg(feature = "dynamic-plugin")]

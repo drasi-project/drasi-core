@@ -7,6 +7,10 @@ use drasi_computation_contracts::{ComponentId, ComponentName};
 
 const QUERY_ID: &str = "00000000-0000-0000-0000-000000000071";
 
+fn query_id() -> ComponentId {
+    ComponentId::try_new(QUERY_ID).expect("fixture UUID")
+}
+
 fn result(query: &str, changes: Vec<ResultDiff>) -> QueryResult {
     let mut result = QueryResult::new(
         ComponentId::try_new(QUERY_ID).expect("fixture UUID"),
@@ -103,28 +107,30 @@ fn default_payload_preserves_the_complete_result_batch_and_row_signatures() {
 }
 
 #[test]
-fn full_query_routes_precede_last_segments_and_default_routes() {
+fn routes_select_by_query_id_regardless_of_name_and_fall_back_to_default() {
     let renderer = SseRenderer::new(
         "/events".into(),
-        HashMap::from([
-            ("source.q".into(), config("full", Some("/full"))),
-            ("q".into(), config("short", Some("short"))),
-        ]),
+        HashMap::from([(query_id(), config("routed", Some("routed")))]),
         Some(config("default", None)),
     );
-    for (query, path, payload) in [
-        ("source.q", "/full", "full"),
-        ("other.q", "/events/short", "short"),
-        ("other", "/events", "default"),
-    ] {
+    for query in ["q", "renamed"] {
         assert_eq!(
             render(&renderer, &result(query, vec![added()])),
             vec![SseEvent {
-                path: path.into(),
-                payload: payload.into(),
+                path: "/events/routed".into(),
+                payload: "routed".into(),
             }]
         );
     }
+    let mut other = result("q", vec![added()]);
+    other.query_id = ComponentId::generate();
+    assert_eq!(
+        render(&renderer, &other),
+        vec![SseEvent {
+            path: "/events".into(),
+            payload: "default".into(),
+        }]
+    );
 }
 
 #[test]
@@ -149,7 +155,7 @@ fn dynamic_paths_and_json_helpers_share_the_real_result_context() {
     let renderer = SseRenderer::new(
         "/events".into(),
         HashMap::from([(
-            "q".into(),
+            query_id(),
             config(
                 r#"{"row":{{json after}},"metadata":{{json metadata}},"query":"{{query_id}}","name":"{{query_name}}","operation":"{{operation}}","time":{{timestamp}}}"#,
                 Some("groups/{{after.group}}"),
@@ -232,7 +238,7 @@ fn update_delete_and_aggregation_use_the_existing_operation_templates() {
 fn static_paths_include_all_operations_and_default_templates() {
     let renderer = SseRenderer::new(
         "/events".into(),
-        HashMap::from([("q".into(), config("", Some("items")))]),
+        HashMap::from([(query_id(), config("", Some("items")))]),
         Some(config("", Some("/default"))),
     );
     assert_eq!(
@@ -245,47 +251,36 @@ fn static_paths_include_all_operations_and_default_templates() {
 fn configured_missing_operations_remain_filtered_instead_of_using_another_route() {
     let renderer = SseRenderer::new(
         "/events".into(),
-        HashMap::from([("q".into(), QueryConfig::default())]),
+        HashMap::from([(query_id(), QueryConfig::default())]),
         Some(config("must not be used", None)),
     );
     assert!(render(&renderer, &result("q", vec![added()])).is_empty());
 }
 
 #[test]
-fn validation_covers_body_and_path_templates_and_query_names() {
+fn validation_covers_body_and_path_templates_only() {
     for route in [
         config("{{invalid syntax", None),
         config("", Some("{{invalid path")),
     ] {
-        assert!(SseRenderer::validate(
-            &HashMap::from([("q".into(), route)]),
-            None,
-            &["source.q".into()],
-        )
-        .is_err());
+        assert!(SseRenderer::validate(&HashMap::from([("q".into(), route)]), None).is_err());
     }
-    assert!(SseRenderer::validate(
-        &HashMap::from([("missing".into(), config("", None))]),
-        None,
-        &["q".into()],
-    )
-    .is_err());
     SseRenderer::validate(
-        &HashMap::from([("q".into(), config("{{json after}}", None))]),
+        &HashMap::from([("missing".into(), config("{{json after}}", None))]),
         None,
-        &["source.q".into()],
     )
     .unwrap();
 }
 
 #[test]
 fn runtime_render_failures_report_the_default_payload_fallback() {
-    let routes = HashMap::from([(
-        "q".into(),
-        config("{{#if after.enabled}}{{missing after}}{{/if}}", None),
-    )]);
-    SseRenderer::validate(&routes, None, &["q".into()]).unwrap();
-    let renderer = SseRenderer::new("/events".into(), routes, None);
+    let template = config("{{#if after.enabled}}{{missing after}}{{/if}}", None);
+    SseRenderer::validate(&HashMap::from([("q".into(), template.clone())]), None).unwrap();
+    let renderer = SseRenderer::new(
+        "/events".into(),
+        HashMap::from([(query_id(), template)]),
+        None,
+    );
     let mut errors = Vec::new();
     let events = renderer.render(&result("q", vec![added()]), 456, |error| errors.push(error));
     assert_eq!(errors.len(), 1);

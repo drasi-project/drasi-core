@@ -24,7 +24,6 @@ use tokio::sync::RwLock;
 use drasi_lib::channels::ComponentStatus;
 use drasi_lib::observability::log_component_start;
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
-use drasi_lib::reactions::common::TemplateRouting;
 use drasi_lib::Reaction;
 
 use crate::config::{PostgresStoredProcReactionConfig, QueryConfig};
@@ -94,8 +93,8 @@ impl PostgresStoredProcReaction {
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
     ) -> Result<Self> {
-        // Validate configuration
-        config.validate(&drasi_lib::reactions::common::input_aliases(&queries))?;
+        // Validate configuration; route keys are resolved to query IDs at start.
+        config.validate_settings()?;
 
         // Pre-compile all templates once so the render path never re-parses.
         let templates = Arc::new(config.compile_templates()?);
@@ -137,6 +136,7 @@ impl PostgresStoredProcReaction {
     async fn run_processing_loop(
         base: ReactionBase,
         config: PostgresStoredProcReactionConfig,
+        routes: HashMap<drasi_lib::ComponentId, QueryConfig>,
         templates: Arc<HashMap<String, render::CompiledTemplate>>,
         executor: Arc<PostgresExecutor>,
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
@@ -189,7 +189,7 @@ impl PostgresStoredProcReaction {
                 // Resolve the command template following the guide's route
                 // resolution order. No template configured -> nothing to run.
                 let spec = match config
-                    .get_result_template_spec(query_result, render_input.operation)
+                    .route_template_spec(routes.get(&query_result.query_id), render_input.operation)
                 {
                     Some(spec) if !spec.template.is_empty() => spec,
                     _ => {
@@ -333,6 +333,8 @@ impl Reaction for PostgresStoredProcReaction {
             self.base.id, self.config.database
         );
 
+        let routes = self.base.bind_routes(&self.config.routes).await?;
+
         self.base.set_status(ComponentStatus::Starting, None).await;
 
         // Create executor (deferred to start so identity_provider from context is available)
@@ -351,7 +353,7 @@ impl Reaction for PostgresStoredProcReaction {
         let config = self.config.clone();
         let templates = Arc::clone(&self.templates);
         let handle = tokio::spawn(async move {
-            Self::run_processing_loop(base, config, templates, executor, shutdown_rx).await;
+            Self::run_processing_loop(base, config, routes, templates, executor, shutdown_rx).await;
         });
         self.base.set_processing_task(handle).await;
 

@@ -330,16 +330,16 @@ pub trait Source: Send + Sync {
     /// Downcast helper for testing - allows access to concrete types
     fn as_any(&self) -> &dyn std::any::Any;
 
-    /// Permanently clean up internal state when the source is being removed.
+    /// Release external resources this source created, when it is removed with
+    /// its data erased (e.g., drop a replication slot, remove cursors).
     ///
-    /// This is called when `remove_source(id, cleanup: true)` is used.
-    /// Use this to release external resources that should not persist after
-    /// the source is deleted (e.g., drop a replication slot, remove cursors).
-    ///
-    /// Support is explicit. Failure retains the cleanup owner and prevents
-    /// final release; ordinary disposal never invokes this destructive hook.
+    /// DrasiLib erases the source's own stored state (its state-store partition,
+    /// checkpoints and recovery metadata) itself after this hook succeeds, so the
+    /// default is a no-op for sources without external resources. Failure
+    /// retains the cleanup owner and prevents final release; ordinary disposal
+    /// never invokes this destructive hook.
     async fn delete_owned_resources(&self) -> Result<()> {
-        anyhow::bail!("this source does not support deleting owned resources")
+        Ok(())
     }
 
     /// Bind mandatory framework services before optional initialization.

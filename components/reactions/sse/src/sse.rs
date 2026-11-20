@@ -328,16 +328,13 @@ impl SseReaction {
             params = params.with_priority_queue_capacity(capacity);
         }
 
-        let renderer = SseRenderer::new(
-            config.sse_path.clone(),
-            config.routes.clone(),
-            config.default_template.clone(),
-        );
-        let broadcasters = renderer
-            .static_paths()
-            .into_iter()
-            .map(|path| (path, broadcast::channel(BROADCAST_CHANNEL_CAPACITY).0))
-            .collect();
+        let broadcasters = SseRenderer::configured_static_paths(
+            &config.sse_path,
+            config.routes.values().chain(config.default_template.iter()),
+        )
+        .into_iter()
+        .map(|path| (path, broadcast::channel(BROADCAST_CHANNEL_CAPACITY).0))
+        .collect();
 
         Self {
             base: ReactionBase::new(params),
@@ -393,6 +390,7 @@ impl Reaction for SseReaction {
                 self.base.id
             )));
         }
+        let routes = self.base.bind_routes(&self.config.routes).await?;
         log_component_start("SSE Reaction", &self.base.id);
 
         *cleanup_required = true;
@@ -441,7 +439,7 @@ impl Reaction for SseReaction {
             .resolved_recovery_policy(self.default_recovery_policy());
         let renderer = SseRenderer::new(
             self.config.sse_path.clone(),
-            self.config.routes.clone(),
+            routes,
             self.config.default_template.clone(),
         );
         let telemetry = self.base.worker_telemetry().await;

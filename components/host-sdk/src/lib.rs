@@ -24,6 +24,7 @@
 //! - Callback types for log/lifecycle event capture
 
 pub mod callbacks;
+pub mod component_directory_bridge;
 pub mod computation;
 #[cfg(feature = "fetcher")]
 pub mod fetcher;

@@ -273,9 +273,50 @@ pub struct ReactionRuntimeContext {
     /// The computation runtime supplies an observer scoped to one component
     /// generation. Legacy contexts and plugin-side FFI contexts leave this unset.
     pub resource_observer: Option<Arc<dyn ComponentResourceObserver>>,
+
+    /// Optional lookup between permanent component IDs and their current names.
+    ///
+    /// The computation runtime supplies this so a reaction can translate
+    /// user-facing names (for example route keys) into the permanent IDs carried
+    /// by delivered results. Names can change at runtime; IDs cannot.
+    pub component_directory: Option<Arc<dyn ComponentDirectory>>,
+}
+
+/// Lookup between permanent component IDs and their current names.
+///
+/// Answers reflect the latest published graph, so a name returned now may differ
+/// after a rename. Plugins that key behavior by name should resolve names once
+/// and retain the resulting IDs.
+pub trait ComponentDirectory: Send + Sync {
+    /// The current name of the component with this ID, if it exists.
+    fn name_of(&self, id: &crate::ComponentId) -> Option<crate::ComponentName>;
+    /// The ID of the component that currently has this name, if any.
+    fn id_of(&self, name: &crate::ComponentName) -> Option<crate::ComponentId>;
+}
+
+/// A reaction input identified by its permanent ID and its current name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputBinding {
+    pub id: crate::ComponentId,
+    /// `None` when no directory is available or the component is not found.
+    pub name: Option<crate::ComponentName>,
 }
 
 impl ReactionRuntimeContext {
+    /// The reaction's bound query inputs, each with its current name when known.
+    pub fn query_bindings(&self) -> Vec<InputBinding> {
+        self.query_ids
+            .iter()
+            .map(|id| InputBinding {
+                id: id.clone(),
+                name: self
+                    .component_directory
+                    .as_ref()
+                    .and_then(|directory| directory.name_of(id)),
+            })
+            .collect()
+    }
+
     /// Create a new reaction runtime context.
     ///
     /// This is typically called by `ReactionManager` when adding a reaction to DrasiLib.
@@ -306,6 +347,7 @@ impl ReactionRuntimeContext {
             identity_provider,
             snapshot_fetcher: None,
             resource_observer: None,
+            component_directory: None,
         }
     }
 
@@ -352,6 +394,13 @@ impl std::fmt::Debug for ReactionRuntimeContext {
                     .resource_observer
                     .as_ref()
                     .map(|_| "<ComponentResourceObserver>"),
+            )
+            .field(
+                "component_directory",
+                &self
+                    .component_directory
+                    .as_ref()
+                    .map(|_| "<ComponentDirectory>"),
             )
             .finish()
     }

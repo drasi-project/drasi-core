@@ -74,7 +74,7 @@ mod tests {
         assert_eq!(size_of::<SourceProgressV1>(), 16 + 6 * pointer);
         assert_eq!(size_of::<ProgressSubscriptionV1>(), 16 + 4 * pointer);
         assert_eq!(size_of::<ComponentVTable>(), 16 + 5 * pointer);
-        assert_eq!(ABI_VERSION, "5.0.0");
-        assert_eq!(WIRE_VERSION, 5);
+        assert_eq!(ABI_VERSION, "0.1.0");
+        assert_eq!(WIRE_VERSION, 1);
     }
 }

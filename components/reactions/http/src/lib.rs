@@ -253,10 +253,8 @@ impl HttpReactionBuilder {
     }
 
     pub fn build(self) -> anyhow::Result<HttpReaction> {
-        self.config.validate(
-            &drasi_lib::reactions::common::input_aliases(&self.queries),
-            self.priority_queue_capacity,
-        )?;
+        self.config
+            .validate_settings(self.priority_queue_capacity)?;
         Ok(HttpReaction::from_builder(
             self.id,
             self.queries,

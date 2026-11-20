@@ -1328,3 +1328,48 @@ async fn native_resource_only_failures_remain_visible_with_ordinary_management_e
     core.shutdown().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn component_removal_is_replayable_and_erases_state() -> anyhow::Result<()> {
+    let file = OwnedFile::new()?;
+    let mut document = load(&file.0)?;
+    document.current.desired.ordinary = running_records()?;
+    save(&file.0, &document)?;
+    let resolver = Arc::new(Resolver::new(file.0.clone()));
+    let core = core(Arc::new(FileStore::new(file.0.clone())), resolver).await?;
+    settle(&core).await?;
+    let reaction = core.component_by_name(&name("consumer"))?.id().clone();
+    let committed = core.desired_configuration()?;
+
+    let stale = ComponentRemoval {
+        request_id: Some("remove-stale".into()),
+        expected_revision: Some(committed.revision + 1),
+        erase_data: true,
+    };
+    assert!(core.remove_component(&reaction, stale).await.is_err());
+    assert!(core
+        .remove_component(&ComponentId::generate(), ComponentRemoval::default())
+        .await
+        .is_err());
+    assert_eq!(load(&file.0)?.current.revision, committed.revision);
+
+    let removal = ComponentRemoval {
+        request_id: Some("remove-consumer".into()),
+        expected_revision: Some(committed.revision),
+        erase_data: true,
+    };
+    let receipt = core.remove_component(&reaction, removal.clone()).await?;
+    settle(&core).await?;
+    assert!(core.component_by_name(&name("consumer")).is_err());
+    assert_eq!(
+        core.remove_component(&reaction, removal.clone()).await?,
+        receipt
+    );
+    let keep_data = ComponentRemoval {
+        erase_data: false,
+        ..removal
+    };
+    assert!(core.remove_component(&reaction, keep_data).await.is_err());
+    core.shutdown().await?;
+    Ok(())
+}

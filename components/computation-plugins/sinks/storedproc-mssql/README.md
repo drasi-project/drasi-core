@@ -7,7 +7,7 @@ cursor protocol only. The live scenarios in
 ignored; do not seek or run a database without renewed approval.
 
 `drasi.mssql/storedproc` is a native ComputationGraph sink for the
-computation plugin ABI 5.0.0. `plugin()` and the gated dynamic entry point
+computation plugin ABI 0.1.0. `plugin()` and the gated dynamic entry point
 (`dynamic-plugin` feature) export the same factory.
 
 It is an external consumer of the host `DeliveryRunner`. Each change runs in

@@ -1463,6 +1463,7 @@ impl Runtime {
             .accept_auto(crate::management::AuthoringOperation::Edit {
                 generations: BTreeMap::from([(id.clone(), current.generation)]),
                 delete_owned_resources: BTreeSet::new(),
+                replay: None,
                 edit: Box::new(move |desired| {
                     let current = desired
                         .ordinary

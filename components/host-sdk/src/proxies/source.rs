@@ -776,6 +776,7 @@ impl Source for SourceProxy {
                     lifecycle_ctx: ctx_ptr,
                     snapshot_fetcher: std::ptr::null(),
                     wal_provider: wp_ptr,
+                    component_directory: std::ptr::null(),
                 };
 
                 let result = bind_fn(owner.state.as_ptr(), &ffi_ctx as *const FfiRuntimeContext);

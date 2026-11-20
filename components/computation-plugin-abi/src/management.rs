@@ -41,11 +41,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn management_is_an_extension_of_the_v5_base() {
+    fn management_is_an_extension_of_the_base_abi() {
         let pointer = size_of::<usize>();
         assert_eq!(size_of::<PluginManagementV1>(), 24 + 2 * pointer);
         assert_eq!(size_of::<ComponentVTable>(), 16 + 5 * pointer);
-        assert_eq!(ABI_VERSION, "5.0.0");
-        assert_eq!(WIRE_VERSION, 5);
+        assert_eq!(ABI_VERSION, "0.1.0");
+        assert_eq!(WIRE_VERSION, 1);
     }
 }

@@ -1,6 +1,6 @@
 # Native SQLite bootstrappers
 
-Independent native bootstrap library (ComputationGraph ABI 5.0.0),
+Independent native bootstrap library (ComputationGraph ABI 0.1.0),
 implementation/configuration version `1`. It exports no processing component,
 dummy service or Source-plugin callback. Configuration is flat camelCase and
 uses the same field names (`path`, `tables`, `tableKeys`) as the
@@ -23,7 +23,7 @@ Load `libdrasi_computation_bootstrap_sqlite.dylib` on macOS,
 `drasi_computation_bootstrap_sqlite.dll` on Windows. The native bootstrap
 extension supplies its query-scoped factory. The component-factory list is
 intentionally empty; hosts must validate the bootstrap catalogue as well.
-Use an ABI 5.0.0 host with bootstrap-only catalogue support; an empty
+Use an ABI 0.1.0 host with bootstrap-only catalogue support; an empty
 processing-factory list is not an empty bootstrap catalogue.
 
 ## File snapshots
