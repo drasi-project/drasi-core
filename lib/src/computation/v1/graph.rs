@@ -2436,6 +2436,10 @@ impl ComputationGraph {
             self.shutdown_timeout,
         )?;
         self.shutdown_until(&deadline).await?;
+        // The graph's components no longer exist once it is disposed.
+        self.observability
+            .telemetry
+            .sync_component_names(std::iter::empty());
         self.state.send_replace(GraphState::CleanupRequired);
         let rejected = self
             .rejected_additions

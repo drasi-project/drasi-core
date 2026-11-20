@@ -180,6 +180,18 @@ struct ComponentNames {
     warned_edges: std::collections::BTreeSet<(String, String, String)>,
 }
 
+// Teardown paths that never dispose the graph still retire its names once the
+// last telemetry handle sharing this registry is gone.
+impl Drop for ComponentNames {
+    fn drop(&mut self) {
+        for (_, gauge) in self.current.values() {
+            if let Some(gauge) = gauge {
+                gauge.set(0.0);
+            }
+        }
+    }
+}
+
 impl Default for GraphTelemetry {
     fn default() -> Self {
         Self {

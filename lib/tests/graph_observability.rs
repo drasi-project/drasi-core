@@ -1382,3 +1382,97 @@ async fn queue_edge_info_reports_plain_edge_queues() {
     });
     graph.dispose().await.unwrap();
 }
+
+#[tokio::test]
+async fn component_info_is_retired_when_the_graph_is_disposed() {
+    let metrics = RecordingMetrics::default();
+    let mut graph = named_pipeline(&metrics);
+    let run = graph.run().unwrap();
+    let control = run.control();
+    let (_, ()) = tokio::join!(run, async {
+        control.deployment_report().await.unwrap();
+        control.cancel();
+    });
+    assert_eq!(component_info(&metrics, "one", "one"), vec![1.0]);
+    graph.dispose().await.unwrap();
+    assert_eq!(component_info(&metrics, "source", "source"), vec![0.0]);
+    assert_eq!(component_info(&metrics, "one", "one"), vec![0.0]);
+}
+
+#[tokio::test]
+async fn component_info_is_retired_when_the_graph_is_dropped_without_dispose() {
+    let metrics = RecordingMetrics::default();
+    let mut graph = named_pipeline(&metrics);
+    let run = graph.run().unwrap();
+    let control = run.control();
+    let (_, ()) = tokio::join!(run, async {
+        control.deployment_report().await.unwrap();
+        control.cancel();
+    });
+    drop(control);
+    drop(graph);
+    assert_eq!(component_info(&metrics, "one", "one"), vec![0.0]);
+}
+
+#[tokio::test]
+async fn queue_edge_info_reports_each_producer_of_a_shared_input_queue() {
+    let metrics = RecordingMetrics::default();
+    let queue = ResourceId::try_new("shared-input").unwrap();
+    let ranked = |rank| RankedInputPipeConfig {
+        queue: queue.clone(),
+        capacity: 8,
+        source_rank: rank,
+        source_id: None,
+        source_dispatch: None,
+        drop_when_full: false,
+    };
+    let mut graph = ComputationGraph::builder("fan-in")
+        .with_telemetry(settings(TelemetryProfile::Basic, false, &metrics))
+        .declare_resource(ResourceSpecification {
+            id: queue.clone(),
+            role: ResourceRole::Pipe,
+            ownership: ResourceOwnership::Borrowed,
+            binding: "shared-input".into(),
+        })
+        .unwrap()
+        .provide_resource(queue.clone(), RankedInputQueue::new(8).unwrap().resource())
+        .unwrap()
+        .source(
+            name("source"),
+            Box::new(IdleSource(descriptor(&id("source"), &[], &["out"]))),
+        )
+        .source(
+            name("client"),
+            Box::new(IdleSource(descriptor(&id("client"), &[], &["out"]))),
+        )
+        .sink(
+            name("one"),
+            Box::new(CollectSink::new(id("one"), "one", &["in"], Arc::default())),
+        )
+        .bind_stream(endpoint(&id("source"), "out"), stream("source"))
+        .bind_stream(endpoint(&id("client"), "out"), stream("client"))
+        .connect(edge(&id("source"), &id("one")), Box::new(ranked(0)))
+        .connect(edge(&id("client"), &id("one")), Box::new(ranked(1)))
+        .build()
+        .unwrap();
+    let run = graph.run().unwrap();
+    let control = run.control();
+    let (_, ()) = tokio::join!(run, async {
+        control.deployment_report().await.unwrap();
+        let edges = edge_info(&metrics);
+        assert_eq!(edges.len(), 2, "{edges:?}");
+        let mut producers = Vec::new();
+        for (labels, gauge) in &edges {
+            assert_eq!(labels["queue_id"], "resource:shared-input");
+            assert_eq!(labels["to_component_id"], id("one").as_str());
+            assert_eq!(*gauge, 1.0);
+            producers.push(labels["from_component_id"].clone());
+        }
+        producers.sort();
+        let mut expected = vec![id("source").to_string(), id("client").to_string()];
+        expected.sort();
+        assert_eq!(producers, expected);
+        control.cancel();
+    });
+    graph.dispose().await.unwrap();
+}
