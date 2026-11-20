@@ -29,7 +29,7 @@ link to their testing obligations there rather than repeating them. The
 [testing guide](../../docs/contributing/contributing-code/contributing-code-tests/)
 describes ordinary Cargo and CI execution.
 
-The ABI 5 design is an unreleased breaking change. Converting every plugin to
+The ABI 0.1 design is an unreleased breaking change. Converting every plugin to
 the native SDK and retiring old adapters are not merge prerequisites, and no
 compatibility shims or automatic migration of old state are planned.
 
@@ -1826,8 +1826,8 @@ plugin and cause, and the rule is enforced.
 
 **Kind:** Issue. **Priority:** Medium (P1). **Effort:** Small.
 
-The quoted ABI versions are fixed: every native document now states ABI 5.0.0,
-wire 5 and ordinary ABI 0.19, and
+The quoted ABI versions are fixed: every native document now states ABI 0.1.0,
+wire 1 and ordinary ABI 0.19, and
 `computation-plugin-sdk/tests/documented_abi_version.rs` fails when a document
 quotes another native ABI, wire version or ordinary ABI. Only some plugins have
 `DESIGN.md` and `CONFIGURATION.md`.

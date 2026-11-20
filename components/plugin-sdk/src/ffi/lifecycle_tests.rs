@@ -303,6 +303,7 @@ impl Table {
             identity_provider: std::ptr::null(),
             snapshot_fetcher: std::ptr::null(),
             wal_provider: std::ptr::null(),
+            component_directory: std::ptr::null(),
         };
         let result = match self {
             Self::Source(table) => (table.bind_runtime_context_fn)(table.state, &context),

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::config::{FileReactionConfig, WriteMode};
+use crate::config::{FileReactionConfig, QueryConfig, WriteMode};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use handlebars::Handlebars;
@@ -65,10 +65,7 @@ impl FileReaction {
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
     ) -> anyhow::Result<Self> {
-        Self::validate_config(
-            &drasi_lib::reactions::common::input_aliases(&queries),
-            &config,
-        )?;
+        Self::validate_config(&config)?;
 
         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
         if let Some(capacity) = priority_queue_capacity {
@@ -138,7 +135,8 @@ impl FileReaction {
         Ok(())
     }
 
-    fn validate_config(queries: &[String], config: &FileReactionConfig) -> anyhow::Result<()> {
+    /// Validate paths and template syntax. Route keys are matched to queries at start.
+    fn validate_config(config: &FileReactionConfig) -> anyhow::Result<()> {
         if config.output_path.trim().is_empty() {
             return Err(anyhow!("output_path must not be empty"));
         }
@@ -159,20 +157,6 @@ impl FileReaction {
         if let Some(default_template) = &config.default_template {
             Self::validate_query_config(default_template)
                 .map_err(|e| anyhow!("Invalid default template: {e}"))?;
-        }
-
-        if !config.routes.is_empty() && !queries.is_empty() {
-            for route_query in config.routes.keys() {
-                let dotted_route = format!(".{route_query}");
-                let matches = queries
-                    .iter()
-                    .any(|q| q == route_query || q.ends_with(&dotted_route));
-                if !matches {
-                    return Err(anyhow!(
-                        "Route '{route_query}' does not match any subscribed query. Subscribed queries: {queries:?}"
-                    ));
-                }
-            }
         }
 
         Ok(())
@@ -327,6 +311,7 @@ impl FileReaction {
 
     fn render_output(
         config: &FileReactionConfig,
+        routes: &HashMap<drasi_lib::ComponentId, QueryConfig>,
         handlebars: &Handlebars<'static>,
         emission: &QueryResult,
         event_timestamp: chrono::DateTime<chrono::Utc>,
@@ -398,7 +383,15 @@ impl FileReaction {
         }
 
         let content = if let Some(operation_type) = operation_type {
-            if let Some(template_spec) = config.get_result_template_spec(emission, operation_type) {
+            let template_spec = routes
+                .get(&emission.query_id)
+                .and_then(|route| FileReactionConfig::get_spec_from_config(route, operation_type))
+                .or_else(|| {
+                    config.default_template().and_then(|default| {
+                        FileReactionConfig::get_spec_from_config(default, operation_type)
+                    })
+                });
+            if let Some(template_spec) = template_spec {
                 handlebars.render_template(&template_spec.template, &context)?
             } else {
                 serde_json::to_string(diff)?
@@ -413,6 +406,7 @@ impl FileReaction {
 
     async fn process_result(
         config: &FileReactionConfig,
+        routes: &HashMap<drasi_lib::ComponentId, QueryConfig>,
         handlebars: &Handlebars<'static>,
         file_locks: &Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
         repaired_files: &Arc<Mutex<HashSet<String>>>,
@@ -425,6 +419,7 @@ impl FileReaction {
             }
             match Self::render_output(
                 config,
+                routes,
                 handlebars,
                 query_result,
                 query_result.timestamp,
@@ -683,6 +678,7 @@ impl Reaction for FileReaction {
         if *cleanup_required || self.base.processing_task.read().await.is_some() {
             return Err(drasi_lib::context::workers::WorkerAlreadyOwned.into());
         }
+        let routes = self.base.bind_routes(&self.config.routes).await?;
         *cleanup_required = true;
         log_component_start("File Reaction", &self.base.id);
 
@@ -714,6 +710,7 @@ impl Reaction for FileReaction {
 
                 Self::process_result(
                     &config,
+                    &routes,
                     &handlebars,
                     &file_locks,
                     &repaired_files,
@@ -758,7 +755,7 @@ impl Reaction for FileReaction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{QueryConfig, TemplateSpec};
+    use crate::config::TemplateSpec;
     use drasi_lib::context::workers::{spawn_owned_worker, WorkerAlreadyOwned, WorkerCleanupError};
     use std::time::Duration;
     use tempfile::TempDir;
@@ -1020,9 +1017,9 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_invalid_route_fails_build() {
-        let result = FileReaction::builder(
+    #[tokio::test]
+    async fn test_unknown_route_fails_start() {
+        let reaction = FileReaction::builder(
             drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000051")
                 .expect("fixture UUID"),
         )
@@ -1036,9 +1033,25 @@ mod tests {
                 ..Default::default()
             },
         )
-        .build();
+        .build()
+        .expect("route keys are checked at start");
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        reaction
+            .bind_runtime_context(drasi_lib::context::ReactionRuntimeContext::new(
+                "instance",
+                reaction.base.id.clone(),
+                vec![drasi_core::ComponentId::generate()],
+                None,
+                tx,
+                None,
+            ))
+            .await;
 
-        assert!(result.is_err());
+        let err = reaction.start().await.expect_err("unknown route");
+        assert!(err
+            .to_string()
+            .contains("does not match any subscribed query"));
+        assert!(reaction.base.processing_task.read().await.is_none());
     }
 
     #[tokio::test]
@@ -1071,6 +1084,7 @@ mod tests {
 
         FileReaction::process_result(
             &config,
+            &HashMap::new(),
             &handlebars,
             &file_locks,
             &Arc::new(Mutex::new(HashSet::new())),
@@ -1106,9 +1120,11 @@ mod tests {
         );
         result.query_name =
             Some(drasi_core::ComponentName::try_new("orders").expect("fixture query name"));
+        let bound = HashMap::new();
 
         FileReaction::process_result(
             &config,
+            &bound,
             &handlebars,
             &file_locks,
             &Arc::new(Mutex::new(HashSet::new())),
@@ -1159,6 +1175,7 @@ mod tests {
 
         FileReaction::process_result(
             &config,
+            &HashMap::new(),
             &handlebars,
             &file_locks,
             &Arc::new(Mutex::new(HashSet::new())),
@@ -1215,9 +1232,11 @@ mod tests {
         );
         result.query_name =
             Some(drasi_core::ComponentName::try_new("orders").expect("fixture query name"));
+        let bound = HashMap::from([(result.query_id.clone(), config.routes["orders"].clone())]);
 
         FileReaction::process_result(
             &config,
+            &bound,
             &handlebars,
             &file_locks,
             &Arc::new(Mutex::new(HashSet::new())),
@@ -1396,9 +1415,11 @@ mod tests {
         );
         result.query_name =
             Some(drasi_core::ComponentName::try_new("orders").expect("fixture query name"));
+        let bound = HashMap::new();
 
         FileReaction::process_result(
             &config,
+            &bound,
             &handlebars,
             &file_locks,
             &Arc::new(Mutex::new(HashSet::new())),
@@ -1454,9 +1475,11 @@ mod tests {
         );
         result.query_name =
             Some(drasi_core::ComponentName::try_new("orders").expect("fixture query name"));
+        let bound = HashMap::new();
 
         FileReaction::process_result(
             &config,
+            &bound,
             &handlebars,
             &file_locks,
             &Arc::new(Mutex::new(HashSet::new())),
@@ -1514,6 +1537,7 @@ mod tests {
 
         FileReaction::process_result(
             &config,
+            &HashMap::new(),
             &handlebars,
             &file_locks,
             &Arc::new(Mutex::new(HashSet::new())),
@@ -1565,8 +1589,7 @@ mod tests {
 
         let handlebars = FileReaction::build_handlebars();
         let file_locks = FileReaction::new_file_locks();
-        // Query with dotted prefix does not match the "orders" route key exactly,
-        // so it falls through to default_template.
+        // The route is bound to another query ID, so this result uses default_template.
         let mut result = QueryResult::new(
             drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000029e")
                 .expect("fixture UUID"),
@@ -1580,9 +1603,14 @@ mod tests {
         );
         result.query_name =
             Some(drasi_core::ComponentName::try_new("ns.orders").expect("fixture query name"));
+        let bound = HashMap::from([(
+            drasi_core::ComponentId::generate(),
+            config.routes["orders"].clone(),
+        )]);
 
         FileReaction::process_result(
             &config,
+            &bound,
             &handlebars,
             &file_locks,
             &Arc::new(Mutex::new(HashSet::new())),

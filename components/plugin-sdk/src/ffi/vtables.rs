@@ -322,7 +322,31 @@ pub struct FfiRuntimeContext {
     /// **Lifetime: persistent.** The plugin retains this pointer and (via
     /// `FfiWalProviderProxy`) frees the vtable struct and its inner state on `Drop`.
     pub wal_provider: *const WalProviderVtable,
+    /// Nullable — lookup between permanent component IDs and current names.
+    ///
+    /// **Lifetime: persistent.** The plugin retains this pointer for the component's
+    /// lifetime and calls `drop_fn` once to release the host state.
+    pub component_directory: *const ComponentDirectoryVtable,
 }
+
+/// Host-provided lookup between permanent component IDs and their current names.
+///
+/// Both lookups are synchronous and return an empty string when nothing matches.
+/// The returned string is allocated by the host and owned by the caller.
+#[repr(C)]
+pub struct ComponentDirectoryVtable {
+    /// Opaque host-owned state.
+    pub state: *mut c_void,
+    /// Current name of the component with the given ID.
+    pub name_of_fn: extern "C" fn(state: *mut c_void, id: FfiStr) -> FfiOwnedStr,
+    /// ID of the component that currently has the given name.
+    pub id_of_fn: extern "C" fn(state: *mut c_void, name: FfiStr) -> FfiOwnedStr,
+    /// Release the host-owned state. Called exactly once.
+    pub drop_fn: extern "C" fn(state: *mut c_void),
+}
+
+unsafe impl Send for ComponentDirectoryVtable {}
+unsafe impl Sync for ComponentDirectoryVtable {}
 
 // Safety: FfiRuntimeContext contains raw pointers that point to thread-safe data.
 // The vtables contain only function pointers and Send+Sync state.

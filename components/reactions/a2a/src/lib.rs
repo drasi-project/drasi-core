@@ -203,10 +203,7 @@ impl A2AReactionBuilder {
     }
 
     pub fn build(self) -> anyhow::Result<A2AReaction> {
-        self.config.validate(
-            &drasi_lib::reactions::common::input_aliases(&self.queries),
-            self.priority_queue_capacity,
-        )?;
+        self.config.validate(self.priority_queue_capacity)?;
         Ok(A2AReaction::from_builder(
             self.id,
             self.queries,

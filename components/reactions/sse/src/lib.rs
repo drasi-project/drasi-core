@@ -173,7 +173,6 @@ impl SseReactionBuilder {
         drasi_reaction_common::sse::SseRenderer::validate(
             &self.routes,
             self.default_template.as_ref(),
-            &drasi_lib::reactions::common::input_aliases(&self.queries),
         )?;
 
         let config = SseReactionConfig {

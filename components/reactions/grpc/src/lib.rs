@@ -285,8 +285,7 @@ impl GrpcReactionBuilder {
     }
 
     pub fn build(self) -> anyhow::Result<GrpcReaction> {
-        self.config
-            .validate(&drasi_lib::reactions::common::input_aliases(&self.queries))?;
+        self.config.validate_settings()?;
         Ok(GrpcReaction::from_builder(
             self.id,
             self.queries,

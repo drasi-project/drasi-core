@@ -117,7 +117,7 @@ field/type-only metadata.
 For example, gRPC sink `batchSize` is bounded to `1..=65536`, and the network
 sources mark `authToken` and `tlsPrivateKeyPem` as secret fields. These
 descriptions do not enable missing features. Rebuild the component library to
-publish the new details; host and plugins must use native ABI 5.0.0 and the
+publish the new details; host and plugins must use native ABI 0.1.0 and the
 UUID wire-version-2 contract. Libraries built against older native ABIs are
 rejected.
 
@@ -140,7 +140,7 @@ rejected.
 Existing implementation names, implementation version `"1"` and configuration
 version `1` remain stable. New factory modes have distinct identities; consult
 each family guide for its schemas, resource requirements and recovery boundaries.
-The native plugin ABI is **5.0.0**, including the six lifecycle operations and
+The native plugin ABI is **0.1.0**, including the six lifecycle operations and
 separate management (assess/apply). Batching, query-snapshot, consumer-progress/cursor-policy,
 source-schema, source/bootstrap coordination and activation credentials remain
 separately negotiated extensions.

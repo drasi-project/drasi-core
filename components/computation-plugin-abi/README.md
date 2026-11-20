@@ -1,28 +1,29 @@
 # Native ComputationGraph ABI
 
 This dependency-free crate freezes the C layouts for native computation plugins.
-The ABI version is **5.0.0**, independent of crate releases and the
+The ABI version is **0.1.0**, independent of crate releases and the
 Source/Reaction/Bootstrap SDK **0.17.0** (which also accepts 0.16 fast-mode plugins).
 Its two symbols are
 `drasi_computation_plugin_metadata` and `drasi_computation_plugin_entry`.
 Do not call a legacy registration function to interpret native metadata.
-The native payload contract is **wire version 5**: UUID component identities,
+The native payload contract is **wire version 1**: UUID component identities,
 bounded MessagePack with bulk binary buffers and binary computation envelopes.
-Other wire versions are rejected. The family magic is `DRASICG5` and the header
-major is 5. This does not change BinaryEnvelopeCodec/EnvelopeCodec serialization
+Other wire versions are rejected. The family magic is `DRASICG0` and the header
+major is 0. This does not change BinaryEnvelopeCodec/EnvelopeCodec serialization
 version 2.
 
-Wire 5 descriptors carry a port `kind` (`Data` or `Bootstrap`, serialized only
+Wire 1 descriptors carry a port `kind` (`Data` or `Bootstrap`, serialized only
 for bootstrap ports). Bootstrap ports are optional graph connections that carry
 bootstrap sessions between providers, sources and consumers. Control
 notifications include a typed `BootstrapRequest` that addresses one bootstrap
 session to its consumer edge.
 
 Headers must match the family magic and major before reading any subsequent
-field. A host accepts the same major with an older or equal minor, whose
-structure size must match that minor's layout, and rejects a newer minor or
-another major before invoking any callback. Tables grow only by appending fields
-in a later minor. Missing metadata, unsupported capabilities and
+field. The ABI stays at 0.1.0 until it is released: before 1.0 every minor is
+breaking, so a host accepts only its own major and minor, whose structure size
+must match that minor's layout, and rejects anything else before invoking any
+callback. From 1.0 a host accepts the same major with an older or equal minor,
+and tables grow only by appending fields in a later minor. Missing metadata, unsupported capabilities and
 unknown wire versions are errors. Enum-like ABI fields are integers, not Rust
 enums with invalid discriminants.
 
@@ -239,7 +240,7 @@ the host's callback, so a loaded library's diagnostics reach the host's logger.
 The table carries the host's level at load time; it is host-owned and valid for
 the process lifetime.
 
-Both extensions leave base tables, strict metadata, ABI 5.0 and wire 5 unchanged.
+Both extensions leave base tables, strict metadata, ABI 0.1 and wire 1 unchanged.
 Only negotiated, bound factories may use them; missing services never imply
 recovery guarantees. See the SDK's authoring and lifecycle contracts.
 
@@ -247,7 +248,7 @@ recovery guarantees. See the SDK's authoring and lifecycle contracts.
 
 `drasi_computation_plugin_output_reads_v2` and
 `drasi_computation_plugin_output_follow_v2` are independent extensions; base ABI
-5.0, wire 5 and every other table are unchanged. A factory declares the output
+5.0, wire 1 and every other table are unchanged. A factory declares the output
 ports it serves in manifest `capabilities.output_snapshots`, `output_replays` and
 `output_follows` (empty lists are omitted); the Host requires the matching
 extension exactly then.

@@ -94,10 +94,8 @@ impl MySqlStoredProcReaction {
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
     ) -> Result<Self> {
-        // Validate configuration
+        // Validate configuration; route keys are resolved to query IDs at start.
         config.validate()?;
-        // Reject route keys that don't match a subscribed query.
-        config.validate_routes(&drasi_lib::reactions::common::input_aliases(&queries))?;
 
         // Create reaction base
         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
@@ -147,6 +145,7 @@ impl MySqlStoredProcReaction {
     /// Spawn the processing task that renders and executes commands.
     fn spawn_processing_task(
         &self,
+        routes: HashMap<drasi_lib::ComponentId, QueryConfig>,
         executor: Arc<MySqlExecutor>,
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) -> tokio::task::JoinHandle<()> {
@@ -241,7 +240,8 @@ impl MySqlStoredProcReaction {
                     };
 
                     // Resolve the command template for this query/operation.
-                    let Some(template) = config.resolve_command_template(query_result, operation)
+                    let Some(template) = config
+                        .resolve_command_template(routes.get(&query_result.query_id), operation)
                     else {
                         debug!(
                             "[{reaction_id}] No command configured for {result_type} operation, skipping"
@@ -352,6 +352,7 @@ impl Reaction for MySqlStoredProcReaction {
 
     async fn start(&self) -> Result<()> {
         log_component_start("MySQL StoredProc Reaction", &self.base.id);
+        let routes = self.base.bind_routes(&self.config.routes).await?;
         self.base
             .set_status(
                 ComponentStatus::Starting,
@@ -384,7 +385,7 @@ impl Reaction for MySqlStoredProcReaction {
         // Spawn processing task with a shutdown channel so stop_common can
         // interrupt the loop promptly.
         let shutdown_rx = self.base.create_shutdown_channel().await;
-        let task = self.spawn_processing_task(executor, shutdown_rx);
+        let task = self.spawn_processing_task(routes, executor, shutdown_rx);
         self.base.set_processing_task(task).await;
 
         info!(

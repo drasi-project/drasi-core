@@ -2738,14 +2738,14 @@ exit 2
             plugin_type: "computation".to_string(),
             sdk_version: "0.11.3".to_string(),
             abi_family: COMPUTATION_ABI_FAMILY.to_string(),
-            abi_version: "5.0.0".to_string(),
+            abi_version: "0.1.0".to_string(),
             filename: Some("libdrasi_computation_source_counter.dylib".to_string()),
             ..artifact_metadata()
         }
     }
 
     const ORDINARY_BINARY: &[u8] = b"binary\0drasi-plugin-ffi-abi=0.19.0\0";
-    const NATIVE_BINARY: &[u8] = b"binary\0drasi-computation-plugin-abi=5.0.0\0";
+    const NATIVE_BINARY: &[u8] = b"binary\0drasi-computation-plugin-abi=0.1.0\0";
 
     #[test]
     fn publication_preserves_sdk_package_annotation_and_adds_distinct_abi() {
@@ -2764,7 +2764,7 @@ exit 2
 
         let annotations = plugin_annotations(&native_metadata());
         assert_eq!(annotations["io.drasi.plugin.abi-family"], "computation");
-        assert_eq!(annotations["io.drasi.plugin.abi-version"], "5.0.0");
+        assert_eq!(annotations["io.drasi.plugin.abi-version"], "0.1.0");
         assert_eq!(
             annotations["io.drasi.plugin.filename"],
             "libdrasi_computation_source_counter.dylib"
@@ -2808,14 +2808,14 @@ exit 2
     #[test]
     fn native_cargo_abi_declaration_must_match_the_built_binary() {
         assert_eq!(
-            built_plugin_abi_version(COMPUTATION_ABI_FAMILY, Some("5.0.0"), NATIVE_BINARY),
-            Ok("5.0.0".to_string())
+            built_plugin_abi_version(COMPUTATION_ABI_FAMILY, Some("0.1.0"), NATIVE_BINARY),
+            Ok("0.1.0".to_string())
         );
         let error = built_plugin_abi_version(COMPUTATION_ABI_FAMILY, Some("4.0.0"), NATIVE_BINARY)
             .expect_err("stale Cargo declaration");
         assert!(error.contains("declared abi-version 4.0.0"), "{error}");
         assert!(
-            built_plugin_abi_version(COMPUTATION_ABI_FAMILY, Some("5.0.0"), ORDINARY_BINARY)
+            built_plugin_abi_version(COMPUTATION_ABI_FAMILY, Some("0.1.0"), ORDINARY_BINARY)
                 .is_err()
         );
         assert_eq!(

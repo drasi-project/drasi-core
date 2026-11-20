@@ -1,8 +1,8 @@
 # Native ComputationGraph plugin SDK
 
 This is a separate plugin family, not a replacement or layout change to the
-Source/Reaction/Bootstrap SDK. It uses `drasi-computation-plugin-abi` **5.0.0**
-with native **wire version 5**, independent of workspace package versions.
+Source/Reaction/Bootstrap SDK. It uses `drasi-computation-plugin-abi` **0.1.0**
+with native **wire version 1**, independent of workspace package versions.
 Ordinary Source/Reaction/Bootstrap ABI **0.19.0** is independently versioned.
 Hosts accept native plugins with the same ABI major and an older or equal
 minor, and reject a newer minor or another major. Unknown native wire versions
@@ -103,7 +103,7 @@ dynamic-plugin = []
 
 [package.metadata.drasi-plugin]
 abi-family = "computation"
-abi-version = "5.0.0"
+abi-version = "0.1.0"
 kind = "example-native"
 ```
 
@@ -497,7 +497,7 @@ the metadata schema and enforce their conditional requirements in construction.
 annotation. The separately negotiated versioned creation envelope sets it for
 existing factory callbacks, including progress and coordinated-source creation.
 Ordinary Rust request literals set it to `false`; the base request encoding,
-base ABI 5.0.0 layouts, and wire version 5 remain unchanged.
+base ABI 0.1.0 layouts, and wire version 1 remain unchanged.
 
 Implement `NativeComponent::start_with_credentials(ActivationCredentials)` for
 the bound path. It runs **inside the normal START operation**, with the same
@@ -525,8 +525,8 @@ cancellation-safe under the existing operation-ownership contract.
 ## Configuration descriptions
 
 The optional `configuration-v1` entry point publishes field descriptions, defaults,
-integer limits and allowed values without changing the frozen ABI 5.0 metadata or
-wire version 5. A matching-wire plugin may omit the extension; the host does not
+integer limits and allowed values without changing the frozen ABI 0.1 metadata or
+wire version 1. A matching-wire plugin may omit the extension; the host does not
 invent missing descriptions. A present but malformed extension is an error,
 including during metadata-only discovery.
 
@@ -562,7 +562,7 @@ source processing lock. Reads must remain possible while `next()` is pending.
 This is data-schema discovery, not the factory's configuration schema.
 
 The optional `source_schema_v1` extension carries a bounded MessagePack
-`Option<SourceSchema>` without changing ABI 5.0.0 or envelope wire version 5.
+`Option<SourceSchema>` without changing ABI 0.1.0 or envelope wire version 1.
 The SDK permits one schema read per source at a time, limits replies to 1 MiB
 and reads to 30 seconds, and rejects results from stopped or replaced
 activations. Cancellation releases the read slot. Actual failures remain errors;
@@ -865,7 +865,7 @@ hot-unload promise. Native plugins are trusted in-process code, not a sandbox.
 
 ## Envelopes and schemas
 
-Metadata and configuration are UTF-8 JSON. Native wire version 5 uses named
+Metadata and configuration are UTF-8 JSON. Native wire version 1 uses named
 MessagePack records and bulk MessagePack binary buffers, not JSON envelopes or
 per-byte integer arrays. Its binary envelope format is also 2.
 `BinaryEnvelopeCodec` encodes the full schema descriptor, typed images, sequence,
@@ -982,7 +982,7 @@ The same participant also works when the host container uses `SharedStorageGroup
 and shared QoS outputs. Its state, the container's input progress/retained output
 and the selected journal appends then commit together. The host reserves pipe
 capacity before invoking the participant. No new ABI interface or storage handle
-crosses the boundary: ABI 5.0 transaction participants use their existing
+crosses the boundary: ABI 0.1 transaction participants use their existing
 revocable mailbox. This does not give standalone native transformers output
 tracking, make separate stores atomic, or deduplicate external effects.
 
@@ -1237,8 +1237,8 @@ service. It has its own exact header, version, reserved fields and read-only
 observation callback. The SDK rejects a base table for a scheduling factory,
 an unexpected scheduling table for an ordinary factory, and malformed or
 unsupported extension versions. Transaction requests still use the same
-revocable mailbox, with no plugin commit method. Base ABI 5.0.0 layouts,
-envelope wire version 5 and the independent legacy plugin ABI are unchanged.
+revocable mailbox, with no plugin commit method. Base ABI 0.1.0 layouts,
+envelope wire version 1 and the independent legacy plugin ABI are unchanged.
 
 The stateful delayed-emission transformer in
 [`host-sdk/tests/fixtures/native_scheduling.rs`](../host-sdk/tests/fixtures/native_scheduling.rs)

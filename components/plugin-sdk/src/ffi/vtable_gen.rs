@@ -3213,6 +3213,16 @@ fn build_reaction_runtime_context(
                 },
             ))
         };
+    let component_directory: Option<Arc<dyn drasi_lib::ComponentDirectory>> =
+        if ffi_ctx.component_directory.is_null() {
+            None
+        } else {
+            Some(Arc::new(
+                super::component_directory_proxy::FfiComponentDirectoryProxy {
+                    vtable: ffi_ctx.component_directory,
+                },
+            ))
+        };
     let (update_tx, status_rx) = tokio::sync::mpsc::channel(16);
 
     let ctx = drasi_lib::ReactionRuntimeContext {
@@ -3225,6 +3235,7 @@ fn build_reaction_runtime_context(
         identity_provider,
         snapshot_fetcher,
         resource_observer: None,
+        component_directory,
     };
     Ok((ctx, status_rx))
 }
@@ -4145,6 +4156,7 @@ mod status_forwarder_tests {
                 identity_provider: std::ptr::null(),
                 snapshot_fetcher: std::ptr::null(),
                 wal_provider: std::ptr::null(),
+                component_directory: std::ptr::null(),
             };
             let (sender, receiver) = if kind == "source" {
                 let (context, receiver) =

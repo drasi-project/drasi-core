@@ -382,9 +382,13 @@ fn build_payload(
 
 /// Build the proto item emitted for a single `ResultDiff`, or `None` for
 /// `ResultDiff::Noop` (which carries no row data and is never emitted).
+///
+/// `route` is the template route already resolved for the emitting query;
+/// operations it leaves unset fall back to the default template.
 pub fn build_proto_item(
     cfg: &GrpcReactionConfig,
     engine: Option<&TemplateEngine>,
+    route: Option<&GrpcQueryConfig>,
     emission: &QueryEmissionContext<'_>,
     diff: &ResultDiff,
 ) -> Option<BuiltProtoItem> {
@@ -448,12 +452,12 @@ pub fn build_proto_item(
         after: raw_after.as_ref(),
         data: raw_data.as_ref(),
     };
-    let spec = match drasi_reaction_common::input_alias(emission.input_alias, emission.query_name) {
-        Some(alias) => resolve_spec(cfg, alias, op),
-        None => cfg
-            .default_template()
-            .and_then(|config| spec_for_op(config, op)),
-    };
+    let spec = route
+        .and_then(|config| spec_for_op(config, op))
+        .or_else(|| {
+            cfg.default_template()
+                .and_then(|config| spec_for_op(config, op))
+        });
     let request_metadata = match (engine, spec) {
         (Some(engine), Some(spec)) => engine.render_extension_metadata(&item_context, spec),
         _ => HashMap::new(),
@@ -590,7 +594,14 @@ mod tests {
         diff: &ResultDiff,
     ) -> BuiltProtoItem {
         let emission = TestEmission::new(query_name);
-        build_proto_item(cfg, engine, &emission.ctx(), diff).expect("non-noop diff yields an item")
+        build_proto_item(
+            cfg,
+            engine,
+            cfg.routes().get(query_name),
+            &emission.ctx(),
+            diff,
+        )
+        .expect("non-noop diff yields an item")
     }
 
     fn struct_field(item_field: &Option<prost_types::Struct>) -> Option<Value> {
@@ -709,7 +720,7 @@ mod tests {
         let cfg = GrpcReactionConfig::default();
         let mut emission = TestEmission::new("q");
         emission.metadata.insert("tenant".into(), json!("acme"));
-        let built = build_proto_item(&cfg, None, &emission.ctx(), &add(json!({"id": 1})))
+        let built = build_proto_item(&cfg, None, None, &emission.ctx(), &add(json!({"id": 1})))
             .expect("add yields item");
         assert_eq!(
             struct_field(&built.item.metadata),
@@ -752,15 +763,15 @@ mod tests {
     }
 
     #[test]
-    fn route_lookup_resolves_exact_then_dotted_suffix_then_default() {
+    fn resolved_route_takes_precedence_then_falls_back_to_default() {
         let mut routes = HashMap::new();
         routes.insert(
             "q1".to_string(),
-            query_config(Some(spec(r#"{"src":"suffix"}"#)), None, None),
+            query_config(None, None, Some(spec(r#"{"src":"route-delete"}"#))),
         );
         routes.insert(
-            "sales.q2".to_string(),
-            query_config(Some(spec(r#"{"src":"exact"}"#)), None, None),
+            "q2".to_string(),
+            query_config(Some(spec(r#"{"src":"route"}"#)), None, None),
         );
         let cfg = config_with(
             Some(query_config(Some(spec(r#"{"src":"default"}"#)), None, None)),
@@ -768,16 +779,16 @@ mod tests {
         );
         let engine = TemplateEngine::new();
 
-        let built = item_for(&cfg, Some(&engine), "sales.q2", &add(json!({})));
+        let built = item_for(&cfg, Some(&engine), "q2", &add(json!({})));
         assert_eq!(
             struct_field(&built.item.payload),
-            Some(json!({"src": "exact"}))
+            Some(json!({"src": "route"}))
         );
 
-        let built = item_for(&cfg, Some(&engine), "sales.q1", &add(json!({})));
+        let built = item_for(&cfg, Some(&engine), "q1", &add(json!({})));
         assert_eq!(
             struct_field(&built.item.payload),
-            Some(json!({"src": "suffix"}))
+            Some(json!({"src": "default"}))
         );
 
         let built = item_for(&cfg, Some(&engine), "orders.q9", &add(json!({})));
@@ -815,7 +826,7 @@ mod tests {
         );
 
         let emission = TestEmission::new("q");
-        assert!(build_proto_item(&cfg, None, &emission.ctx(), &ResultDiff::Noop).is_none());
+        assert!(build_proto_item(&cfg, None, None, &emission.ctx(), &ResultDiff::Noop).is_none());
     }
 
     #[test]

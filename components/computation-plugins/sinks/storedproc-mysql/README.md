@@ -1,7 +1,7 @@
 # Native MySQL stored procedures
 
 `drasi-computation-sink-storedproc-mysql` provides `drasi.mysql/storedproc`
-(implementation `1`, configuration version `1`, native ABI 5.0): it calls a
+(implementation `1`, configuration version `1`, native ABI 0.1): it calls a
 MySQL stored procedure for each standard graph change from a source,
 transformer or query ([sink input contract](../../SINKS.md)).
 

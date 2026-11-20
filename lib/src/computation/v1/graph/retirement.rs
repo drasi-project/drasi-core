@@ -79,14 +79,25 @@ impl RecoveryFreeze {
                 .ok_or_else(|| topology("recovery component is unavailable"))?;
             if state.realization != RealizationState::Created
                 || state.lifecycle != ComponentLifecycle::Stopped
-                || state.failure.as_ref().is_some_and(|failure| {
-                    !allow_processing_failure
-                        || failure.phase != crate::computation::v1::FailurePhase::Processing
-                })
+                || state
+                    .failure
+                    .as_ref()
+                    .is_some_and(|failure| match failure.phase {
+                        // A rejected control notification on a component that
+                        // completed stop does not affect its recovery state.
+                        crate::computation::v1::FailurePhase::Control => false,
+                        crate::computation::v1::FailurePhase::Processing => {
+                            !allow_processing_failure
+                        }
+                        _ => true,
+                    })
             {
-                return Err(topology(
-                    "recovery component must complete stop; only authorized processing failures may remain",
-                ));
+                return Err(topology(format!(
+                    "recovery component {id} must complete stop; only authorized processing failures may remain (realization {:?}, lifecycle {:?}, failure {:?})",
+                    state.realization,
+                    state.lifecycle,
+                    state.failure.as_ref().map(|failure| failure.phase)
+                )));
             }
             let slot = &graph.components[graph.ids[id]];
             if !slot.is_constructed()? {
@@ -211,7 +222,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn loss_authorized_retirement_only_allows_processing_failure_after_completed_stop() {
+    async fn retirement_after_completed_stop_allows_only_authorized_processing_or_control_failure()
+    {
         let id = ComponentId::generate();
         let mut graph = ComputationGraph::builder("freeze")
             .service(
@@ -251,11 +263,13 @@ mod tests {
                         &BTreeSet::from([id.clone()]),
                         authorized,
                     );
+                    // A rejected control notification never blocks a
+                    // component that completed stop.
                     assert_eq!(
                         result.is_ok(),
-                        authorized
-                            && phase == FailurePhase::Processing
-                            && lifecycle == ComponentLifecycle::Stopped,
+                        lifecycle == ComponentLifecycle::Stopped
+                            && (phase == FailurePhase::Control
+                                || authorized && phase == FailurePhase::Processing),
                         "{phase:?}/{lifecycle:?}: {:?}",
                         result.as_ref().err()
                     );

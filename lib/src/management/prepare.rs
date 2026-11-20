@@ -332,11 +332,21 @@ impl Driver {
                 generations,
                 edit,
                 delete_owned_resources,
+                replay,
             } => {
-                anyhow::ensure!(
-                    prior.is_none(),
-                    "process-local mutations cannot replay a consumed request"
-                );
+                let replay = replay
+                    .map(|key| digest(b"edit-replay\0", &key))
+                    .transpose()?;
+                if let Some(receipt) = &prior {
+                    let Some(replay) = replay else {
+                        anyhow::bail!("process-local mutations cannot replay a consumed request");
+                    };
+                    anyhow::ensure!(
+                        prior_creation(receipt)?.request_digest == replay,
+                        ManagementError::RequestConflict
+                    );
+                    return Ok(receipt.clone());
+                }
                 for (id, generation) in generations {
                     anyhow::ensure!(
                         control.component_handle_by_id(&id)?.generation() == generation,
@@ -358,7 +368,10 @@ impl Driver {
                     desired: Some(desired),
                     additions: Vec::new(),
                 };
-                let request_digest = digest(b"edit\0", &input)?;
+                let request_digest = match replay {
+                    Some(replay) => replay,
+                    None => digest(b"edit\0", &input)?,
+                };
                 (input, None, request_digest)
             }
         };

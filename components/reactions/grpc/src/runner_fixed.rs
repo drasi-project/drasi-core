@@ -14,6 +14,7 @@
 
 //! Fixed-size batching runner.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use log::{debug, error, info, trace, warn};
@@ -25,7 +26,7 @@ use drasi_lib::reactions::common::base::ReactionBase;
 use drasi_lib::ReactionRecoveryPolicy;
 
 use crate::batch::{merge_metadata, BatchKey, PendingBatch};
-use crate::config::GrpcReactionConfig;
+use crate::config::{GrpcQueryConfig, GrpcReactionConfig};
 use crate::connection::{create_client_with_retry, ConnectionState};
 use crate::proto::ReactionServiceClient;
 use crate::send::send_batch_with_retry;
@@ -38,6 +39,7 @@ pub(crate) struct FixedRunnerParams {
     pub batch_flush_timeout_ms: u64,
     pub base: ReactionBase,
     pub config: GrpcReactionConfig,
+    pub routes: HashMap<drasi_lib::ComponentId, GrpcQueryConfig>,
     pub shutdown_rx: oneshot::Receiver<()>,
     pub checkpoints: CheckpointState,
     pub policy: ReactionRecoveryPolicy,
@@ -57,6 +59,7 @@ pub(crate) async fn run(params: FixedRunnerParams) {
         batch_flush_timeout_ms,
         base,
         config,
+        routes,
         mut shutdown_rx,
         mut checkpoints,
         policy,
@@ -143,6 +146,7 @@ pub(crate) async fn run(params: FixedRunnerParams) {
         trace!("Processing results for query_id: {query_id}");
 
         let emission = QueryEmissionContext::from(query_result.as_ref());
+        let route = routes.get(&query_result.query_id);
 
         // Build all items first so the last one can be flagged terminal; the
         // checkpoint only advances once a result's terminal item is acked.
@@ -153,7 +157,7 @@ pub(crate) async fn run(params: FixedRunnerParams) {
                 continue;
             }
             let Some(built) =
-                build_proto_item(&config, template_engine.as_ref(), &emission, result)
+                build_proto_item(&config, template_engine.as_ref(), route, &emission, result)
             else {
                 continue;
             };

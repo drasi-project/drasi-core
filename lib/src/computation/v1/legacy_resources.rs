@@ -161,3 +161,30 @@ fn same_legacy_provider(left: &ResourceHandle, right: &ResourceHandle) -> bool {
         _ => false,
     }
 }
+
+/// Answers ID and name lookups from the latest published graph.
+pub struct GraphComponentDirectory {
+    control: GraphControl,
+}
+
+impl GraphComponentDirectory {
+    pub fn new(control: GraphControl) -> Self {
+        Self { control }
+    }
+}
+
+impl crate::context::ComponentDirectory for GraphComponentDirectory {
+    fn name_of(&self, id: &ComponentId) -> Option<crate::ComponentName> {
+        self.control
+            .desired_snapshot()
+            .component_by_id(id)
+            .map(|node| node.name.clone())
+    }
+
+    fn id_of(&self, name: &crate::ComponentName) -> Option<ComponentId> {
+        self.control
+            .desired_snapshot()
+            .component_by_name(name)
+            .map(|node| node.descriptor.id().clone())
+    }
+}

@@ -29,7 +29,7 @@ use drasi_lib::Reaction;
 use drasi_lib::{ReactionBase, ReactionBaseParams};
 
 use crate::blob::BlobService;
-use crate::config::{AzureStorageReactionConfig, StorageTarget};
+use crate::config::{AzureStorageReactionConfig, QueryConfig, StorageTarget};
 use crate::queue::QueueService;
 use crate::table::TableService;
 use crate::AzureStorageReactionBuilder;
@@ -100,19 +100,18 @@ impl AzureStorageReaction {
 
     fn resolve_template_spec<'a>(
         config: &'a AzureStorageReactionConfig,
+        routes: &'a HashMap<drasi_lib::ComponentId, QueryConfig>,
         emission: &drasi_lib::channels::QueryResult,
         operation: OperationType,
     ) -> Option<&'a TemplateSpec> {
-        if let Some(spec) = config.get_result_template_spec(emission, operation) {
-            return Some(spec);
-        }
-
-        drasi_lib::reactions::common::input_alias(
-            emission.input_alias.as_deref(),
-            emission.query_name.as_ref(),
-        )
-        .and_then(|alias| alias.rsplit('.').next())
-        .and_then(|short| config.get_template_spec(short, operation))
+        routes
+            .get(&emission.query_id)
+            .and_then(|route| AzureStorageReactionConfig::get_spec_from_config(route, operation))
+            .or_else(|| {
+                config.default_template().and_then(|default| {
+                    AzureStorageReactionConfig::get_spec_from_config(default, operation)
+                })
+            })
     }
 
     fn build_context(
@@ -168,12 +167,13 @@ impl AzureStorageReaction {
     fn render_payload(
         handlebars: &Handlebars<'_>,
         config: &AzureStorageReactionConfig,
+        routes: &HashMap<drasi_lib::ComponentId, QueryConfig>,
         emission: &drasi_lib::channels::QueryResult,
         operation: OperationType,
         context: &Map<String, Value>,
         fallback_data: &Value,
     ) -> Result<String> {
-        let template = Self::resolve_template_spec(config, emission, operation)
+        let template = Self::resolve_template_spec(config, routes, emission, operation)
             .map(|s| s.template.clone())
             .unwrap_or_default();
 
@@ -215,6 +215,7 @@ impl AzureStorageReaction {
         service_client: &ServiceClient,
         target: &StorageTarget,
         config: &AzureStorageReactionConfig,
+        routes: &HashMap<drasi_lib::ComponentId, QueryConfig>,
         handlebars: &Handlebars<'_>,
         operation_name: &str,
         operation: OperationType,
@@ -222,8 +223,9 @@ impl AzureStorageReaction {
         data: &Value,
     ) -> Result<()> {
         let context = Self::build_context(operation_name, emission, data);
-        let payload =
-            Self::render_payload(handlebars, config, emission, operation, &context, data)?;
+        let payload = Self::render_payload(
+            handlebars, config, routes, emission, operation, &context, data,
+        )?;
 
         match (service_client, target) {
             (
@@ -270,17 +272,19 @@ impl AzureStorageReaction {
                         .delete_entity(table_name, &partition_key, &row_key)
                         .await?;
                 } else {
-                    let table_data = if Self::resolve_template_spec(config, emission, operation)
-                        .is_some_and(|spec| !spec.template.is_empty())
-                    {
-                        Self::parse_table_properties(&payload)?
-                    } else {
-                        let fallback = Self::get_table_default_data(operation_name, &context, data);
-                        fallback
-                            .as_object()
-                            .cloned()
-                            .context("table fallback payload must be JSON object")?
-                    };
+                    let table_data =
+                        if Self::resolve_template_spec(config, routes, emission, operation)
+                            .is_some_and(|spec| !spec.template.is_empty())
+                        {
+                            Self::parse_table_properties(&payload)?
+                        } else {
+                            let fallback =
+                                Self::get_table_default_data(operation_name, &context, data);
+                            fallback
+                                .as_object()
+                                .cloned()
+                                .context("table fallback payload must be JSON object")?
+                        };
 
                     table_service
                         .upsert_entity(table_name, &partition_key, &row_key, table_data)
@@ -337,6 +341,7 @@ impl Reaction for AzureStorageReaction {
     }
 
     async fn start(&self) -> Result<()> {
+        let routes = self.base.bind_routes(&self.config.routes).await?;
         log_component_start("Azure Storage Reaction", &self.base.id);
         self.base
             .set_status(
@@ -458,6 +463,7 @@ impl Reaction for AzureStorageReaction {
                         &service_client,
                         &target,
                         &config,
+                        &routes,
                         &handlebars,
                         operation_name,
                         operation,

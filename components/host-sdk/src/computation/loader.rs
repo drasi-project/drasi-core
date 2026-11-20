@@ -94,7 +94,7 @@ impl NativePlugin {
     /// foreign producers). Production discovery should use load/try_load.
     ///
     /// # Safety
-    /// Both functions and every returned pointer must obey ABI 5.0. Their code and
+    /// Both functions and every returned pointer must obey ABI 0.1. Their code and
     /// metadata must be pinned for process lifetime. This is not a plugin sandbox.
     pub unsafe fn from_entry_points(
         metadata: abi::MetadataFn,

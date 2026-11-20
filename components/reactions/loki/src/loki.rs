@@ -85,10 +85,7 @@ impl LokiReaction {
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
     ) -> Result<Self> {
-        Self::validate_config(
-            &drasi_lib::reactions::common::input_aliases(&queries),
-            &config,
-        )?;
+        Self::validate_config(&config)?;
         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
         if let Some(capacity) = priority_queue_capacity {
             params = params.with_priority_queue_capacity(capacity);
@@ -122,7 +119,8 @@ impl LokiReaction {
         Ok(())
     }
 
-    fn validate_config(queries: &[String], config: &LokiReactionConfig) -> Result<()> {
+    /// Validate template syntax. Route keys are matched to queries at start.
+    fn validate_config(config: &LokiReactionConfig) -> Result<()> {
         for (query_id, route_config) in &config.routes {
             Self::validate_query_config(route_config)
                 .map_err(|e| anyhow::anyhow!("invalid template in route '{query_id}': {e}"))?;
@@ -137,20 +135,6 @@ impl LokiReaction {
             Self::validate_template(label_value_template).map_err(|e| {
                 anyhow::anyhow!("invalid label template for label '{label_name}': {e}")
             })?;
-        }
-
-        if !config.routes.is_empty() && !queries.is_empty() {
-            for route_query in config.routes.keys() {
-                let dotted_route = format!(".{route_query}");
-                let matches = queries
-                    .iter()
-                    .any(|q| q == route_query || q.ends_with(&dotted_route));
-                if !matches {
-                    return Err(anyhow::anyhow!(
-                        "Route '{route_query}' does not match any subscribed query. Subscribed queries: {queries:?}"
-                    ));
-                }
-            }
         }
         Ok(())
     }
@@ -258,22 +242,6 @@ impl LokiReaction {
             }
         }
         labels
-    }
-
-    fn query_template<'a>(
-        alias: Option<&str>,
-        routes: &'a HashMap<String, QueryConfig>,
-        default_template: &'a Option<QueryConfig>,
-    ) -> Option<&'a QueryConfig> {
-        alias
-            .and_then(|alias| {
-                routes.get(alias).or_else(|| {
-                    alias
-                        .rsplit_once('.')
-                        .and_then(|(_, last)| routes.get(last))
-                })
-            })
-            .or(default_template.as_ref())
     }
 
     fn render_log_line(
@@ -409,6 +377,7 @@ impl Reaction for LokiReaction {
         if *cleanup_required || self.base.processing_task.read().await.is_some() {
             return Err(drasi_lib::context::workers::WorkerAlreadyOwned.into());
         }
+        let routes = self.base.bind_routes(&self.config.routes).await?;
         *cleanup_required = true;
         log_component_start("Loki Reaction", &self.base.id);
         info!(
@@ -449,7 +418,6 @@ impl Reaction for LokiReaction {
         let tenant_id = self.config.tenant_id.clone();
         let timeout_ms = self.config.timeout_ms;
         let labels = self.config.labels.clone();
-        let routes = self.config.routes.clone();
         let default_template = self.config.default_template.clone();
 
         drasi_lib::context::workers::spawn_owned_worker(&self.base.processing_task, async move {
@@ -500,11 +468,9 @@ impl Reaction for LokiReaction {
                 }
 
                 let query_id = &query_result.query_id;
-                let query_template = Self::query_template(
-                    drasi_lib::reactions::common::input_alias(query_result.input_alias.as_deref(), query_result.query_name.as_ref()),
-                    &routes,
-                    &default_template,
-                );
+                let query_template = routes
+                    .get(&query_result.query_id)
+                    .or(default_template.as_ref());
                 let base_timestamp_ns: i64 = query_result
                     .timestamp
                     .timestamp_nanos_opt()

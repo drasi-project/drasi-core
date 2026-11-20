@@ -334,7 +334,7 @@ impl<'a> PluginResolver<'a> {
                 match ann.get(annotations::ABI_VERSION) {
                     Some(version) if drasi_computation_plugin_abi::accepts_abi_version(version) => {}
                     Some(version) => mismatches.push(format!(
-                        "  computation ABI version: host={}, plugin={version} (requires the same major and an older or equal minor)",
+                        "  computation ABI version: host={}, plugin={version} (requires the same major and minor before 1.0, then the same major and an older or equal minor)",
                         self.host_info.computation_abi_version()
                     )),
                     None => mismatches.push(format!(
@@ -829,7 +829,7 @@ mod tests {
         for rejected in [
             format!("{}.{}.0", abi.major, abi.minor + 1),
             format!("{}.0.0", abi.major + 1),
-            format!("{}.0.0", abi.major - 1),
+            format!("{}.{}.0", abi.major, abi.minor - 1),
             "invalid".to_string(),
         ] {
             let ann = native_annotations(&rejected);

@@ -208,53 +208,41 @@ impl MsSqlStoredProcReactionConfig {
         self.port.unwrap_or(1433)
     }
 
-    /// Get the command template for a specific query and operation type
-    ///
-    /// Resolution order (developer-guide §11):
-    /// 1. `routes[query_id]` for the operation (full wire id).
-    /// 2. `routes[last dotted segment of query_id]` for the operation.
-    /// 3. `default_template` for the operation.
+    /// Get the command template for an operation, using the per-query route
+    /// already resolved by query ID and falling back to `default_template`
+    /// when the route has no command for that operation.
     pub fn get_command_template(
         &self,
-        result: &drasi_lib::channels::QueryResult,
+        route: Option<&QueryConfig>,
         operation: OperationType,
     ) -> Option<String> {
-        let alias = drasi_lib::reactions::common::input_alias(
-            result.input_alias.as_deref(),
-            result.query_name.as_ref(),
-        );
-        match alias {
-            Some(alias) => self.resolve_template_spec(alias, operation),
-            None => self
-                .default_template
-                .as_ref()
-                .and_then(|config| Self::get_spec_from_config(config, operation)),
+        route
+            .and_then(|config| Self::get_spec_from_config(config, operation))
+            .or_else(|| {
+                self.default_template
+                    .as_ref()
+                    .and_then(|config| Self::get_spec_from_config(config, operation))
+            })
+            .map(|spec| spec.template.clone())
+    }
+
+    /// Validate the configuration against a list of query ids:
+    /// [`Self::validate_settings`] plus a check that every `routes` key matches
+    /// a query id (or its last dotted segment).
+    pub fn validate(&self, query_ids: &[String]) -> anyhow::Result<()> {
+        self.validate_settings()?;
+        for key in self.routes.keys() {
+            let matches = query_ids.iter().any(|q| q == key || last_segment(q) == key);
+            if !matches {
+                anyhow::bail!(
+                    "route '{key}' does not match any subscribed query id (or its last dotted segment)"
+                );
+            }
         }
-        .map(|spec| spec.template.clone())
+        Ok(())
     }
 
-    /// Resolve the [`TemplateSpec`] for a `(query_id, operation)` pair following
-    /// the full three-step resolution order (per-query id → last dotted segment
-    /// → default template). The [`TemplateRouting`] trait default only covers
-    /// steps 1 and 3, so this adds the last-segment lookup in between.
-    ///
-    /// Internal helper backing [`Self::get_command_template`], which is the
-    /// public entry point. Kept crate-private because it returns a borrow of the
-    /// internal [`TemplateSpec`] type.
-    pub(crate) fn resolve_template_spec(
-        &self,
-        query_id: &str,
-        operation: OperationType,
-    ) -> Option<&TemplateSpec> {
-        drasi_mssql_common::sql::resolve_template(
-            &self.routes,
-            self.default_template.as_ref(),
-            query_id,
-            operation,
-        )
-    }
-
-    /// Validate the configuration against the reaction's subscribed queries.
+    /// Validate the configuration without matching route keys to queries.
     ///
     /// Called by the builder's `build()` so misconfiguration fails at
     /// construction rather than on the first inbound event. Checks:
@@ -262,9 +250,9 @@ impl MsSqlStoredProcReactionConfig {
     /// 1. `user` and `database` are set.
     /// 2. At least one command is configured (routes or default template).
     /// 3. Every command template compiles as a Handlebars template.
-    /// 4. Every `routes` key matches a subscribed query id (or its last dotted
-    ///    segment).
-    pub fn validate(&self, query_ids: &[String]) -> anyhow::Result<()> {
+    ///
+    /// Route keys are resolved to query IDs when the reaction starts.
+    pub fn validate_settings(&self) -> anyhow::Result<()> {
         if self.user.is_empty() {
             anyhow::bail!("Database user is required");
         }
@@ -290,13 +278,6 @@ impl MsSqlStoredProcReactionConfig {
         for (key, qc) in &self.routes {
             validate_query_config(qc)
                 .map_err(|e| anyhow::anyhow!("invalid template for route '{key}': {e}"))?;
-
-            let matches = query_ids.iter().any(|q| q == key || last_segment(q) == key);
-            if !matches {
-                anyhow::bail!(
-                    "route '{key}' does not match any subscribed query id (or its last dotted segment)"
-                );
-            }
         }
 
         Ok(())

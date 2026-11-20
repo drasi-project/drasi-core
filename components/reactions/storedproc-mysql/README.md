@@ -300,7 +300,10 @@ let reaction = MySqlStoredProcReaction::builder("my-reaction")
     .await?;
 ```
 
-Route keys are validated at construction time: every key must match a subscribed query id (or the last dotted segment of one). An unknown route key causes `build()` to fail.
+When the reaction starts, each route key is resolved to the permanent ID of a subscribed
+query. A key may be the query's ID, its name, or the last dotted segment of its name (so
+`my_query` selects `source.my_query`). An unknown key, or two keys selecting the same query,
+makes `start()` fail. Results are then routed by query ID, so a renamed query keeps its route.
 
 ### Configuration Options
 
@@ -381,10 +384,9 @@ TemplateSpec::new("CALL store_doc({{param after.id}}, {{param after.payload}})")
 
 When a query result arrives, the reaction selects a template for the operation using the following order:
 
-1. **Full query id route** — `routes[<query_id>]`
-2. **Last dotted segment route** — `routes[<last segment of query_id>]` (e.g. a route keyed `my_query` matches a query id `source.my_query`)
-3. **Default template** — `default_template`
-4. **Skip** — if none of the above provides a template for the operation, the event is skipped
+1. **Query route** — the `routes` entry resolved to the result's query ID when the reaction started
+2. **Default template** — `default_template`
+3. **Skip** — if none of the above provides a template for the operation, the event is skipped
 
 Example:
 

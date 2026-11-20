@@ -167,19 +167,26 @@ impl Reaction for HttpReaction {
             self.base.id, self.config.base_url
         );
 
-        if let Err(e) = self.config.validate(
-            &drasi_lib::reactions::common::input_aliases(&self.base.queries),
-            None,
-        ) {
-            error!("[{}] Invalid HTTP reaction config: {e:#}", self.base.id);
-            self.base
-                .set_status(
-                    ComponentStatus::Error,
-                    Some(format!("Invalid HTTP reaction config: {e:#}")),
-                )
-                .await;
-            return Err(e);
-        }
+        let validated = match self.config.validate_settings(None) {
+            Ok(()) => match self.config.output_templates.as_ref() {
+                Some(templates) => self.base.bind_routes(&templates.routes).await,
+                None => Ok(HashMap::new()),
+            },
+            Err(e) => Err(e),
+        };
+        let routes = match validated {
+            Ok(routes) => routes,
+            Err(e) => {
+                error!("[{}] Invalid HTTP reaction config: {e:#}", self.base.id);
+                self.base
+                    .set_status(
+                        ComponentStatus::Error,
+                        Some(format!("Invalid HTTP reaction config: {e:#}")),
+                    )
+                    .await;
+                return Err(e);
+            }
+        };
 
         self.base
             .set_status(
@@ -219,6 +226,7 @@ impl Reaction for HttpReaction {
                     reaction_id,
                     base,
                     config,
+                    routes,
                     runtime_adaptive,
                     client,
                     shutdown_rx,
@@ -232,6 +240,7 @@ impl Reaction for HttpReaction {
                     reaction_id,
                     base,
                     config,
+                    routes,
                     client,
                     handlebars,
                     shutdown_rx,

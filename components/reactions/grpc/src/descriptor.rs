@@ -832,12 +832,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_reaction_rejects_route_key_not_matching_a_query() {
+    async fn route_key_not_matching_a_query_fails_at_start() {
         let cfg = serde_json::json!({
             "endpoint": "grpc://h:1",
             "outputTemplates": { "routes": { "ghost": { "added": { "template": "{\"id\":1}" } } } }
         });
-        let result = GrpcReactionDescriptor
+        let reaction = GrpcReactionDescriptor
             .create_reaction(
                 &drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000da")
                     .expect("fixture UUID"),
@@ -847,10 +847,24 @@ mod tests {
                 &cfg,
                 true,
             )
+            .await
+            .expect("route keys are checked at start");
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        reaction
+            .bind_runtime_context(drasi_lib::context::ReactionRuntimeContext::new(
+                "instance",
+                reaction.id().clone(),
+                vec![drasi_core::ComponentId::generate()],
+                None,
+                tx,
+                None,
+            ))
             .await;
+        let err = reaction.start().await.expect_err("unknown route");
         assert!(
-            result.is_err(),
-            "a route key matching no subscribed query must fail create_reaction"
+            err.to_string()
+                .contains("does not match any subscribed query"),
+            "unexpected error: {err}"
         );
     }
 

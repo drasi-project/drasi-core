@@ -233,7 +233,7 @@ currently fixed, populating the remaining adaptive fields from
 | Field | Type | Description |
 |-------|------|-------------|
 | `defaultTemplate` | `Option<QueryConfig>` | Applied to any query without a matching `routes` entry. |
-| `routes` | `HashMap<String, QueryConfig>` | Per-query overrides keyed by exact query id or by the last dotted segment of a query id. Exact query ids win over suffix matches. |
+| `routes` | `HashMap<String, QueryConfig>` | Per-query overrides keyed by a subscribed query's ID, name, or the last dotted segment of its name. Keys are resolved to query IDs when the reaction starts. |
 
 ### `QueryConfig`
 
@@ -255,13 +255,15 @@ with different rendered metadata values are sent in separate RPCs.
 
 `outputTemplates` lets each query customise the body `payload` on each emitted `QueryResultItem`. For each result, the reaction selects a template in this order:
 
-1. `outputTemplates.routes[<query_id>]` — a per-query override matched by the
-   exact wire query id.
-2. `outputTemplates.routes[<last dotted segment>]` — so a route keyed `my_query`
-   matches a wire id `source.my_query`.
-3. `outputTemplates.defaultTemplate` — a shared fallback, if present.
-4. **No template** — `payload` uses the canonical JSON item when `outputFormat`
+1. The `outputTemplates.routes` entry resolved to the result's query ID (see below).
+2. `outputTemplates.defaultTemplate` — a shared fallback, if present.
+3. **No template** — `payload` uses the canonical JSON item when `outputFormat`
    is `canonicalJson`, or is omitted when `outputFormat` is `proto`.
+
+When the reaction starts, each route key is resolved to the permanent ID of a subscribed
+query. A key may be the query's ID, its name, or the last dotted segment of its name (so
+`my_query` selects `source.my_query`). An unknown key, or two keys selecting the same query,
+makes `start()` fail. Results are then routed by query ID, so a renamed query keeps its route.
 
 Within the selected `QueryConfig`, the `added` / `updated` / `deleted` spec matching the result's operation is used:
 
@@ -686,7 +688,7 @@ or resolve uncertainty after a process failure or lost acknowledgement.
 
 Unit tests cover config defaults, builder semantics (including per-field adaptive
 setters), endpoint/batching validation, template validation at construction, route
-resolution (exact, dotted-suffix, default), template render success/failure,
+binding at start (unknown keys fail), route-then-default resolution, template render success/failure,
 per-template metadata rendering, and `build_proto_item` field population for every
 variant.
 
@@ -701,7 +703,7 @@ Integration tests in `tests/integration_tests.rs` use an in-process tonic mock
   item carries the canonical payload — events are never dropped.
 - `UPDATE` and `DELETE` template context (before / after population) and the
   portable standard keys (`after`, `operation`).
-- Per-query route resolution over the wire (exact id, last dotted segment, and
+- Per-query route resolution over the wire (routes bound to query IDs, and
   default fallthrough) and the `{{json}}` helper embedding a nested row.
 - Output format `proto` (payload omitted without a template; rendered payload
   retained when one applies).

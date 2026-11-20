@@ -1,7 +1,7 @@
 # Native log sink
 
 `drasi-computation-sink-log` provides `drasi.standard/log` (implementation `1`,
-configuration version `1`, native ABI 5.0). It writes each standard graph
+configuration version `1`, native ABI 0.1). It writes each standard graph
 change as one line, rendered by a per-output Handlebars template or formatted
 as JSON or the legacy compact form, to the host's logger (also when loaded as a
 plugin library, through the SDK's logging bridge), stdout or stderr. Each input

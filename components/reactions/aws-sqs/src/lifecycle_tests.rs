@@ -199,3 +199,40 @@ async fn worker_panic_and_remaining_base_cleanup_block_restart() {
     .unwrap();
     support::assert_panic_cleanup(&reaction, &reaction.base).await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn routes_bind_dotted_names_and_reject_unknown_keys_at_start() {
+    let build = |route: &str| {
+        SqsReaction::builder(
+            drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000006e")
+                .expect("fixture UUID"),
+        )
+        .with_query_by_name(
+            drasi_core::ComponentName::try_new("source.q1").expect("fixture component name"),
+        )
+        .with_queue_url("http://127.0.0.1:1/queue")
+        .with_endpoint_url("http://127.0.0.1:1")
+        .with_region("us-east-1")
+        .with_credentials("test", "test")
+        .with_route(route, QueryConfig::default())
+        .build()
+        .expect("route keys are checked at start")
+    };
+
+    let reaction = build("q1");
+    support::initialize(&reaction, Arc::new(MemoryStateStoreProvider::new())).await;
+    let routes = reaction
+        .base
+        .bind_routes(&reaction.config.routes)
+        .await
+        .unwrap();
+    assert!(routes.contains_key(&support::result(1).query_id));
+
+    let reaction = build("unknown");
+    support::initialize(&reaction, Arc::new(MemoryStateStoreProvider::new())).await;
+    let err = reaction.start().await.expect_err("unknown route");
+    assert!(err
+        .to_string()
+        .contains("does not match any subscribed query"));
+    assert!(reaction.base.processing_task.read().await.is_none());
+}

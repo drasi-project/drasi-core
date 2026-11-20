@@ -257,7 +257,7 @@ mod legacy_reaction;
 mod legacy_resources;
 mod source_transaction;
 pub use legacy_index::*;
-pub use legacy_resources::GraphResourceObserver;
+pub use legacy_resources::{GraphComponentDirectory, GraphResourceObserver};
 pub(crate) mod plugin_services;
 pub use plugin_services::*;
 mod plugin_source;

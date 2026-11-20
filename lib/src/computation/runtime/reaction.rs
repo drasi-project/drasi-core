@@ -165,7 +165,10 @@ impl ReactionInstance {
     }
     pub(super) async fn delete_owned_resources(&self) -> anyhow::Result<()> {
         RuntimeComponent::stop(self).await?;
-        self.reaction.delete_owned_resources().await
+        match self.current_host()? {
+            Some(host) => host.delete_owned_resources().await,
+            None => self.reaction.delete_owned_resources().await,
+        }
     }
 }
 #[async_trait]
@@ -289,6 +292,7 @@ impl RuntimeComponent for ReactionInstance {
             self.reaction.id().clone(),
             generation,
         )))?;
+        host.set_component_directory(Arc::new(GraphComponentDirectory::new(owner.control()?)))?;
         // Retain the owner before initialization can be interrupted.
         *self
             .host

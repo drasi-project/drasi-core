@@ -254,16 +254,16 @@ pub trait Reaction: Send + Sync {
         Ok(())
     }
 
-    /// Permanently clean up internal state when the reaction is being removed.
+    /// Release external resources this reaction created, when it is removed with
+    /// its data erased (e.g., delete output topics, remove external subscriptions).
     ///
-    /// This is called when `remove_reaction(id, cleanup: true)` is used.
-    /// Use this to release external resources that should not persist after
-    /// the reaction is deleted (e.g., delete output topics, remove external subscriptions).
-    ///
-    /// Support is explicit. Failure retains the cleanup owner and prevents
-    /// final release; ordinary disposal never invokes this destructive hook.
+    /// DrasiLib erases the reaction's own stored state (its state-store partition,
+    /// checkpoints and recovery metadata) itself after this hook succeeds, so the
+    /// default is a no-op for reactions without external resources. Failure
+    /// retains the cleanup owner and prevents final release; ordinary disposal
+    /// never invokes this destructive hook.
     async fn delete_owned_resources(&self) -> Result<()> {
-        anyhow::bail!("this reaction does not support deleting owned resources")
+        Ok(())
     }
 
     /// Set the identity provider for this reaction.

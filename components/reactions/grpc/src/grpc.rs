@@ -52,7 +52,7 @@ impl GrpcReaction {
         queries: Vec<drasi_lib::config::ComponentReference>,
         config: GrpcReactionConfig,
     ) -> anyhow::Result<Self> {
-        config.validate(&drasi_lib::reactions::common::input_aliases(&queries))?;
+        config.validate_settings()?;
         let id = id.clone();
         let params = ReactionBaseParams::new(id, queries);
         Ok(Self {
@@ -68,7 +68,7 @@ impl GrpcReaction {
         config: GrpcReactionConfig,
         priority_queue_capacity: usize,
     ) -> anyhow::Result<Self> {
-        config.validate(&drasi_lib::reactions::common::input_aliases(&queries))?;
+        config.validate_settings()?;
         let id = id.clone();
         let params = ReactionBaseParams::new(id, queries)
             .with_priority_queue_capacity(priority_queue_capacity);
@@ -145,6 +145,10 @@ impl Reaction for GrpcReaction {
         if *cleanup_required || self.base.processing_task.read().await.is_some() {
             return Err(drasi_lib::context::workers::WorkerAlreadyOwned.into());
         }
+        let routes = match self.config.output_templates.as_ref() {
+            Some(templates) => self.base.bind_routes(&templates.routes).await?,
+            None => HashMap::new(),
+        };
         *cleanup_required = true;
         log_component_start("gRPC Reaction", &self.base.id);
         info!(
@@ -205,6 +209,7 @@ impl Reaction for GrpcReaction {
                         batch_flush_timeout_ms,
                         base,
                         config,
+                        routes,
                         shutdown_rx,
                         checkpoints,
                         policy,
@@ -217,6 +222,7 @@ impl Reaction for GrpcReaction {
                         adaptive: adaptive.as_adaptive_config().unwrap_or_default(),
                         base,
                         config,
+                        routes,
                         shutdown_rx,
                         checkpoints,
                         policy,

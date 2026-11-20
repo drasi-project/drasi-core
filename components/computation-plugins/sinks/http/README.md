@@ -1,7 +1,7 @@
 # Native HTTP sinks
 
 `drasi-computation-sink-http` provides two native ComputationGraph factories
-(implementation `1`, configuration version `1`, native ABI 5.0). Both consume
+(implementation `1`, configuration version `1`, native ABI 0.1). Both consume
 standard graph-change envelopes on their `in` port from any producer: a source,
 a transformer or a query ([sink input contract](../../SINKS.md)).
 

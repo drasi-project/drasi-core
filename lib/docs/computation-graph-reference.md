@@ -714,7 +714,7 @@ dynamic loading by itself neither supplies nor rules out replay support.
 
 The [native ABI](../../components/computation-plugin-abi/src/lib.rs) and
 [native SDK](../../components/computation-plugin-sdk/README.md) are separate from
-the existing Source/Reaction plugin interface. ABI 5.0 loads sources,
+the existing Source/Reaction plugin interface. ABI 0.1 loads sources,
 transformers, sinks and services directly into graph-native proxies; it does not
 translate them back into the older component model.
 
@@ -735,7 +735,7 @@ operations cross the boundary as poll/wake/cancel handles and owned serialized
 buffers. Control notifications do not wait behind mutable data processing.
 Libraries remain loaded for the process lifetime.
 
-Native wire version 5 uses `BinaryEnvelopeCodec` and bulk MessagePack byte buffers.
+Native wire version 1 uses `BinaryEnvelopeCodec` and bulk MessagePack byte buffers.
 The binary transport preserves the complete envelope and runs the same registered
 record validators; it does not strip context, lineage or recovery metadata.
 Producer-owned reply buffers remain alive during decoding and are released

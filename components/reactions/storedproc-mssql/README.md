@@ -221,7 +221,7 @@ let reaction = MsSqlStoredProcReaction::builder("my-reaction")
 | `database` | Database name | `String` | Required |
 | `ssl` | Enable TLS encryption | `bool` | `false` |
 | `default_template` | Command templates applied to all queries unless overridden | `Option<QueryConfig>` | `None` |
-| `routes` | Per-query command templates (keyed by query id) | `Map<String, QueryConfig>` | `{}` |
+| `routes` | Per-query command templates keyed by a subscribed query's ID, name, or last dotted name segment; resolved to query IDs at start | `Map<String, QueryConfig>` | `{}` |
 | `command_timeout_ms` | Command timeout | `u64` | `30000` |
 | `retry_attempts` | Number of retries | `u32` | `3` |
 

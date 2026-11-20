@@ -325,7 +325,10 @@ pub use wal::{
 };
 
 /// Runtime context types for plugin initialization
-pub use context::{QueryRuntimeContext, ReactionRuntimeContext, SourceRuntimeContext};
+pub use context::{
+    ComponentDirectory, InputBinding, QueryRuntimeContext, ReactionRuntimeContext,
+    SourceRuntimeContext,
+};
 
 /// Checkpoint type for durable reaction progress tracking
 pub use reactions::ReactionCheckpoint;

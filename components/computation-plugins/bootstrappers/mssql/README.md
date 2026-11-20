@@ -4,7 +4,7 @@
 this family is verified by unit tests and database-free Host checks only.**
 
 One bootstrap-role crate exports two explicit factories, both through the real
-static SDK and the native ABI 5.0 dynamic library:
+static SDK and the native ABI 0.1 dynamic library:
 
 | Factory | Permissions and behavior |
 |---|---|

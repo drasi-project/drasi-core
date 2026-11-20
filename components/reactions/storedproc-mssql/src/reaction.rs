@@ -92,8 +92,9 @@ impl MsSqlStoredProcReaction {
         priority_queue_capacity: Option<usize>,
         auto_start: bool,
     ) -> Result<Self> {
-        // Validate configuration (including template compilation and route keys)
-        config.validate(&drasi_lib::reactions::common::input_aliases(&queries))?;
+        // Validate configuration (including template compilation); route keys
+        // are resolved to query IDs at start.
+        config.validate_settings()?;
 
         // Create reaction base
         let mut params = ReactionBaseParams::new(id, queries).with_auto_start(auto_start);
@@ -121,6 +122,7 @@ impl MsSqlStoredProcReaction {
 async fn process_query_result(
     reaction_id: &drasi_lib::ComponentId,
     config: &MsSqlStoredProcReactionConfig,
+    routes: &HashMap<drasi_lib::ComponentId, QueryConfig>,
     executor: &MsSqlExecutor,
     query_result: &QueryResult,
 ) {
@@ -141,7 +143,9 @@ async fn process_query_result(
         };
 
         // Resolve the command template for this query and operation type.
-        let Some(template) = config.get_command_template(query_result, operation) else {
+        let Some(template) =
+            config.get_command_template(routes.get(&query_result.query_id), operation)
+        else {
             debug!(
                 "[{reaction_id}] No command configured for {} operation on query '{}', skipping",
                 context
@@ -190,6 +194,7 @@ async fn run_processing_loop(
     reaction_id: drasi_lib::ComponentId,
     base: ReactionBase,
     config: MsSqlStoredProcReactionConfig,
+    routes: HashMap<drasi_lib::ComponentId, QueryConfig>,
     executor: Arc<MsSqlExecutor>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
@@ -209,7 +214,14 @@ async fn run_processing_loop(
             continue;
         }
 
-        process_query_result(&reaction_id, &config, &executor, query_result.as_ref()).await;
+        process_query_result(
+            &reaction_id,
+            &config,
+            &routes,
+            &executor,
+            query_result.as_ref(),
+        )
+        .await;
     }
 }
 
@@ -284,6 +296,19 @@ impl Reaction for MsSqlStoredProcReaction {
             self.base.id, self.config.database
         );
 
+        let routes = match self.base.bind_routes(&self.config.routes).await {
+            Ok(routes) => routes,
+            Err(e) => {
+                self.base
+                    .set_status(
+                        ComponentStatus::Error,
+                        Some(format!("Invalid MS SQL StoredProc reaction config: {e:#}")),
+                    )
+                    .await;
+                return Err(e);
+            }
+        };
+
         // Create executor (deferred to start so identity_provider from context is available)
         let identity_provider = self.base.identity_provider().await;
         let executor = match MsSqlExecutor::new(&self.config, identity_provider).await {
@@ -320,6 +345,7 @@ impl Reaction for MsSqlStoredProcReaction {
             self.base.id.clone(),
             self.base.clone_shared(),
             self.config.clone(),
+            routes,
             executor,
             shutdown_rx,
         ));

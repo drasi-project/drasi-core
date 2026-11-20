@@ -255,14 +255,47 @@ fn validate_query_config(qc: &EventGridQueryConfig) -> anyhow::Result<()> {
 }
 
 impl EventGridReactionConfig {
-    /// Validate the configuration against the reaction's subscribed
-    /// `query_ids`. Called by the builder's `build()` so misconfiguration fails
-    /// at construction rather than at dispatch.
+    /// Resolve the template spec for an already-resolved per-query route,
+    /// falling back to the default template for operations the route leaves
+    /// unset.
+    pub fn route_template_spec<'a>(
+        &'a self,
+        route: Option<&'a EventGridQueryConfig>,
+        operation: OperationType,
+    ) -> Option<&'a EventGridTemplateSpec> {
+        route
+            .and_then(|qc| Self::get_spec_from_config(qc, operation))
+            .or_else(|| {
+                self.default_template()
+                    .and_then(|qc| Self::get_spec_from_config(qc, operation))
+            })
+    }
+
+    /// Validate the configuration against the subscribed `query_ids`:
+    /// [`Self::validate_settings`] plus a check that every route key matches
+    /// a query id (or its last dotted segment).
     pub fn validate(
         &self,
         query_ids: &[String],
         priority_queue_capacity: Option<usize>,
     ) -> anyhow::Result<()> {
+        self.validate_settings(priority_queue_capacity)?;
+        if let Some(templates) = &self.output_templates {
+            for key in templates.routes.keys() {
+                let matches = query_ids.iter().any(|q| q == key || last_segment(q) == key);
+                if !matches {
+                    anyhow::bail!(
+                        "output template route '{key}' does not match any subscribed query id"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate everything except route keys, which the reaction resolves to
+    /// query IDs when it starts.
+    pub fn validate_settings(&self, priority_queue_capacity: Option<usize>) -> anyhow::Result<()> {
         validate_endpoint(&self.endpoint, self.allow_http).context("endpoint")?;
 
         if self.timeout_ms == 0 {
@@ -293,12 +326,6 @@ impl EventGridReactionConfig {
             }
             for (key, qc) in &templates.routes {
                 validate_query_config(qc).with_context(|| format!("route '{key}'"))?;
-                let matches = query_ids.iter().any(|q| q == key || last_segment(q) == key);
-                if !matches {
-                    anyhow::bail!(
-                        "output template route '{key}' does not match any subscribed query id"
-                    );
-                }
             }
         }
 

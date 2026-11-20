@@ -291,7 +291,8 @@ impl RuntimeComponent for SourceInstance {
         Ok(())
     }
     async fn delete_owned_resources(&self) -> anyhow::Result<()> {
-        self.source.delete_owned_resources().await
+        self.source.delete_owned_resources().await?;
+        self.services.erase_component_state(self.source.id()).await
     }
     async fn pause_processing(&self) -> anyhow::Result<()> {
         self.source.pause_processing().await

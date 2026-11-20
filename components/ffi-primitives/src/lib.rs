@@ -107,8 +107,8 @@ mod abi_marker_tests {
             Ok("0.19.0")
         );
         assert_eq!(
-            read_abi_version_marker(b"\0native-abi=5.0.0\0", b"native-abi="),
-            Ok("5.0.0")
+            read_abi_version_marker(b"\0native-abi=0.1.0\0", b"native-abi="),
+            Ok("0.1.0")
         );
     }
 

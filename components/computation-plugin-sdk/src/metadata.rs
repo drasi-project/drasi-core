@@ -909,7 +909,8 @@ mod tests {
     }
 }
 
-/// Same major and an older or equal minor, matching the binary header rule.
+/// The binary header rule: the same major and minor before 1.0, afterwards the
+/// same major with an older or equal minor.
 fn accepts_abi_version(version: &str) -> bool {
     abi::accepts_abi_version(version)
 }
@@ -917,11 +918,12 @@ fn accepts_abi_version(version: &str) -> bool {
 #[cfg(test)]
 mod abi_version_tests {
     #[test]
-    fn accepts_same_major_older_or_equal_minor_only() {
+    fn accepts_only_this_pre_release_version() {
         assert!(super::accepts_abi_version(super::abi::ABI_VERSION));
-        assert!(!super::accepts_abi_version("4.0.0"));
-        assert!(!super::accepts_abi_version("5.1.0"));
-        assert!(!super::accepts_abi_version("5.0"));
-        assert!(!super::accepts_abi_version("6.0.0"));
+        assert!(super::accepts_abi_version("0.1.7"));
+        assert!(!super::accepts_abi_version("0.0.1"));
+        assert!(!super::accepts_abi_version("0.2.0"));
+        assert!(!super::accepts_abi_version("0.1"));
+        assert!(!super::accepts_abi_version("5.0.0"));
     }
 }

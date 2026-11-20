@@ -192,3 +192,55 @@ async fn startup_registration_cancellation_and_worker_panic_preserve_cleanup_fen
     .unwrap();
     support::assert_panic_cleanup(&reaction, &reaction.base).await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn unknown_route_is_rejected_at_start() {
+    let reaction = LokiReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000029c")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_endpoint("http://127.0.0.1:1")
+    .with_route("unsubscribed", QueryConfig::default())
+    .build()
+    .expect("route keys are checked at start");
+    support::initialize(&reaction, Arc::new(MemoryStateStoreProvider::new())).await;
+    let err = reaction.start().await.expect_err("unknown route");
+    assert!(err
+        .to_string()
+        .contains("does not match any subscribed query"));
+    assert!(reaction.base.processing_task.read().await.is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn routes_select_templates_by_query_id() {
+    let mut server = receiver(1, false).await;
+    let reaction = LokiReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000029b")
+            .expect("fixture UUID"),
+    )
+    .with_query_by_name(drasi_core::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_endpoint(&server.url)
+    .with_token("test-token")
+    .with_tenant_id("test-tenant")
+    .with_label("job", "lifecycle")
+    .with_label("generation", "{{after.generation}}")
+    .with_route(
+        "q1",
+        QueryConfig {
+            added: Some(TemplateSpec::new("{{json after}}")),
+            ..Default::default()
+        },
+    )
+    .build()
+    .unwrap();
+    support::initialize(&reaction, Arc::new(MemoryStateStoreProvider::new())).await;
+    reaction.start().await.unwrap();
+    let mut result = support::result(1);
+    result.query_name = None;
+    reaction.enqueue_query_result(result).await.unwrap();
+    arrived(&mut server, 1).await;
+    server.release.add_permits(1);
+    reaction.stop().await.unwrap();
+    server.worker.await.unwrap();
+}

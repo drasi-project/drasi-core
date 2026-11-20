@@ -208,6 +208,20 @@ impl OutputTemplates {
     /// matches a subscribed query id (or its last dotted segment). Called
     /// at construction time so misconfiguration fails fast.
     pub fn validate(&self, query_ids: &[String]) -> anyhow::Result<()> {
+        self.validate_templates()?;
+        for key in self.routes.keys() {
+            if !route_key_matches(key, query_ids) {
+                anyhow::bail!(
+                    "outputTemplates route key '{key}' does not match any subscribed query id \
+                     (or its last dotted segment)"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Compile every configured template without checking route keys.
+    pub fn validate_templates(&self) -> anyhow::Result<()> {
         use anyhow::Context as _;
         if let Some(qc) = self.default_template.as_ref() {
             validate_query_config(qc).context("invalid defaultTemplate")?;
@@ -215,12 +229,6 @@ impl OutputTemplates {
         for (key, qc) in &self.routes {
             validate_query_config(qc)
                 .with_context(|| format!("invalid outputTemplates route '{key}'"))?;
-            if !route_key_matches(key, query_ids) {
-                anyhow::bail!(
-                    "outputTemplates route key '{key}' does not match any subscribed query id \
-                     (or its last dotted segment)"
-                );
-            }
         }
         Ok(())
     }
@@ -306,6 +314,16 @@ impl GrpcReactionConfig {
     /// query id (or its last dotted segment), so a misconfiguration fails at
     /// `build()` rather than per-event at dispatch.
     pub fn validate(&self, query_ids: &[String]) -> anyhow::Result<()> {
+        self.validate_settings()?;
+        if let Some(templates) = self.output_templates.as_ref() {
+            templates.validate(query_ids)?;
+        }
+        Ok(())
+    }
+
+    /// Validate everything except route keys, which a reaction resolves to
+    /// query IDs when it starts.
+    pub fn validate_settings(&self) -> anyhow::Result<()> {
         validate_endpoint(&self.endpoint)?;
         validate_positive(self.timeout_ms, "timeoutMs")?;
         validate_positive(
@@ -339,7 +357,7 @@ impl GrpcReactionConfig {
             }
         }
         if let Some(templates) = self.output_templates.as_ref() {
-            templates.validate(query_ids)?;
+            templates.validate_templates()?;
         }
         Ok(())
     }

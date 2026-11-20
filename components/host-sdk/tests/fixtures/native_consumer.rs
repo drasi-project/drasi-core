@@ -139,7 +139,13 @@ impl Handler {
                     .create_new(true)
                     .open(path)
                 {
-                    Ok(_) => anyhow::bail!("fixture one-shot second operation failure"),
+                    // Permanent, so the graph stalls the consumer with the
+                    // operation prefix committed instead of retrying in
+                    // place; only a later activation delivers the input.
+                    Ok(_) => Err(drasi_computation_contracts::DeliveryFailure::permanent(
+                        anyhow::anyhow!("fixture one-shot second operation failure"),
+                    )
+                    .into()),
                     Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
                     Err(error) => Err(error.into()),
                 }

@@ -415,6 +415,18 @@ impl Reaction for ReactionProxy {
                     .as_ref()
                     .map(|sf| SnapshotFetcherVtableBuilder::build(sf.clone()));
 
+                let cd_ptr = context
+                    .component_directory
+                    .as_ref()
+                    .map(|directory| {
+                        Box::into_raw(Box::new(
+                            crate::component_directory_bridge::ComponentDirectoryVtableBuilder::build(
+                                directory.clone(),
+                            ),
+                        )) as *const _
+                    })
+                    .unwrap_or(std::ptr::null());
+
                 let sf_ptr = snapshot_fetcher_vtable
                     .map(|v| Box::into_raw(Box::new(v)) as *const _)
                     .unwrap_or(std::ptr::null());
@@ -431,6 +443,7 @@ impl Reaction for ReactionProxy {
                     lifecycle_ctx: ctx_ptr,
                     snapshot_fetcher: sf_ptr,
                     wal_provider: std::ptr::null(),
+                    component_directory: cd_ptr,
                 };
 
                 let result = bind_fn(owner.state.as_ptr(), &ffi_ctx as *const FfiRuntimeContext);

@@ -398,8 +398,8 @@ fn test_sse_builder_route_validation_passes() {
     assert!(result.is_ok());
 }
 
-#[test]
-fn test_sse_builder_route_validation_fails() {
+#[tokio::test]
+async fn test_sse_start_rejects_unknown_route() {
     let route_config = QueryConfig {
         added: Some(TemplateSpec {
             template: r#"{"data": {{json after}}}"#.to_string(),
@@ -409,21 +409,35 @@ fn test_sse_builder_route_validation_fails() {
         deleted: None,
     };
 
-    let result = SseReaction::builder(
+    let reaction = SseReaction::builder(
         drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000021")
             .expect("fixture UUID"),
     )
     .with_query_by_name(
         drasi_core::ComponentName::try_new("query1").expect("fixture component name"),
     )
+    .with_port(0)
     .with_route("query2", route_config)
-    .build();
+    .build()
+    .expect("route keys are checked at start");
+    let (update_tx, _updates) = tokio::sync::mpsc::channel(16);
+    reaction
+        .bind_runtime_context(ReactionRuntimeContext::new(
+            "test-instance",
+            reaction.id().clone(),
+            vec![drasi_core::ComponentId::generate()],
+            None,
+            update_tx,
+            None,
+        ))
+        .await;
 
-    assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
+    let error = reaction.start().await.expect_err("unknown route");
+    assert!(error
         .to_string()
         .contains("does not match any subscribed query"));
+    assert!(reaction.base.processing_task.read().await.is_none());
+    assert!(reaction.base.shutdown_tx.read().await.is_none());
 }
 
 #[test]

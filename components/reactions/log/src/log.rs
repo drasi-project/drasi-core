@@ -47,13 +47,12 @@ impl LogReaction {
     ///
     /// # Returns
     ///
-    /// Returns `Ok(LogReaction)` if all templates are valid and all routes correspond to subscribed queries.
-    /// Returns `Err` if template validation fails or if a route doesn't match a subscribed query.
+    /// Returns `Ok(LogReaction)` if all templates are valid. Route keys are matched
+    /// to subscribed queries when the reaction starts.
     ///
     /// # Errors
     ///
     /// - Returns error if any template has invalid Handlebars syntax
-    /// - Returns error if a route query ID doesn't match any subscribed query
     pub fn new(
         id: drasi_lib::ComponentId,
         queries: Vec<drasi_lib::config::ComponentReference>,
@@ -61,11 +60,7 @@ impl LogReaction {
     ) -> anyhow::Result<Self> {
         let id = id.clone();
 
-        // Validate templates and routes
-        Self::validate_config(
-            &drasi_lib::reactions::common::input_aliases(&queries),
-            &config,
-        )?;
+        Self::validate_config(&config)?;
 
         let params = ReactionBaseParams::new(id, queries);
         Ok(Self {
@@ -89,13 +84,12 @@ impl LogReaction {
     ///
     /// # Returns
     ///
-    /// Returns `Ok(LogReaction)` if all templates are valid and all routes correspond to subscribed queries.
-    /// Returns `Err` if template validation fails or if a route doesn't match a subscribed query.
+    /// Returns `Ok(LogReaction)` if all templates are valid. Route keys are matched
+    /// to subscribed queries when the reaction starts.
     ///
     /// # Errors
     ///
     /// - Returns error if any template has invalid Handlebars syntax
-    /// - Returns error if a route query ID doesn't match any subscribed query
     pub fn with_priority_queue_capacity(
         id: drasi_lib::ComponentId,
         queries: Vec<drasi_lib::config::ComponentReference>,
@@ -104,11 +98,7 @@ impl LogReaction {
     ) -> anyhow::Result<Self> {
         let id = id.clone();
 
-        // Validate templates and routes
-        Self::validate_config(
-            &drasi_lib::reactions::common::input_aliases(&queries),
-            &config,
-        )?;
+        Self::validate_config(&config)?;
 
         let params = ReactionBaseParams::new(id, queries)
             .with_priority_queue_capacity(priority_queue_capacity);
@@ -144,34 +134,16 @@ impl LogReaction {
         Ok(())
     }
 
-    /// Validate configuration: templates and route-query matching
-    fn validate_config(queries: &[String], config: &LogReactionConfig) -> anyhow::Result<()> {
-        // Validate all templates in routes
+    /// Validate template syntax. Route keys are matched to queries at start.
+    fn validate_config(config: &LogReactionConfig) -> anyhow::Result<()> {
         for (query_id, route_config) in &config.routes {
             Self::validate_query_config(route_config)
                 .map_err(|e| anyhow::anyhow!("Invalid template in route '{query_id}': {e}"))?;
         }
 
-        // Validate default template if provided
         if let Some(default_template) = &config.default_template {
             Self::validate_query_config(default_template)
                 .map_err(|e| anyhow::anyhow!("Invalid default template: {e}"))?;
-        }
-
-        // Validate that all routes correspond to subscribed queries
-        if !config.routes.is_empty() && !queries.is_empty() {
-            for route_query in config.routes.keys() {
-                // Pre-compute dotted format once per route
-                let dotted_route = format!(".{route_query}");
-                let matches = queries
-                    .iter()
-                    .any(|q| q == route_query || q.ends_with(&dotted_route));
-                if !matches {
-                    return Err(anyhow::anyhow!(
-                        "Route '{route_query}' does not match any subscribed query. Subscribed queries: {queries:?}"
-                    ));
-                }
-            }
         }
 
         Ok(())
@@ -340,19 +312,14 @@ impl LogReactionBuilder {
     ///
     /// # Returns
     ///
-    /// Returns `Ok(LogReaction)` if all templates are valid and all routes correspond to subscribed queries.
-    /// Returns `Err` if template validation fails or if a route doesn't match a subscribed query.
+    /// Returns `Ok(LogReaction)` if all templates are valid. Route keys are matched
+    /// to subscribed queries when the reaction starts.
     ///
     /// # Errors
     ///
     /// - Returns error if any template has invalid Handlebars syntax
-    /// - Returns error if a route query ID doesn't match any subscribed query
     pub fn build(self) -> anyhow::Result<LogReaction> {
-        // Validate templates and routes
-        LogReaction::validate_config(
-            &drasi_lib::reactions::common::input_aliases(&self.queries),
-            &self.config,
-        )?;
+        LogReaction::validate_config(&self.config)?;
 
         let mut params =
             ReactionBaseParams::new(self.id, self.queries).with_auto_start(self.auto_start);
@@ -424,6 +391,7 @@ impl Reaction for LogReaction {
         if *cleanup_required || self.base.processing_task.read().await.is_some() {
             return Err(drasi_lib::context::workers::WorkerAlreadyOwned.into());
         }
+        let routes = self.base.bind_routes(&self.config.routes).await?;
         *cleanup_required = true;
         log_component_start("Reaction", &self.base.id);
 
@@ -523,11 +491,8 @@ impl Reaction for LogReaction {
                     context.insert("input_alias".to_string(), serde_json::json!(query_result.input_alias));
 
                     // Get query-specific config if available, otherwise use default
-                    let query_config = drasi_lib::reactions::common::input_alias(
-                        query_result.input_alias.as_deref(),
-                        query_result.query_name.as_ref(),
-                    )
-                        .and_then(|alias| config.routes.get(alias))
+                    let query_config = routes
+                        .get(&query_result.query_id)
                         .or(config.default_template.as_ref());
 
                     match result {

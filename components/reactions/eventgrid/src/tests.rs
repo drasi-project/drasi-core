@@ -46,6 +46,24 @@ fn query_result(
     )
 }
 
+/// Routes keyed by the fixture query's name, resolved to its query ID.
+fn name_routes(
+    config: &EventGridReactionConfig,
+    qr: &QueryResult,
+) -> HashMap<drasi_core::ComponentId, EventGridQueryConfig> {
+    qr.query_name
+        .as_ref()
+        .and_then(|name| {
+            config
+                .output_templates
+                .as_ref()?
+                .routes
+                .get(&name.to_string())
+        })
+        .map(|route| HashMap::from([(qr.query_id.clone(), route.clone())]))
+        .unwrap_or_default()
+}
+
 fn add(data: serde_json::Value) -> ResultDiff {
     ResultDiff::Add {
         data,
@@ -458,7 +476,13 @@ fn build_events_packed_emits_single_event() {
         1,
         vec![add(json!({ "id": 1 })), add(json!({ "id": 2 }))],
     );
-    let events = build_events(&reaction_id(), &config, &hb, &qr);
+    let events = build_events(
+        &reaction_id(),
+        &config,
+        &name_routes(&config, &qr),
+        &hb,
+        &qr,
+    );
     assert_eq!(events.len(), 1);
     assert_eq!(
         events[0].subject,
@@ -484,7 +508,13 @@ fn build_events_packed_skips_noop_only() {
         1,
         vec![ResultDiff::Noop],
     );
-    let events = build_events(&reaction_id(), &config, &hb, &qr);
+    let events = build_events(
+        &reaction_id(),
+        &config,
+        &name_routes(&config, &qr),
+        &hb,
+        &qr,
+    );
     assert!(events.is_empty());
 }
 
@@ -507,7 +537,13 @@ fn build_events_unpacked_emits_per_diff() {
             ResultDiff::Noop,
         ],
     );
-    let events = build_events(&reaction_id(), &config, &hb, &qr);
+    let events = build_events(
+        &reaction_id(),
+        &config,
+        &name_routes(&config, &qr),
+        &hb,
+        &qr,
+    );
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].data["op"], "i");
     assert_eq!(events[1].data["op"], "d");
@@ -547,7 +583,13 @@ fn build_events_template_renders_data_and_metadata() {
     );
     qr.query_name =
         Some(drasi_lib::ComponentName::try_new("orders").expect("fixture component name"));
-    let events = build_events(&reaction_id(), &config, &hb, &qr);
+    let events = build_events(
+        &reaction_id(),
+        &config,
+        &name_routes(&config, &qr),
+        &hb,
+        &qr,
+    );
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].data["productId"], 42);
     assert_eq!(
@@ -586,7 +628,13 @@ fn build_events_template_invalid_json_falls_back_to_unpacked() {
     );
     qr.query_name =
         Some(drasi_lib::ComponentName::try_new("orders").expect("fixture component name"));
-    let events = build_events(&reaction_id(), &config, &hb, &qr);
+    let events = build_events(
+        &reaction_id(),
+        &config,
+        &name_routes(&config, &qr),
+        &hb,
+        &qr,
+    );
     assert_eq!(events.len(), 1);
     // Fallback = unpacked notification.
     assert_eq!(events[0].data["op"], "i");
@@ -623,9 +671,54 @@ fn build_events_template_missing_template_falls_back_to_unpacked() {
     );
     qr.query_name =
         Some(drasi_lib::ComponentName::try_new("orders").expect("fixture component name"));
-    let events = build_events(&reaction_id(), &config, &hb, &qr);
+    let events = build_events(
+        &reaction_id(),
+        &config,
+        &name_routes(&config, &qr),
+        &hb,
+        &qr,
+    );
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].data["op"], "i");
+}
+
+#[tokio::test]
+async fn unknown_route_key_fails_at_start() {
+    let reaction = EventGridReaction::builder(
+        drasi_core::ComponentId::try_new("00000000-0000-0000-0000-0000000000dc")
+            .expect("fixture UUID"),
+    )
+    .with_endpoint("https://x.eventgrid.azure.net/api/events") // DevSkim: ignore DS137138
+    .with_access_key("k")
+    .with_format(OutputFormat::Template)
+    .with_query_by_name(drasi_lib::ComponentName::try_new("q1").expect("fixture component name"))
+    .with_query_template(
+        "unknown",
+        EventGridQueryConfig {
+            added: Some(spec("{{after.id}}")),
+            ..Default::default()
+        },
+    )
+    .build()
+    .expect("route keys are checked at start");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    reaction
+        .bind_runtime_context(drasi_lib::context::ReactionRuntimeContext::new(
+            "instance",
+            reaction.id().clone(),
+            vec![drasi_core::ComponentId::generate()],
+            None,
+            tx,
+            None,
+        ))
+        .await;
+    let err = reaction.start().await.expect_err("unknown route");
+    assert!(
+        err.to_string()
+            .contains("does not match any subscribed query"),
+        "{err}"
+    );
 }
 
 // ---------------------------------------------------------------------------

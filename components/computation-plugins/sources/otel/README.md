@@ -1,7 +1,7 @@
 # Native OpenTelemetry source
 
 `drasi-computation-source-otel` provides `drasi.network/otel-source`
-(implementation `1`, configuration version `1`, native ABI 5.0). It receives
+(implementation `1`, configuration version `1`, native ABI 0.1). It receives
 OpenTelemetry Protocol (OTLP) exports over gRPC and/or HTTP (binary protobuf)
 and projects an allowlisted subset into a live service graph on its `out` port:
 
