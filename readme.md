@@ -333,9 +333,9 @@ make publish-all PRE_RELEASE=dev.1
 
 The [Release-plz workflow](.github/workflows/release-plz.yml) publishes crates to crates.io, then calls [publish-plugins.yml](.github/workflows/publish-plugins.yml) to build and publish signed OCI plugins across its configured architecture matrix. The plugin workflow can also be triggered manually via `workflow_dispatch` in the GitHub Actions UI.
 
-Before publishing, read-only package metadata checks verify that `drasi-plugin-directory` exists and is public. After all builds and pushes succeed, every plugin package is checked for public visibility. GitHub does not support changing package visibility through the REST endpoint used to read metadata: a package administrator must select **Public** in each package's GitHub **Package settings** → **Change visibility**, including for new packages after their first push, then rerun verification.
+Before publishing, anonymous GHCR pull checks verify that `drasi-plugin-directory` exists and is publicly pullable. After all builds and pushes succeed, every plugin package is checked the same way by listing tags and fetching a manifest. A package administrator must select **Public** in each package's GitHub **Package settings** → **Change visibility**, including for new packages after their first push, then rerun verification.
 
-The compatibility-named `PACKAGES_ADMIN_TOKEN` secret only needs a classic PAT with `read:packages` and appropriate organization access/SSO for these checks; a successful check does not establish admin access. See [workflow setup and release recovery](.github/workflows/readme.md#recovering-from-failed-releases) for details.
+These checks use anonymous pull-scoped GHCR tokens and do not require a personal access token. See [workflow setup and release recovery](.github/workflows/readme.md#recovering-from-failed-releases) for details.
 
 Normal nightly and release preparation share the committed root `Cargo.lock`.
 Each prepared candidate is frozen once and consumed with `--locked` across all

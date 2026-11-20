@@ -796,6 +796,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_release_and_nightly_share_candidate_and_publication_safeguards(self):
         publication = repair_tests.workflow(ROOT / ".github/workflows/publish-plugins.yml")
+        self.assertNotIn("secrets", publication["on"]["workflow_call"])
         defaults = {
             name: definition["default"]
             for name, definition in publication["on"]["workflow_call"]["inputs"].items()
@@ -836,8 +837,7 @@ class WorkflowTests(unittest.TestCase):
                                  effective["candidate_sha256"])
                 self.assertEqual({"contents": "read", "packages": "write", "id-token": "write"},
                                  publish["permissions"])
-                self.assertEqual({"PACKAGES_ADMIN_TOKEN": "${{ secrets.PACKAGES_ADMIN_TOKEN }}"},
-                                 publish["secrets"])
+                self.assertNotIn("secrets", publish)
 
     def test_release_preparation_and_dry_run_gates_remain_distinct_from_nightly(self):
         jobs = repair_tests.workflow(ROOT / ".github/workflows/release-plz.yml")["jobs"]

@@ -29,7 +29,7 @@ on:
         type: boolean
         default: false
       skip_visibility:
-        description: 'Skip public package visibility checks (e.g. for nightly test runs)'
+        description: 'Skip anonymous public-pull checks (e.g. for nightly test runs)'
         required: false
         type: boolean
         default: false
@@ -92,7 +92,7 @@ on:
         type: boolean
         default: false
       skip_visibility:
-        description: 'Skip public package visibility checks (e.g. for nightly test runs)'
+        description: 'Skip anonymous public-pull checks (e.g. for nightly test runs)'
         required: false
         type: boolean
         default: false
@@ -101,11 +101,6 @@ on:
         required: false
         type: string
         default: ''
-    secrets:
-      PACKAGES_ADMIN_TOKEN:
-        description: 'PAT classic with read:packages and organization access to verify public package visibility'
-        required: false
-
 permissions:
   packages: write
   contents: read
@@ -318,7 +313,6 @@ jobs:
       - name: Verify plugin directory is public (read-only)
         if: ${{ !inputs.dry_run && !inputs.skip_visibility }}
         env:
-          GH_TOKEN: ${{ secrets.PACKAGES_ADMIN_TOKEN }}
           INPUT_REGISTRY: ${{ inputs.registry }}
         run: |
           directory="$(python3 .github/scripts/release-candidate.py packages --registry "$INPUT_REGISTRY")"
@@ -692,7 +686,6 @@ jobs:
 
       - name: Verify packages are public (read-only)
         env:
-          GH_TOKEN: ${{ secrets.PACKAGES_ADMIN_TOKEN }}
           PACKAGE_NAMES: ${{ needs.list-plugin-packages.outputs.packages }}
           INPUT_REGISTRY: ${{ inputs.registry }}
         run: |
