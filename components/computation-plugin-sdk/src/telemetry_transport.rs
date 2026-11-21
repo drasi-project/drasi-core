@@ -65,8 +65,11 @@ pub(crate) fn decode_creation(
         .with_disabled_plugin_metrics(binding.is_none());
     if let Some(binding) = &binding {
         let config = binding.config();
+        // A transaction constructs its steps under its own binding; steps are not
+        // graph nodes, so their telemetry is attributed to the owning transaction.
         anyhow::ensure!(
-            config.scope.component_id() == Some(&request.id)
+            (config.scope.component_id() == Some(&request.id)
+                || factory.capabilities.transactional)
                 && config.scope.role() == Some(factory.role),
             "native telemetry binding does not match the constructed component"
         );
@@ -325,7 +328,9 @@ pub(crate) fn export_operation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::TraceContextV1;
+    use crate::telemetry::*;
+    use drasi_computation_contracts::ImplementationIdentity;
+    use std::sync::Arc;
 
     fn context(id: u8) -> ExecutionContext {
         ExecutionContext::new(TraceContextV1::new([id; 16], [id; 8], 0, None).unwrap())
@@ -438,5 +443,117 @@ mod tests {
                 assert_eq!(decode_request(&encoded).unwrap().contexts.inputs, contexts);
             }
         }
+    }
+
+    #[derive(Debug)]
+    struct Binding {
+        config: PluginTelemetryConfig,
+        diagnostics: TelemetryDiagnostics,
+    }
+    impl PluginTelemetryBackend for Binding {
+        fn config(&self) -> &PluginTelemetryConfig {
+            &self.config
+        }
+        fn diagnostics(&self) -> &TelemetryDiagnostics {
+            &self.diagnostics
+        }
+        fn for_plugin(&self, _: &str) -> crate::telemetry::Result<PluginTelemetry> {
+            Err(TelemetryError::Unsupported("test rebind"))
+        }
+        fn register_metric(
+            &self,
+            _: &PluginMetricRegistration,
+        ) -> crate::telemetry::Result<RegisteredMetric> {
+            Err(TelemetryError::Unsupported("test metrics"))
+        }
+        fn register_metric_handle(
+            &self,
+            _: &PluginMetricRegistration,
+        ) -> crate::telemetry::Result<Option<PluginMetricHandle>> {
+            Err(TelemetryError::Unsupported("test handles"))
+        }
+        fn update_metric(&self, _: PluginMetricUpdate) -> crate::telemetry::Result<()> {
+            Err(TelemetryError::Unsupported("test updates"))
+        }
+        fn has_span_collector(&self) -> bool {
+            false
+        }
+        fn submit_encoded_span(&self, _: &[u8]) -> TelemetrySubmission {
+            TelemetrySubmission::Invalid
+        }
+        fn submit_span(&self, _: &CompletedSpan) -> TelemetrySubmission {
+            TelemetrySubmission::Invalid
+        }
+        fn submit_log(&self, _: &TelemetryLogRecord) -> TelemetrySubmission {
+            TelemetrySubmission::Invalid
+        }
+        fn sample_root(&self, _: &RootSpanRequest) -> crate::telemetry::Result<RootSpanDecision> {
+            Err(TelemetryError::Unsupported("test sampling"))
+        }
+    }
+
+    #[test]
+    fn transactional_steps_construct_under_their_owning_transaction_binding() {
+        use drasi_computation_contracts::{ComponentId, ComponentRole};
+        let owner = ComponentId::try_new("00000000-0000-0000-0000-000000000006").unwrap();
+        let step = ComponentId::try_new("00000000-0000-0000-0000-000000000003").unwrap();
+        let owner_scope = TelemetryScope::graph("instance", "graph")
+            .unwrap()
+            .component(
+                owner.clone(),
+                ComponentRole::Transformer,
+                ComponentSemanticKind::Transformer,
+            );
+        let binding = PluginTelemetry::new(Arc::new(Binding {
+            config: PluginTelemetryConfig {
+                scope: owner_scope.clone(),
+                generation: 1,
+                plugin_kind: "test".into(),
+                tracing: false,
+                metrics: false,
+                native_metrics_required: false,
+                native_query_observations_required: false,
+                trace_directives: "off".into(),
+                log_directives: "off".into(),
+                metric_exclusions: vec![],
+                sampling: PluginRootSampling::Always,
+                limits: Default::default(),
+            },
+            diagnostics: Default::default(),
+        }));
+        let mut factory = crate::FactoryMetadata {
+            implementation: ImplementationIdentity::try_new("test/step", "1").unwrap(),
+            role: ComponentRole::Transformer,
+            configuration_version: 1,
+            configuration: Default::default(),
+            ports: vec![],
+            completion: None,
+            capabilities: Default::default(),
+        };
+        let create = |factory: &crate::FactoryMetadata| {
+            let request = CreateRequest {
+                id: step.clone(),
+                implementation: factory.implementation.clone(),
+                configuration_version: 1,
+                configuration: serde_json::Value::Null,
+                scope: None,
+                inputs: vec![],
+                activation_credentials_bound: false,
+                update_directive: None,
+            };
+            let bytes = wire::encode_create_request(&request).unwrap();
+            ExecutionScope::new(ExecutionContext::default())
+                .with_plugin_telemetry(Some(binding.clone()))
+                .in_scope(|| decode_creation(&bytes, factory))
+        };
+        let error = create(&factory).err().expect("a foreign component binding");
+        assert!(error
+            .to_string()
+            .contains("does not match the constructed component"));
+        factory.capabilities.transactional = true;
+        let (request, scope, _) = create(&factory).unwrap();
+        assert_eq!(request.id, step);
+        let attributed = scope.in_scope(ExecutionScope::current_component).unwrap();
+        assert_eq!(attributed.identity, owner_scope);
     }
 }
