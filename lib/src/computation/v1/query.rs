@@ -39,7 +39,10 @@ pub use drasi_query_common::{
     ContinuousQueryDefinition, QUERY_BOOTSTRAP_INPUT_PORT, QUERY_BOOTSTRAP_OUTPUT_PORT,
 };
 
-use crate::profiling::{timestamp_ns, ProfilingMetadata};
+use crate::{
+    observability::{ComponentObservations, QueryProcessingPhase},
+    profiling::{timestamp_ns, ProfilingMetadata},
+};
 use drasi_query_common::QueryOutputOwner;
 
 pub use crate::computation::internal::query_state::{
@@ -221,6 +224,7 @@ pub struct ContinuousQueryTransformer {
     declaration: Option<Arc<super::query_configuration::OrdinaryQueryDeclaration>>,
     scheduling: Option<Arc<super::QuerySchedulingResource>>,
     draining_futures: bool,
+    processing_context: crate::observability::ExecutionContext,
     #[cfg(feature = "test-support")]
     test_session: Option<crate::test_support::QueryTestSession>,
     #[cfg(feature = "test-support")]
@@ -337,6 +341,7 @@ impl ContinuousQueryTransformer {
             publication_identity: Arc::new(RwLock::new(Some(uuid::Uuid::new_v4()))),
             scheduling: None,
             draining_futures: false,
+            processing_context: Default::default(),
             #[cfg(feature = "test-support")]
             test_session: None,
             #[cfg(feature = "test-support")]
@@ -689,6 +694,7 @@ impl ContinuousQueryTransformer {
         let query = ComputationQuery::try_build(builder, resources).await?;
         let checkpoint = query.resources().checkpoint_store().cloned();
         self.query = Some(query);
+        self.bind_query_observer(crate::observability::QueryPhase::Bootstrap, false)?;
         *self
             .checkpoint_view
             .write()
@@ -705,6 +711,25 @@ impl ContinuousQueryTransformer {
             .write()
             .map_err(|_| anyhow::anyhow!("query output persistence view poisoned"))? =
             Some(self.output_persistent);
+        Ok(())
+    }
+
+    fn bind_query_observer(
+        &mut self,
+        phase: crate::observability::QueryPhase,
+        detail: bool,
+    ) -> anyhow::Result<()> {
+        let observer = match crate::observability::ComponentObservations::current() {
+            Some(owner) => {
+                owner.bind_query_metrics()?;
+                owner.query_observer_for(phase, detail)
+            }
+            None => None,
+        };
+        self.query
+            .as_mut()
+            .expect("constructed query")
+            .set_observer(observer)?;
         Ok(())
     }
 
@@ -990,21 +1015,25 @@ impl ContinuousQueryTransformer {
                     metrics.record_seq_advance();
                 }
                 self.sync_metrics()?;
+                let delivery = self.live_delivery(output)?;
+                crate::observability::ComponentObservations::current_or_disabled()
+                    .query_results(&delivery);
                 Ok(vec![OutputEnvelope {
+                    execution_context: crate::observability::ExecutionContext::current(),
                     port: PortId::try_new("out")?,
-                    envelope: self.live_delivery(output)?,
+                    envelope: delivery,
                 }])
             }
             None => Ok(Vec::new()),
         }
     }
     fn sync_metrics(&self) -> anyhow::Result<()> {
+        let state = self
+            .results
+            .state
+            .read()
+            .map_err(|_| anyhow::anyhow!("query output state poisoned"))?;
         if let Some(metrics) = &self.metrics {
-            let state = self
-                .results
-                .state
-                .read()
-                .map_err(|_| anyhow::anyhow!("query output state poisoned"))?;
             metrics.update_outbox(
                 state.outbox.len(),
                 state
@@ -1014,6 +1043,34 @@ impl ContinuousQueryTransformer {
                 state.sequence,
             );
             metrics.record_live_results_count(state.rows.len());
+        }
+        let (outbox, live) = (state.outbox.len(), state.rows.len());
+        let head = if state.ready {
+            state
+                .identity
+                .as_ref()
+                .map(|identity| crate::observability::QueryHead {
+                    sequence: state.sequence,
+                    epoch: crate::observability::QueryEpoch {
+                        generation: state.generation,
+                        config_hash: identity.configuration_hash(),
+                        incarnation: identity.incarnation(),
+                    },
+                })
+        } else {
+            None
+        };
+        drop(state);
+        crate::observability::ComponentObservations::current_or_disabled()
+            .query_state(outbox, live);
+        if let Some(entry) = self
+            .catalog
+            .as_ref()
+            .map(|catalog| catalog.get(&self.definition.id))
+            .transpose()?
+            .flatten()
+        {
+            entry.telemetry.publish(head);
         }
         Ok(())
     }
@@ -1028,105 +1085,119 @@ impl ContinuousQueryTransformer {
             anyhow::bail!("query processing is fenced pending recovery");
         }
         let query = self.query()?;
-        let ordering = input.envelope.system().ordering();
-        let prepared_input = drasi_query_common::prepare_query_input::<SOURCE_TRANSACTION>(
-            &input.envelope,
-            self.execution.source_transactions,
-        )?;
-        let transaction_deadline = self
-            .execution
-            .source_transactions
-            .filter(|_| SOURCE_TRANSACTION)
-            .map(|limits| {
-                tokio::time::Instant::now()
-                    .checked_add(limits.duration())
-                    .ok_or(super::SourceTransactionError::InvalidDeadline)
-            })
-            .transpose()?;
-        let mut progress = input_progress(&input.envelope)?;
-        progress.graph = progress
-            .graph
-            .with_consumer_boundary(&input.envelope, self.source_progress.as_deref())?;
-        if let Some(source) = &prepared_input.source_id {
-            progress.input_origin =
-                drasi_computation_contracts::QueryInputOrigin::Source(source.clone());
-        }
-        let saved = if let Some(checkpoint) = query.resources().checkpoint_store() {
-            progress
-                .graph
-                .validate(
-                    checkpoint.as_ref(),
-                    !self.provider.is_volatile() && checkpoint.is_persistent(),
-                )
-                .await?
-        } else {
-            let watermarks = self
-                .watermarks
-                .lock()
-                .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?;
-            let producers = self
-                .input_producers
-                .lock()
-                .map_err(|_| anyhow::anyhow!("input producer identities poisoned"))?;
-            progress.graph.validate_owner(
-                watermarks.get(&progress.graph.key).copied(),
-                producers.get(&progress.graph.key),
-            )?;
-            None
-        };
-        let watermark = self
-            .watermarks
-            .lock()
-            .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?
-            .get(&progress.key)
-            .copied();
-        let duplicate = progress.graph.is_duplicate(
-            saved.as_ref(),
-            watermark,
-            self.source_progress.as_deref(),
-        )?;
-        if duplicate {
-            if let Some(checkpoint) = query.resources().checkpoint_store() {
-                if progress
-                    .graph
-                    .needs_transport_update(checkpoint.as_ref())
-                    .await?
-                {
-                    query
-                        .resource_transaction(|| async {
-                            progress.graph.stage_transport(checkpoint.as_ref()).await
+        let Some((progress, changes, reservations, transaction_deadline)) =
+            ComponentObservations::current_or_disabled()
+                .query_phase(QueryProcessingPhase::PrepareInput, async {
+                    let ordering = input.envelope.system().ordering();
+                    let prepared_input = drasi_query_common::prepare_query_input::<
+                        SOURCE_TRANSACTION,
+                    >(
+                        &input.envelope, self.execution.source_transactions
+                    )?;
+                    let transaction_deadline = self
+                        .execution
+                        .source_transactions
+                        .filter(|_| SOURCE_TRANSACTION)
+                        .map(|limits| {
+                            tokio::time::Instant::now()
+                                .checked_add(limits.duration())
+                                .ok_or(super::SourceTransactionError::InvalidDeadline)
                         })
-                        .await?;
-                    self.publish_source_progress(true).await?;
-                }
-            } else if let Some(owner) = &self.source_progress {
-                let mut snapshot = (*owner.snapshot()).clone();
-                progress
-                    .graph
-                    .record_transport(&mut snapshot.transport_sequences);
-                owner.publish(snapshot);
-            }
+                        .transpose()?;
+                    let mut progress = input_progress(&input.envelope)?;
+                    progress.graph = progress
+                        .graph
+                        .with_consumer_boundary(&input.envelope, self.source_progress.as_deref())?;
+                    if let Some(source) = &prepared_input.source_id {
+                        progress.input_origin =
+                            drasi_computation_contracts::QueryInputOrigin::Source(source.clone());
+                    }
+                    let saved = if let Some(checkpoint) = query.resources().checkpoint_store() {
+                        progress
+                            .graph
+                            .validate(
+                                checkpoint.as_ref(),
+                                !self.provider.is_volatile() && checkpoint.is_persistent(),
+                            )
+                            .await?
+                    } else {
+                        let watermarks = self
+                            .watermarks
+                            .lock()
+                            .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?;
+                        let producers = self
+                            .input_producers
+                            .lock()
+                            .map_err(|_| anyhow::anyhow!("input producer identities poisoned"))?;
+                        progress.graph.validate_owner(
+                            watermarks.get(&progress.graph.key).copied(),
+                            producers.get(&progress.graph.key),
+                        )?;
+                        None
+                    };
+                    let watermark = self
+                        .watermarks
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?
+                        .get(&progress.key)
+                        .copied();
+                    let duplicate = progress.graph.is_duplicate(
+                        saved.as_ref(),
+                        watermark,
+                        self.source_progress.as_deref(),
+                    )?;
+                    if duplicate {
+                        if let Some(checkpoint) = query.resources().checkpoint_store() {
+                            if progress
+                                .graph
+                                .needs_transport_update(checkpoint.as_ref())
+                                .await?
+                            {
+                                query
+                                    .resource_transaction(|| async {
+                                        progress.graph.stage_transport(checkpoint.as_ref()).await
+                                    })
+                                    .await?;
+                                self.publish_source_progress(true).await?;
+                            }
+                        } else if let Some(owner) = &self.source_progress {
+                            let mut snapshot = (*owner.snapshot()).clone();
+                            progress
+                                .graph
+                                .record_transport(&mut snapshot.transport_sequences);
+                            owner.publish(snapshot);
+                        }
+                        return Ok(None);
+                    }
+                    if query.resources().checkpoint_store().is_some() {
+                        progress
+                            .graph
+                            .retain_valid_position(saved.as_ref(), &self.definition.id);
+                    }
+                    let changes = drasi_core::computation::QueryInputBatch::new(
+                        prepared_input.into_changes(&input.envelope)?,
+                        ordering,
+                    )
+                    .with_optional_input_scope(
+                        drasi_query_common::query_input_scope(self.input_scopes.as_ref(), &input)?,
+                    );
+                    let reservations = if self.output_bindings.has_shared() {
+                        Some(Box::pin(self.output_bindings.reserve()).await?)
+                    } else {
+                        None
+                    };
+                    self.begin_non_atomic().await?;
+                    Ok::<_, anyhow::Error>(Some((
+                        progress,
+                        changes,
+                        reservations,
+                        transaction_deadline,
+                    )))
+                })
+                .await?
+        else {
             return Ok(Vec::new());
-        }
-        if query.resources().checkpoint_store().is_some() {
-            progress
-                .graph
-                .retain_valid_position(saved.as_ref(), &self.definition.id);
-        }
-        let changes = drasi_core::computation::QueryInputBatch::new(
-            prepared_input.into_changes(&input.envelope)?,
-            ordering,
-        )
-        .with_optional_input_scope(drasi_query_common::query_input_scope(
-            self.input_scopes.as_ref(),
-            &input,
-        )?);
-        let reservations = if self.output_bindings.has_shared() {
-            Some(Box::pin(self.output_bindings.reserve()).await?)
-        } else {
-            None
         };
-        self.begin_non_atomic().await?;
         let prepared = Mutex::new(None);
         let operation = QueryOperation::from_metadata(
             &input.envelope,
@@ -1137,41 +1208,44 @@ impl ContinuousQueryTransformer {
             let prepared = &prepared;
             let progress = &progress;
             let operation = &operation;
-            async move {
-                let sequence = QueryOperation::output_sequence(
-                    self.results.head().map_err(IndexError::other)?.sequence,
-                    &results,
-                )
-                .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
-                let mut output = operation
-                    .project(&self.definition, &self.projector, sequence, &results)
-                    .map_err(IndexError::other)?;
-                if let Some(output) = &mut output {
-                    self.stamp_output_identity(output)
-                        .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
-                }
-                if transaction_deadline
-                    .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
-                {
-                    return Err(IndexError::other(super::SourceTransactionError::Deadline));
-                }
-                if let Some(checkpoint) = query.resources().checkpoint_store() {
-                    progress.graph.stage(checkpoint.as_ref()).await?;
-                    if let Some(output) = &output {
-                        if self.output_persistent {
-                            if self.options.publication == QueryPublicationMode::Atomic {
-                                self.stage_output(output).await?;
-                            } else {
-                                QueryPublicationCheckpoint::Pending(output.system().sequence())
-                                    .stage(checkpoint.as_ref())
-                                    .await?;
+            ComponentObservations::current_or_disabled().query_phase(
+                QueryProcessingPhase::PrepareOutput,
+                async move {
+                    let sequence = QueryOperation::output_sequence(
+                        self.results.head().map_err(IndexError::other)?.sequence,
+                        &results,
+                    )
+                    .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
+                    let mut output = operation
+                        .project(&self.definition, &self.projector, sequence, &results)
+                        .map_err(IndexError::other)?;
+                    if let Some(output) = &mut output {
+                        self.stamp_output_identity(output)
+                            .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
+                    }
+                    if transaction_deadline
+                        .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+                    {
+                        return Err(IndexError::other(super::SourceTransactionError::Deadline));
+                    }
+                    if let Some(checkpoint) = query.resources().checkpoint_store() {
+                        progress.graph.stage(checkpoint.as_ref()).await?;
+                        if let Some(output) = &output {
+                            if self.output_persistent {
+                                if self.options.publication == QueryPublicationMode::Atomic {
+                                    self.stage_output(output).await?;
+                                } else {
+                                    QueryPublicationCheckpoint::Pending(output.system().sequence())
+                                        .stage(checkpoint.as_ref())
+                                        .await?;
+                                }
                             }
                         }
                     }
-                }
-                *prepared.lock().map_err(|_| IndexError::CorruptedData)? = output;
-                Ok(())
-            }
+                    *prepared.lock().map_err(|_| IndexError::CorruptedData)? = output;
+                    Ok(())
+                },
+            )
         };
         match query.resources().atomic_result_transaction() {
             Ok(transaction) if self.options.publication == QueryPublicationMode::Atomic => {
@@ -1234,36 +1308,46 @@ impl ContinuousQueryTransformer {
             Ok(_) => unreachable!(),
         }
         let core_return_ns = timestamp_ns();
-        let mut output = prepared
-            .into_inner()
-            .map_err(|_| anyhow::anyhow!("prepared output poisoned"))?;
-        if self.options.publication == QueryPublicationMode::NonAtomic && self.output_persistent {
-            self.finish_non_atomic(output.as_ref()).await?;
-        }
-        if query.resources().checkpoint_store().is_none() {
-            if let Some(producer) = &progress.graph.producer {
-                let mut owners = self
-                    .input_producers
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("input producer identities poisoned"))?;
-                if !owners.contains_key(&progress.graph.key) {
-                    owners.insert(progress.graph.key.clone(), producer.clone());
+        ComponentObservations::current_or_disabled()
+            .query_phase(QueryProcessingPhase::Finalize, async {
+                let mut output = prepared
+                    .into_inner()
+                    .map_err(|_| anyhow::anyhow!("prepared output poisoned"))?;
+                if self.options.publication == QueryPublicationMode::NonAtomic
+                    && self.output_persistent
+                {
+                    self.finish_non_atomic(output.as_ref()).await?;
                 }
-            }
-        }
-        self.watermarks
-            .lock()
-            .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?
-            .insert(progress.graph.key.clone(), progress.sequence);
-        // Keep completion timings on the live branch, not in already committed outbox bytes.
-        if let Some(output) = &mut output {
-            QueryOperation::committed(output, &self.definition.id, core_return_ns)?;
-        }
-        let outputs = self.publish(output)?;
-        if let Some(confirmation) = &self.source_progress {
-            confirmation.confirm_input(&progress.graph);
-        }
-        Ok(outputs)
+                if query.resources().checkpoint_store().is_none() {
+                    if let Some(producer) = &progress.graph.producer {
+                        let mut owners = self
+                            .input_producers
+                            .lock()
+                            .map_err(|_| anyhow::anyhow!("input producer identities poisoned"))?;
+                        if !owners.contains_key(&progress.graph.key) {
+                            owners.insert(progress.graph.key.clone(), producer.clone());
+                        }
+                    }
+                }
+                self.watermarks
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?
+                    .insert(progress.graph.key.clone(), progress.sequence);
+                // Keep completion timings on the live branch, not in already committed outbox bytes.
+                if let Some(output) = &mut output {
+                    QueryOperation::committed(output, &self.definition.id, core_return_ns)?;
+                }
+                let outputs = self.publish(output)?;
+                if SOURCE_TRANSACTION || !GraphChangeCodec::is_futures_due(&input.envelope) {
+                    crate::observability::ComponentObservations::current_or_disabled()
+                        .query_input(crate::observability::QueryPhase::Steady);
+                }
+                if let Some(confirmation) = &self.source_progress {
+                    confirmation.confirm_input(&progress.graph);
+                }
+                Ok::<_, anyhow::Error>(outputs)
+            })
+            .await
     }
 }
 
@@ -1484,7 +1568,9 @@ impl ComputationComponent for ContinuousQueryTransformer {
             self.options.recovery != QueryRecoveryPolicy::AutoReset || self.bootstrap.is_some(),
             "auto_reset requires a bootstrap provider or a connected bootstrap input"
         );
-        self.initialize_recovery().await?;
+        self.sync_metrics()?;
+        self.bind_query_observer(crate::observability::QueryPhase::Bootstrap, false)?;
+        Box::pin(self.initialize_recovery()).await?;
         self.prepare_delivery().await?;
         self.pending_input_replay = match &self.bootstrap {
             Some(provider) => provider.take_input_replay()?.into(),
@@ -1506,6 +1592,7 @@ impl ComputationComponent for ContinuousQueryTransformer {
         if let Some(scheduling) = &self.scheduling {
             scheduling.ready(self.query()?.scheduling_queue());
         }
+        self.bind_query_observer(crate::observability::QueryPhase::Steady, true)?;
         Ok(())
     }
 
@@ -1521,6 +1608,7 @@ impl ComputationComponent for ContinuousQueryTransformer {
             progress.pending();
         }
         self.results.suspend()?;
+        self.sync_metrics()?;
         if let Some(bootstrap) = &self.bootstrap {
             bootstrap.stop().await?;
         }
@@ -1580,6 +1668,15 @@ impl ContinuousQueryTransformer {
 
 #[async_trait]
 impl Transformer for ContinuousQueryTransformer {
+    fn processing_context(&self) -> Option<crate::observability::ExecutionContext> {
+        Some(self.processing_context.clone())
+    }
+
+    fn observes_input(&self, input: &InputEnvelope) -> bool {
+        self.execution.source_transactions.is_none()
+            && GraphChangeCodec::is_futures_due(&input.envelope)
+    }
+
     async fn bind_output_destinations(
         &mut self,
         bindings: &super::OutputBindings,
@@ -1588,55 +1685,15 @@ impl Transformer for ContinuousQueryTransformer {
     }
 
     async fn delivery_completed(&mut self, outputs: &[OutputEnvelope]) -> anyhow::Result<()> {
-        self.confirm_delivery(outputs).await
+        let result = self.confirm_delivery(outputs).await;
+        self.processing_context = self.processing_context.clone().without_handled_branch();
+        result
     }
 
     async fn transform(&mut self, input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
-        anyhow::ensure!(
-            self.pending_output.is_empty(),
-            "drain recovered query output before accepting input"
-        );
-        let futures_due = self.execution.source_transactions.is_none()
-            && GraphChangeCodec::is_futures_due(&input.envelope);
-        let progress = if futures_due {
-            super::GraphProducerProgress::from_envelope(&input.envelope)?
-        } else {
-            None
-        };
-        if futures_due
-            && progress.as_ref().is_none_or(|progress| {
-                !progress.identity().persistent() && self.provider.is_volatile()
-            })
-        {
-            self.draining_futures = true;
-            return self.on_wakeup().await;
-        }
-        let _timer = TransactionTimer {
-            metrics: self.metrics.clone(),
-            started: std::time::Instant::now(),
-        };
-        let mut guard = ProcessingGuard {
-            failure: self.failure.clone(),
-            complete: false,
-            progress: self.source_progress.clone(),
-        };
-        let mut result = match self.execution.source_transactions {
-            Some(limits) => {
-                tokio::time::timeout(limits.duration(), Box::pin(self.process::<true>(input)))
-                    .await
-                    .map_err(|_| super::SourceTransactionError::Deadline)?
-            }
-            None => self.process::<false>(input).await,
-        };
-        if futures_due && result.is_ok() {
-            // The empty batch commits the middleware's logical input progress.
-            // Due work already belongs to the query's durable future queue, so
-            // an interruption between this checkpoint and draining is replayable.
-            self.draining_futures = true;
-            result = self.on_wakeup().await;
-        }
-        guard.complete = result.is_ok();
-        result
+        let scope = crate::observability::ExecutionScope::for_input(&input.execution_context);
+        self.processing_context = scope.context().clone();
+        scope.scope(self.transform_input(input)).await
     }
 
     fn wakeup_source(&self) -> Option<Arc<dyn WakeupSource>> {
@@ -1679,15 +1736,23 @@ impl Transformer for ContinuousQueryTransformer {
     }
 
     async fn on_wakeup(&mut self) -> anyhow::Result<Vec<OutputEnvelope>> {
+        self.processing_context = Default::default();
+        // Box inherent futures before wrapping them: unoptimized builds otherwise copy
+        // the large query future through each observation frame and overflow 2 MiB stacks.
         if !self.pending_output.is_empty() {
-            return self.replay_output().await;
+            let observation = self.scheduled_observation("output_replay")?;
+            return observation
+                .run_outputs(Box::pin(self.replay_output()))
+                .await;
         }
         if let Some(envelope) = self.pending_input_replay.front().cloned() {
-            let output = self
-                .transform(InputEnvelope {
+            let observation = self.scheduled_observation("input_replay")?;
+            let output = observation
+                .run_outputs(Box::pin(self.transform_input(InputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("in")?,
                     envelope,
-                })
+                })))
                 .await?;
             self.pending_input_replay.pop_front();
             return Ok(output);
@@ -1747,93 +1812,174 @@ impl Transformer for ContinuousQueryTransformer {
             guard.complete = true;
             return Ok(Vec::new());
         }
-        let query = self.query()?;
-        let reservations = if self.output_bindings.has_shared() {
-            Some(self.output_bindings.reserve().await?)
+        let observation = self.scheduled_observation("future_queue")?;
+        observation
+            .run_outputs(Box::pin(async {
+                let query = self.query()?;
+                let reservations = if self.output_bindings.has_shared() {
+                    Some(self.output_bindings.reserve().await?)
+                } else {
+                    None
+                };
+                self.begin_non_atomic().await?;
+                let prepared = Mutex::new(None);
+                let owner = &*self;
+                let hook = |due: Arc<drasi_core::computation::ComputationFutureResult>| {
+                    let prepared = &prepared;
+                    async move {
+                        let sequence = QueryOperation::output_sequence(
+                            owner.results.head().map_err(IndexError::other)?.sequence,
+                            &due.results,
+                        )
+                        .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
+                        let mut output = drasi_query_common::project_due_query_output(
+                            &owner.definition,
+                            &owner.projector,
+                            sequence,
+                            &due,
+                        )?;
+                        if let Some(output) = &mut output {
+                            owner
+                                .stamp_output_identity(output)
+                                .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
+                        }
+                        if owner.output_persistent {
+                            if let Some(output) = &output {
+                                if owner.options.publication == QueryPublicationMode::Atomic {
+                                    owner.stage_output(output).await?;
+                                } else {
+                                    QueryPublicationCheckpoint::Pending(output.system().sequence())
+                                        .stage(
+                                            query
+                                                .resources()
+                                                .checkpoint_store()
+                                                .ok_or(IndexError::NotSupported)?
+                                                .as_ref(),
+                                        )
+                                        .await?;
+                                }
+                            }
+                        }
+                        *prepared.lock().map_err(|_| IndexError::CorruptedData)? = output;
+                        Ok(())
+                    }
+                };
+                match query.resources().atomic_result_transaction() {
+                    Ok(transaction) if self.options.publication == QueryPublicationMode::Atomic => {
+                        if let Some(reservations) = reservations {
+                            Box::pin(query.process_due_futures_with_transaction_group(
+                                &transaction,
+                                |due| {
+                                    let pending = hook(due);
+                                    let prepared = &prepared;
+                                    async move {
+                                        pending.await?;
+                                        let output = prepared
+                                            .lock()
+                                            .map_err(|_| IndexError::CorruptedData)?;
+                                        owner.shared_delivery_mutations(
+                                            reservations,
+                                            output.as_ref(),
+                                        )
+                                    }
+                                },
+                            ))
+                            .await?;
+                        } else {
+                            Box::pin(
+                                query.process_due_futures_with_result_hook(&transaction, hook),
+                            )
+                            .await?;
+                        }
+                    }
+                    _ if self.provider.is_volatile()
+                        || self.options.publication == QueryPublicationMode::NonAtomic =>
+                    {
+                        Box::pin(query.process_due_futures_with_non_atomic_result_hook(hook))
+                            .await?;
+                    }
+                    Err(error) => return Err(error.into()),
+                    Ok(_) => unreachable!(),
+                }
+                let output = prepared
+                    .into_inner()
+                    .map_err(|_| anyhow::anyhow!("prepared future output poisoned"))?;
+                if self.options.publication == QueryPublicationMode::NonAtomic
+                    && self.output_persistent
+                {
+                    self.finish_non_atomic(output.as_ref()).await?;
+                }
+                let result = self.publish(output);
+                guard.complete = result.is_ok();
+                result
+            }))
+            .await
+    }
+}
+
+impl ContinuousQueryTransformer {
+    fn scheduled_observation(
+        &mut self,
+        work_kind: &'static str,
+    ) -> anyhow::Result<crate::observability::OperationObservation> {
+        let observation = crate::observability::ComponentObservations::current_or_disabled().root(
+            crate::observability::ObservedOperation::Scheduled,
+            &Default::default(),
+            crate::observability::OperationFields {
+                input_count: Some(0),
+                work_kind: Some(work_kind),
+                ..Default::default()
+            },
+        )?;
+        self.processing_context = observation.context().clone();
+        Ok(observation)
+    }
+
+    async fn transform_input(
+        &mut self,
+        input: InputEnvelope,
+    ) -> anyhow::Result<Vec<OutputEnvelope>> {
+        anyhow::ensure!(
+            self.pending_output.is_empty(),
+            "drain recovered query output before accepting input"
+        );
+        let futures_due = self.execution.source_transactions.is_none()
+            && GraphChangeCodec::is_futures_due(&input.envelope);
+        let progress = if futures_due {
+            super::GraphProducerProgress::from_envelope(&input.envelope)?
         } else {
             None
         };
-        self.begin_non_atomic().await?;
-        let prepared = Mutex::new(None);
-        let owner = &*self;
-        let hook = |due: Arc<drasi_core::computation::ComputationFutureResult>| {
-            let prepared = &prepared;
-            async move {
-                let sequence = QueryOperation::output_sequence(
-                    owner.results.head().map_err(IndexError::other)?.sequence,
-                    &due.results,
-                )
-                .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
-                let mut output = drasi_query_common::project_due_query_output(
-                    &owner.definition,
-                    &owner.projector,
-                    sequence,
-                    &due,
-                )?;
-                if let Some(output) = &mut output {
-                    owner
-                        .stamp_output_identity(output)
-                        .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
-                }
-                if owner.output_persistent {
-                    if let Some(output) = &output {
-                        if owner.options.publication == QueryPublicationMode::Atomic {
-                            owner.stage_output(output).await?;
-                        } else {
-                            QueryPublicationCheckpoint::Pending(output.system().sequence())
-                                .stage(
-                                    query
-                                        .resources()
-                                        .checkpoint_store()
-                                        .ok_or(IndexError::NotSupported)?
-                                        .as_ref(),
-                                )
-                                .await?;
-                        }
-                    }
-                }
-                *prepared.lock().map_err(|_| IndexError::CorruptedData)? = output;
-                Ok(())
-            }
+        if futures_due
+            && progress.as_ref().is_none_or(|progress| {
+                !progress.identity().persistent() && self.provider.is_volatile()
+            })
+        {
+            self.draining_futures = true;
+            return self.on_wakeup().await;
+        }
+        let _timer = TransactionTimer {
+            metrics: self.metrics.clone(),
+            started: std::time::Instant::now(),
         };
-        match query.resources().atomic_result_transaction() {
-            Ok(transaction) if self.options.publication == QueryPublicationMode::Atomic => {
-                if let Some(reservations) = reservations {
-                    query
-                        .process_due_futures_with_transaction_group(&transaction, |due| {
-                            let pending = hook(due);
-                            let prepared = &prepared;
-                            async move {
-                                pending.await?;
-                                let output =
-                                    prepared.lock().map_err(|_| IndexError::CorruptedData)?;
-                                owner.shared_delivery_mutations(reservations, output.as_ref())
-                            }
-                        })
-                        .await?;
-                } else {
-                    query
-                        .process_due_futures_with_result_hook(&transaction, hook)
-                        .await?;
-                }
+        let mut guard = ProcessingGuard {
+            failure: self.failure.clone(),
+            complete: false,
+            progress: self.source_progress.clone(),
+        };
+        let mut result = match self.execution.source_transactions {
+            Some(limits) => {
+                tokio::time::timeout(limits.duration(), Box::pin(self.process::<true>(input)))
+                    .await
+                    .map_err(|_| super::SourceTransactionError::Deadline)?
             }
-            _ if self.provider.is_volatile()
-                || self.options.publication == QueryPublicationMode::NonAtomic =>
-            {
-                query
-                    .process_due_futures_with_non_atomic_result_hook(hook)
-                    .await?;
-            }
-            Err(error) => return Err(error.into()),
-            Ok(_) => unreachable!(),
+            None => self.process::<false>(input).await,
+        };
+        if futures_due && result.is_ok() {
+            // Notification progress is committed before draining the durable queue.
+            self.draining_futures = true;
+            result = self.on_wakeup().await;
         }
-        let output = prepared
-            .into_inner()
-            .map_err(|_| anyhow::anyhow!("prepared future output poisoned"))?;
-        if self.options.publication == QueryPublicationMode::NonAtomic && self.output_persistent {
-            self.finish_non_atomic(output.as_ref()).await?;
-        }
-        let result = self.publish(output);
         guard.complete = result.is_ok();
         result
     }
@@ -2621,6 +2767,7 @@ mod profiling_tests {
             let mut codec = EnvelopeCodec::new(NonZeroUsize::new(64 * 1024).unwrap());
             codec.register_schema(QueryChangeCodec::schema()).unwrap();
             let input = InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in").unwrap(),
                 envelope: GraphChangeCodec::encode_source_event(
                     Arc::new(crate::channels::SourceEventWrapper::with_sequence(

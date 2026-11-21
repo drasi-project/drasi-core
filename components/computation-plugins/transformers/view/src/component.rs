@@ -176,6 +176,8 @@ impl NativeTransformer for View {
         self.output.publish(next.outputs.clone(), sequence)?;
         self.state = next;
         self.sequence = sequence;
-        Ok(vec![OutputEnvelope { port, envelope }])
+        Ok(vec![
+            OutputEnvelope::new(port, envelope).with_current_context()
+        ])
     }
 }

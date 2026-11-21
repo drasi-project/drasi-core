@@ -64,6 +64,197 @@ fn change() -> SourceChange {
     }
 }
 
+mod observation_tests {
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct Probe {
+        events: Arc<Mutex<Vec<String>>>,
+        current: Arc<Mutex<Option<QueryOperation>>>,
+    }
+
+    struct Observation {
+        probe: Probe,
+        operation: QueryOperation,
+        finished: bool,
+    }
+
+    impl QueryObserver for Probe {
+        fn start(
+            &self,
+            operation: QueryOperation,
+            change_count: Option<usize>,
+        ) -> std::result::Result<Box<dyn QueryObservation>, IndexError> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("{operation:?}.begin"));
+            if operation == QueryOperation::Evaluate {
+                assert_eq!(change_count, Some(1));
+            }
+            Ok(Box::new(Observation {
+                probe: self.clone(),
+                operation,
+                finished: false,
+            }))
+        }
+    }
+
+    impl QueryObservation for Observation {
+        fn in_scope(&self, work: &mut dyn FnMut()) {
+            struct Restore(Arc<Mutex<Option<QueryOperation>>>, Option<QueryOperation>);
+            impl Drop for Restore {
+                fn drop(&mut self) {
+                    *self.0.lock().unwrap() = self.1;
+                }
+            }
+            let prior = self.probe.current.lock().unwrap().replace(self.operation);
+            let _restore = Restore(self.probe.current.clone(), prior);
+            work();
+        }
+        fn finish(&mut self, success: bool, result_count: Option<usize>) {
+            self.finished = true;
+            if self.operation == QueryOperation::Evaluate {
+                assert_eq!(result_count, Some(1));
+            }
+            self.probe.events.lock().unwrap().push(format!(
+                "{:?}.{}",
+                self.operation,
+                if success { "success" } else { "error" }
+            ));
+        }
+    }
+    impl Drop for Observation {
+        fn drop(&mut self) {
+            if !self.finished {
+                self.probe
+                    .events
+                    .lock()
+                    .unwrap()
+                    .push(format!("{:?}.cancelled", self.operation));
+            }
+        }
+    }
+
+    struct Session {
+        probe: Probe,
+        fail: bool,
+        pending: bool,
+        entered: tokio::sync::Notify,
+    }
+    #[async_trait]
+    impl SessionControl for Session {
+        async fn begin(&self) -> std::result::Result<(), IndexError> {
+            assert!(self.probe.current.lock().unwrap().is_none());
+            Ok(())
+        }
+        async fn commit(&self) -> std::result::Result<(), IndexError> {
+            assert_eq!(
+                *self.probe.current.lock().unwrap(),
+                Some(QueryOperation::Commit)
+            );
+            self.entered.notify_one();
+            if self.pending {
+                return std::future::pending().await;
+            }
+            if self.fail {
+                Err(IndexError::IOError)
+            } else {
+                Ok(())
+            }
+        }
+        fn rollback(&self) -> std::result::Result<(), IndexError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn evaluator_hook_and_commit_are_distinct_and_failure_is_not_success() {
+        for fail in [false, true] {
+            let probe = Probe::default();
+            let session = Arc::new(Session {
+                probe: probe.clone(),
+                fail,
+                pending: false,
+                entered: tokio::sync::Notify::new(),
+            });
+            let resources =
+                ComputationIndexes::try_new(memory_indexes(session), None, None, None, None)
+                    .unwrap();
+            let query = ComputationQuery::try_build_with_observer(
+                builder(),
+                resources,
+                Some(Arc::new(probe.clone())),
+            )
+            .await
+            .unwrap();
+            let result = query
+                .process_source_changes_with_non_atomic_result_hook(vec![change()], |_| async {
+                    assert!(
+                        probe.current.lock().unwrap().is_none(),
+                        "result hook is outside evaluator observation"
+                    );
+                    probe.events.lock().unwrap().push("hook".into());
+                    Ok(())
+                })
+                .await;
+            assert_eq!(result.is_err(), fail);
+            assert_eq!(
+                probe.events.lock().unwrap().as_slice(),
+                &[
+                    "Evaluate.begin",
+                    "Evaluate.success",
+                    "hook",
+                    "Commit.begin",
+                    if fail {
+                        "Commit.error"
+                    } else {
+                        "Commit.success"
+                    },
+                ]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn interrupted_commit_closes_observation_and_preserves_recovery_fence() {
+        let probe = Probe::default();
+        let session = Arc::new(Session {
+            probe: probe.clone(),
+            fail: false,
+            pending: true,
+            entered: tokio::sync::Notify::new(),
+        });
+        let resources =
+            ComputationIndexes::try_new(memory_indexes(session.clone()), None, None, None, None)
+                .unwrap();
+        let query = ComputationQuery::try_build_with_observer(
+            builder(),
+            resources,
+            Some(Arc::new(probe.clone())),
+        )
+        .await
+        .unwrap();
+        {
+            let processing = query.process_source_change(change());
+            tokio::pin!(processing);
+            tokio::select! {
+                result = &mut processing => panic!("pending commit returned: {result:?}"),
+                _ = session.entered.notified() => {}
+            }
+            assert!(
+                probe.current.lock().unwrap().is_none(),
+                "poll scope must not leak"
+            );
+        }
+        assert!(query.recovery_required());
+        assert_eq!(
+            probe.events.lock().unwrap().last().map(String::as_str),
+            Some("Commit.cancelled")
+        );
+    }
+}
+
 #[derive(Default)]
 struct RecordingSession(Mutex<Vec<&'static str>>);
 

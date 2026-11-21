@@ -662,6 +662,7 @@ impl Batch {
         input: &InputEnvelope,
         identity: DeliveryBatchIdentity,
     ) -> anyhow::Result<Self> {
+        let contexts = [input.execution_context.clone()];
         let input = BeginBatch {
             port: input.port.clone(),
             envelope: codec.encode(&input.envelope)?.into(),
@@ -672,6 +673,7 @@ impl Batch {
             extension,
             abi::consumer::BEGIN_BATCH,
             &wire::encode(&input)?,
+            &contexts,
             None,
         )?;
         let generation: u64 = wire::decode(
@@ -723,20 +725,10 @@ fn begin(
     extension: PluginConsumerV1,
     code: u32,
     input: &[u8],
+    contexts: &[drasi_lib::observability::ExecutionContext],
     context: Option<&abi::Transaction>,
-) -> anyhow::Result<OperationFuture> {
-    let mut operation = abi::OperationHandle::null();
-    unsafe {
-        take_status(extension.begin.expect("validated")(
-            component.state(),
-            code,
-            abi::BorrowedBytes::new(input),
-            context.map_or(std::ptr::null(), |context| context),
-            &mut operation,
-        ))
-        .map_err(super::proxy::native_operation_cause)?;
-        OperationFuture::new(operation).map_err(super::proxy::native_operation_cause)
-    }
+) -> anyhow::Result<super::proxy::NativeOperation> {
+    component.begin_consumer(extension, code, input, contexts, context)
 }
 #[async_trait]
 impl DeliveryHandler for Batch {
@@ -746,6 +738,7 @@ impl DeliveryHandler for Batch {
             self.extension,
             abi::consumer::HANDLE,
             &self.request(&item)?,
+            &[],
             None,
         )?;
         anyhow::ensure!(
@@ -776,6 +769,7 @@ impl TransactionalDeliveryHandler for Batch {
                 self.extension,
                 abi::consumer::HANDLE,
                 &self.request(&item)?,
+                &[],
                 Some(&table),
             )?
         };
@@ -845,6 +839,7 @@ mod tests {
             extension,
             abi::consumer::BEGIN_BATCH,
             &wire::encode(&request)?,
+            std::slice::from_ref(&input.execution_context),
             None
         )?
         .await
@@ -883,6 +878,7 @@ mod tests {
                 extension,
                 abi::consumer::HANDLE,
                 &wire::encode(&request)?,
+                &[],
                 None
             )?
             .await
@@ -894,6 +890,7 @@ mod tests {
             extension,
             abi::consumer::HANDLE,
             &vec![0; abi::consumer::MAX_CONTROL_BYTES + 1],
+            &[],
             None
         )
         .is_err());
@@ -906,6 +903,7 @@ mod tests {
             extension,
             abi::consumer::HANDLE,
             &first.request(&item)?,
+            &[],
             None
         )?
         .await
@@ -958,6 +956,7 @@ mod tests {
                 consumer.extension,
                 abi::consumer::HANDLE,
                 &batch.request(&local.item(0)?)?,
+                &[],
                 None,
             )?;
             assert!(futures_util::poll!(&mut operation).is_pending());

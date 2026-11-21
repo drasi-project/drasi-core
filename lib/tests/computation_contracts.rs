@@ -934,10 +934,11 @@ impl EnvelopeSource for CustomSource {
     async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
         self.lifecycle.require_running()?;
         let port = PortId::try_new("out")?;
-        Ok(self
-            .events
-            .pop_front()
-            .map(|envelope| OutputEnvelope { port, envelope }))
+        Ok(self.events.pop_front().map(|envelope| OutputEnvelope {
+            execution_context: Default::default(),
+            port,
+            envelope,
+        }))
     }
 }
 
@@ -962,6 +963,7 @@ impl Transformer for CustomTransformer {
                 .checked_add(1)
                 .ok_or_else(|| anyhow::anyhow!("sequence exhausted"))?;
             outputs.push(OutputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("out")?,
                 envelope: annotated.derive(
                     EnvelopeId::try_new(
@@ -1047,6 +1049,7 @@ async fn external_stateful_components_are_object_safe_and_support_zero_one_many_
         let input_id = input.envelope.id().clone();
         let outputs = transform
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in").unwrap(),
                 envelope: input.envelope,
             })
@@ -1060,6 +1063,7 @@ async fn external_stateful_components_are_object_safe_and_support_zero_one_many_
             assert_eq!(output.envelope.lineage().unwrap().envelope_id(), &input_id);
             assert_eq!(output.envelope.context().len(), 1);
             sink.handle(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in").unwrap(),
                 envelope: output.envelope,
             })
@@ -1074,6 +1078,7 @@ async fn external_stateful_components_are_object_safe_and_support_zero_one_many_
     sink.stop(&lifecycle_contexts::stop()).await.unwrap();
     assert!(sink
         .handle(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in").unwrap(),
             envelope: envelope(9, vec![])
         })
@@ -1114,6 +1119,7 @@ async fn accepted_sink_never_upgrades_to_handled_even_with_ack_capable_pipe() {
     handled.start(&lifecycle_contexts::start()).await.unwrap();
     for sink in [&mut accepted, &mut handled] {
         sink.handle(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in").unwrap(),
             envelope: envelope(0, vec![added(0)]),
         })
@@ -1142,21 +1148,24 @@ impl Acknowledgement for TestAcknowledgement {
     }
 }
 
-struct TestSender(mpsc::Sender<Envelope>);
+struct TestSender(mpsc::Sender<EnvelopeMessage>);
 
 #[async_trait]
 impl EnvelopeSender for TestSender {
-    async fn send(&self, envelope: Envelope) -> std::result::Result<EnqueueReceipt, SendFailure> {
-        let id = envelope.id().clone();
-        self.0.send(envelope).await.map_err(|error| SendFailure {
-            envelope: error.0,
-            error: PipeError::Closed,
-        })?;
+    async fn send_message(
+        &self,
+        message: EnvelopeMessage,
+    ) -> std::result::Result<EnqueueReceipt, SendFailure> {
+        let id = message.envelope.id().clone();
+        self.0
+            .send(message)
+            .await
+            .map_err(|error| SendFailure::new(error.0, PipeError::Closed))?;
         Ok(EnqueueReceipt::new(id))
     }
 }
 
-struct TestReceiver(mpsc::Receiver<Envelope>);
+struct TestReceiver(mpsc::Receiver<EnvelopeMessage>);
 
 #[async_trait]
 impl EnvelopeReceiver for TestReceiver {
@@ -1165,7 +1174,7 @@ impl EnvelopeReceiver for TestReceiver {
             .0
             .recv()
             .await
-            .map(|envelope| Delivery::new(envelope, None)))
+            .map(|message| Delivery::from_message(message, None)))
     }
 }
 
@@ -1223,7 +1232,7 @@ async fn transport_acceptance_delivery_and_handling_ack_are_separate() {
     assert_eq!(handled.load(Ordering::SeqCst), 0);
     let delivery = receiver.receive().await.unwrap().unwrap();
     assert_eq!(delivery.envelope().system().sequence(), 1);
-    let (received, acknowledgement) = delivery.into_parts();
+    let (received, _, acknowledgement) = delivery.into_parts();
     assert!(acknowledgement.is_none());
     assert!(Arc::ptr_eq(received.changes(), first.changes()));
     assert_eq!(
@@ -1250,7 +1259,7 @@ async fn transport_acceptance_delivery_and_handling_ack_are_separate() {
     assert_eq!(handled.load(Ordering::SeqCst), 0);
     explicit
         .into_parts()
-        .1
+        .2
         .unwrap()
         .complete(HandlingOutcome::Handled)
         .await

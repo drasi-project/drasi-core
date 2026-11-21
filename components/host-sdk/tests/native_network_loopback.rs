@@ -290,7 +290,7 @@ fn source_value(envelope: &ChangeEnvelope) -> Result<i64> {
         _ => anyhow::bail!("missing integer value"),
     }
 }
-async fn next(source: &mut NativeComponentProxy) -> Result<ChangeEnvelope> {
+async fn next_output(source: &mut NativeComponentProxy) -> Result<OutputEnvelope> {
     let output = tokio::time::timeout(DEADLINE, source.next())
         .await??
         .context("unexpected EOF")?;
@@ -299,7 +299,10 @@ async fn next(source: &mut NativeComponentProxy) -> Result<ChangeEnvelope> {
         .context("real producer identity")?;
     assert!(!progress.identity().persistent());
     assert_eq!(progress.sequence(), output.envelope.system().sequence());
-    Ok(output.envelope)
+    Ok(output)
+}
+async fn next(source: &mut NativeComponentProxy) -> Result<ChangeEnvelope> {
+    Ok(next_output(source).await?.envelope)
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -671,6 +674,7 @@ fn result_inputs(sequence: u64, values: &[i64]) -> Result<InputEnvelope> {
         })
         .collect::<Vec<_>>();
     Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: QueryChangeCodec::encode_evaluation(
             None,
@@ -963,6 +967,7 @@ fn source_graph_input(sequence: u64) -> Result<InputEnvelope> {
         "a source envelope has no query annotation"
     );
     Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope,
     })
@@ -1017,6 +1022,7 @@ async fn http_and_grpc_sinks_accept_source_graph_changes_without_query_metadata(
     }
     // A scheduling control is not data and fails instead of being dropped.
     let due = InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_futures_due(
             stream("facilities-db/out"),

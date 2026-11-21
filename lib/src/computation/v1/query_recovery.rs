@@ -21,6 +21,21 @@ use super::*;
 
 pub(super) use drasi_query_common::QueryResetMarker as ResetMarker;
 
+struct BootstrapCounts {
+    spans: [tracing::Span; 2],
+    inputs: i64,
+    changes: i64,
+}
+
+impl Drop for BootstrapCounts {
+    fn drop(&mut self) {
+        for span in &self.spans {
+            span.record("input_count", self.inputs);
+            span.record("change_count", self.changes);
+        }
+    }
+}
+
 impl ContinuousQueryTransformer {
     /// Wipes every durable trace of the query's output so a recreated query
     /// starts a new incarnation at sequence 1.
@@ -168,6 +183,25 @@ impl ContinuousQueryTransformer {
             }
             self.reset_for_bootstrap().await?;
         }
+        let trace = crate::observability::BootstrapTrace::capture();
+        let guard = trace.guard();
+        if let Some(provider) = &self.bootstrap {
+            provider.bind_bootstrap_trace(trace.clone())?;
+            if !self.bootstrap_complete.load(Ordering::Acquire) {
+                trace.start()?;
+            }
+        }
+        let result = trace
+            .scope(Box::pin(self.initialize_bootstrap(&trace)))
+            .await?;
+        guard.finish(result.is_ok());
+        result
+    }
+
+    async fn initialize_bootstrap(
+        &mut self,
+        trace: &crate::observability::BootstrapTrace,
+    ) -> anyhow::Result<()> {
         self.publish_source_progress(false).await?;
         if let Some(provider) = self.bootstrap.clone() {
             let preparation = provider
@@ -193,31 +227,58 @@ impl ContinuousQueryTransformer {
                 }
                 Err(error) => return Err(error),
             };
-            if preparation != super::super::BootstrapPreparation::Ready {
-                if preparation == super::super::BootstrapPreparation::RefreshVolatile
-                    && self.provider.is_volatile()
-                    || self.options.recovery == QueryRecoveryPolicy::AutoReset
-                {
-                    self.reset_and_prepare_bootstrap(provider.as_ref()).await?;
-                } else {
-                    return Err(QueryRecoveryError::SourceResetRequired.into());
-                }
+            if preparation != super::super::BootstrapPreparation::Ready
+                || provider.has_pending_snapshot()?
+            {
+                trace.start()?;
             }
-            if self.bootstrap_complete.load(Ordering::Acquire) && provider.has_pending_snapshot()? {
-                if self.options.recovery != QueryRecoveryPolicy::AutoReset
-                    && !self.provider.is_volatile()
-                {
-                    return Err(QueryRecoveryError::SourceResetRequired.into());
-                }
-                // The prepared cut initializes a new output incarnation. It must
-                // never overwrite an existing projection at an unchanged cursor.
+            return trace
+                .scope(Box::pin(self.finish_bootstrap_preparation(
+                    provider,
+                    preparation,
+                    trace,
+                )))
+                .await?;
+        }
+        self.finish_bootstrap(trace).await
+    }
+
+    async fn finish_bootstrap_preparation(
+        &mut self,
+        provider: Arc<dyn super::super::ComputationBootstrapProvider>,
+        preparation: super::super::BootstrapPreparation,
+        trace: &crate::observability::BootstrapTrace,
+    ) -> anyhow::Result<()> {
+        if preparation != super::super::BootstrapPreparation::Ready {
+            if preparation == super::super::BootstrapPreparation::RefreshVolatile
+                && self.provider.is_volatile()
+                || self.options.recovery == QueryRecoveryPolicy::AutoReset
+            {
                 self.reset_and_prepare_bootstrap(provider.as_ref()).await?;
+            } else {
+                return Err(QueryRecoveryError::SourceResetRequired.into());
             }
         }
+        if self.bootstrap_complete.load(Ordering::Acquire) && provider.has_pending_snapshot()? {
+            if self.options.recovery != QueryRecoveryPolicy::AutoReset
+                && !self.provider.is_volatile()
+            {
+                return Err(QueryRecoveryError::SourceResetRequired.into());
+            }
+            // A new prepared cut must initialize a new output incarnation.
+            self.reset_and_prepare_bootstrap(provider.as_ref()).await?;
+        }
+        self.finish_bootstrap(trace).await
+    }
+
+    async fn finish_bootstrap(
+        &mut self,
+        trace: &crate::observability::BootstrapTrace,
+    ) -> anyhow::Result<()> {
         if let Some(progress) = &self.source_progress {
             progress.admit();
         }
-        self.run_bootstrap().await
+        Box::pin(self.run_bootstrap(trace)).await
     }
 
     async fn reset_and_prepare_bootstrap(
@@ -462,7 +523,10 @@ impl ContinuousQueryTransformer {
         Ok(())
     }
 
-    async fn run_bootstrap(&self) -> anyhow::Result<()> {
+    async fn run_bootstrap(
+        &self,
+        trace: &crate::observability::BootstrapTrace,
+    ) -> anyhow::Result<()> {
         let Some(provider) = &self.bootstrap else {
             return Ok(());
         };
@@ -474,237 +538,282 @@ impl ContinuousQueryTransformer {
             !self.bootstrap_complete.load(Ordering::Acquire),
             QueryRecoveryError::SourceResetRequired
         );
-        let query = self.query()?;
-        if let Some(checkpoint) = query.resources().checkpoint_store() {
-            if checkpoint
-                .read_checkpoint(&drasi_core::interface::CheckpointKey::Metadata(
-                    BOOTSTRAP.to_owned(),
-                ))
-                .await?
-                .is_some_and(|marker| marker.sequence == 1)
-                && !requested_snapshot
-            {
-                self.bootstrap_complete.store(true, Ordering::Release);
-                return Ok(());
-            }
-            query
-                .resource_transaction(|| async {
-                    checkpoint
-                        .stage_checkpoint(
-                            &drasi_core::interface::CheckpointKey::Metadata(BOOTSTRAP.to_owned()),
-                            0,
-                            None,
-                        )
-                        .await
-                })
-                .await?;
-        }
-        let mut snapshot = provider
-            .snapshot_with_state(&QueryBootstrapState(query))
-            .await?;
-        validate_watermarks(&snapshot.watermarks, !self.provider.is_volatile())?;
-        let bootstrap_stream = StreamId::try_new(format!(
-            "{}/bootstrap/{}",
-            self.definition.id,
-            uuid::Uuid::new_v4()
-        ))?;
-        let mut ordinal = 0u64;
-        while let Some(input) = snapshot.changes.next().await {
-            let input = input?;
-            ordinal = ordinal
-                .checked_add(1)
-                .ok_or_else(|| anyhow::anyhow!("bootstrap ordinal exhausted"))?;
-            let mut changes = drasi_core::computation::QueryInputBatch::new(
-                GraphChangeCodec::decode_changes(&input)?,
-                input.system().ordering(),
-            );
-            if let Some(origin) = provider.input_origin(input.system().stream())? {
-                changes = changes.with_input_scope(origin.component.clone());
-            }
-            let prepared = Mutex::new(None);
-            let hook =
-                |results: Arc<[drasi_core::evaluation::context::QueryPartEvaluationContext]>| {
-                    let input = &input;
-                    let prepared = &prepared;
-                    let stream = bootstrap_stream.clone();
-                    async move {
-                        let mut output = QueryChangeCodec::encode_evaluation(
-                            Some(input),
-                            &self.definition.id,
-                            SystemMetadata::new(stream, ordinal),
-                            &self.projector,
-                            &results,
-                            QueryOutputMetadata {
-                                query_id: self.definition.id.clone(),
-                                input_origin: None,
-                                timestamp: Utc::now(),
-                                metadata: HashMap::new(),
-                                profiling: None,
-                            },
-                        )
-                        .map_err(IndexError::other)?;
-                        if let Some(output) = &mut output {
-                            self.stamp_output_identity(output)
-                                .map_err(|error| IndexError::Other(error.into_boxed_dyn_error()))?;
-                        }
-                        if self.output_persistent
-                            && self.options.publication == QueryPublicationMode::Atomic
-                        {
-                            if let Some(output) = &output {
-                                self.stage_projection(output).await?;
-                            }
-                        }
-                        *prepared.lock().map_err(|_| IndexError::CorruptedData)? = output;
-                        Ok(())
+        trace.start()?;
+        trace
+            .scope(Box::pin(self.load_bootstrap(provider, requested_snapshot)))
+            .await?
+    }
+
+    async fn load_bootstrap(
+        &self,
+        provider: &Arc<dyn super::super::ComputationBootstrapProvider>,
+        requested_snapshot: bool,
+    ) -> anyhow::Result<()> {
+        let bootstrap_span = tracing::Span::current();
+        let snapshot_observation =
+            crate::observability::ComponentObservations::current_or_disabled().begin(
+                crate::observability::ObservedOperation::Snapshot,
+                &crate::observability::ExecutionContext::current(),
+                Default::default(),
+            )?;
+        let snapshot_span = snapshot_observation.span();
+        let mut counts = BootstrapCounts {
+            spans: [bootstrap_span, snapshot_span],
+            inputs: 0,
+            changes: 0,
+        };
+        snapshot_observation
+            .run(Box::pin(async {
+                let query = self.query()?;
+                if let Some(checkpoint) = query.resources().checkpoint_store() {
+                    if checkpoint
+                        .read_checkpoint(&drasi_core::interface::CheckpointKey::Metadata(
+                            BOOTSTRAP.to_owned(),
+                        ))
+                        .await?
+                        .is_some_and(|marker| marker.sequence == 1)
+                        && !requested_snapshot
+                    {
+                        self.bootstrap_complete.store(true, Ordering::Release);
+                        return Ok(());
                     }
-                };
-            if self.options.publication == QueryPublicationMode::Atomic && self.output_persistent {
-                query
-                    .process_source_changes_with_result_hook(
-                        changes,
-                        &query.resources().atomic_result_transaction()?,
-                        hook,
-                    )
-                    .await?;
-            } else {
-                query
-                    .process_source_changes_with_non_atomic_result_hook(changes, hook)
-                    .await?;
-            }
-            if let Some(output) = prepared
-                .into_inner()
-                .map_err(|_| anyhow::anyhow!("bootstrap output poisoned"))?
-            {
-                if self.output_persistent
-                    && self.options.publication == QueryPublicationMode::NonAtomic
-                {
                     query
-                        .resource_transaction(|| async { self.stage_projection(&output).await })
-                        .await?;
-                }
-                self.results
-                    .state
-                    .write()
-                    .map_err(|_| anyhow::anyhow!("query output state poisoned"))?
-                    .apply_rows(&output);
-            }
-        }
-        snapshot
-            .watermarks
-            .extend(provider.complete_snapshot().await?);
-        validate_watermarks(&snapshot.watermarks, !self.provider.is_volatile())?;
-        let completion_state = provider.completion_state()?;
-        if let Some(state) = &completion_state {
-            validate_bootstrap_state(state)?;
-            query.resources().atomic_result_transaction()?;
-            anyhow::ensure!(
-                query.resources().checkpoint_store().is_some(),
-                "bootstrap handover completion requires a checkpoint store"
-            );
-        }
-        let watermarks: Vec<_> = snapshot
-            .watermarks
-            .into_iter()
-            .map(|watermark| {
-                (
-                    progress_key(&watermark.stream, watermark.source_id.as_ref()),
-                    watermark.sequence,
-                    watermark.position,
-                    watermark.producer,
-                )
-            })
-            .collect();
-        if let Some(checkpoint) = query.resources().checkpoint_store() {
-            let sequence = self.results.snapshot()?.as_of_sequence;
-            let reset = self.read_reset_marker().await?;
-            let marker = serde_json::to_vec(&ResetMarker {
-                sequence,
-                in_progress: false,
-                generation: self.results.snapshot()?.generation,
-            })?;
-            query
-                .resource_transaction(|| async {
-                    for (key, sequence, position, producer) in &watermarks {
-                        if let Some(producer) = producer {
-                            let owner = Bytes::from(
-                                serde_json::to_vec(producer).map_err(IndexError::other)?,
-                            );
+                        .resource_transaction(|| async {
                             checkpoint
                                 .stage_checkpoint(
-                                    &super::super::producer_progress::producer_owner_key(
-                                        producer.stream(),
+                                    &drasi_core::interface::CheckpointKey::Metadata(
+                                        BOOTSTRAP.to_owned(),
                                     ),
-                                    1,
-                                    Some(&owner),
+                                    0,
+                                    None,
                                 )
-                                .await?;
-                        }
-                        checkpoint
-                            .stage_checkpoint(key, *sequence, position.as_ref())
-                            .await?;
-                    }
-                    checkpoint
-                        .stage_checkpoint(
-                            &drasi_core::interface::CheckpointKey::Metadata(BOOTSTRAP.to_owned()),
-                            1,
-                            None,
-                        )
+                                .await
+                        })
                         .await?;
-                    if let Some(state) = &completion_state {
-                        checkpoint
-                            .stage_checkpoint(
-                                &drasi_core::interface::CheckpointKey::Metadata(
-                                    BOOTSTRAP_STATE.to_owned(),
-                                ),
-                                1,
-                                Some(state),
+                }
+                let mut snapshot = provider
+                    .snapshot_with_state(&QueryBootstrapState(query))
+                    .await?;
+                validate_watermarks(&snapshot.watermarks, !self.provider.is_volatile())?;
+                let bootstrap_stream = StreamId::try_new(format!(
+                    "{}/bootstrap/{}",
+                    self.definition.id,
+                    uuid::Uuid::new_v4()
+                ))?;
+                let mut ordinal = 0u64;
+                while let Some(input) = snapshot.changes.next().await {
+                    let input = input?;
+                    ordinal = ordinal
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow::anyhow!("bootstrap ordinal exhausted"))?;
+                    counts.changes = counts.changes.saturating_add(
+                        i64::try_from(input.changes().operations().len())
+                            .expect("snapshot collection length fits signed trace counts"),
+                    );
+                    counts.inputs = i64::try_from(ordinal).unwrap_or(i64::MAX);
+                    let mut changes = drasi_core::computation::QueryInputBatch::new(
+                        GraphChangeCodec::decode_changes(&input)?,
+                        input.system().ordering(),
+                    );
+                    if let Some(origin) = provider.input_origin(input.system().stream())? {
+                        changes = changes.with_input_scope(origin.component.clone());
+                    }
+                    let prepared = Mutex::new(None);
+                    let hook = |results: Arc<
+                        [drasi_core::evaluation::context::QueryPartEvaluationContext],
+                    >| {
+                        let input = &input;
+                        let prepared = &prepared;
+                        let stream = bootstrap_stream.clone();
+                        async move {
+                            let mut output = QueryChangeCodec::encode_evaluation(
+                                Some(input),
+                                &self.definition.id,
+                                SystemMetadata::new(stream, ordinal),
+                                &self.projector,
+                                &results,
+                                QueryOutputMetadata {
+                                    query_id: self.definition.id.clone(),
+                                    input_origin: None,
+                                    timestamp: Utc::now(),
+                                    metadata: HashMap::new(),
+                                    profiling: None,
+                                },
+                            )
+                            .map_err(IndexError::other)?;
+                            if let Some(output) = &mut output {
+                                self.stamp_output_identity(output).map_err(|error| {
+                                    IndexError::Other(error.into_boxed_dyn_error())
+                                })?;
+                            }
+                            if self.output_persistent
+                                && self.options.publication == QueryPublicationMode::Atomic
+                            {
+                                if let Some(output) = &output {
+                                    self.stage_projection(output).await?;
+                                }
+                            }
+                            *prepared.lock().map_err(|_| IndexError::CorruptedData)? = output;
+                            Ok(())
+                        }
+                    };
+                    if self.options.publication == QueryPublicationMode::Atomic
+                        && self.output_persistent
+                    {
+                        query
+                            .process_source_changes_with_result_hook(
+                                changes,
+                                &query.resources().atomic_result_transaction()?,
+                                hook,
                             )
                             .await?;
-                    }
-                    checkpoint
-                        .stage_result_sequence(&self.output_key(), sequence)
-                        .await?;
-                    if reset.is_some() {
+                    } else {
                         query
-                            .resources()
-                            .outbox_writer()
-                            .ok_or(IndexError::NotSupported)?
-                            .append(&self.reset_key(), 1, &marker)
+                            .process_source_changes_with_non_atomic_result_hook(changes, hook)
                             .await?;
                     }
-                    Ok(())
-                })
-                .await?;
-        }
-        if let Some(progress) = &self.source_progress {
-            for (key, sequence, position, _) in &watermarks {
-                progress.confirm(
-                    progress_identity(key)?,
-                    SourceCheckpoint::new(*sequence, position.clone()),
-                );
-            }
-        }
-        {
-            let mut owners = self
-                .input_producers
-                .lock()
-                .map_err(|_| anyhow::anyhow!("input producer identities poisoned"))?;
-            for (key, _, _, producer) in &watermarks {
-                if let Some(producer) = producer {
-                    owners.insert(key.clone(), producer.clone());
+                    if let Some(output) = prepared
+                        .into_inner()
+                        .map_err(|_| anyhow::anyhow!("bootstrap output poisoned"))?
+                    {
+                        if self.output_persistent
+                            && self.options.publication == QueryPublicationMode::NonAtomic
+                        {
+                            query
+                                .resource_transaction(|| async {
+                                    self.stage_projection(&output).await
+                                })
+                                .await?;
+                        }
+                        self.results
+                            .state
+                            .write()
+                            .map_err(|_| anyhow::anyhow!("query output state poisoned"))?
+                            .apply_rows(&output);
+                    }
+                    crate::observability::ComponentObservations::current_or_disabled()
+                        .query_input(crate::observability::QueryPhase::Bootstrap);
                 }
-            }
-        }
-        self.watermarks
-            .lock()
-            .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?
-            .extend(
-                watermarks
+                snapshot
+                    .watermarks
+                    .extend(provider.complete_snapshot().await?);
+                validate_watermarks(&snapshot.watermarks, !self.provider.is_volatile())?;
+                let completion_state = provider.completion_state()?;
+                if let Some(state) = &completion_state {
+                    validate_bootstrap_state(state)?;
+                    query.resources().atomic_result_transaction()?;
+                    anyhow::ensure!(
+                        query.resources().checkpoint_store().is_some(),
+                        "bootstrap handover completion requires a checkpoint store"
+                    );
+                }
+                let watermarks: Vec<_> = snapshot
+                    .watermarks
                     .into_iter()
-                    .map(|(key, sequence, _, _)| (key, sequence)),
-            );
-        self.bootstrap_complete.store(true, Ordering::Release);
-        Ok(())
+                    .map(|watermark| {
+                        (
+                            progress_key(&watermark.stream, watermark.source_id.as_ref()),
+                            watermark.sequence,
+                            watermark.position,
+                            watermark.producer,
+                        )
+                    })
+                    .collect();
+                if let Some(checkpoint) = query.resources().checkpoint_store() {
+                    let sequence = self.results.snapshot()?.as_of_sequence;
+                    let reset = self.read_reset_marker().await?;
+                    let marker = serde_json::to_vec(&ResetMarker {
+                        sequence,
+                        in_progress: false,
+                        generation: self.results.snapshot()?.generation,
+                    })?;
+                    query
+                        .resource_transaction(|| async {
+                            for (key, sequence, position, producer) in &watermarks {
+                                if let Some(producer) = producer {
+                                    let owner = Bytes::from(
+                                        serde_json::to_vec(producer).map_err(IndexError::other)?,
+                                    );
+                                    checkpoint
+                                        .stage_checkpoint(
+                                            &super::super::producer_progress::producer_owner_key(
+                                                producer.stream(),
+                                            ),
+                                            1,
+                                            Some(&owner),
+                                        )
+                                        .await?;
+                                }
+                                checkpoint
+                                    .stage_checkpoint(key, *sequence, position.as_ref())
+                                    .await?;
+                            }
+                            checkpoint
+                                .stage_checkpoint(
+                                    &drasi_core::interface::CheckpointKey::Metadata(
+                                        BOOTSTRAP.to_owned(),
+                                    ),
+                                    1,
+                                    None,
+                                )
+                                .await?;
+                            if let Some(state) = &completion_state {
+                                checkpoint
+                                    .stage_checkpoint(
+                                        &drasi_core::interface::CheckpointKey::Metadata(
+                                            BOOTSTRAP_STATE.to_owned(),
+                                        ),
+                                        1,
+                                        Some(state),
+                                    )
+                                    .await?;
+                            }
+                            checkpoint
+                                .stage_result_sequence(&self.output_key(), sequence)
+                                .await?;
+                            if reset.is_some() {
+                                query
+                                    .resources()
+                                    .outbox_writer()
+                                    .ok_or(IndexError::NotSupported)?
+                                    .append(&self.reset_key(), 1, &marker)
+                                    .await?;
+                            }
+                            Ok(())
+                        })
+                        .await?;
+                }
+                if let Some(progress) = &self.source_progress {
+                    for (key, sequence, position, _) in &watermarks {
+                        progress.confirm(
+                            progress_identity(key)?,
+                            SourceCheckpoint::new(*sequence, position.clone()),
+                        );
+                    }
+                }
+                {
+                    let mut owners = self
+                        .input_producers
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("input producer identities poisoned"))?;
+                    for (key, _, _, producer) in &watermarks {
+                        if let Some(producer) = producer {
+                            owners.insert(key.clone(), producer.clone());
+                        }
+                    }
+                }
+                self.watermarks
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("watermarks poisoned"))?
+                    .extend(
+                        watermarks
+                            .into_iter()
+                            .map(|(key, sequence, _, _)| (key, sequence)),
+                    );
+                self.bootstrap_complete.store(true, Ordering::Release);
+                Ok(())
+            }))
+            .await
     }
 
     pub(super) async fn begin_non_atomic(&self) -> anyhow::Result<()> {

@@ -31,9 +31,7 @@ const SOURCE_COMPONENT_ID: &str = "64ae0536-16da-5306-9137-453be5793209";
 const REACTION_COMPONENT_ID: &str = "0ba93649-a2ad-5f34-8ee9-4b8050945416";
 
 fn init_logging() {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 }
 
 fn make_feed(vehicles: &[(&str, f32, f32)]) -> FeedMessage {

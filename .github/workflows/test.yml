@@ -8,6 +8,8 @@ on:
       - feature/*
       - feature-lib
       - release/*
+      # TEMPORARY: remove once the parallel computation graph recovery work merges.
+      - agentofreality-parallel-computation-graph-recovery
 
 env:
   CARGO_TERM_COLOR: always

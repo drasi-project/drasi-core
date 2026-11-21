@@ -22,3 +22,14 @@ in `drasi-grpc-common`; there is no local copy of `common.proto`.
 Minimal configuration: `{"stream": "telemetry"}` listens on `127.0.0.1:50051`.
 Listening on another address requires `authToken` or an explicit
 `allowUnauthenticated: true`.
+
+## Incoming trace context
+
+Unary event calls, streaming events and durable admission extract W3C
+`traceparent` and optional `tracestate` from request metadata through the
+shared SDK. Request metadata applies to every event in that stream. The
+incoming trace ID, sender parent span and sampling decision are retained;
+framework spans receive new local span IDs. Missing metadata clears prior
+context; malformed metadata logs a warning and is ignored without rejecting
+business data. Trace context is transient and does not change protobuf event
+messages, persisted data or receipt identities.

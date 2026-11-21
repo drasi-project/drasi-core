@@ -955,7 +955,7 @@ async fn loaded_plugin_case(plugin: &NativePlugin) -> anyhow::Result<()> {
         component
             .start(&crate::computation::test_hooks::start_ctx())
             .await?;
-        let input = InputEnvelope {
+        let input = InputEnvelope { execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: super::envelope(
                 &ComponentId::try_new("794abcc2-d807-5d24-9408-573e63650685")?,
@@ -1083,6 +1083,7 @@ impl EnvelopeSource for OneSource {
         Ok(self.envelope.take().map(|envelope| OutputEnvelope {
             port: PortId::try_new("out").expect("fixture port"),
             envelope,
+            execution_context: Default::default(),
         }))
     }
 }

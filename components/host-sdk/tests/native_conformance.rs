@@ -170,6 +170,7 @@ impl SinkProbe for CaptureProbe {
                 sequence,
                 None,
             )?,
+            execution_context: Default::default(),
         })
     }
 

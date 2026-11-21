@@ -77,6 +77,7 @@ struct Entry {
     key: (Option<chrono::DateTime<chrono::Utc>>, usize, u64),
     generation: u64,
     envelope: ChangeEnvelope,
+    execution_context: ExecutionContext,
 }
 
 impl crate::channels::priority_queue::QueueOrder for Entry {
@@ -104,6 +105,7 @@ struct State {
 /// unprocessed work. Untimed native heads delimit groups by admission order;
 /// their envelopes retain the absent timestamp. No idle source is awaited.
 pub struct RankedInputQueue {
+    observations: Arc<crate::observability::QueueObservations>,
     capacity: usize,
     state: Mutex<State>,
     changed: Notify,
@@ -113,6 +115,7 @@ impl RankedInputQueue {
     pub fn new(capacity: usize) -> anyhow::Result<Arc<Self>> {
         anyhow::ensure!(capacity > 0, "ranked input capacity must be nonzero");
         Ok(Arc::new(Self {
+            observations: Arc::default(),
             capacity,
             state: Mutex::new(State::default()),
             changed: Notify::new(),
@@ -180,6 +183,8 @@ impl RankedInputQueue {
                 entry.key.1 != binding.rank || entry.generation != binding.generation
             });
             binding.metrics.discarded(before - state.heap.len());
+            self.observations.discarded(before - state.heap.len());
+            self.observations.set_depth(state.heap.len());
             state.bindings.remove(&binding.rank);
         } else if let Some((_, closure)) = state.bindings.get_mut(&binding.rank) {
             *closure = Closure::Draining;
@@ -206,6 +211,8 @@ impl ResourceCleanup for RankedInputQueue {
             .lock()
             .map_err(|_| anyhow::anyhow!("ranked input ownership poisoned"))?;
         state.closed = true;
+        self.observations.discarded(state.heap.len());
+        self.observations.set_depth(0);
         for entry in std::mem::take(&mut state.heap).drain() {
             if let Some((binding, _)) = state.bindings.get(&entry.key.1) {
                 binding.metrics.discarded(1);
@@ -312,6 +319,9 @@ impl PipeControl for Control {
     fn metrics(&self) -> Option<PipeMetricsSnapshot> {
         Some(self.binding.metrics.snapshot())
     }
+    fn observations(&self) -> Option<Arc<crate::observability::QueueObservations>> {
+        self.queue.upgrade().map(|queue| queue.observations.clone())
+    }
 }
 
 struct Sender {
@@ -327,7 +337,11 @@ impl Drop for Sender {
 
 #[async_trait]
 impl EnvelopeSender for Sender {
-    async fn send(&self, envelope: ChangeEnvelope) -> Result<EnqueueReceipt, SendFailure> {
+    async fn send_message(&self, message: EnvelopeMessage) -> Result<EnqueueReceipt, SendFailure> {
+        let EnvelopeMessage {
+            envelope,
+            execution_context,
+        } = message;
         let key = match &self.config.source_id {
             Some(source) => GraphChangeCodec::source_metadata(&envelope)
                 .map_err(anyhow::Error::from)
@@ -357,6 +371,7 @@ impl EnvelopeSender for Sender {
             Err(error) => {
                 return Err(SendFailure {
                     envelope,
+                    execution_context,
                     error: PipeError::Backend(error),
                 })
             }
@@ -372,6 +387,7 @@ impl EnvelopeSender for Sender {
                     Err(_) => {
                         return Err(SendFailure {
                             envelope,
+                            execution_context,
                             error: poisoned(),
                         })
                     }
@@ -380,6 +396,7 @@ impl EnvelopeSender for Sender {
                 {
                     return Err(SendFailure {
                         envelope,
+                        execution_context,
                         error: PipeError::Closed,
                     });
                 }
@@ -388,6 +405,7 @@ impl EnvelopeSender for Sender {
                     let Some(next) = admission.checked_add(1) else {
                         return Err(SendFailure {
                             envelope,
+                            execution_context,
                             error: exhausted(),
                         });
                     };
@@ -399,9 +417,11 @@ impl EnvelopeSender for Sender {
                             key,
                             generation: self.binding.generation,
                             envelope,
+                            execution_context,
                         }),
                         admission,
                     );
+                    self.queue.observations.set_depth(state.heap.len());
                     drop(state);
                     self.queue.changed.notify_waiters();
                     return Ok(receipt);
@@ -410,10 +430,12 @@ impl EnvelopeSender for Sender {
                     // Acceptance by a declared lossy input is not delivery.
                     self.binding.metrics.accepted();
                     self.binding.metrics.discarded(1);
+                    self.queue.observations.discarded(1);
                     return Ok(EnqueueReceipt::new(envelope.id().clone()));
                 }
                 if !blocked {
                     self.binding.metrics.blocked();
+                    self.queue.observations.blocked();
                     blocked = true;
                 }
             }
@@ -449,9 +471,13 @@ impl EnvelopeReceiver for Receiver {
                 }) {
                     let entry = state.heap.pop().expect("ranked head");
                     self.binding.metrics.delivered();
+                    self.queue.observations.set_depth(state.heap.len());
                     drop(state);
                     self.queue.changed.notify_waiters();
-                    return Ok(Some(Delivery::new(entry.envelope.clone(), None)));
+                    return Ok(Some(
+                        Delivery::new(entry.envelope.clone(), None)
+                            .with_execution_context(entry.execution_context.clone()),
+                    ));
                 }
                 if closure == Closure::Draining
                     && !state.heap.iter().any(|entry| {

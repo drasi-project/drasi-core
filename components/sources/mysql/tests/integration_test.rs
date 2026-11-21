@@ -585,9 +585,7 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
 async fn test_mysql_bootstrap_cdc_overlap_handover_no_duplicates_or_gaps() {
     use std::collections::{HashMap, HashSet};
 
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     const SEED_COUNT: usize = 1_000;
 
@@ -1072,9 +1070,7 @@ async fn test_mysql_checkpoint_recovery_round_trip() {
     use drasi_index_rocksdb::RocksDbIndexProvider;
     use std::sync::Arc;
 
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let result = timeout(Duration::from_secs(300), async {
@@ -1269,9 +1265,7 @@ async fn test_mysql_bootstrap_then_restart_resumes_from_snapshot_position() {
     use drasi_index_rocksdb::RocksDbIndexProvider;
     use std::sync::Arc;
 
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let result = timeout(Duration::from_secs(300), async {
@@ -1421,9 +1415,7 @@ async fn test_mysql_full_restart_picks_up_offline_changes() {
     use drasi_index_rocksdb::RocksDbIndexProvider;
     use std::sync::Arc;
 
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let tmp_dir = tempfile::TempDir::new().unwrap();
     let result = timeout(Duration::from_secs(300), async {

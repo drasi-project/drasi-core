@@ -1,5 +1,31 @@
 # Drasi Host SDK
 
+## Shared native telemetry
+
+The loader negotiates telemetry V2 separately from native base ABI 2 and ordinary
+plugin interfaces. Native factories bind the actual graph-owned telemetry before
+calling constructors, including service-aware construction. Opaque metric tokens
+are scoped to the binding and generation; updates call the host recorder directly
+and never enter the droppable span queue. Native log records use the selected
+component-log destination once.
+
+Configure collection through the [library telemetry options](../../lib/README.md#shared-native-telemetry).
+Deferred graph resource construction also supplies an owned resource scope.
+Direct constructor/provider callers outside graph construction must enter an
+explicit `ExecutionScope::with_plugin_telemetry` binding. No factory guesses a
+global instance identity. V1/base-only plugins retain supported host observations
+while missing internal telemetry is reported; required native metric support
+fails before construction. A malformed advertised V2 extension is rejected.
+
+`NativeSpanCollector` owns bounded collection, not the graph or exporter.
+Stop producers, retain their callbacks through cleanup, drain the collector,
+then shut down the provider. Cancelling a public wait does not discard the
+owned worker. Recorders and sampling callbacks must perform no network I/O or
+recursive telemetry updates.
+
+Rebuild actual libraries after SDK changes. `make test-native-telemetry` runs
+real native telemetry/context/logging checks and a no-OTel metrics/log profile.
+
 ## Component lifecycle and managed updates
 
 The host binds runtime services before calling `initialize` once for each
@@ -143,6 +169,27 @@ Single-owner progress and source admission cannot be supplied alongside this
 binding. Non-opt-in factories keep their existing construction and processing.
 
 The Host attaches the actual set with `ComponentRecovery::with_consumer_progress`.
+
+Handled-branch latency additionally negotiates the optional telemetry V3
+extension, independently of unchanged base/V1/V2 tables. The Host retains
+graph-local timing resolvers, not an origin's clock or an idle completed origin.
+Imported input and reply carriers acquire bounded host leases. Producer-owned
+reply buffers retain their leases until host import or buffer release; callback
+contexts outlive outstanding native owners. Component telemetry lifetimes fence
+replacement/retirement, while release remains available for cleanup.
+
+Ordinary native operations use V3 only after an enabled timing origin binds a
+resolver. Disabled timing performs no timing callback or context-copy allocation.
+V1/V2-only propagation is an explicit coverage gap, not a loader downgrade or a
+business-processing failure. Host-observed terminal `Handled` calls remain
+measurable with retained input provenance. Existing consumer-wrapper callbacks
+continue through their frozen negotiated interface, without pretending to
+transport V3 ownership or changing their completion/durability semantics.
+
+Build the actual SDK fixture before qualification:
+`make build-native-telemetry-fixtures`; the
+`native_handled_branch_latency` test then exercises a native transformer retaining
+input across a continuation and the final source-to-sink histogram without OTel.
 An optional immutable native cursor comparator is captured separately and attached
 with `with_consumer_positions`. It interprets bounded source positions, not a
 generic minimum scalar, and can run while source/transformer processing is pending.

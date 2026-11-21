@@ -278,7 +278,7 @@ impl QosChannel {
         let mut metadata = state.metadata.clone();
         metadata.admission = Some(AdmissionState::new(options, &self.definition)?);
         self.persist(&metadata, None).await?;
-        state.metadata = metadata;
+        state.publish_metadata(metadata);
         Ok(())
     }
 
@@ -412,7 +412,17 @@ impl QosChannel {
         sequence: u64,
         input: &ChangeEnvelope,
     ) -> Result<AdmissionReceipt, PipeError> {
-        self.admit_validated(session, sequence, input, |_| Ok(()))
+        self.admit_message(session, sequence, &input.clone().into())
+            .await
+    }
+
+    pub async fn admit_message(
+        &self,
+        session: &ProducerSession,
+        sequence: u64,
+        message: &EnvelopeMessage,
+    ) -> Result<AdmissionReceipt, PipeError> {
+        self.admit_validated(session, sequence, message, |_| Ok(()))
             .await
     }
 
@@ -420,14 +430,14 @@ impl QosChannel {
         &self,
         session: &ProducerSession,
         sequence: u64,
-        input: &ChangeEnvelope,
+        message: &EnvelopeMessage,
         validate: impl FnOnce(&ChangeEnvelope) -> anyhow::Result<()> + Send,
     ) -> Result<AdmissionReceipt, PipeError> {
         let state = self
             .state
             .try_lock()
             .map_err(|_| AdmissionRejection::Busy)?;
-        self.admit_locked(state, session, sequence, input, validate)
+        self.admit_locked(state, session, sequence, message, validate)
             .await
     }
 
@@ -453,9 +463,10 @@ impl QosChannel {
         mut state: tokio::sync::MutexGuard<'_, State>,
         session: &ProducerSession,
         sequence: u64,
-        input: &ChangeEnvelope,
+        message: &EnvelopeMessage,
         validate: impl FnOnce(&ChangeEnvelope) -> anyhow::Result<()> + Send,
     ) -> Result<AdmissionReceipt, PipeError> {
+        let input = &message.envelope;
         self.check()?;
         let storage = self
             .storage()?
@@ -554,8 +565,13 @@ impl QosChannel {
         let _wake = WakeOnDrop(&self.changed);
         self.persist(&metadata, Some((position, &envelope, retain_from)))
             .await?;
-        state.append_committed(position, envelope, retain_from, budget);
-        state.metadata = metadata;
+        state.append_committed(
+            position,
+            EnvelopeMessage::new(envelope, message.execution_context.clone()),
+            retain_from,
+            budget,
+        );
+        state.publish_metadata(metadata);
         Ok(AdmissionReceipt {
             session: session.clone(),
             sequence,

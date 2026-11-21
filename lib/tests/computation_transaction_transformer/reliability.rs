@@ -122,6 +122,7 @@ impl EnvelopeSource for Source {
             None,
         )?;
         Ok(Some(OutputEnvelope {
+            execution_context: Default::default(),
             port: port("out"),
             envelope,
         }))

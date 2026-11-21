@@ -7,6 +7,9 @@ use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 use tokio::sync::{Mutex, Notify};
 
+#[path = "shutdown_outcome_tests.rs"]
+mod shutdown_outcome_tests;
+
 struct Completion(Arc<AtomicUsize>);
 
 impl Drop for Completion {
@@ -22,7 +25,7 @@ async fn cancelled_before_admission() -> Result<()> {
         let completed = completed.clone();
         async move {
             let _completion = Completion(completed);
-            let Some(Command::Close(reply)) = receive.recv().await else {
+            let Some(Command::Close { reply, .. }) = receive.recv().await else {
                 panic!("expected exactly one close request");
             };
             reply.send(Ok(())).unwrap();
@@ -31,14 +34,14 @@ async fn cancelled_before_admission() -> Result<()> {
     let mut task = ManagementTask::new(driver);
     let permit = commands.reserve().await?;
     {
-        let mut closing = Box::pin(task.close(&commands));
+        let mut closing = Box::pin(task.close(&commands, true));
         assert!(poll!(closing.as_mut()).is_pending());
     }
     assert!(matches!(task.close, CloseProgress::Open));
     assert_eq!(completed.load(Ordering::SeqCst), 0);
     drop(permit);
-    task.close(&commands).await?;
-    task.close(&commands).await?;
+    task.close(&commands, true).await?;
+    task.close(&commands, true).await?;
     assert_eq!(completed.load(Ordering::SeqCst), 1);
     Ok(())
 }
@@ -54,7 +57,7 @@ async fn cancelled_after_acknowledgement() -> Result<()> {
         let completed = completed.clone();
         async move {
             let _completion = Completion(completed);
-            let Some(Command::Close(reply)) = receive.recv().await else {
+            let Some(Command::Close { reply, .. }) = receive.recv().await else {
                 panic!("expected a close request");
             };
             reply.send(Ok(())).unwrap();
@@ -64,7 +67,7 @@ async fn cancelled_after_acknowledgement() -> Result<()> {
     });
     let mut task = ManagementTask::new(driver);
     {
-        let mut closing = Box::pin(task.close(&commands));
+        let mut closing = Box::pin(task.close(&commands, true));
         assert!(poll!(closing.as_mut()).is_pending());
         acknowledged.notified().await;
         assert!(poll!(closing.as_mut()).is_pending());
@@ -73,12 +76,12 @@ async fn cancelled_after_acknowledgement() -> Result<()> {
     assert!(!task.driver.is_finished());
     assert_eq!(completed.load(Ordering::SeqCst), 0);
     {
-        let mut retry = Box::pin(task.close(&commands));
+        let mut retry = Box::pin(task.close(&commands, true));
         assert!(poll!(retry.as_mut()).is_pending());
     }
     release.notify_one();
-    task.close(&commands).await?;
-    task.close(&commands).await?;
+    task.close(&commands, true).await?;
+    task.close(&commands, true).await?;
     assert_eq!(completed.load(Ordering::SeqCst), 1);
     Ok(())
 }
@@ -94,7 +97,7 @@ async fn concurrent_callers_share_close() -> Result<()> {
         let completed = completed.clone();
         async move {
             let _completion = Completion(completed);
-            let Some(Command::Close(reply)) = receive.recv().await else {
+            let Some(Command::Close { reply, .. }) = receive.recv().await else {
                 panic!("expected a close request");
             };
             entered.notify_one();
@@ -108,7 +111,7 @@ async fn concurrent_callers_share_close() -> Result<()> {
         let task = task.clone();
         let commands = commands.clone();
         calls.push(tokio::spawn(async move {
-            task.lock().await.close(&commands).await
+            task.lock().await.close(&commands, true).await
         }));
     }
     entered.notified().await;
@@ -126,7 +129,7 @@ async fn driver_failure_is_retained() -> Result<()> {
     for acknowledge in [false, true] {
         let (commands, mut receive) = mpsc::channel(1);
         let driver = tokio::spawn(async move {
-            let Some(Command::Close(reply)) = receive.recv().await else {
+            let Some(Command::Close { reply, .. }) = receive.recv().await else {
                 panic!("expected a close request");
             };
             if acknowledge {
@@ -136,7 +139,7 @@ async fn driver_failure_is_retained() -> Result<()> {
         });
         let mut task = ManagementTask::new(driver);
         for _ in 0..2 {
-            let error = task.close(&commands).await.unwrap_err();
+            let error = task.close(&commands, true).await.unwrap_err();
             let panic = error
                 .chain()
                 .find_map(|cause| cause.downcast_ref::<tokio::task::JoinError>())
@@ -151,7 +154,7 @@ async fn driver_failure_is_retained() -> Result<()> {
     commands.closed().await;
     let mut task = ManagementTask::new(driver);
     for _ in 0..2 {
-        let error = task.close(&commands).await.unwrap_err();
+        let error = task.close(&commands, true).await.unwrap_err();
         assert!(error.chain().any(|cause| matches!(
             cause.downcast_ref::<ManagementError>(),
             Some(ManagementError::Closed)

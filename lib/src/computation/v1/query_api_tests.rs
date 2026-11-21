@@ -135,6 +135,7 @@ fn emission(reader: &Reader, sequence: u64, transport: u64) -> anyhow::Result<Ou
     Ok(OutputEnvelope {
         port: PortId::try_new("out")?,
         envelope: envelope.reemit(transport)?,
+        execution_context: Default::default(),
     })
 }
 

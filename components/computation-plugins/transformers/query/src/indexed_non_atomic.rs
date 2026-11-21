@@ -63,6 +63,7 @@ pub(super) async fn finish(
     retention: u64,
     prepared: Option<Vec<u8>>,
 ) -> Result<Option<Vec<u8>>> {
+    let telemetry = crate::observations::QueryObservations::capture()?;
     processing
         .run_output(move |context| async move {
             let pending = context
@@ -83,18 +84,26 @@ pub(super) async fn finish(
                     && pending.source_position == expected.source_position,
                 "non-atomic output does not match the committed evaluation"
             );
-            context.resume_input_progress().await?;
-            let output = match output {
-                Some(output) => Some(
-                    stage_output(
-                        &context, &state, &projector, output, retention, false, false,
-                    )
-                    .await?,
-                ),
-                None => None,
-            };
-            stage(&context, QueryPublicationCheckpoint::Complete).await?;
-            Ok(output)
+            telemetry
+                .phase(
+                    QueryObservationKind::CommitWork,
+                    QueryObservationPhase::Steady,
+                    async {
+                        context.resume_input_progress().await?;
+                        let output = match output {
+                            Some(output) => Some(
+                                stage_output(
+                                    &context, &state, &projector, output, retention, false, false,
+                                )
+                                .await?,
+                            ),
+                            None => None,
+                        };
+                        stage(&context, QueryPublicationCheckpoint::Complete).await?;
+                        Ok(output)
+                    },
+                )
+                .await
         })
         .await
 }

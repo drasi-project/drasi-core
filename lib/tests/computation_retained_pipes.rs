@@ -35,7 +35,7 @@ fn memory(capacity: usize, policy: RetentionPolicy) -> Arc<MemoryEnvelopeStore> 
 async fn handled(delivery: Delivery) {
     delivery
         .into_parts()
-        .1
+        .2
         .expect("explicit acknowledgement")
         .complete(HandlingOutcome::Handled)
         .await
@@ -91,7 +91,7 @@ async fn retained_delivery_drop_or_failure_does_not_acknowledge_and_capacity_bac
     assert_eq!(replayed.envelope().system().sequence(), 1);
     replayed
         .into_parts()
-        .1
+        .2
         .expect("ack")
         .complete(HandlingOutcome::Failed {
             reason: "retry".into(),
@@ -164,7 +164,7 @@ async fn new_binding_generation_closes_old_senders_and_acknowledgements_but_repl
     assert!(matches!(
         old_delivery
             .into_parts()
-            .1
+            .2
             .expect("old ack")
             .complete(HandlingOutcome::Handled)
             .await,
@@ -594,10 +594,10 @@ impl RetainedEnvelopeStore for PausedStore {
     fn notify(&self) -> &tokio::sync::Notify {
         self.inner.notify()
     }
-    async fn append(
+    async fn append_message(
         &self,
         generation: u64,
-        envelope: &ChangeEnvelope,
+        message: &EnvelopeMessage,
     ) -> std::result::Result<u64, PipeError> {
         if self
             .pause_append
@@ -606,7 +606,7 @@ impl RetainedEnvelopeStore for PausedStore {
             self.entered.notify_one();
             self.release.notified().await;
         }
-        self.inner.append(generation, envelope).await
+        self.inner.append_message(generation, message).await
     }
     async fn next(
         &self,
@@ -686,7 +686,7 @@ async fn cancellation_revokes_admitted_sends_and_acks_before_the_store_mutation(
         .expect("delivery")
         .expect("one")
         .into_parts()
-        .1
+        .2
         .expect("ack");
     store
         .pause_ack
@@ -1075,7 +1075,7 @@ mod durable {
                 .expect("receive")
                 .expect("delivery")
                 .into_parts()
-                .1
+                .2
                 .expect("ack");
             assert!(matches!(
                 ack.complete(HandlingOutcome::Handled).await,

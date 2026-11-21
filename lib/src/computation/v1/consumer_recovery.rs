@@ -553,6 +553,7 @@ impl QueryReplayTransformer {
     async fn forward(&self, envelope: &super::ChangeEnvelope) -> anyhow::Result<OutputEnvelope> {
         let sequence = self.progress.allocate_sequence(&self.stream).await?;
         Ok(OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out")?,
             envelope: envelope.derive(
                 super::emission_id(&self.stream, sequence)?,
@@ -653,6 +654,7 @@ impl QueryReplayTransformer {
         }
         .annotate(&mut envelope, self.descriptor.id())?;
         Ok(OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out")?,
             envelope,
         })

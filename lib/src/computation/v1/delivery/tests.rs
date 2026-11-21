@@ -115,6 +115,7 @@ fn input(producer: &GraphProducerIdentity, sequence: u64, count: usize) -> Input
             .expect("changes");
     GraphProducerProgress::annotate(&mut envelope, producer, sequence).expect("progress");
     InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").expect("port"),
         envelope,
     }
@@ -268,7 +269,7 @@ fn query_output(generation: u64, sequence: u64) -> InputEnvelope {
         .annotate(&mut envelope, &query)
         .expect("annotated");
     QueryChangeCodec::set_generation(&mut envelope, &query, generation).expect("generation");
-    InputEnvelope {
+    InputEnvelope { execution_context: Default::default(),
         port: PortId::try_new("in").expect("port"),
         envelope,
     }
@@ -730,6 +731,7 @@ impl ComputationComponent for Source {
 impl EnvelopeSource for Source {
     async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
         Ok(self.batch.take().map(|input| OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out").expect("port"),
             envelope: input.envelope,
         }))
@@ -974,6 +976,7 @@ async fn delivery_crash_child() -> anyhow::Result<()> {
     let mut delivery =
         DeliveryRunner::new(scope(), with_control(original, control), codec(), options())?;
     let batch = InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: codec().decode(&std::fs::read(path.join("input.json"))?)?,
     };

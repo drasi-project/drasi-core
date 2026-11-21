@@ -411,6 +411,7 @@ impl PersistentStockroom {
         let core = DrasiLib::builder()
             .with_allow_external_component_ids(true)
             .with_id(INSTANCE)
+            .with_component_logging(crate::component_logging()?)
             .with_components(batch)
             .build()
             .await?;
@@ -677,6 +678,7 @@ mod tests {
             runner
                 .deliver_transactional(
                     &InputEnvelope {
+                        execution_context: Default::default(),
                         port: PortId::try_new("in")?,
                         envelope,
                     },

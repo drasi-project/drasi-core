@@ -159,7 +159,7 @@ impl Case {
             "persistent": self.producer == Producer::Persistent
         }))?;
         GraphProducerProgress::annotate(&mut envelope, &identity, 1)?;
-        Ok(InputEnvelope {
+        Ok(InputEnvelope { execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope,
         })

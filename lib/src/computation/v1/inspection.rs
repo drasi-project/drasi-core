@@ -685,6 +685,7 @@ impl EnvelopeSource for ComputationTopologySource {
                     self.previous.remove(&id);
                 }
                 return Ok(Some(OutputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("out")?,
                     envelope,
                 }));

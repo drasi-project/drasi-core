@@ -199,6 +199,7 @@ async fn computation_topology_is_queryable_as_typed_graph_changes() {
             .expect("initial topology");
         query
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: port("in"),
                 envelope: event.envelope,
             })
@@ -314,6 +315,7 @@ async fn orphan_relationships_remain_queryable_and_history_eviction_is_explicit(
             .envelope;
         query
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: port("in"),
                 envelope,
             })

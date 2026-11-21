@@ -69,7 +69,7 @@ async fn a_query_commits_a_source_progress_record_as_that_sources_checkpoint_wit
     let input = GraphChangeCodec::encode_source_event(Arc::new(change), &source, stream(), 1, None)
         .unwrap();
     let output = query
-        .transform(InputEnvelope {
+        .transform(InputEnvelope { execution_context: Default::default(),
             port: PortId::try_new("in").unwrap(),
             envelope: input,
         })
@@ -89,7 +89,7 @@ async fn a_query_commits_a_source_progress_record_as_that_sources_checkpoint_wit
     .unwrap();
     assert!(record.changes().operations().is_empty());
     let output = query
-        .transform(InputEnvelope {
+        .transform(InputEnvelope { execution_context: Default::default(),
             port: PortId::try_new("in").unwrap(),
             envelope: record,
         })

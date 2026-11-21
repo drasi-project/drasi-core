@@ -205,6 +205,7 @@ async fn consumer_progress_static_and_dynamic_producers_observe_actual_independe
             let input = super::envelope(&id(749), 1);
             let outputs = first
                 .transform(InputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("in")?,
                     envelope: input.clone(),
                 })
@@ -221,6 +222,7 @@ async fn consumer_progress_static_and_dynamic_producers_observe_actual_independe
             } else {
                 let outputs = proxy
                     .transform(InputEnvelope {
+                        execution_context: Default::default(),
                         port: PortId::try_new("in")?,
                         envelope: input,
                     })
@@ -925,6 +927,7 @@ async fn standalone_transaction_capable_factories_keep_volatile_handling_separat
             .await?;
         let output = component
             .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in")?,
                 envelope: GraphChangeCodec::encode_changes(
                     &[],
@@ -1017,6 +1020,7 @@ mod graph_fanout {
     impl EnvelopeSource for Input {
         async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
             Ok(self.receiver.recv().await.map(|envelope| OutputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("out").expect("fixture port"),
                 envelope,
             }))
@@ -1574,6 +1578,7 @@ mod graph_fanout {
             sink.start(&crate::computation::test_hooks::start_ctx())
                 .await?;
             sink.handle(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in")?,
                 envelope: input(1)?,
             })

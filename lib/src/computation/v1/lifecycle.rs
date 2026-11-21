@@ -55,6 +55,9 @@ pub(crate) struct OperationDeadline {
 }
 
 impl OperationDeadline {
+    pub(crate) fn operation(&self) -> &'static str {
+        self.operation
+    }
     pub(crate) fn new(
         owner: impl Into<Arc<str>>,
         operation: &'static str,

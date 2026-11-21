@@ -74,7 +74,7 @@ fn relation(target: &str, time: u64) -> Element {
 }
 
 fn input(change: SourceChange, sequence: u64) -> Result<InputEnvelope> {
-    Ok(InputEnvelope {
+    Ok(InputEnvelope { execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_change(
             change,

@@ -652,7 +652,7 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "tracing",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -1147,7 +1147,7 @@ dependencies = [
  "time",
  "tracing",
  "url",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -1196,7 +1196,7 @@ dependencies = [
  "serde",
  "time",
  "tracing",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -1234,7 +1234,7 @@ dependencies = [
  "time",
  "tracing",
  "url",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -1255,7 +1255,7 @@ dependencies = [
  "time",
  "tracing",
  "url",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -1270,7 +1270,7 @@ dependencies = [
  "serde",
  "time",
  "tracing",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -2702,7 +2702,7 @@ dependencies = [
  "tokio",
  "tracing",
  "utoipa",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -2811,7 +2811,7 @@ dependencies = [
  "tokio-postgres",
  "tokio-stream",
  "utoipa",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -2872,7 +2872,7 @@ dependencies = [
  "tokio-postgres",
  "tokio-stream",
  "utoipa",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -2899,7 +2899,7 @@ dependencies = [
  "tokio-postgres",
  "tokio-stream",
  "utoipa",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -2922,7 +2922,7 @@ dependencies = [
  "tokio-postgres",
  "tokio-stream",
  "utoipa",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -3036,7 +3036,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -3086,7 +3086,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-util",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -3105,7 +3105,11 @@ dependencies = [
  "imbl",
  "jsonschema",
  "log",
+ "metrics",
+ "opentelemetry 0.33.1",
+ "opentelemetry_sdk 0.33.1",
  "ordered-float 3.9.2",
+ "pin-project-lite",
  "rmp-serde",
  "serde",
  "serde_bytes",
@@ -3114,7 +3118,10 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
- "uuid 1.26.1",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -3180,11 +3187,19 @@ dependencies = [
  "futures-core",
  "futures-util",
  "log",
+ "metrics",
+ "opentelemetry 0.33.1",
+ "opentelemetry_sdk 0.33.1",
  "rmp-serde",
  "serde",
  "serde_bytes",
  "serde_json",
  "tokio",
+ "tracing",
+ "tracing-core",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -3199,7 +3214,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tokio",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -3561,7 +3576,7 @@ dependencies = [
  "testcontainers",
  "tokio",
  "tokio-postgres",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -3584,7 +3599,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -3749,7 +3764,7 @@ dependencies = [
  "log",
  "mockall 0.13.1",
  "once_cell",
- "opentelemetry",
+ "opentelemetry 0.20.0",
  "ordered-float 3.9.2",
  "priority-queue",
  "rand 0.8.8",
@@ -3765,7 +3780,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -3792,7 +3807,7 @@ dependencies = [
  "time",
  "tokio",
  "utoipa",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -3890,9 +3905,12 @@ dependencies = [
  "indexmap 2.14.2",
  "libloading",
  "log",
+ "metrics",
  "notify",
  "notify-debouncer-mini",
  "oci-client",
+ "opentelemetry 0.33.1",
+ "opentelemetry_sdk 0.33.1",
  "ordered-float 3.9.2",
  "p256",
  "p384",
@@ -3914,7 +3932,10 @@ dependencies = [
  "toml",
  "tonic",
  "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
  "url",
+ "uuid 1.29.0",
  "x509-parser 0.16.0",
 ]
 
@@ -4094,7 +4115,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tokio",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -4141,7 +4162,10 @@ dependencies = [
  "futures",
  "imbl",
  "log",
+ "metrics",
  "mockall 0.12.1",
+ "opentelemetry 0.33.1",
+ "opentelemetry_sdk 0.33.1",
  "ordered-float 3.9.2",
  "pretty_assertions",
  "rmp-serde",
@@ -4160,8 +4184,9 @@ dependencies = [
  "tokio-test",
  "tracing",
  "tracing-log",
+ "tracing-opentelemetry",
  "tracing-subscriber",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -4209,7 +4234,7 @@ dependencies = [
  "tiberius",
  "tokio",
  "tokio-util",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -4343,7 +4368,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-postgres",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -4377,7 +4402,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -4467,7 +4492,7 @@ dependencies = [
  "tokio",
  "url",
  "utoipa",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -4542,7 +4567,7 @@ dependencies = [
  "tower 0.4.13",
  "tower-http 0.5.2",
  "utoipa",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -4565,7 +4590,7 @@ dependencies = [
  "tokio",
  "url",
  "utoipa",
- "uuid 1.26.1",
+ "uuid 1.29.0",
  "wiremock",
 ]
 
@@ -4591,7 +4616,7 @@ dependencies = [
  "tokio-stream",
  "tokio-test",
  "utoipa",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -4608,6 +4633,7 @@ dependencies = [
  "drasi-plugin-sdk",
  "handlebars 5.1.2",
  "log",
+ "metrics",
  "ordered-float 3.9.2",
  "prost 0.14.4",
  "prost-types 0.14.4",
@@ -4620,8 +4646,10 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tonic-prost",
+ "tracing",
+ "tracing-subscriber",
  "utoipa",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -4639,11 +4667,14 @@ dependencies = [
  "env_logger 0.11.11",
  "handlebars 5.1.2",
  "log",
+ "metrics",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "shared-tests",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "utoipa",
  "wiremock",
 ]
@@ -4669,7 +4700,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "utoipa",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -4722,7 +4753,7 @@ dependencies = [
  "tower-http 0.5.2",
  "url",
  "utoipa",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -4745,7 +4776,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "utoipa",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -4766,7 +4797,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "utoipa",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -4841,7 +4872,7 @@ dependencies = [
  "tower 0.4.13",
  "tower-http 0.5.2",
  "utoipa",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -5080,7 +5111,7 @@ dependencies = [
  "tonic-prost",
  "tracing",
  "utoipa",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -5134,7 +5165,7 @@ dependencies = [
  "tokio-test",
  "tracing",
  "utoipa",
- "uuid 1.26.1",
+ "uuid 1.29.0",
  "wiremock",
 ]
 
@@ -5180,7 +5211,7 @@ dependencies = [
  "tower-service",
  "tracing",
  "utoipa",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -5305,7 +5336,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "utoipa",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -5340,7 +5371,7 @@ dependencies = [
  "tokio-test",
  "tokio-util",
  "utoipa",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -5407,7 +5438,7 @@ dependencies = [
  "tokio-test",
  "tracing",
  "utoipa",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -5521,7 +5552,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "utoipa",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -5567,7 +5598,7 @@ dependencies = [
  "tokio-test",
  "tracing",
  "utoipa",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -5630,7 +5661,7 @@ dependencies = [
  "tower-http 0.5.2",
  "tracing",
  "utoipa",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -5706,7 +5737,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -5725,7 +5756,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -7566,7 +7597,7 @@ dependencies = [
  "serde_json",
  "time",
  "url",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -7834,6 +7865,9 @@ dependencies = [
  "drasi-state-store-redb",
  "drasi-wal-redb",
  "futures",
+ "metrics",
+ "opentelemetry 0.33.1",
+ "opentelemetry_sdk 0.33.1",
  "prost-types 0.14.4",
  "rmp-serde",
  "rusqlite",
@@ -7849,6 +7883,8 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -8077,6 +8113,16 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "metrics"
+version = "0.24.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89550ee9f79e88fef3119de263694973a8adb26c21d75322164fb8c493039fe2"
+dependencies = [
+ "portable-atomic",
+ "rapidhash",
+]
 
 [[package]]
 name = "microlp"
@@ -8313,7 +8359,7 @@ dependencies = [
  "sha1",
  "sha2 0.10.9",
  "thiserror 2.0.20",
- "uuid 1.26.1",
+ "uuid 1.29.0",
  "zstd 0.13.3",
 ]
 
@@ -8868,7 +8914,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9591d937bc0e6d2feb6f71a559540ab300ea49955229c347a517a28d27784c54"
 dependencies = [
  "opentelemetry_api",
- "opentelemetry_sdk",
+ "opentelemetry_sdk 0.20.0",
+]
+
+[[package]]
+name = "opentelemetry"
+version = "0.33.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c1f1a6ac9c875a4941e4c7c085b61e8f4daa326de03b4701768c3491a6ad9ee"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+ "js-sys",
+ "pin-project-lite",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -8904,6 +8963,23 @@ dependencies = [
  "percent-encoding",
  "rand 0.8.8",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "opentelemetry_sdk"
+version = "0.33.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "372a912db2974d1990207006fd0e3aa0ef3fd4ad3be43c65cfaadf2206866061"
+dependencies = [
+ "futures-channel",
+ "futures-executor",
+ "futures-util",
+ "opentelemetry 0.33.1",
+ "percent-encoding",
+ "portable-atomic",
+ "rand 0.9.5",
+ "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]
@@ -9502,7 +9578,7 @@ dependencies = [
  "postgres-protocol",
  "serde_core",
  "serde_json",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -10225,6 +10301,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f703f4665700daf5512dcca5f43afa6af89f09db47fb56be587f80636bda2d41"
 dependencies = [
  "rand_core 0.9.5",
+]
+
+[[package]]
+name = "rapidhash"
+version = "4.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5da7e78a036ce858e8d55b7e7dc8ba3a88b78350fd2155d3591bbd966b58589e"
+dependencies = [
+ "rustversion",
 ]
 
 [[package]]
@@ -11432,7 +11517,7 @@ dependencies = [
  "testcontainers",
  "testcontainers-modules",
  "tokio",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -12066,7 +12151,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "tracing",
- "uuid 1.26.1",
+ "uuid 1.29.0",
  "winauth",
  "zeroize",
 ]
@@ -12562,6 +12647,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-opentelemetry"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a904802a1b902f43638b677ff2a650847e3b4404101b6c586d648e8c1e3e8fe"
+dependencies = [
+ "js-sys",
+ "opentelemetry 0.33.1",
+ "tracing",
+ "tracing-core",
+ "tracing-subscriber",
+ "web-time",
+]
+
+[[package]]
 name = "tracing-subscriber"
 version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12654,7 +12753,7 @@ dependencies = [
  "typespec",
  "typespec_macros",
  "url",
- "uuid 1.26.1",
+ "uuid 1.29.0",
 ]
 
 [[package]]
@@ -12842,9 +12941,9 @@ dependencies = [
 
 [[package]]
 name = "uuid"
-version = "1.26.1"
+version = "1.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
+checksum = "4a0e2d11620c50695fe12bbbfde96b3477fe606e7284c22d505c12ce51214514"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",

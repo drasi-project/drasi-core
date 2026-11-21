@@ -118,7 +118,7 @@ use tokio::sync::RwLock;
 use tonic::{transport::Server, Request, Response, Status};
 
 use drasi_lib::channels::{DispatchMode, *};
-use drasi_lib::observability::{log_component_start, log_component_stop};
+use drasi_lib::observability::{log_component_start, log_component_stop, ExecutionScope};
 use drasi_lib::sources::base::{SourceBase, SourceBaseParams};
 use drasi_lib::wal::{WalError, WalProvider};
 use drasi_lib::Source;
@@ -393,7 +393,7 @@ impl Source for GrpcSource {
             component_id = %source_id_for_span,
             component_type = "source"
         );
-        drasi_lib::context::workers::spawn_owned_worker(
+        drasi_lib::context::workers::spawn_owned_component_worker(
             &self.base.task_handle,
             async move {
                 reporter
@@ -427,24 +427,27 @@ impl Source for GrpcSource {
         if let Some(wal) = wal_ref {
             let base = self.base.clone_shared();
             let source_id = self.base.id.clone();
-            drasi_lib::context::workers::spawn_owned_worker(&self.prune_task, async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(30));
-                let mut stopping = base.subscribe_wal_pruning_stop();
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = stopping.wait_for(|stopping| *stopping) => break,
-                        _ = interval.tick() => {}
-                    }
-                    match base.prune_confirmed_wal(wal.as_ref()).await {
-                        Ok(pruned) if pruned > 0 => {
-                            debug!("[{source_id}] WAL pruned: count={pruned}");
+            drasi_lib::context::workers::spawn_owned_component_worker(
+                &self.prune_task,
+                async move {
+                    let mut interval = tokio::time::interval(Duration::from_secs(30));
+                    let mut stopping = base.subscribe_wal_pruning_stop();
+                    loop {
+                        tokio::select! {
+                            biased;
+                            _ = stopping.wait_for(|stopping| *stopping) => break,
+                            _ = interval.tick() => {}
                         }
-                        Ok(_) => {}
-                        Err(error) => warn!("[{source_id}] WAL prune failed: {error}"),
+                        match base.prune_confirmed_wal(wal.as_ref()).await {
+                            Ok(pruned) if pruned > 0 => {
+                                debug!("[{source_id}] WAL pruned: count={pruned}");
+                            }
+                            Ok(_) => {}
+                            Err(error) => warn!("[{source_id}] WAL prune failed: {error}"),
+                        }
                     }
-                }
-            })
+                },
+            )
             .await
             .with_context(|| format!("gRPC source '{}' WAL pruner registration", self.base.id))?;
         }
@@ -554,6 +557,16 @@ impl SourceService for GrpcSourceService {
         &self,
         request: Request<SubmitEventRequest>,
     ) -> Result<Response<SubmitEventResponse>, Status> {
+        let scope = ExecutionScope::capture().with_w3c_headers(
+            request
+                .metadata()
+                .get("traceparent")
+                .map(|value| value.as_encoded_bytes()),
+            request
+                .metadata()
+                .get("tracestate")
+                .map(|value| value.as_encoded_bytes()),
+        );
         let event_request = request.into_inner();
 
         if let Some(proto_change) = event_request.event {
@@ -614,7 +627,7 @@ impl SourceService for GrpcSourceService {
 
                     debug!("[{}] Processing gRPC event: {:?}", self.source_id, &wrapper);
 
-                    if let Err(e) = self.base.dispatch_event(wrapper).await {
+                    if let Err(e) = scope.scope(self.base.dispatch_event(wrapper)).await {
                         debug!(
                             "[{}] Failed to dispatch (no subscribers): {}",
                             self.source_id, e
@@ -657,6 +670,16 @@ impl SourceService for GrpcSourceService {
         &self,
         request: Request<tonic::Streaming<ProtoSourceChange>>,
     ) -> Result<Response<Self::StreamEventsStream>, Status> {
+        let scope = ExecutionScope::capture().with_w3c_headers(
+            request
+                .metadata()
+                .get("traceparent")
+                .map(|value| value.as_encoded_bytes()),
+            request
+                .metadata()
+                .get("tracestate")
+                .map(|value| value.as_encoded_bytes()),
+        );
         let mut stream = request.into_inner();
         let source_id = self.source_id.clone();
         let instance_id = self.instance_id.clone();
@@ -673,7 +696,7 @@ impl SourceService for GrpcSourceService {
             component_id = %source_id_for_span,
             component_type = "source"
         );
-        tokio::spawn(
+        drasi_lib::context::workers::spawn_scoped_worker(
             async move {
                 let mut events_processed = 0u64;
 
@@ -733,7 +756,7 @@ impl SourceService for GrpcSourceService {
                                     Some(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
                             }
 
-                            if let Err(e) = base.dispatch_event(wrapper).await {
+                            if let Err(e) = scope.scope(base.dispatch_event(wrapper)).await {
                                 debug!("[{source_id}] Failed to dispatch (no subscribers): {e}");
                             }
 
@@ -803,7 +826,7 @@ impl SourceService for GrpcSourceService {
             component_id = %source_id_for_span,
             component_type = "source"
         );
-        tokio::spawn(
+        drasi_lib::context::workers::spawn_scoped_worker(
             async move {
                 let _ = tx
                     .send(Ok(BootstrapResponse {

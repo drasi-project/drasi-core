@@ -53,7 +53,7 @@ impl Harness {
 
     fn input(&mut self, changes: &[SourceChange]) -> Result<InputEnvelope> {
         self.sequence += 1;
-        Ok(InputEnvelope {
+        Ok(InputEnvelope { execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: GraphChangeCodec::encode_changes(
                 changes,

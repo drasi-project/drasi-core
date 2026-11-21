@@ -419,8 +419,10 @@ impl Reaction for LogReaction {
 
         // Create shutdown channel for graceful termination
         let mut shutdown_rx = self.base.create_shutdown_channel().await;
+        let telemetry = self.base.worker_telemetry().await;
 
         drasi_lib::context::workers::spawn_owned_worker(&self.base.processing_task, async move {
+            telemetry.scope(async {
             let mut checkpoints = CheckpointState::load(&base).await;
             // Set up Handlebars with json helper
             let mut handlebars = Handlebars::new();
@@ -453,12 +455,12 @@ impl Reaction for LogReaction {
                         break;
                     }
 
-                    result = priority_queue.dequeue() => result,
+                    result = priority_queue.dequeue_message() => result,
                 };
 
                 // Get mutable access to the result for profiling
                 // Note: We need to clone and modify since Arc doesn't allow mutation
-                let mut query_result = (*query_result_arc).clone();
+                let mut query_result = (*query_result_arc.payload).clone();
 
                 // Capture reaction_receive_ns timestamp
                 if let Some(ref mut profiling) = query_result.profiling {
@@ -470,6 +472,17 @@ impl Reaction for LogReaction {
                     debug!("[{reaction_name}] Received empty result set from query");
                 }
 
+                let change_count = query_result.results.iter()
+                    .filter(|diff| !matches!(diff, ResultDiff::Noop)).count();
+                let observation = if change_count == 0 {
+                    None
+                } else {
+                    telemetry.reaction(&query_result_arc.execution_context, change_count)
+                        .map_err(|e| log::warn!("Failed to observe log output: {e}")).ok()
+                };
+                let mut work = (change_count > 0).then(|| telemetry.reaction_work_context(&query_result_arc.execution_context));
+                let output = async {
+                let mut render_failed = false;
                 #[allow(clippy::print_stdout)]
                 if has_results {
                     println!(
@@ -513,6 +526,7 @@ impl Reaction for LogReaction {
                                         }
                                     }
                                     Err(e) => {
+                                        render_failed = true;
                                         debug!("[{reaction_name}] Template render error: {e}");
                                         #[allow(clippy::print_stdout)]
                                         {
@@ -544,6 +558,7 @@ impl Reaction for LogReaction {
                                         }
                                     }
                                     Err(e) => {
+                                        render_failed = true;
                                         debug!("[{reaction_name}] Template render error: {e}");
                                         #[allow(clippy::print_stdout)]
                                         {
@@ -582,6 +597,7 @@ impl Reaction for LogReaction {
                                         }
                                     }
                                     Err(e) => {
+                                        render_failed = true;
                                         debug!("[{reaction_name}] Template render error: {e}");
                                         #[allow(clippy::print_stdout)]
                                         {
@@ -614,6 +630,9 @@ impl Reaction for LogReaction {
                     }
                 }
 
+                if let Some(work) = &work {
+                    work.handled(query_result.query_id.as_str(), change_count, 0);
+                }
                 // Capture reaction_complete_ns timestamp
                 if let Some(profiling) = query_result.profiling.as_mut().filter(|_| has_results) {
                     profiling.reaction_complete_ns = Some(drasi_lib::profiling::timestamp_ns());
@@ -630,6 +649,19 @@ impl Reaction for LogReaction {
                         );
                     }
                 }
+                if let Some(work) = &mut work {
+                    work.handled(query_result.query_id.as_str(), 0, 1);
+                    work.finish(!render_failed);
+                }
+                if render_failed {
+                    anyhow::bail!("One or more log templates failed; raw output was used");
+                }
+                Ok::<_, anyhow::Error>(())
+                };
+                let _ = match observation {
+                    Some(observation) => observation.run(output).await,
+                    None => output.await,
+                };
                 if let Err(error) = checkpoints
                     .advance_with_policy(&base, &query_result.query_id, query_result.sequence, policy)
                     .await
@@ -643,6 +675,7 @@ impl Reaction for LogReaction {
                     break;
                 }
             }
+            }).await;
         }).await?;
         self.base
             .set_status(

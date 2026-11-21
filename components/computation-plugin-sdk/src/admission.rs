@@ -116,6 +116,7 @@ pub struct NativeAdmission {
     identity: Arc<GraphProducerIdentity>,
     /// Outstanding host operations, shared by every clone of the capability.
     slots: Arc<tokio::sync::Semaphore>,
+    contextual: bool,
 }
 
 impl NativeAdmission {
@@ -154,11 +155,17 @@ impl NativeAdmission {
             codec,
             identity: Arc::new(identity),
             slots: Arc::new(tokio::sync::Semaphore::new(MAX_OUTSTANDING_REQUESTS)),
+            contextual: false,
         })
     }
 
     pub fn identity(&self) -> &GraphProducerIdentity {
         &self.identity
+    }
+
+    pub(crate) fn with_context_transport(mut self, contextual: bool) -> Self {
+        self.contextual = contextual;
+        self
     }
 
     pub fn report_failure(&self, reason: &str) -> Result<(), Failure> {
@@ -281,7 +288,15 @@ impl NativeAdmission {
         sequence: u64,
         input: &ChangeEnvelope,
     ) -> Result<AdmissionReceipt, AdmissionError> {
-        self.admit_request(session, sequence, input, false).await
+        self.admit_message(
+            session,
+            sequence,
+            &drasi_computation_contracts::EnvelopeMessage::new(
+                input.clone(),
+                crate::telemetry::ExecutionContext::current(),
+            ),
+        )
+        .await
     }
 
     /// Admits one envelope with back-pressure: the host waits for the current
@@ -299,6 +314,36 @@ impl NativeAdmission {
         sequence: u64,
         input: &ChangeEnvelope,
     ) -> Result<AdmissionReceipt, AdmissionError> {
+        self.admit_message_wait(
+            session,
+            sequence,
+            &drasi_computation_contracts::EnvelopeMessage::new(
+                input.clone(),
+                crate::telemetry::ExecutionContext::current(),
+            ),
+        )
+        .await
+    }
+
+    /// Admits one envelope together with its execution context; see
+    /// [`Self::admit`].
+    pub async fn admit_message(
+        &self,
+        session: &ProducerSession,
+        sequence: u64,
+        input: &drasi_computation_contracts::EnvelopeMessage,
+    ) -> Result<AdmissionReceipt, AdmissionError> {
+        self.admit_request(session, sequence, input, false).await
+    }
+
+    /// Admits one envelope together with its execution context with
+    /// back-pressure; see [`Self::admit_wait`].
+    pub async fn admit_message_wait(
+        &self,
+        session: &ProducerSession,
+        sequence: u64,
+        input: &drasi_computation_contracts::EnvelopeMessage,
+    ) -> Result<AdmissionReceipt, AdmissionError> {
         self.admit_request(session, sequence, input, true).await
     }
 
@@ -306,18 +351,40 @@ impl NativeAdmission {
         &self,
         session: &ProducerSession,
         sequence: u64,
-        input: &ChangeEnvelope,
+        input: &drasi_computation_contracts::EnvelopeMessage,
         wait: bool,
     ) -> Result<AdmissionReceipt, AdmissionError> {
-        let envelope = self.codec.encode(input).map_err(invalid)?;
+        let envelope = self.codec.encode(&input.envelope).map_err(invalid)?;
+        let payload = encode(&AdmitRequest {
+            session: session.clone(),
+            sequence,
+            envelope: envelope.into(),
+            wait,
+        })?;
+        let operation = crate::telemetry::ExecutionContext::current();
+        let contextual = !input.execution_context.is_empty() || !operation.is_empty();
+        if contextual && !self.contextual {
+            return Err(invalid(
+                "native admission execution context transport was not negotiated",
+            ));
+        }
+        let payload = if contextual {
+            crate::telemetry_transport::encode_request(
+                &operation,
+                std::slice::from_ref(&input.execution_context),
+                &payload,
+            )
+            .map_err(invalid)?
+        } else {
+            payload
+        };
         self.call(
-            abi::services::admission::ADMIT,
-            &encode(&AdmitRequest {
-                session: session.clone(),
-                sequence,
-                envelope: envelope.into(),
-                wait,
-            })?,
+            if contextual {
+                abi::telemetry::ADMIT
+            } else {
+                abi::services::admission::ADMIT
+            },
+            &payload,
             AdmissionErrorKind::AcceptanceUnknown,
         )
         .await

@@ -19,7 +19,7 @@ use drasi_source_otel::OtelSource;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let _logging = drasi_lib::init_default_subscriber()?;
 
     let bind = std::env::var("OTEL_GRPC_BIND").unwrap_or_else(|_| "0.0.0.0:14317".to_string());
     let source = OtelSource::builder("otel")

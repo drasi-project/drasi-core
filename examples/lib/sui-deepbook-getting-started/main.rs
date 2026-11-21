@@ -23,7 +23,7 @@ const DASHBOARD_HTML: &str = include_str!("dashboard.html");
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let _logging = drasi_lib::init_default_subscriber()?;
 
     let rpc_endpoint = std::env::var("SUI_RPC_URL")
         .unwrap_or_else(|_| "https://fullnode.mainnet.sui.io:443".to_string());

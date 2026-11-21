@@ -116,7 +116,7 @@ async fn recover_after_exit(phase: &str) -> Result<()> {
             .await?;
         let output = graph.output(0).await?;
         aggregate(
-            &[OutputEnvelope {
+            &[OutputEnvelope { execution_context: Default::default(),
                 port: PortId::try_new("out")?,
                 envelope: output,
             }],

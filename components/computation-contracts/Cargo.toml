@@ -11,6 +11,9 @@ readme = "README.md"
 [features]
 default = []
 test-support = []
+metrics-facade = ["dep:metrics"]
+tracing-context = ["dep:tracing", "dep:pin-project-lite"]
+otel-context = ["tracing-context", "dep:opentelemetry", "dep:tracing-opentelemetry", "dep:opentelemetry_sdk"]
 
 [dependencies]
 drasi-core-types = { workspace = true }
@@ -33,6 +36,12 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 tokio-util = "0.7"
 uuid = { version = "1", features = ["v4", "serde"] }
+metrics = { workspace = true, optional = true }
+tracing = { version = "0.1", optional = true }
+pin-project-lite = { version = "0.2", optional = true }
+opentelemetry = { version = "=0.33.1", default-features = false, features = ["trace"], optional = true }
+tracing-opentelemetry = { version = "=0.34.0", default-features = false, optional = true }
+opentelemetry_sdk = { version = "=0.33.1", default-features = false, features = ["trace"], optional = true }
 
 [lints]
 workspace = true
@@ -41,3 +50,5 @@ workspace = true
 futures = "0.3"
 ordered-float = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "test-util"] }
+opentelemetry_sdk = { version = "=0.33.1", default-features = false, features = ["trace", "testing"] }
+tracing-subscriber = { version = "0.3", features = ["registry"] }

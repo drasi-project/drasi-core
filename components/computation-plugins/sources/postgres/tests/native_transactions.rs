@@ -370,6 +370,7 @@ async fn apply(
 ) -> Result<Vec<OutputEnvelope>> {
     let results = query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: output.envelope,
         })

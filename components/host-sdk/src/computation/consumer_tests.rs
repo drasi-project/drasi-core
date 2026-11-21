@@ -87,6 +87,7 @@ impl ComputationComponent for BatchSource {
 impl EnvelopeSource for BatchSource {
     async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
         Ok(self.input.take().map(|envelope| OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out").unwrap(),
             envelope,
         }))
@@ -192,6 +193,7 @@ pub(in crate::computation) fn batch() -> anyhow::Result<InputEnvelope> {
     )?;
     GraphProducerProgress::annotate(&mut envelope, &producer, 1)?;
     Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope,
     })
@@ -1158,7 +1160,7 @@ fn volatile_batch(incarnation: &str) -> anyhow::Result<InputEnvelope> {
         "configuration_hash": 7, "incarnation": incarnation
     }))?;
     identity.annotate(&mut envelope, &query)?;
-    Ok(InputEnvelope {
+    Ok(InputEnvelope { execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope,
     })

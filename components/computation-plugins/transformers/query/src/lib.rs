@@ -3,6 +3,7 @@
 
 mod durable;
 mod indexed;
+mod observations;
 mod output;
 mod update;
 
@@ -12,6 +13,9 @@ use anyhow::Context;
 use async_trait::async_trait;
 use chrono::Utc;
 use drasi_computation_contracts::profiling::timestamp_ns;
+use drasi_computation_contracts::telemetry::{
+    ExecutionContext, QueryObservationKind, QueryObservationOutcome, QueryObservationPhase,
+};
 use drasi_computation_contracts::ComputationQueryLanguage as QueryLanguage;
 use drasi_computation_contracts::{
     BootstrapCompletion, BootstrapStatus, ChangeEnvelope, ComponentDescriptor, ComponentRole,
@@ -178,6 +182,10 @@ fn query_configuration_details() -> ConfigDetails {
 }
 
 impl Factory for IndexedQueryFactory {
+    fn supports_query_instrumentation(&self) -> bool {
+        true
+    }
+
     fn configuration_details(&self) -> ConfigDetails {
         query_configuration_details()
     }
@@ -364,6 +372,7 @@ fn create_query(
     update::validate_creation(request)?;
     let (definition, execution) = query_configuration(request, &middleware)?;
     let definition = Arc::new(definition);
+    let telemetry = observations::QueryObservations::capture()?;
     let id = definition.id.clone();
     let stream = definition.output_stream.clone();
     let capacity = definition.outbox_capacity;
@@ -393,7 +402,7 @@ fn create_query(
         stream.clone(),
         projector.clone(),
         capacity,
-        definition.configuration_hash(&execution)?,
+        telemetry.clone(),
         QueryDescription {
             graph_id: definition.graph_id.clone(),
             query: definition.query.clone(),
@@ -424,6 +433,7 @@ fn create_query(
         output.clone(),
         &execution,
         schedule.clone(),
+        telemetry.clone(),
     )?;
     Ok(Component::Transformer(Box::new(QueryTransformer {
         descriptor: metadata.descriptor(id.clone())?,
@@ -441,6 +451,9 @@ fn create_query(
         failed: false,
         schedule,
         draining_futures: false,
+        telemetry,
+        bootstrap_run: None,
+        processing_context: ExecutionContext::default(),
     }))
     .into())
 }
@@ -479,6 +492,9 @@ struct QueryTransformer {
     failed: bool,
     schedule: QuerySchedule,
     draining_futures: bool,
+    telemetry: observations::QueryObservations,
+    bootstrap_run: Option<observations::QueryRun>,
+    processing_context: ExecutionContext,
 }
 
 #[async_trait]
@@ -627,28 +643,47 @@ impl QueryTransformer {
     }
 
     async fn start_activation(&mut self) -> anyhow::Result<()> {
-        anyhow::ensure!(!self.started, "query is already started or initializing");
-        let was_failed = self.failed;
-        self.output.begin_activation()?;
-        self.schedule.publish(None)?;
-        self.draining_futures = false;
-        self.failed = true;
-        let reset = self.durable.reset_failed_volatile(was_failed)?;
-        self.durable
-            .start(
-                &self.processing,
-                self.definition.clone(),
-                self.execution.clone(),
-                self.middleware.clone(),
-                reset,
-            )
-            .await?;
-        self.started = true;
-        self.failed = false;
-        Ok(())
+        let telemetry = self.telemetry.clone();
+        let result = telemetry
+            .transaction(QueryObservationPhase::Bootstrap, async {
+                anyhow::ensure!(!self.started, "query is already started or initializing");
+                let was_failed = self.failed;
+                self.output.begin_activation()?;
+                self.schedule.publish(None)?;
+                self.draining_futures = false;
+                self.failed = true;
+                self.bootstrap_run = Some(telemetry.run(QueryObservationPhase::Bootstrap));
+                let reset = self.durable.reset_failed_volatile(was_failed)?;
+                self.durable
+                    .start(
+                        &self.processing,
+                        self.definition.clone(),
+                        self.execution.clone(),
+                        self.middleware.clone(),
+                        reset,
+                    )
+                    .await?;
+                self.started = true;
+                self.failed = false;
+                Ok(())
+            })
+            .await;
+        if let Some(run) = self.bootstrap_run.take() {
+            run.finish(
+                if result.is_ok() {
+                    QueryObservationOutcome::Success
+                } else {
+                    QueryObservationOutcome::Error
+                },
+                None,
+            )?;
+        }
+        result
     }
 
     fn stop_activation(&mut self) -> anyhow::Result<()> {
+        self.bootstrap_run.take();
+        self.processing_context = ExecutionContext::default();
         self.started = false;
         self.draining_futures = false;
         self.schedule.publish(None)?;
@@ -676,61 +711,80 @@ impl NativeTransformer for QueryTransformer {
                 Ok(Vec::new())
             };
         }
+        let run = self.telemetry.run(QueryObservationPhase::Steady);
+        run.start(QueryObservationKind::OutputReplay)?;
         self.failed = true;
-        let output = self.durable.continue_output(&self.processing).await?;
+        let output = run
+            .scope(self.durable.continue_output(&self.processing))
+            .await;
+        self.processing_context = run.context()?.unwrap_or_default();
+        run.finish(
+            if output.is_ok() {
+                QueryObservationOutcome::Success
+            } else {
+                QueryObservationOutcome::Error
+            },
+            Some(u64::from(output.as_ref().is_ok_and(Option::is_some))),
+        )?;
+        let output = output?;
         self.failed = false;
         Ok(output
             .into_iter()
-            .map(|envelope| OutputEnvelope {
-                port: PortId::try_new("out").expect("constant port"),
-                envelope,
+            .map(|envelope| {
+                OutputEnvelope::new(PortId::try_new("out").expect("constant port"), envelope)
+                    .with_execution_context(self.processing_context.clone())
             })
             .collect())
     }
 
     async fn transform(&mut self, input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
-        anyhow::ensure!(!self.failed, "query is fenced after a processing failure");
-        anyhow::ensure!(self.started, "query is not started");
-        anyhow::ensure!(input.port.as_str() == "in", "invalid query input");
-        let futures_due = self.execution.source_transactions.is_none()
-            && GraphChangeCodec::is_futures_due(&input.envelope);
-        if futures_due {
-            let progress = GraphProducerProgress::from_envelope(&input.envelope)?;
-            if progress
-                .as_ref()
-                .is_none_or(|progress| !progress.identity().persistent() && self.durable.volatile)
-            {
-                return self.on_wakeup().await;
-            }
-        }
-        let scope = drasi_query_common::query_input_scope(self.input_scopes.as_ref(), &input)?;
-        self.failed = true;
-        let publication = self.output.processing();
-        let mut output = self
-            .durable
-            .transform(
-                &self.processing,
-                self.definition.clone(),
-                self.projector.clone(),
-                input,
-                scope,
-            )
-            .await?;
-        if let Some(output) = &mut output {
-            self.output.publish(output)?;
-        }
-        publication.complete();
-        self.failed = false;
-        if futures_due {
-            return self.on_wakeup().await;
-        }
-        Ok(output
-            .into_iter()
-            .map(|envelope| OutputEnvelope {
-                port: PortId::try_new("out").expect("constant port"),
-                envelope,
+        let telemetry = self.telemetry.clone();
+        telemetry
+            .transaction(QueryObservationPhase::Steady, async {
+                anyhow::ensure!(!self.failed, "query is fenced after a processing failure");
+                anyhow::ensure!(self.started, "query is not started");
+                anyhow::ensure!(input.port.as_str() == "in", "invalid query input");
+                let futures_due = self.execution.source_transactions.is_none()
+                    && GraphChangeCodec::is_futures_due(&input.envelope);
+                if futures_due {
+                    let progress = GraphProducerProgress::from_envelope(&input.envelope)?;
+                    if progress
+                        .as_ref()
+                        .is_none_or(|progress| !progress.identity().persistent() && self.durable.volatile)
+                    {
+                        return self.on_wakeup().await;
+                    }
+                }
+                let scope = drasi_query_common::query_input_scope(self.input_scopes.as_ref(), &input)?;
+                self.failed = true;
+                let publication = self.output.processing();
+                let mut output = self
+                    .durable
+                    .transform(
+                        &self.processing,
+                        self.definition.clone(),
+                        self.projector.clone(),
+                        input,
+                        scope,
+                    )
+                    .await?;
+                if let Some(output) = &mut output {
+                    self.output.publish(output)?;
+                }
+                publication.complete();
+                self.failed = false;
+                if futures_due {
+                    return self.on_wakeup().await;
+                }
+                Ok(output
+                    .into_iter()
+                    .map(|envelope| {
+                        OutputEnvelope::new(PortId::try_new("out").expect("constant port"), envelope)
+                            .with_current_context()
+                    })
+                    .collect())
             })
-            .collect())
+            .await
     }
 
     fn wakeup_source(&self) -> Option<Arc<dyn WakeupSource>> {
@@ -738,6 +792,7 @@ impl NativeTransformer for QueryTransformer {
     }
 
     async fn on_wakeup(&mut self) -> anyhow::Result<Vec<OutputEnvelope>> {
+        self.processing_context = ExecutionContext::default();
         anyhow::ensure!(
             self.started && !self.failed,
             "query is not ready for scheduled work"
@@ -745,31 +800,57 @@ impl NativeTransformer for QueryTransformer {
         if self.durable.has_pending_emissions() {
             return self.continue_transform().await;
         }
-        self.failed = true;
-        let publication = self.output.processing();
-        let (mut output, now) = self
-            .durable
-            .on_wakeup(
-                &self.processing,
-                self.definition.clone(),
-                self.projector.clone(),
-            )
-            .await?;
-        if let Some(output) = &mut output {
-            self.output.publish(output)?;
-        }
-        self.draining_futures = self
-            .schedule
-            .next_due()?
-            .is_some_and(|deadline| deadline <= now);
-        publication.complete();
-        self.failed = false;
-        Ok(output
-            .into_iter()
-            .map(|envelope| OutputEnvelope {
-                port: PortId::try_new("out").expect("constant port"),
-                envelope,
+        let telemetry = self.telemetry.clone();
+        let run = telemetry.run(QueryObservationPhase::Steady);
+        let result: anyhow::Result<Vec<OutputEnvelope>> = telemetry
+            .transaction(QueryObservationPhase::Steady, async {
+                self.failed = true;
+                let publication = self.output.processing();
+                let (mut output, now) = self
+                    .durable
+                    .on_wakeup(
+                        &self.processing,
+                        self.definition.clone(),
+                        self.projector.clone(),
+                        run.clone(),
+                    )
+                    .await?;
+                run.scope(async {
+                    if let Some(output) = &mut output {
+                        self.output.publish(output)?;
+                    }
+                    self.draining_futures = self
+                        .schedule
+                        .next_due()?
+                        .is_some_and(|deadline| deadline <= now);
+                    publication.complete();
+                    self.failed = false;
+                    Ok(output
+                        .into_iter()
+                        .map(|envelope| {
+                            OutputEnvelope::new(
+                                PortId::try_new("out").expect("constant port"),
+                                envelope,
+                            )
+                            .with_current_context()
+                        })
+                        .collect())
+                })
+                .await
             })
+            .await;
+        self.processing_context = run.context()?.unwrap_or_default();
+        run.finish(
+            if result.is_ok() {
+                QueryObservationOutcome::Success
+            } else {
+                QueryObservationOutcome::Error
+            },
+            result.as_ref().ok().map(|outputs| outputs.len() as u64),
+        )?;
+        Ok(result?
+            .into_iter()
+            .map(|output| output.with_execution_context(self.processing_context.clone()))
             .collect())
     }
     fn bootstrap_input(&mut self) -> Option<BootstrapInput<'_>> {
@@ -810,8 +891,11 @@ impl NativeDurableOutput for QueryTransformer {
             "query is not ready for confirmation"
         );
         self.failed = true;
-        self.durable
-            .delivery_completed(&self.processing, outputs)
+        self.telemetry
+            .transaction(
+                QueryObservationPhase::Steady,
+                self.durable.delivery_completed(&self.processing, outputs),
+            )
             .await?;
         self.failed = false;
         Ok(())
@@ -834,36 +918,74 @@ impl NativeBootstrapInput for QueryTransformer {
     }
 
     async fn bootstrap(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
-        anyhow::ensure!(!self.failed, "query initialization is fenced");
-        anyhow::ensure!(input.port.as_str() == "in", "invalid query bootstrap input");
-        let scope = self.input_scopes.as_ref().and_then(|scopes| {
-            scopes
-                .get(&(input.port.clone(), input.envelope.system().stream().clone()))
-                .cloned()
-        });
-        self.failed = true;
-        self.durable
-            .bootstrap(
-                &self.processing,
-                self.definition.clone(),
-                self.projector.clone(),
-                input,
-                scope,
-            )
-            .await?;
-        self.failed = false;
-        Ok(())
+        let telemetry = self.telemetry.clone();
+        let run = self
+            .bootstrap_run
+            .get_or_insert_with(|| telemetry.run(QueryObservationPhase::Bootstrap))
+            .clone();
+        run.start(QueryObservationKind::Bootstrap)?;
+        let result = run
+            .scope(async {
+                anyhow::ensure!(!self.failed, "query initialization is fenced");
+                anyhow::ensure!(input.port.as_str() == "in", "invalid query bootstrap input");
+                let scope = self.input_scopes.as_ref().and_then(|scopes| {
+                    scopes
+                        .get(&(input.port.clone(), input.envelope.system().stream().clone()))
+                        .cloned()
+                });
+                self.failed = true;
+                self.durable
+                    .bootstrap(
+                        &self.processing,
+                        self.definition.clone(),
+                        self.projector.clone(),
+                        input,
+                        scope,
+                    )
+                    .await?;
+                self.failed = false;
+                Ok(())
+            })
+            .await;
+        if result.is_err() {
+            run.finish(QueryObservationOutcome::Error, None)?;
+            self.bootstrap_run.take();
+        }
+        result
     }
 
     async fn bootstrap_completed(&mut self, completion: BootstrapCompletion) -> anyhow::Result<()> {
-        anyhow::ensure!(!self.failed, "query initialization is fenced");
-        self.failed = true;
-        self.durable
-            .complete_bootstrap(&self.processing, completion)
-            .await?;
-        self.started = true;
-        self.failed = false;
-        Ok(())
+        let telemetry = self.telemetry.clone();
+        let needs_initialization = !self.durable.bootstrap_status().complete;
+        let run = self
+            .bootstrap_run
+            .get_or_insert_with(|| telemetry.run(QueryObservationPhase::Bootstrap))
+            .clone();
+        if needs_initialization {
+            run.start(QueryObservationKind::Bootstrap)?;
+        }
+        let result = run
+            .scope(async {
+                anyhow::ensure!(!self.failed, "query initialization is fenced");
+                self.failed = true;
+                self.durable
+                    .complete_bootstrap(&self.processing, completion)
+                    .await?;
+                self.started = true;
+                self.failed = false;
+                Ok(())
+            })
+            .await;
+        run.finish(
+            if result.is_ok() {
+                QueryObservationOutcome::Success
+            } else {
+                QueryObservationOutcome::Error
+            },
+            None,
+        )?;
+        self.bootstrap_run.take();
+        result
     }
 }
 

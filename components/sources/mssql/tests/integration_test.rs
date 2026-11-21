@@ -199,9 +199,7 @@ async fn prepare_database(config: &MssqlConfig) -> Result<MssqlConfig> {
 #[ignore] // Run with: cargo test -p drasi-source-mssql --test integration_test -- --ignored --nocapture
 #[cfg(not(target_arch = "aarch64"))]
 async fn test_mssql_change_detection_end_to_end() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let result = tokio::time::timeout(Duration::from_secs(300), async {
         let mssql = setup_mssql()
@@ -340,9 +338,7 @@ async fn test_mssql_change_detection_end_to_end() -> Result<()> {
 #[ignore]
 #[cfg(not(target_arch = "aarch64"))]
 async fn test_mssql_bootstrap_cdc_overlap_handover() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let result = tokio::time::timeout(Duration::from_secs(300), async {
         let mssql = setup_mssql()
@@ -567,9 +563,7 @@ async fn test_mssql_bootstrap_cdc_overlap_handover() -> Result<()> {
 #[ignore] // Run with: cargo test -p drasi-source-mssql --test integration_test -- --ignored --nocapture
 #[cfg(not(target_arch = "aarch64"))]
 async fn test_mssql_schema_discovery_end_to_end() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let result = tokio::time::timeout(Duration::from_secs(300), async {
         let mssql = setup_mssql()
@@ -761,9 +755,7 @@ async fn prepare_types_database(config: &MssqlConfig) -> Result<MssqlConfig> {
 #[tokio::test]
 #[ignore]
 async fn test_mssql_column_type_mapping() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let result = tokio::time::timeout(Duration::from_secs(900), async {
         let mssql = setup_mssql()
@@ -1162,9 +1154,7 @@ async fn test_mssql_checkpoint_recovery_round_trip() -> Result<()> {
     use drasi_index_rocksdb::RocksDbIndexProvider;
     use std::sync::Arc;
 
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let tmp_dir = tempfile::TempDir::new()?;
     let result = tokio::time::timeout(Duration::from_secs(300), async {
@@ -1337,9 +1327,7 @@ async fn test_mssql_bootstrap_then_restart_resumes_from_snapshot_lsn() -> Result
     use drasi_index_rocksdb::RocksDbIndexProvider;
     use std::sync::Arc;
 
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let tmp_dir = tempfile::TempDir::new()?;
     let result = tokio::time::timeout(Duration::from_secs(300), async {
@@ -1486,9 +1474,7 @@ async fn test_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
     use drasi_index_rocksdb::RocksDbIndexProvider;
     use std::sync::Arc;
 
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let tmp_dir = tempfile::TempDir::new()?;
     let result = tokio::time::timeout(Duration::from_secs(300), async {
@@ -1670,9 +1656,7 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
     use drasi_index_rocksdb::RocksDbIndexProvider;
     use std::sync::Arc;
 
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let tmp_dir = tempfile::TempDir::new()?;
     let result = tokio::time::timeout(Duration::from_secs(300), async {
@@ -1993,9 +1977,7 @@ async fn test_ffi_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
     use drasi_plugin_sdk::descriptor::{BootstrapPluginDescriptor, SourcePluginDescriptor};
     use std::sync::Arc;
 
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     if !ffi_plugin_exists("drasi-source-mssql") || !ffi_plugin_exists("drasi-bootstrap-mssql") {
         panic!(
@@ -2280,9 +2262,7 @@ async fn subscribe_direct(
 #[ignore] // Run with: cargo test -p drasi-source-mssql --test integration_test -- --ignored --nocapture
 #[cfg(not(target_arch = "aarch64"))]
 async fn test_mssql_effective_from_populated() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let result = tokio::time::timeout(Duration::from_secs(300), async {
         let mssql = setup_mssql()
@@ -2418,9 +2398,7 @@ async fn test_mssql_effective_from_populated() -> Result<()> {
 #[ignore]
 #[cfg(not(target_arch = "aarch64"))]
 async fn test_mssql_bootstrap_cdc_element_id_match() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let result = tokio::time::timeout(Duration::from_secs(300), async {
         let mssql = setup_mssql()
@@ -2540,9 +2518,7 @@ async fn test_mssql_bootstrap_cdc_element_id_match() -> Result<()> {
 #[ignore]
 #[cfg(not(target_arch = "aarch64"))]
 async fn test_mssql_update_after_bootstrap_no_duplicate() -> Result<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .is_test(true)
-        .try_init();
+    let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
     let result = tokio::time::timeout(Duration::from_secs(300), async {
         let mssql = setup_mssql()

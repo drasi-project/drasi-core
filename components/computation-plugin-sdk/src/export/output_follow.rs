@@ -480,7 +480,11 @@ unsafe extern "C" fn begin(
         let damaged = binding.damaged.clone();
         let opening = lease.clone();
         let mut cancelled = opening.cancel.subscribe();
-        let operation = transport::export_component_operation(
+        let scope = binding
+            .execution_scope
+            .has_plugin_telemetry()
+            .then(|| binding.execution_scope.clone());
+        let operation = crate::telemetry_transport::export_operation(
             async move {
                 guard.validate()?;
                 if opening.is_closed() {
@@ -507,6 +511,7 @@ unsafe extern "C" fn begin(
             Some(runtime),
             damaged,
             false,
+            scope,
         );
         unsafe {
             transport::write_out(
@@ -578,7 +583,12 @@ unsafe fn lease_request(
         let mut cancelled = lease.cancel.subscribe();
         let runtime = io_runtime()?;
         let damaged = lease.binding.damaged.clone();
-        let operation = transport::export_component_operation(
+        let scope = lease
+            .binding
+            .execution_scope
+            .has_plugin_telemetry()
+            .then(|| lease.binding.execution_scope.clone());
+        let operation = crate::telemetry_transport::export_operation(
             async move {
                 let _active = active;
                 guard.validate()?;
@@ -600,6 +610,7 @@ unsafe fn lease_request(
             Some(runtime),
             damaged,
             false,
+            scope,
         );
         unsafe { transport::write_out(out, operation) }
     })

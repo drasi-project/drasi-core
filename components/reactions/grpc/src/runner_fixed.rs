@@ -14,14 +14,14 @@
 
 //! Fixed-size batching runner.
 
-use std::collections::HashMap;
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use log::{debug, error, info, trace, warn};
 use tokio::sync::oneshot;
 use tonic::transport::Channel;
 
 use drasi_lib::channels::ComponentStatus;
+use drasi_lib::observability::{ExecutionContext, ReactionInput};
 use drasi_lib::reactions::common::base::ReactionBase;
 use drasi_lib::ReactionRecoveryPolicy;
 
@@ -52,213 +52,259 @@ enum FlushControl {
     Stop,
 }
 
+type PendingInputs = HashMap<u64, (ExecutionContext, ReactionInput, Vec<usize>)>;
+
 pub(crate) async fn run(params: FixedRunnerParams) {
-    let FixedRunnerParams {
-        reaction_id,
-        batch_size,
-        batch_flush_timeout_ms,
-        base,
-        config,
-        routes,
-        mut shutdown_rx,
-        mut checkpoints,
-        policy,
-    } = params;
+    let telemetry = params.base.worker_telemetry().await;
+    telemetry
+        .scope(async {
+            let FixedRunnerParams {
+                reaction_id,
+                batch_size,
+                batch_flush_timeout_ms,
+                base,
+                config,
+                routes,
+                mut shutdown_rx,
+                mut checkpoints,
+                policy,
+            } = params;
 
-    let endpoint = config.endpoint.clone();
-    let base_metadata = config.metadata.clone();
-    let max_retries = config.max_retries;
-    let timeout_ms = config.timeout_ms;
-    let connection_retry_attempts = config.connection_retry_attempts;
-    let initial_connection_timeout_ms = config.initial_connection_timeout_ms;
-    let template_engine = config
-        .output_templates
-        .as_ref()
-        .filter(|t| t.has_renderable_templates())
-        .map(|_| TemplateEngine::new());
+            let endpoint = config.endpoint.clone();
+            let base_metadata = config.metadata.clone();
+            let max_retries = config.max_retries;
+            let timeout_ms = config.timeout_ms;
+            let connection_retry_attempts = config.connection_retry_attempts;
+            let initial_connection_timeout_ms = config.initial_connection_timeout_ms;
+            let template_engine = config
+                .output_templates
+                .as_ref()
+                .filter(|t| t.has_renderable_templates())
+                .map(|_| TemplateEngine::new());
 
-    let status_handle = base.status_handle();
-    let priority_queue = base.priority_queue.clone();
+            let status_handle = base.status_handle();
+            let priority_queue = base.priority_queue.clone();
 
-    info!("gRPC reaction starting for endpoint: {endpoint} (lazy connection)");
+            info!("gRPC reaction starting for endpoint: {endpoint} (lazy connection)");
 
-    let mut client: Option<ReactionServiceClient<Channel>> = None;
-    let mut connection_state = ConnectionState::Disconnected;
-    let mut consecutive_failures = 0u32;
-    let mut last_connection_attempt = std::time::Instant::now();
-    let base_backoff = Duration::from_millis(500);
-    let max_backoff = Duration::from_secs(30);
-    let mut pending: Option<PendingBatch> = None;
+            let mut client: Option<ReactionServiceClient<Channel>> = None;
+            let mut connection_state = ConnectionState::Disconnected;
+            let mut consecutive_failures = 0u32;
+            let mut last_connection_attempt = std::time::Instant::now();
+            let base_backoff = Duration::from_millis(500);
+            let max_backoff = Duration::from_secs(30);
+            let mut pending: Option<PendingBatch> = None;
+            // Keep distinct dequeues even when a replay repeats a sequence ID.
+            let mut pending_contexts = HashMap::new();
+            let mut next_input_id = 0u64;
 
-    let flush_timeout = Duration::from_millis(batch_flush_timeout_ms);
-    let mut flush_timer = tokio::time::interval(flush_timeout);
-    flush_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let flush_timeout = Duration::from_millis(batch_flush_timeout_ms);
+            let mut flush_timer = tokio::time::interval(flush_timeout);
+            flush_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    loop {
-        let query_result = tokio::select! {
-            biased;
-            _ = &mut shutdown_rx => {
-                debug!("[{reaction_id}] Received shutdown signal, exiting processing loop");
-                break;
+            loop {
+                let query_result = tokio::select! {
+                    biased;
+                    _ = &mut shutdown_rx => {
+                        debug!("[{reaction_id}] Received shutdown signal, exiting processing loop");
+                        break;
+                    }
+                    _ = flush_timer.tick() => {
+                        if pending.is_some()
+                            && flush_pending(
+                                &reaction_id,
+                                &endpoint,
+                                timeout_ms,
+                                initial_connection_timeout_ms,
+                                connection_retry_attempts,
+                                max_retries,
+                                &mut client,
+                                &mut connection_state,
+                                &mut consecutive_failures,
+                                &mut last_connection_attempt,
+                                base_backoff,
+                                max_backoff,
+                                &mut pending,
+                                &mut pending_contexts,
+                                &base,
+                                &mut checkpoints,
+                                policy,
+                            )
+                            .await
+                            == FlushControl::Stop
+                        {
+                            return;
+                        }
+                        continue;
+                    }
+                    result = priority_queue.dequeue_message() => result,
+                };
+                let execution_context = query_result.execution_context;
+                let query_result = query_result.payload;
+                let input_id = next_input_id;
+                next_input_id = next_input_id.wrapping_add(1);
+
+                debug!(
+                    "Dequeued query result with {} items for processing",
+                    query_result.results.len()
+                );
+
+                if query_result.results.is_empty() {
+                    debug!("[{reaction_id}] Received empty result set from query");
+                    continue;
+                }
+
+                let query_id = query_result.query_id.clone();
+                let seq = query_result.sequence;
+                trace!("Processing results for query_id: {query_id}");
+
+                let emission = QueryEmissionContext::from(query_result.as_ref());
+                let route = routes.get(&query_result.query_id);
+
+                // Build all items first so the last one can be flagged terminal; the
+                // checkpoint only advances once a result's terminal item is acked.
+                let mut built_items: Vec<(BatchKey, crate::proto::ProtoQueryResultItem, usize)> =
+                    Vec::new();
+                for (ordinal, result) in query_result
+                    .results
+                    .iter()
+                    .filter(|result| !matches!(result, drasi_lib::channels::ResultDiff::Noop))
+                    .enumerate()
+                {
+                    if matches!(result, drasi_lib::channels::ResultDiff::Noop) {
+                        debug!("[{reaction_id}] Ignoring noop result");
+                        continue;
+                    }
+                    let Some(built) = build_proto_item(
+                        &config,
+                        template_engine.as_ref(),
+                        route,
+                        &emission,
+                        result,
+                    ) else {
+                        continue;
+                    };
+                    let effective_metadata =
+                        merge_metadata(&base_metadata, &built.request_metadata);
+                    let key = BatchKey::new(query_id.clone(), effective_metadata);
+                    built_items.push((key, built.item, ordinal));
+                }
+
+                let last_idx = built_items.len().saturating_sub(1);
+                let input_rows = query_result
+                    .results
+                    .iter()
+                    .filter(|diff| !matches!(diff, drasi_lib::channels::ResultDiff::Noop))
+                    .count();
+                let processing = telemetry.reaction_input_context(
+                    query_id.as_str(),
+                    input_rows,
+                    &execution_context,
+                );
+                for (i, (key, item, ordinal)) in built_items.into_iter().enumerate() {
+                    let is_terminal = i == last_idx;
+
+                    if pending
+                        .as_ref()
+                        .is_some_and(|batch| !batch.can_accept(&key))
+                        && flush_pending(
+                            &reaction_id,
+                            &endpoint,
+                            timeout_ms,
+                            initial_connection_timeout_ms,
+                            connection_retry_attempts,
+                            max_retries,
+                            &mut client,
+                            &mut connection_state,
+                            &mut consecutive_failures,
+                            &mut last_connection_attempt,
+                            base_backoff,
+                            max_backoff,
+                            &mut pending,
+                            &mut pending_contexts,
+                            &base,
+                            &mut checkpoints,
+                            policy,
+                        )
+                        .await
+                            == FlushControl::Stop
+                    {
+                        return;
+                    }
+
+                    match pending.as_mut() {
+                        Some(batch) => batch.push(item, is_terminal),
+                        None => pending = Some(PendingBatch::new(key, item, is_terminal)),
+                    }
+                    pending_contexts
+                        .entry(input_id)
+                        .or_insert_with(|| {
+                            (execution_context.clone(), processing.clone(), Vec::new())
+                        })
+                        .2
+                        .push(ordinal);
+
+                    if pending
+                        .as_ref()
+                        .is_some_and(|batch| batch.items.len() >= batch_size)
+                        && flush_pending(
+                            &reaction_id,
+                            &endpoint,
+                            timeout_ms,
+                            initial_connection_timeout_ms,
+                            connection_retry_attempts,
+                            max_retries,
+                            &mut client,
+                            &mut connection_state,
+                            &mut consecutive_failures,
+                            &mut last_connection_attempt,
+                            base_backoff,
+                            max_backoff,
+                            &mut pending,
+                            &mut pending_contexts,
+                            &base,
+                            &mut checkpoints,
+                            policy,
+                        )
+                        .await
+                            == FlushControl::Stop
+                    {
+                        return;
+                    }
+                }
             }
-            _ = flush_timer.tick() => {
-                if pending.is_some()
-                    && flush_pending(
-                        &reaction_id,
-                        &endpoint,
-                        timeout_ms,
-                        initial_connection_timeout_ms,
-                        connection_retry_attempts,
-                        max_retries,
-                        &mut client,
-                        &mut connection_state,
-                        &mut consecutive_failures,
-                        &mut last_connection_attempt,
-                        base_backoff,
-                        max_backoff,
-                        &mut pending,
-                        &base,
-                        &mut checkpoints,
-                        policy,
-                    )
-                    .await
+
+            if pending.is_some() {
+                info!("[{reaction_id}] Sending final fixed batch before shutdown");
+                if flush_pending(
+                    &reaction_id,
+                    &endpoint,
+                    timeout_ms,
+                    initial_connection_timeout_ms,
+                    connection_retry_attempts,
+                    max_retries,
+                    &mut client,
+                    &mut connection_state,
+                    &mut consecutive_failures,
+                    &mut last_connection_attempt,
+                    base_backoff,
+                    max_backoff,
+                    &mut pending,
+                    &mut pending_contexts,
+                    &base,
+                    &mut checkpoints,
+                    policy,
+                )
+                .await
                     == FlushControl::Stop
                 {
                     return;
                 }
-                continue;
-            }
-            result = priority_queue.dequeue() => result,
-        };
-
-        debug!(
-            "Dequeued query result with {} items for processing",
-            query_result.results.len()
-        );
-
-        if query_result.results.is_empty() {
-            debug!("[{reaction_id}] Received empty result set from query");
-            continue;
-        }
-
-        let query_id = query_result.query_id.clone();
-        let seq = query_result.sequence;
-        trace!("Processing results for query_id: {query_id}");
-
-        let emission = QueryEmissionContext::from(query_result.as_ref());
-        let route = routes.get(&query_result.query_id);
-
-        // Build all items first so the last one can be flagged terminal; the
-        // checkpoint only advances once a result's terminal item is acked.
-        let mut built_items: Vec<(BatchKey, crate::proto::ProtoQueryResultItem)> = Vec::new();
-        for result in &query_result.results {
-            if matches!(result, drasi_lib::channels::ResultDiff::Noop) {
-                debug!("[{reaction_id}] Ignoring noop result");
-                continue;
-            }
-            let Some(built) =
-                build_proto_item(&config, template_engine.as_ref(), route, &emission, result)
-            else {
-                continue;
-            };
-            let effective_metadata = merge_metadata(&base_metadata, &built.request_metadata);
-            let key = BatchKey::new(query_id.clone(), effective_metadata);
-            built_items.push((key, built.item));
-        }
-
-        let last_idx = built_items.len().saturating_sub(1);
-        for (i, (key, item)) in built_items.into_iter().enumerate() {
-            let is_terminal = i == last_idx;
-
-            if pending
-                .as_ref()
-                .is_some_and(|batch| !batch.can_accept(&key))
-                && flush_pending(
-                    &reaction_id,
-                    &endpoint,
-                    timeout_ms,
-                    initial_connection_timeout_ms,
-                    connection_retry_attempts,
-                    max_retries,
-                    &mut client,
-                    &mut connection_state,
-                    &mut consecutive_failures,
-                    &mut last_connection_attempt,
-                    base_backoff,
-                    max_backoff,
-                    &mut pending,
-                    &base,
-                    &mut checkpoints,
-                    policy,
-                )
-                .await
-                    == FlushControl::Stop
-            {
-                return;
             }
 
-            match pending.as_mut() {
-                Some(batch) => batch.push(item, is_terminal),
-                None => pending = Some(PendingBatch::new(key, item, is_terminal)),
-            }
-
-            if pending
-                .as_ref()
-                .is_some_and(|batch| batch.items.len() >= batch_size)
-                && flush_pending(
-                    &reaction_id,
-                    &endpoint,
-                    timeout_ms,
-                    initial_connection_timeout_ms,
-                    connection_retry_attempts,
-                    max_retries,
-                    &mut client,
-                    &mut connection_state,
-                    &mut consecutive_failures,
-                    &mut last_connection_attempt,
-                    base_backoff,
-                    max_backoff,
-                    &mut pending,
-                    &base,
-                    &mut checkpoints,
-                    policy,
-                )
-                .await
-                    == FlushControl::Stop
-            {
-                return;
-            }
-        }
-    }
-
-    if pending.is_some() {
-        info!("[{reaction_id}] Sending final fixed batch before shutdown");
-        if flush_pending(
-            &reaction_id,
-            &endpoint,
-            timeout_ms,
-            initial_connection_timeout_ms,
-            connection_retry_attempts,
-            max_retries,
-            &mut client,
-            &mut connection_state,
-            &mut consecutive_failures,
-            &mut last_connection_attempt,
-            base_backoff,
-            max_backoff,
-            &mut pending,
-            &base,
-            &mut checkpoints,
-            policy,
-        )
-        .await
-            == FlushControl::Stop
-        {
-            return;
-        }
-    }
-
-    finish(&reaction_id, &status_handle).await;
+            finish(&reaction_id, &status_handle).await;
+        })
+        .await;
 }
 
 async fn finish(
@@ -289,6 +335,7 @@ async fn flush_pending(
     base_backoff: Duration,
     max_backoff: Duration,
     pending: &mut Option<PendingBatch>,
+    pending_contexts: &mut PendingInputs,
     base: &ReactionBase,
     checkpoints: &mut CheckpointState,
     policy: ReactionRecoveryPolicy,
@@ -301,103 +348,130 @@ async fn flush_pending(
     let completed_seq = batch.completed_seq;
     let seen_seq = batch.seen_seq;
 
-    ensure_client(
-        client,
-        connection_state,
-        endpoint,
-        initial_connection_timeout_ms,
-        connection_retry_attempts,
-        consecutive_failures,
-        last_connection_attempt,
-        base_backoff,
-        max_backoff,
-    )
-    .await;
-
-    let sent = if client.is_none() {
-        // No connection could be (re)established within the current backoff
-        // window — treat as a sustained delivery failure.
-        warn!(
-            "[{reaction_id}] No gRPC connection available for batch of {item_count} item(s) \
-             for query '{query_id}'"
-        );
-        false
-    } else {
-        send_with_swap(
+    let telemetry = base.worker_telemetry().await;
+    let observation = telemetry
+        .reaction_batch(
+            pending_contexts.values().map(|(context, _, _)| context),
+            pending_contexts.len(),
+            item_count,
+        )
+        .map_err(|e| warn!("Failed to observe gRPC batch: {e}"))
+        .ok();
+    let mut work = telemetry.reaction_batch_work();
+    let flush = async {
+        let Some(batch) = pending.as_ref() else {
+            return Ok(FlushControl::Continue);
+        };
+        ensure_client(
             client,
-            &batch.items,
-            &batch.key.query_id,
-            &batch.key.metadata_map(),
-            max_retries,
-            endpoint,
-            timeout_ms,
-            reaction_id,
             connection_state,
+            endpoint,
+            initial_connection_timeout_ms,
+            connection_retry_attempts,
             consecutive_failures,
             last_connection_attempt,
+            base_backoff,
+            max_backoff,
         )
-        .await
-    };
+        .await;
 
-    // The batch is consumed whether delivered or dropped, so a stuck downstream
-    // cannot grow `pending` without bound.
-    *pending = None;
+        let sent = if client.is_none() {
+            // No connection could be (re)established within the current backoff
+            // window — treat as a sustained delivery failure.
+            warn!(
+                "[{reaction_id}] No gRPC connection available for batch of {item_count} item(s) \
+             for query '{query_id}'"
+            );
+            false
+        } else {
+            send_with_swap(
+                client,
+                &batch.items,
+                &batch.key.query_id,
+                &batch.key.metadata_map(),
+                max_retries,
+                endpoint,
+                timeout_ms,
+                reaction_id,
+                connection_state,
+                consecutive_failures,
+                last_connection_attempt,
+            )
+            .await
+        };
 
-    if sent {
-        // Advance the checkpoint to the batch's max fully-acked (terminal)
-        // sequence after the side effect committed.
-        if let Some(seq) = completed_seq {
-            if let Err(e) = checkpoints
-                .advance_with_policy(base, &query_id, seq, policy)
-                .await
-            {
-                error!(
-                    "[{reaction_id}] Failed to write checkpoint for query '{query_id}' \
+        // The batch is consumed whether delivered or dropped, so a stuck downstream
+        // cannot grow `pending` without bound.
+        if sent {
+            for (_, input, rows) in pending_contexts.values() {
+                input.handled_rows(rows);
+            }
+        }
+        work.finish(sent);
+        *pending = None;
+        pending_contexts.clear();
+
+        if sent {
+            // Advance the checkpoint to the batch's max fully-acked (terminal)
+            // sequence after the side effect committed.
+            if let Some(seq) = completed_seq {
+                if let Err(e) = checkpoints
+                    .advance_with_policy(base, &query_id, seq, policy)
+                    .await
+                {
+                    error!(
+                        "[{reaction_id}] Failed to write checkpoint for query '{query_id}' \
                      (seq {seq}): {e}"
+                    );
+                    base.status_handle()
+                        .set_status(
+                            ComponentStatus::Error,
+                            Some(format!(
+                                "gRPC checkpoint write failed for query '{query_id}' (seq {seq}); \
+                             stopped per recovery policy"
+                            )),
+                        )
+                        .await;
+                    return Err(FlushControl::Stop);
+                }
+            }
+            return Ok(FlushControl::Continue);
+        }
+
+        // Sustained delivery failure: apply the recovery policy.
+        match FailureAction::from_policy(policy) {
+            FailureAction::Stop => {
+                error!(
+                    "[{reaction_id}] Failed to deliver batch of {item_count} item(s) for query \
+                 '{query_id}' after retries; stopping per Strict recovery policy — the batch \
+                 replays from the outbox on restart"
                 );
                 base.status_handle()
                     .set_status(
                         ComponentStatus::Error,
                         Some(format!(
-                            "gRPC checkpoint write failed for query '{query_id}' (seq {seq}); \
-                             stopped per recovery policy"
-                        )),
-                    )
-                    .await;
-                return FlushControl::Stop;
-            }
-        }
-        return FlushControl::Continue;
-    }
-
-    // Sustained delivery failure: apply the recovery policy.
-    match FailureAction::from_policy(policy) {
-        FailureAction::Stop => {
-            error!(
-                "[{reaction_id}] Failed to deliver batch of {item_count} item(s) for query \
-                 '{query_id}' after retries; stopping per Strict recovery policy — the batch \
-                 replays from the outbox on restart"
-            );
-            base.status_handle()
-                .set_status(
-                    ComponentStatus::Error,
-                    Some(format!(
                         "gRPC delivery failed for query '{query_id}'; stopped per recovery policy"
                     )),
-                )
-                .await;
-            FlushControl::Stop
-        }
-        FailureAction::SkipAndContinue => {
-            warn!(
-                "[{reaction_id}] Failed to deliver batch of {item_count} item(s) for query \
+                    )
+                    .await;
+                Err(FlushControl::Stop)
+            }
+            FailureAction::SkipAndContinue => {
+                warn!(
+                    "[{reaction_id}] Failed to deliver batch of {item_count} item(s) for query \
                  '{query_id}' after retries; skipping and advancing checkpoint per AutoSkipGap \
                  recovery policy"
-            );
-            let _ = checkpoints.advance(base, &query_id, seen_seq).await;
-            FlushControl::Continue
+                );
+                let _ = checkpoints.advance(base, &query_id, seen_seq).await;
+                Err(FlushControl::Continue)
+            }
         }
+    };
+    match observation {
+        Some(observation) => observation.run(flush).await,
+        None => flush.await,
     }
+    .unwrap_or_else(|control| control)
 }
 
 #[allow(clippy::too_many_arguments)]

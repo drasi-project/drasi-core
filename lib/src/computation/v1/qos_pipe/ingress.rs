@@ -17,7 +17,8 @@ enum Request {
     Admit {
         session: ProducerSession,
         sequence: u64,
-        input: ChangeEnvelope,
+        input: EnvelopeMessage,
+        operation_context: ExecutionContext,
         wait: bool,
         reply: Reply<AdmissionReceipt>,
     },
@@ -83,6 +84,7 @@ struct Binding {
     requests: Option<mpsc::Sender<QueuedRequest>>,
     activity: Option<Arc<super::super::feedback::Activity>>,
     failure: Option<ActivationFailure>,
+    telemetry: Option<crate::observability::GraphTelemetry>,
 }
 
 enum ActivationFailure {
@@ -303,18 +305,34 @@ impl SourceAdmission {
         sequence: u64,
         input: &ChangeEnvelope,
     ) -> Result<AdmissionReceipt, PipeError> {
+        self.admit_message(
+            session,
+            sequence,
+            &EnvelopeMessage::new(input.clone(), ExecutionContext::current()),
+        )
+        .await
+    }
+
+    pub async fn admit_message(
+        &self,
+        session: &ProducerSession,
+        sequence: u64,
+        input: &EnvelopeMessage,
+    ) -> Result<AdmissionReceipt, PipeError> {
+        let input = self.timed_input(input)?;
         self.submit(
             |reply| {
                 self.channel
                     .storage()?
                     .ok_or(AdmissionRejection::NotEnabled)?
                     .codec
-                    .encode(input)
+                    .encode(&input.envelope)
                     .map_err(|error| PipeError::Backend(error.into()))?;
                 Ok(Request::Admit {
                     session: session.clone(),
                     sequence,
-                    input: input.clone(),
+                    input,
+                    operation_context: ExecutionContext::current(),
                     wait: false,
                     reply,
                 })
@@ -324,6 +342,20 @@ impl SourceAdmission {
             },
         )
         .await
+    }
+
+    fn timed_input(&self, input: &EnvelopeMessage) -> Result<EnvelopeMessage, PipeError> {
+        let telemetry = self
+            .binding
+            .lock()
+            .map_err(|_| backend("source admission binding poisoned"))?
+            .telemetry
+            .clone();
+        let context = match telemetry {
+            Some(telemetry) => telemetry.source_timing(&input.execution_context, &input.envelope),
+            None => input.execution_context.clone(),
+        };
+        Ok(EnvelopeMessage::new(input.envelope.clone(), context))
     }
 
     /// Admit the same input with event-driven backpressure instead of returning
@@ -344,12 +376,28 @@ impl SourceAdmission {
         sequence: u64,
         input: &ChangeEnvelope,
     ) -> Result<AdmissionReceipt, PipeError> {
+        self.admit_message_wait(
+            session,
+            sequence,
+            &EnvelopeMessage::new(input.clone(), ExecutionContext::current()),
+        )
+        .await
+    }
+
+    /// [`Self::admit_wait`] for input that carries its own execution context,
+    /// as [`Self::admit_message`] does for [`Self::admit`].
+    pub async fn admit_message_wait(
+        &self,
+        session: &ProducerSession,
+        sequence: u64,
+        input: &EnvelopeMessage,
+    ) -> Result<AdmissionReceipt, PipeError> {
         self.channel.check()?;
         self.channel
             .storage()?
             .ok_or(AdmissionRejection::NotEnabled)?
             .codec
-            .encode(input)
+            .encode(&input.envelope)
             .map_err(|error| PipeError::Backend(error.into()))?;
         let (generation, sender) = {
             let binding = self
@@ -361,6 +409,8 @@ impl SourceAdmission {
                 binding.requests.clone().ok_or(PipeError::Closed)?,
             )
         };
+        let operation_context = ExecutionContext::current();
+        let input = self.timed_input(input)?;
         loop {
             // Register before submission so an acknowledgement cannot race the
             // full-journal response and leave this caller asleep.
@@ -377,6 +427,7 @@ impl SourceAdmission {
                 session: session.clone(),
                 sequence,
                 input: input.clone(),
+                operation_context: operation_context.clone(),
                 wait: true,
                 reply,
             })?);
@@ -607,6 +658,8 @@ impl SourceAdmission {
             .map_err(|_| backend("QoS channel already has a graph admission owner"))?;
         let (send, receive) = mpsc::channel(PENDING_REQUESTS);
         binding.requests = Some(send);
+        binding.telemetry = crate::observability::ComponentObservations::current()
+            .map(|owner| owner.telemetry().clone());
         self.activation_changed.notify_waiters();
         Ok(AdmissionLease {
             service: self.clone(),
@@ -622,6 +675,7 @@ impl SourceAdmission {
         });
         if binding.generation == generation {
             binding.requests.take();
+            binding.telemetry.take();
             binding.opening = false;
             self.activation_changed.notify_waiters();
         }
@@ -665,6 +719,7 @@ impl AdmissionLease {
     pub(crate) async fn process(
         &mut self,
         quiesce: &mut tokio::sync::watch::Receiver<bool>,
+        queue_id: Option<&str>,
         validate: impl FnOnce(&ChangeEnvelope) -> anyhow::Result<()> + Send,
     ) -> Result<Option<bool>, PipeError> {
         let request = tokio::select! {
@@ -689,11 +744,12 @@ impl AdmissionLease {
             Request::Admit {
                 session,
                 sequence,
-                input,
+                mut input,
+                operation_context,
                 wait,
                 mut reply,
             } => {
-                let result = if wait {
+                let state = if wait {
                     let state = tokio::select! {
                         biased;
                         _ = reply.closed() => return Ok(Some(false)),
@@ -708,19 +764,76 @@ impl AdmissionLease {
                         ) => state,
                     };
                     match state {
-                        Ok(state) => {
-                            channel
-                                .admit_locked(state, &session, sequence, &input, validate)
-                                .await
+                        Ok(state) => Some(state),
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                            self.service.channel.check()?;
+                            return Ok(Some(false));
                         }
-                        Err(error) => Err(error),
                     }
                 } else {
-                    channel
-                        .admit_validated(&session, sequence, &input, validate)
-                        .await
+                    None
                 };
+                let owner = crate::observability::ComponentObservations::current_or_disabled();
+                let parent = if input.execution_context.is_empty() {
+                    &operation_context
+                } else {
+                    &input.execution_context
+                };
+                let publication = owner
+                    .begin(
+                        crate::observability::ObservedOperation::Publish,
+                        parent,
+                        crate::observability::OperationFields {
+                            output_port: Some(self.service.port.as_str()),
+                            output_count: Some(1),
+                            change_count: Some(input.envelope.changes().operations().len()),
+                            publication_mode: Some("admitted"),
+                            ..Default::default()
+                        },
+                    )
+                    .map_err(|error| PipeError::Backend(error.into()))?;
+                input.execution_context = publication.context().clone();
+                let mut produced = false;
+                let result = publication
+                    .run(async {
+                        let send = owner
+                            .begin(
+                                crate::observability::ObservedOperation::Send,
+                                &input.execution_context,
+                                crate::observability::OperationFields {
+                                    queue_id,
+                                    ..Default::default()
+                                },
+                            )
+                            .map_err(|error| PipeError::Backend(error.into()))?;
+                        let validate = |envelope: &ChangeEnvelope| {
+                            validate(envelope)?;
+                            produced = true;
+                            Ok(())
+                        };
+                        send.run_acceptance(async {
+                            match state {
+                                Some(state) => {
+                                    channel
+                                        .admit_locked(state, &session, sequence, &input, validate)
+                                        .await
+                                }
+                                None => {
+                                    channel
+                                        .admit_validated(&session, sequence, &input, validate)
+                                        .await
+                                }
+                            }
+                        })
+                        .await
+                    })
+                    .await;
                 accepted = result.is_ok();
+                if accepted {
+                    owner.outputs(usize::from(produced));
+                    owner.dispatched(false);
+                }
                 let _ = reply.send(result);
             }
             Request::Register(producer, reply) => {
@@ -1050,7 +1163,9 @@ mod tests {
         first.report_failure("later worker failure").unwrap();
         let (_pause, mut quiesce) = tokio::sync::watch::channel(false);
         let error = lease
-            .process(&mut quiesce, |_| panic!("failure must not validate data"))
+            .process(&mut quiesce, None, |_| {
+                panic!("failure must not validate data")
+            })
             .await
             .unwrap_err();
         assert!(error.to_string().contains("first worker failure"));
@@ -1068,7 +1183,7 @@ mod tests {
             .contains("worker failed during startup"));
         let mut lease = first.bind().unwrap();
         let error = lease
-            .process(&mut quiesce, |_| {
+            .process(&mut quiesce, None, |_| {
                 panic!("startup failure must not validate data")
             })
             .await

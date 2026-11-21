@@ -1,0 +1,2 @@
+# The runner builds the example with --locked.
+!Cargo.lock

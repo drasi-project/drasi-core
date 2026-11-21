@@ -30,6 +30,7 @@ fn completed(fail: bool) -> (SinkBatchState, Arc<FlowProgress>, Arc<Probe>) {
     let progress = Arc::new(FlowProgress::default());
     let probe = Arc::new(Probe::default());
     let input = InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").unwrap(),
         envelope: crate::computation::v1::GraphChangeCodec::encode_changes(
             &[],
@@ -42,6 +43,7 @@ fn completed(fail: bool) -> (SinkBatchState, Arc<FlowProgress>, Arc<Probe>) {
     let mut state = SinkBatchState::default();
     state.inputs.push_back(RetainedInput {
         edge: 0,
+        queue_id: Arc::from("test-queue"),
         producer: crate::computation::v1::ProducerBoundary::Origin,
         input,
         acknowledgement: Some(Box::new(Ack {
@@ -108,6 +110,7 @@ fn incoming(edge: usize, seconds: Option<i64>) -> Incoming {
     .unwrap();
     Incoming {
         edge,
+        queue_id: format!("test-queue-{edge}").into(),
         producer: crate::computation::v1::ProducerBoundary::Origin,
         port: PortId::try_new("in").unwrap(),
         receiver: Box::new(ClosedReceiver),

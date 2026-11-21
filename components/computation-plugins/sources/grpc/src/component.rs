@@ -352,6 +352,24 @@ pub(crate) fn peer<T>(request: &Request<T>) -> Option<IpAddr> {
     request.remote_addr().map(|address| address.ip())
 }
 
+/// The ingress telemetry binding entered with the request's W3C trace
+/// context metadata, applied to every event the request admits.
+pub(crate) fn request_scope<T>(
+    ingress: &Ingress,
+    request: &Request<T>,
+) -> drasi_computation_plugin_sdk::telemetry::ExecutionScope {
+    ingress.execution_scope.with_w3c_headers(
+        request
+            .metadata()
+            .get("traceparent")
+            .map(|value| value.as_encoded_bytes()),
+        request
+            .metadata()
+            .get("tracestate")
+            .map(|value| value.as_encoded_bytes()),
+    )
+}
+
 struct SourceService(Services);
 type ResponseStream<T> = Pin<Box<dyn Stream<Item = std::result::Result<T, Status>> + Send>>;
 
@@ -363,6 +381,7 @@ impl source::source_service_server::SourceService for SourceService {
     ) -> std::result::Result<Response<source::SubmitEventResponse>, Status> {
         let ingress = &self.0.ingress;
         let _permit = ingress.request_permit().map_err(|error| status(&error))?;
+        let scope = request_scope(ingress, &request);
         let converted = request
             .into_inner()
             .event
@@ -380,7 +399,10 @@ impl source::source_service_server::SourceService for SourceService {
                 }));
             }
         };
-        ingress.admit(vec![change]).await.map_err(admit_status)?;
+        scope
+            .scope(ingress.admit(vec![change]))
+            .await
+            .map_err(admit_status)?;
         Ok(Response::new(source::SubmitEventResponse {
             success: true,
             message: "Event processed successfully".into(),
@@ -397,6 +419,7 @@ impl source::source_service_server::SourceService for SourceService {
         let permit = self.0.stream_permit()?;
         let services = self.0.clone();
         let peer = peer(&request);
+        let scope = request_scope(&services.ingress, &request);
         let mut input = request.into_inner();
         let output = async_stream::try_stream! {
             let _permit = permit;
@@ -417,7 +440,7 @@ impl source::source_service_server::SourceService for SourceService {
                 };
                 let next = events_processed.checked_add(1)
                     .ok_or_else(|| Status::resource_exhausted("gRPC stream event count exhausted"))?;
-                ingress.admit(vec![change]).await.map_err(admit_status)?;
+                scope.scope(ingress.admit(vec![change])).await.map_err(admit_status)?;
                 events_processed = next;
                 // The published SourceService reports a cumulative accepted
                 // prefix. Consumers keep the latest total; they do not sum it.

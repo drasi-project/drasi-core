@@ -51,7 +51,7 @@ async fn started(
 }
 
 fn input(output: &OutputEnvelope) -> InputEnvelope {
-    InputEnvelope {
+    InputEnvelope { execution_context: Default::default(),
         port: PortId::try_new("in").expect("port"),
         envelope: output.envelope.clone(),
     }
@@ -165,7 +165,7 @@ async fn captured_many(
         database.client().batch_execute(statement).await?;
         let group = next(&mut source).await?;
         let mut produced = query
-            .transform(InputEnvelope {
+            .transform(InputEnvelope { execution_context: Default::default(),
                 port: PortId::try_new("in")?,
                 envelope: group.envelope,
             })
@@ -552,7 +552,7 @@ fn volatile_output(incarnation: &str, sequence: u64, id: i64, name: &str) -> Res
         "query_id": query.as_str(), "configuration_hash": 7, "incarnation": incarnation
     }))?;
     identity.annotate(&mut envelope, &query)?;
-    Ok(InputEnvelope {
+    Ok(InputEnvelope { execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope,
     })

@@ -63,6 +63,10 @@ fn runtime_descriptor(metadata: &FactoryMetadata) -> FactoryDescriptor {
 pub(super) mod recovery_tests;
 
 pub struct NativeFactory {
+    telemetry: Option<abi::telemetry::PluginTelemetryV1>,
+    telemetry_v2: Option<abi::telemetry::PluginTelemetryV2>,
+    telemetry_v3: Option<abi::telemetry::PluginTelemetryV3>,
+    telemetry_v4: Option<abi::telemetry::PluginTelemetryV4>,
     pub(super) query_authoring: std::sync::Mutex<Option<std::sync::Weak<dyn ComponentFactory>>>,
     metadata: FactoryMetadata,
     configuration_details: Option<drasi_computation_plugin_sdk::ConfigDetails>,
@@ -242,6 +246,10 @@ impl NativeFactory {
             .then(|| metadata.port_catalogue())
             .transpose()?;
         Ok(Self {
+            telemetry: None,
+            telemetry_v2: None,
+            telemetry_v3: None,
+            telemetry_v4: None,
             query_authoring: std::sync::Mutex::new(None),
             descriptor,
             port_formats,
@@ -256,6 +264,73 @@ impl NativeFactory {
     }
     pub fn metadata(&self) -> &FactoryMetadata {
         &self.metadata
+    }
+    pub(super) fn with_telemetry(
+        mut self,
+        extension: Option<abi::telemetry::PluginTelemetryV1>,
+    ) -> Self {
+        self.telemetry = extension;
+        self
+    }
+
+    pub fn supports_execution_context(&self) -> bool {
+        self.telemetry.is_some()
+    }
+    pub(super) fn with_telemetry_v2(
+        mut self,
+        extension: Option<abi::telemetry::PluginTelemetryV2>,
+    ) -> Self {
+        self.telemetry_v2 = extension;
+        self
+    }
+    pub(super) fn with_telemetry_v3(
+        mut self,
+        extension: Option<abi::telemetry::PluginTelemetryV3>,
+    ) -> Self {
+        self.telemetry_v3 = extension;
+        self
+    }
+
+    pub fn telemetry_capabilities(&self) -> u32 {
+        let capabilities = self.telemetry_v2.map_or_else(
+            || {
+                if self.telemetry.is_some() {
+                    abi::telemetry::CONTEXT
+                } else {
+                    0
+                }
+            },
+            |extension| extension.capabilities,
+        );
+        capabilities | self.telemetry_v4.map_or(0, |table| table.capabilities)
+    }
+
+    pub(super) fn with_telemetry_v4(
+        mut self,
+        extension: Option<abi::telemetry::PluginTelemetryV4>,
+    ) -> anyhow::Result<Self> {
+        if let Some(extension) = extension {
+            let mut supported = u32::MAX;
+            unsafe {
+                take_status(extension.supports_factory.expect("validated")(
+                    self.raw.state,
+                    &mut supported,
+                ))?
+            };
+            anyhow::ensure!(
+                supported <= 1,
+                "invalid native query instrumentation capability"
+            );
+            if supported == 1 {
+                anyhow::ensure!(
+                    self.metadata.role == ComponentRole::Transformer
+                        && self.metadata.semantic_kind() == ComponentSemanticKind::Query,
+                    "query instrumentation requires a semantic query transformer"
+                );
+                self.telemetry_v4 = Some(extension);
+            }
+        }
+        Ok(self)
     }
 
     /// Ask the actual plugin factory to assess a change without constructing or
@@ -395,6 +470,10 @@ impl NativeFactory {
             "source bootstrap progress mode does not match its source factory"
         );
         self.validate_configuration(&configuration)?;
+        let telemetry = super::telemetry::NativeTelemetryBinding::capture(
+            self.telemetry_v2,
+            self.metadata.implementation.name.as_ref(),
+        )?;
         let mut request = self.request(id, configuration, Some(scope), Vec::new());
         request.activation_credentials_bound = identity.is_some();
         super::NativeSourceBootstrapResource::create(
@@ -404,6 +483,7 @@ impl NativeFactory {
             self.raw.state,
             self._plugin.clone(),
             identity,
+            telemetry,
         )
     }
     pub(super) fn with_configuration_details(
@@ -1111,6 +1191,24 @@ impl NativeFactory {
             .transpose()?;
         request.activation_credentials_bound = activation_identity.is_some();
         let bytes = wire::encode_create_request(&request)?;
+        let execution_scope = drasi_lib::observability::ExecutionScope::capture();
+        if execution_scope.transport_required() && self.telemetry.is_none() {
+            return Err(drasi_lib::observability::TelemetryError::Unsupported(
+                "native execution context transport",
+            )
+            .into());
+        }
+        let context_enabled =
+            execution_scope.has_adapter() || !execution_scope.context().is_empty();
+        let bytes = if self.telemetry.is_some() {
+            drasi_computation_plugin_sdk::telemetry_transport::encode_creation(&bytes)?
+        } else {
+            anyhow::ensure!(
+                execution_scope.context().is_empty(),
+                "native construction context transport is unsupported"
+            );
+            bytes
+        };
         let table = unsafe { &*self.raw.vtable };
         let mut component = abi::ComponentHandle::null();
         let output_snapshots = output_snapshots.map(|service| {
@@ -1121,6 +1219,7 @@ impl NativeFactory {
         });
         let admission_binding = admission.as_ref().map(|admission| {
             super::admission::AdmissionBinding::new(admission, self.codec.clone())
+                .with_context_transport(self.telemetry.is_some())
         });
         let progress = source_progress.map(|owner| BoundProgress {
             binding: super::progress::ProgressBinding::new(&owner),
@@ -1174,7 +1273,13 @@ impl NativeFactory {
                     None => create(std::ptr::null(), coordinator, component),
                 }
             };
-        match &source_bootstrap {
+        let telemetry_binding = super::telemetry::NativeTelemetryBinding::capture_query(
+            self.telemetry_v2,
+            self.telemetry_v4,
+            self.metadata.implementation.name.as_ref(),
+        )?;
+        super::telemetry::scope(telemetry_binding.as_ref(), || {
+            match &source_bootstrap {
             Some((coordinator, _, _)) => {
                 coordinator.validate_factory(self.raw.state, &self._plugin)?;
                 coordinator.validate_identity(
@@ -1188,7 +1293,9 @@ impl NativeFactory {
                 )?;
             }
             None => create_with_processing(std::ptr::null(), &mut component)?,
-        }
+            }
+            Ok(())
+        })?;
         let component = unsafe {
             NativeComponentProxy::new(
                 component,
@@ -1203,7 +1310,11 @@ impl NativeFactory {
                     consumer_progress,
                     input_progress,
                 },
+                self.telemetry,
+                context_enabled && self.telemetry.is_some(),
             )?
+            .with_timing_extension(self.telemetry_v3)
+            .with_telemetry_binding(telemetry_binding)
         };
         let component = match self.extensions.batching {
             Some(extension) => component.with_batching(extension),
@@ -1400,6 +1511,13 @@ impl ComponentFactory for NativeFactory {
         &self,
         context: ConstructionContext,
     ) -> std::result::Result<ConstructedComponent, ComponentCreationError> {
+        if context.telemetry().policy().distributed_tracing_required() && self.telemetry.is_none() {
+            return Err(ComponentCreationError::terminal(
+                drasi_lib::observability::TelemetryError::Unsupported(
+                    "native execution context transport",
+                ),
+            ));
+        }
         self.validate(&context.specification)
             .map_err(ComponentCreationError::terminal)?;
         // The instance carries the declaration the graph checks: the plugin's

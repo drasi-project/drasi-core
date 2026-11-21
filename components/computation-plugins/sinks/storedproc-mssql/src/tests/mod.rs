@@ -100,6 +100,7 @@ pub(crate) fn batch(sequence: u64, changes: &[SourceChange]) -> Result<DeliveryB
         true,
     )?;
     let mut input = InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_changes(
             changes,

@@ -505,7 +505,7 @@ async fn running_and_stopped_renames_preserve_object_wiring_progress_and_node_uu
             let generation = source.generation();
 
             for sequence in 1..=2 {
-                input.send(OutputEnvelope {
+                input.send(OutputEnvelope { execution_context: Default::default(),
                     port: port("out"),
                     envelope: GraphChangeCodec::encode_change(SourceChange::Delete {
                         metadata: ElementMetadata {

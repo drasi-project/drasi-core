@@ -35,7 +35,7 @@ fn effective_level_tracks_env_filter() {
     );
 
     std::env::set_var("RUST_LOG", "info");
-    let _registry = drasi_lib::get_or_init_global_registry();
+    let runtime = drasi_lib::init_default_subscriber().unwrap();
 
     assert_eq!(
         effective_host_log_level(),
@@ -43,4 +43,10 @@ fn effective_level_tracks_env_filter() {
         "with RUST_LOG=info the host must report Info, not Trace — \
          otherwise producer-side filtering never engages in production"
     );
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(runtime.shutdown(std::time::Duration::from_secs(2)))
+        .unwrap();
 }

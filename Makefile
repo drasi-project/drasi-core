@@ -6,6 +6,10 @@
 RUSTFLAGS := -Dwarnings
 
 .PHONY: test clippy clippy-fix help build-test-plugins test-host-sdk check-native-dependencies \
+       build-native-context-fixtures test-native-context observability-demo observability-demo-smoke observability-demo-suite-smoke \
+       observability-demo-controls observability-demo-latency observability-demo-postgres observability-demo-postgres-smoke \
+       observability-demo-incoming-trace \
+       build-native-telemetry-fixtures test-native-telemetry test-native-query-observability \
        build-native-plugins build-native-standard-plugins build-native-network-plugins build-native-mysql-plugins build-native-postgres-plugins build-native-sqlite-plugins test-native-network test-native-mysql test-native-sqlite test-native-storedproc-crash test-native-paired-crash \
        build-native-mssql-plugins test-native-mssql \
        build-plugins build-plugins-release list-plugins \
@@ -20,6 +24,17 @@ help:
 	@echo "  clippy                    - Run cargo clippy with same configuration as CI"
 	@echo "  build-test-plugins        - Build cdylib plugins needed for host-sdk integration tests"
 	@echo "  test-host-sdk             - Build test plugins and run host-sdk integration tests"
+	@echo "  test-native-context       - Build SDK-only context fixtures and qualify the native context ABI"
+	@echo "  test-native-telemetry     - Build real SDK libraries and qualify shared telemetry"
+	@echo "  test-native-query-observability - Rebuild the query library and verify authoritative observations"
+	@echo "  observability-demo        - Run the main HTTP-only telemetry demo; Ctrl-C cleans up"
+	@echo "  observability-demo-controls - Run HTTP-only signal controls"
+	@echo "  observability-demo-incoming-trace - Verify an incoming HTTP trace ID and parent, then leave the demo live"
+	@echo "  observability-demo-latency - Run HTTP-only fast/slow handled-branch latency"
+	@echo "  observability-demo-postgres - Run the optional PostgreSQL-only CDC demo"
+	@echo "  observability-demo-postgres-smoke - Verify optional PostgreSQL CDC and clean up"
+	@echo "  observability-demo-smoke  - Verify demo traces/metrics/logs and clean up automatically"
+	@echo "  observability-demo-suite-smoke - Verify all three scenarios and the signal-policy matrix"
 	@echo "  build-native-plugins      - Compatibility alias for shared test-plugin preparation"
 	@echo "  test-native-network       - Build native network plugins and run wire/loopback tests"
 	@echo "  test-native-mysql         - Build native MySQL plugins and run isolated Podman consumer tests"
@@ -70,14 +85,18 @@ test:
 	$(MAKE) build-test-plugins
 	cargo test --locked --workspace --exclude drasi-host-sdk --no-fail-fast -- --test-threads=1
 	cargo test --locked -p drasi-host-sdk --features $(HOST_TEST_FEATURES) --no-fail-fast -- --test-threads=1
+	cargo test --locked -p drasi-host-sdk --features otel-context --test native_execution_context --test native_telemetry --test native_handled_branch_latency --test logging_policy --test native_query_observability -- --test-threads=1
+	cargo test --locked -p drasi-host-sdk --no-default-features --test native_metrics_telemetry --test native_handled_branch_latency -- --test-threads=1
 
-build-test-plugins:
+build-test-plugins: build-native-telemetry-fixtures
 	bash .github/scripts/build-test-plugins.sh
 
 # Build test plugins, then run host-sdk integration tests.
 test-host-sdk: build-test-plugins
 	@echo "=== Running host-sdk integration tests ==="
 	cargo test --locked -p drasi-host-sdk --features $(HOST_TEST_FEATURES) --no-fail-fast -- --test-threads=1
+	cargo test --locked -p drasi-host-sdk --features otel-context --test native_execution_context --test native_telemetry --test native_handled_branch_latency --test logging_policy --test native_query_observability -- --test-threads=1
+	cargo test --locked -p drasi-host-sdk --no-default-features --test native_metrics_telemetry --test native_handled_branch_latency -- --test-threads=1
 	@echo "=== host-sdk integration tests passed ==="
 
 .PHONY: build-native-query-plugin
@@ -88,6 +107,52 @@ build-native-sqlite-plugins build-native-query-plugin: build-test-plugins
 
 check-native-dependencies:
 	python3 ci/check_native_dependencies.py
+
+build-native-context-fixtures:
+	cargo build -p drasi-computation-plugin-sdk --example execution_context_fixture --example execution_context_base_fixture --features otel-context --locked
+
+test-native-context: build-native-context-fixtures
+	cargo test -p drasi-host-sdk --features otel-context --test native_execution_context --locked -- --test-threads=1
+
+build-native-telemetry-fixtures: build-native-context-fixtures
+	cargo build -p drasi-computation-plugin-sdk --example telemetry_fixture --example handled_branch_fixture --example handled_branch_v2_fixture --no-default-features --locked
+
+test-native-telemetry: build-native-telemetry-fixtures test-native-query-observability
+	cargo test -p drasi-host-sdk --features otel-context --test native_telemetry --test native_execution_context --test native_handled_branch_latency --test logging_policy --locked -- --test-threads=1
+	cargo test -p drasi-host-sdk --no-default-features --test native_metrics_telemetry --test native_handled_branch_latency --locked -- --test-threads=1
+
+test-native-query-observability: build-native-query-plugin
+	cargo test -p drasi-host-sdk --features otel-context --test native_query_observability --locked -- --test-threads=1
+	cargo test -p drasi-host-sdk --no-default-features --test native_query_observability --locked -- --test-threads=1
+
+.PHONY: test-handled-branch-ownership
+test-handled-branch-ownership:
+	cargo build --manifest-path lib/tests/handled-branch-ownership/Cargo.toml -p handled-branch-ownership-fixture --locked
+	cargo test --manifest-path lib/tests/handled-branch-ownership/Cargo.toml -p handled-branch-ownership --locked
+
+observability-demo:
+	bash lib/examples/observability/demo.sh
+
+observability-demo-smoke:
+	bash lib/examples/observability/demo.sh --smoke
+
+observability-demo-incoming-trace:
+	DEMO_INCOMING_TRACE=true bash lib/examples/observability/demo.sh
+
+observability-demo-controls:
+	bash lib/examples/observability/demo.sh --scenario controls
+
+observability-demo-latency:
+	bash lib/examples/observability/demo.sh --scenario latency
+
+observability-demo-postgres:
+	bash lib/examples/observability/demo.sh --scenario postgres
+
+observability-demo-postgres-smoke:
+	bash lib/examples/observability/demo.sh --scenario postgres --smoke
+
+observability-demo-suite-smoke:
+	bash lib/examples/observability/demo.sh --suite-smoke
 
 test-native-mssql: build-test-plugins
 	cargo test --locked $(foreach package,$(NATIVE_MSSQL_PACKAGES),-p $(package)) --lib

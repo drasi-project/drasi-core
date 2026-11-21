@@ -597,6 +597,7 @@ struct SnapshotSlot {
     waker: Option<std::task::Waker>,
 }
 struct Instance {
+    execution_scope: crate::telemetry::ExecutionScope,
     provider: NativeBootstrapProvider,
     codec: Arc<BinaryEnvelopeCodec>,
     stream: Mutex<SnapshotSlot>,
@@ -838,6 +839,8 @@ pub(crate) fn export_provider(
 ) -> BootstrapHandle {
     BootstrapHandle {
         state: Box::into_raw(Box::new(Arc::new(Instance {
+            execution_scope: crate::telemetry::ExecutionScope::capture()
+                .with_context(Default::default()),
             provider,
             codec,
             stream: Mutex::new(SnapshotSlot {
@@ -925,8 +928,12 @@ unsafe extern "C" fn begin(
             completed: false,
         };
         let runtime = crate::export::io_runtime()?;
+        let scope = guard
+            .instance
+            .execution_scope
+            .with_context(crate::telemetry::ExecutionContext::current());
         let operation = transport::export_operation(
-            async move {
+            scope.scope(async move {
                 let result = guard
                     .instance
                     .call(code, generation, state)
@@ -941,7 +948,7 @@ unsafe extern "C" fn begin(
                 });
                 guard.completed = result.is_ok();
                 result
-            },
+            }),
             Some(runtime),
         );
         unsafe { transport::write_out(out, operation) }

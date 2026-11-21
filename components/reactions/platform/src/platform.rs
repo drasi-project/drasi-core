@@ -61,13 +61,70 @@ use crate::types::{CloudEvent, CloudEventConfig, ControlSignal, ResultControlEve
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use drasi_lib::channels::ComponentStatus;
-use drasi_lib::observability::log_component_start;
+use drasi_lib::observability::{
+    log_component_start, BatchTraceParent, ExecutionContext, ExecutionScope, TraceLinkLimits,
+    WorkerTelemetry,
+};
 use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
 use drasi_lib::Reaction;
 use publisher::{PublisherConfig, RedisStreamPublisher};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+async fn publish_batch_observed(
+    publisher: &RedisStreamPublisher,
+    telemetry: &WorkerTelemetry,
+    events: Vec<CloudEvent<ResultEvent>>,
+    contexts: &[(ExecutionContext, String, usize)],
+) -> Result<Vec<String>> {
+    let change_count = contexts.iter().map(|(_, _, count)| count).sum();
+    let observation = if change_count == 0 {
+        None
+    } else {
+        telemetry
+            .reaction_batch(
+                contexts.iter().map(|(context, _, _)| context),
+                contexts.len(),
+                change_count,
+            )
+            .map_err(|e| log::warn!("Failed to observe platform batch: {e}"))
+            .ok()
+    };
+    let mut work = (change_count > 0).then(|| telemetry.reaction_batch_work());
+    let timing_inputs = contexts
+        .iter()
+        .map(|(context, query, rows)| telemetry.reaction_input_context(query, *rows, context))
+        .collect::<Vec<_>>();
+    let publish = publisher.publish_batch_with_retry(events, 3);
+    let outcome = match observation {
+        Some(observation) => observation.run(publish).await,
+        None => {
+            let selected = BatchTraceParent::select(
+                contexts.iter().map(|(context, _, _)| context),
+                TraceLinkLimits::default(),
+            );
+            ExecutionScope::capture()
+                .with_context(selected.parent)
+                .scope(publish)
+                .await
+        }
+    };
+    if let Some(work) = &mut work {
+        if outcome.is_ok() {
+            for input in timing_inputs {
+                input.completed();
+            }
+            for (_, query, rows) in contexts {
+                if *rows > 0 {
+                    work.handled(query, *rows, 1);
+                }
+            }
+        }
+        work.finish(outcome.is_ok());
+    }
+    outcome
+}
 
 /// Platform Reaction for publishing to Redis Streams
 pub struct PlatformReaction {
@@ -301,13 +358,16 @@ impl Reaction for PlatformReaction {
         let batch_enabled = self.batch_enabled;
         let batch_max_size = self.batch_max_size;
         let batch_max_wait_ms = self.batch_max_wait_ms;
+        let telemetry = self.base.worker_telemetry().await;
 
         // Spawn main processing task
         let processing_task_handle = tokio::spawn(async move {
+            telemetry.scope(async {
             log::debug!("Platform Reaction '{reaction_id}' processing task started");
 
             // Buffer for batching CloudEvents before publishing
             let mut event_buffer: Vec<CloudEvent<ResultEvent>> = Vec::new();
+            let mut event_contexts = Vec::new();
             let mut last_flush_time = std::time::Instant::now();
 
             loop {
@@ -320,8 +380,10 @@ impl Reaction for PlatformReaction {
                         break;
                     }
 
-                    result = priority_queue.dequeue() => result,
+                    result = priority_queue.dequeue_message() => result,
                 };
+                let execution_context = query_result.execution_context;
+                let query_result = query_result.payload;
 
                 // Check if this is a control signal
                 if let Some(control_signal) = query_result.metadata.get("control_signal") {
@@ -331,8 +393,9 @@ impl Reaction for PlatformReaction {
                             "Flushing {} buffered events before control signal",
                             event_buffer.len()
                         );
-                        if let Err(e) = publisher
-                            .publish_batch_with_retry(event_buffer.clone(), 3)
+                        if let Err(e) = publish_batch_observed(
+                            &publisher, &telemetry, event_buffer.clone(), &event_contexts,
+                        )
                             .await
                         {
                             log::error!(
@@ -340,6 +403,7 @@ impl Reaction for PlatformReaction {
                             );
                         }
                         event_buffer.clear();
+                        event_contexts.clear();
                         last_flush_time = std::time::Instant::now();
                     }
 
@@ -377,7 +441,11 @@ impl Reaction for PlatformReaction {
                                 &cloud_event_config,
                             );
 
-                            if let Err(e) = publisher.publish_with_retry(cloud_event, 3).await {
+                            let publish = ExecutionScope::capture()
+                                .with_context(execution_context.clone())
+                                .scope(publisher.publish_with_retry(cloud_event, 3))
+                                .await;
+                            if let Err(e) = publish {
                                 log::warn!("Failed to emit control event {signal_type}: {e}");
                             } else {
                                 log::info!("Emitted control event: {signal_type}");
@@ -420,6 +488,9 @@ impl Reaction for PlatformReaction {
                         if batch_enabled {
                             // Add to buffer
                             event_buffer.push(cloud_event);
+                            let change_count = query_result_mut.results.iter()
+                                .filter(|diff| !matches!(diff, drasi_lib::channels::ResultDiff::Noop)).count();
+                            event_contexts.push((execution_context.clone(), query_result_mut.query_id.to_string(), change_count));
 
                             // Check if we should flush the buffer
                             let should_flush = event_buffer.len() >= batch_max_size
@@ -434,8 +505,9 @@ impl Reaction for PlatformReaction {
                                     last_flush_time.elapsed().as_millis()
                                 );
 
-                                match publisher
-                                    .publish_batch_with_retry(event_buffer.clone(), 3)
+                                match publish_batch_observed(
+                                    &publisher, &telemetry, event_buffer.clone(), &event_contexts,
+                                )
                                     .await
                                 {
                                     Ok(message_ids) => {
@@ -454,11 +526,34 @@ impl Reaction for PlatformReaction {
                                 }
 
                                 event_buffer.clear();
+                                event_contexts.clear();
                                 last_flush_time = std::time::Instant::now();
                             }
                         } else {
                             // Batching disabled - publish immediately
-                            match publisher.publish_with_retry(cloud_event, 3).await {
+                            let change_count = query_result_mut.results.iter()
+                                .filter(|diff| !matches!(diff, drasi_lib::channels::ResultDiff::Noop)).count();
+                            let observation = if change_count == 0 {
+                                None
+                            } else {
+                                telemetry.reaction(&execution_context, change_count)
+                                    .map_err(|e| log::warn!("Failed to observe platform publication: {e}")).ok()
+                            };
+                            let mut work = (change_count > 0).then(|| telemetry.reaction_work_context(&execution_context));
+                            let publish = publisher.publish_with_retry(cloud_event, 3);
+                            let outcome = match observation {
+                                Some(observation) => observation.run(publish).await,
+                                None => ExecutionScope::capture()
+                                    .with_context(execution_context.clone())
+                                    .scope(publish).await,
+                            };
+                            if let Some(work) = &mut work {
+                                if outcome.is_ok() {
+                                    work.handled(query_result_mut.query_id.as_str(), change_count, 1);
+                                }
+                                work.finish(outcome.is_ok());
+                            }
+                            match outcome {
                                 Ok(message_id) => {
                                     log::debug!(
                                         "Published query result for '{}' (sequence: {}, message_id: {})",
@@ -486,6 +581,7 @@ impl Reaction for PlatformReaction {
                     }
                 }
             }
+            }).await;
         });
 
         // Store the processing task handle

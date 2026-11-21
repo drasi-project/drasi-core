@@ -855,14 +855,20 @@ const COMMAND_CAPACITY: usize = 64;
 
 #[derive(Clone)]
 pub(super) struct CommandSender {
-    regular: mpsc::Sender<Command>,
-    construction: mpsc::Sender<Command>,
+    regular: mpsc::Sender<ContextualCommand>,
+    construction: mpsc::Sender<ContextualCommand>,
+}
+
+struct ContextualCommand {
+    command: Command,
+    context: crate::observability::ExecutionContext,
 }
 
 pub(super) struct CommandReceiver {
-    regular: mpsc::Receiver<Command>,
-    construction: mpsc::Receiver<Command>,
+    regular: mpsc::Receiver<ContextualCommand>,
+    construction: mpsc::Receiver<ContextualCommand>,
     construction_first: bool,
+    context: crate::observability::ExecutionContext,
 }
 
 pub(super) fn command_channel() -> (CommandSender, CommandReceiver) {
@@ -877,12 +883,13 @@ pub(super) fn command_channel() -> (CommandSender, CommandReceiver) {
             regular,
             construction,
             construction_first: false,
+            context: Default::default(),
         },
     )
 }
 
 impl CommandSender {
-    fn channel(&self, command: &Command) -> &mpsc::Sender<Command> {
+    fn channel(&self, command: &Command) -> &mpsc::Sender<ContextualCommand> {
         match command {
             Command::Add { .. } | Command::HandleStop { .. } => &self.construction,
             _ => &self.regular,
@@ -893,12 +900,21 @@ impl CommandSender {
         &self,
         command: Command,
     ) -> Result<(), mpsc::error::SendError<Command>> {
-        self.channel(&command).send(command).await
+        self.channel(&command)
+            .send(ContextualCommand {
+                command,
+                context: crate::observability::ExecutionContext::current(),
+            })
+            .await
+            .map_err(|error| mpsc::error::SendError(error.0.command))
     }
 
     pub(super) fn try_send(&self, command: Command) -> Result<(), mpsc::error::TrySendError<()>> {
         self.channel(&command)
-            .try_send(command)
+            .try_send(ContextualCommand {
+                command,
+                context: crate::observability::ExecutionContext::current(),
+            })
             .map_err(|error| match error {
                 mpsc::error::TrySendError::Full(_) => mpsc::error::TrySendError::Full(()),
                 mpsc::error::TrySendError::Closed(_) => mpsc::error::TrySendError::Closed(()),
@@ -922,13 +938,17 @@ impl CommandReceiver {
             let first_closed = match first.poll_recv(cx) {
                 Poll::Ready(Some(command)) => {
                     self.construction_first = !self.construction_first;
-                    return Poll::Ready(Some(command));
+                    self.context = command.context;
+                    return Poll::Ready(Some(command.command));
                 }
                 Poll::Ready(None) => true,
                 Poll::Pending => false,
             };
             match second.poll_recv(cx) {
-                Poll::Ready(Some(command)) => Poll::Ready(Some(command)),
+                Poll::Ready(Some(command)) => {
+                    self.context = command.context;
+                    Poll::Ready(Some(command.command))
+                }
                 Poll::Ready(None) if first_closed => Poll::Ready(None),
                 _ => Poll::Pending,
             }
@@ -939,7 +959,9 @@ impl CommandReceiver {
     // Independent additions and generation-fenced stops remain serviceable.
     #[cfg(test)]
     async fn recv_during_construction(&mut self) -> Option<Command> {
-        self.construction.recv().await
+        let command = self.construction.recv().await?;
+        self.context = command.context;
+        Some(command.command)
     }
 }
 
@@ -1000,19 +1022,23 @@ impl GraphControl {
         deadline: &crate::computation::v1::OperationDeadline,
         command: impl FnOnce(oneshot::Sender<GraphResult<T>>) -> Command,
     ) -> GraphResult<T> {
-        let (reply, result) = oneshot::channel();
-        deadline
-            .wait(
-                "queueing the lifecycle request",
-                false,
-                self.commands.send(command(reply)),
-            )
-            .await?
-            .map_err(|_| GraphError::ControllerClosed)?;
-        deadline
-            .wait("awaiting component outcomes", true, result)
-            .await?
-            .map_err(|_| GraphError::ControllerClosed)?
+        self.observe_control(deadline.operation())?
+            .run_control(async {
+                let (reply, result) = oneshot::channel();
+                deadline
+                    .wait(
+                        "queueing the lifecycle request",
+                        false,
+                        self.commands.send(command(reply)),
+                    )
+                    .await?
+                    .map_err(|_| GraphError::ControllerClosed)?;
+                deadline
+                    .wait("awaiting component outcomes", true, result)
+                    .await?
+                    .map_err(|_| GraphError::ControllerClosed)?
+            })
+            .await
     }
 
     /// Explicitly interrupt selected work without a drain/rollback promise.
@@ -1139,20 +1165,24 @@ impl GraphControl {
         delete_owned_resources: BTreeSet<ComponentId>,
         updates: BTreeMap<ComponentId, super::ComponentUpdateExecution>,
     ) -> GraphResult<reconcile::ReconciliationReport> {
-        let (reply, result) = oneshot::channel();
-        self.commands
-            .send(Command::ReconcileComponents {
-                previous,
-                desired,
-                bindings,
-                activation,
-                delete_owned_resources,
-                updates,
-                reply,
+        self.observe_control("reconcile_components")?
+            .run_control(async {
+                let (reply, result) = oneshot::channel();
+                self.commands
+                    .send(Command::ReconcileComponents {
+                        previous,
+                        desired,
+                        bindings,
+                        activation,
+                        delete_owned_resources,
+                        updates,
+                        reply,
+                    })
+                    .await
+                    .map_err(|_| GraphError::ControllerClosed)?;
+                result.await.map_err(|_| GraphError::ControllerClosed)?
             })
             .await
-            .map_err(|_| GraphError::ControllerClosed)?;
-        result.await.map_err(|_| GraphError::ControllerClosed)?
     }
 
     pub(crate) async fn completed_updates(
@@ -1244,12 +1274,16 @@ impl GraphControl {
         &self,
         factory: Arc<dyn crate::computation::v1::ComponentFactory>,
     ) -> GraphResult<()> {
-        let (reply, result) = oneshot::channel();
-        self.commands
-            .send(Command::RegisterFactory { factory, reply })
+        self.observe_control("register_factory")?
+            .run_control(async {
+                let (reply, result) = oneshot::channel();
+                self.commands
+                    .send(Command::RegisterFactory { factory, reply })
+                    .await
+                    .map_err(|_| GraphError::ControllerClosed)?;
+                result.await.map_err(|_| GraphError::ControllerClosed)?
+            })
             .await
-            .map_err(|_| GraphError::ControllerClosed)?;
-        result.await.map_err(|_| GraphError::ControllerClosed)?
     }
 
     pub fn subscribe_observed(&self) -> watch::Receiver<Arc<ObservedGraph>> {
@@ -1362,19 +1396,23 @@ impl GraphControl {
         component: ComponentId,
         policy: LifecyclePolicy,
     ) -> GraphResult<GraphRevision> {
-        self.require_configuration_write()?;
-        let (reply, result) = oneshot::channel();
-        self.commands
-            .send(Command::Policy {
-                revision,
-                component,
-                policy,
-                management_access: self.management_access,
-                reply,
+        self.observe_control("set_lifecycle_policy")?
+            .run_control(async {
+                self.require_configuration_write()?;
+                let (reply, result) = oneshot::channel();
+                self.commands
+                    .send(Command::Policy {
+                        revision,
+                        component,
+                        policy,
+                        management_access: self.management_access,
+                        reply,
+                    })
+                    .await
+                    .map_err(|_| GraphError::ControllerClosed)?;
+                result.await.map_err(|_| GraphError::ControllerClosed)?
             })
             .await
-            .map_err(|_| GraphError::ControllerClosed)?;
-        result.await.map_err(|_| GraphError::ControllerClosed)?
     }
 
     pub async fn report_health(
@@ -1382,16 +1420,20 @@ impl GraphControl {
         revision: GraphRevision,
         observation: HealthObservation,
     ) -> GraphResult<()> {
-        let (reply, result) = oneshot::channel();
-        self.commands
-            .send(Command::Health {
-                revision,
-                observation,
-                reply,
+        self.observe_control("report_health")?
+            .run_control(async {
+                let (reply, result) = oneshot::channel();
+                self.commands
+                    .send(Command::Health {
+                        revision,
+                        observation,
+                        reply,
+                    })
+                    .await
+                    .map_err(|_| GraphError::ControllerClosed)?;
+                result.await.map_err(|_| GraphError::ControllerClosed)?
             })
             .await
-            .map_err(|_| GraphError::ControllerClosed)?;
-        result.await.map_err(|_| GraphError::ControllerClosed)?
     }
 }
 
@@ -3087,6 +3129,7 @@ fn construct_pipe(
     let provider = graph.providers[&index].clone();
     let resources = graph.resource_handles.clone();
     let edge = edge.clone();
+    let telemetry = graph.observability.telemetry.clone();
     let producer = super::super::ProducerBoundary::of(
         &graph.nodes[graph.ids[&edge.definition.from.component]],
     );
@@ -3118,6 +3161,51 @@ fn construct_pipe(
                                         "created pipe differs from preflight capabilities",
                                     ));
                                 }
+                                let queue_id: Arc<str> = match &edge.pipe {
+                                    super::DesiredPipe::Ranked(config) => {
+                                        format!("resource:{}", config.queue).into()
+                                    }
+                                    super::DesiredPipe::Qos(config) => {
+                                        format!("resource:{}", config.resource).into()
+                                    }
+                                    super::DesiredPipe::Retained(config) => {
+                                        format!("resource:{}", config.resource).into()
+                                    }
+                                    _ => format!(
+                                        "edge:{}:{}:{}:{}:{}:{}:{}:{}",
+                                        edge.definition.from.component.as_str().len(),
+                                        edge.definition.from.component,
+                                        edge.definition.from.port.as_str().len(),
+                                        edge.definition.from.port,
+                                        edge.definition.to.component.as_str().len(),
+                                        edge.definition.to.component,
+                                        edge.definition.to.port.as_str().len(),
+                                        edge.definition.to.port
+                                    )
+                                    .into(),
+                                };
+                                if let Some(observations) = provided.control.observations() {
+                                    let binding = observations
+                                        .bind(&telemetry, &queue_id)
+                                        .map_err(|error| GraphError::Pipe {
+                                            edge: index,
+                                            source: crate::computation::v1::PipeError::Backend(
+                                                error.into(),
+                                            ),
+                                        })?;
+                                    let edge_info = telemetry.queue_edge_info(
+                                        &queue_id,
+                                        edge.definition.from.component.as_str(),
+                                        edge.definition.to.component.as_str(),
+                                    );
+                                    provided.control =
+                                        crate::computation::v1::bounded_pipe::observed_control(
+                                            provided.control,
+                                            binding,
+                                            edge_info,
+                                        );
+                                    controls.0.insert(index, provided.control.clone());
+                                }
                                 let receiver = provided.pipe.take_receiver().map_err(|source| {
                                     GraphError::Pipe {
                                         edge: index,
@@ -3126,6 +3214,7 @@ fn construct_pipe(
                                 })?;
                                 let progress = Arc::new(super::FlowProgress::default());
                                 let outgoing = Outgoing {
+                                    queue_id: queue_id.clone(),
                                     edge: index,
                                     port: edge.definition.from.port.clone(),
                                     sender: provided.pipe.sender(),
@@ -3148,7 +3237,7 @@ fn construct_pipe(
                                     })?,
                                 };
                                 let incoming = Incoming {
-                    edge: index, producer, port: edge.definition.to.port.clone(), receiver,
+                    edge: index, queue_id, producer, port: edge.definition.to.port.clone(), receiver,
                     acknowledgement_required: edge.capabilities.supported()
                         .contains(&crate::computation::v1::PipeCapability::ExplicitAcknowledgement),
                     pending: None, exhausted: false, progress,
@@ -3457,6 +3546,7 @@ struct Operations {
         Arc<tokio::sync::Notify>,
         Arc<tokio::sync::Notify>,
     )>,
+    lifecycle_contexts: BTreeMap<usize, crate::observability::ExecutionContext>,
     futures: FuturesUnordered<BoxFuture<'static, Completion>>,
     active: BTreeMap<usize, Active>,
     starting: Vec<Starting>,
@@ -3466,7 +3556,7 @@ struct Operations {
     next_drain: u64,
     drain_futures: FuturesUnordered<BoxFuture<'static, DrainCompletion>>,
     /// Handle starts and stops waiting for a conflicting operation, in arrival order.
-    handle_requests: VecDeque<HandleRequest>,
+    handle_requests: VecDeque<PendingHandleRequest>,
     stop_after_abort: BTreeSet<usize>,
     propagated_stop: BTreeSet<usize>,
     exhausted: BTreeSet<usize>,
@@ -4727,6 +4817,26 @@ impl Operations {
             .collect();
         let node = graph.nodes[index].clone();
         let generation = slot.generation;
+        let observations = graph
+            .observability
+            .telemetry
+            .observations(
+                node.descriptor.id().clone(),
+                node.role,
+                drasi_computation_contracts::ComponentSemanticKind::for_component(
+                    node.role,
+                    &node.descriptor,
+                ),
+                generation.0,
+            )
+            .map_err(|error| component_error(&node, "bind operation telemetry", error.into()))?;
+        if let Some(specification) = graph.snapshot.specifications.get(&slot.id) {
+            observations
+                .bind_implementation(&specification.implementation)
+                .map_err(|error| {
+                    component_error(&node, "bind implementation telemetry", error.into())
+                })?;
+        }
         #[cfg(feature = "test-support")]
         if operation == Operation::Start {
             lease
@@ -4760,6 +4870,22 @@ impl Operations {
         let resources = graph.resource_handles.clone();
         let scope = graph.execution_scope.clone();
         let graph_id = graph.snapshot.id.clone();
+        // Keep construction/update context out of processing/continuation futures.
+        let observability = (matches!(operation, Operation::Create | Operation::Reconfigure)
+            || (operation == Operation::Start && lease.pending_update.is_some()))
+        .then(|| {
+            Box::new(crate::observability::RuntimeObservability {
+                logging: graph.observability.logging.clone(),
+                telemetry: graph.observability.telemetry.component(
+                    node.descriptor.id().clone(),
+                    node.role,
+                    drasi_computation_contracts::ComponentSemanticKind::for_component(
+                        node.role,
+                        &node.descriptor,
+                    ),
+                ),
+            })
+        });
         let output_catalogue = crate::computation::v1::OutputCatalogue::from_publications(
             graph.registry.subscribe(),
             graph.state.subscribe(),
@@ -4827,6 +4953,61 @@ impl Operations {
             component_type = crate::observability::ComponentLogType::for_component(
                 node.role, node.descriptor.semantic_kind()).as_str(),
             generation = generation.0);
+        let execution_scope = crate::observability::ExecutionScope::new(
+            self.lifecycle_contexts
+                .get(&index)
+                .cloned()
+                .unwrap_or_else(crate::observability::ExecutionContext::current),
+        )
+        .with_component(
+            crate::observability::TelemetryScope::graph(
+                graph.execution_scope.clone(),
+                graph.snapshot.id.clone(),
+            )
+            .map_err(|error| component_error(&node, "bind execution scope", error.into()))?
+            .component(
+                node.descriptor.id().clone(),
+                node.role,
+                drasi_computation_contracts::ComponentSemanticKind::for_component(
+                    node.role,
+                    &node.descriptor,
+                ),
+            ),
+            generation.0,
+        )
+        .with_adapter(graph.observability.telemetry.context_adapter().cloned())
+        .with_required_transport(
+            graph
+                .observability
+                .telemetry
+                .policy()
+                .distributed_tracing_required(),
+        )
+        .with_plugin_telemetry(Some(
+            graph
+                .observability
+                .telemetry
+                .plugin_binding(
+                    crate::observability::TelemetryScope::graph(
+                        graph.execution_scope.clone(),
+                        graph.snapshot.id.clone(),
+                    )
+                    .map_err(|error| component_error(&node, "bind plugin scope", error.into()))?
+                    .component(
+                        node.descriptor.id().clone(),
+                        node.role,
+                        drasi_computation_contracts::ComponentSemanticKind::for_component(
+                            node.role,
+                            &node.descriptor,
+                        ),
+                    ),
+                    generation.0,
+                    "component",
+                    graph.observability.logging.clone(),
+                )
+                .map_err(|error| component_error(&node, "bind plugin telemetry", error.into()))?,
+        ));
+        let lifecycle_parent = execution_scope.context().clone();
         let admission_activation = if operation == Operation::Process
             && matches!(&lease.component, Component::Source(_))
         {
@@ -4928,6 +5109,9 @@ impl Operations {
                         } else {
                             Vec::new()
                         };
+                        let construction_observability = observability.as_deref().cloned().ok_or_else(|| {
+                            component_error(&node, "construct", anyhow::anyhow!("missing construction observability owner"))
+                        })?;
                         let context = tokio::time::timeout_at(construction_deadline, ConstructionContext::resolve(
                             scope.clone(),
                             graph_id.clone(),
@@ -4950,6 +5134,7 @@ impl Operations {
                                         plan: update.plan,
                                     }),
                             },
+                            construction_observability,
                         ))
                         .await
                         .map_err(|_| work_identity.interrupted("configuration resolution timeout"))?
@@ -4960,12 +5145,14 @@ impl Operations {
                         })?;
                         let declared = declared_description(&node, factory.as_ref(), &context)?;
                         if operation == Operation::Reconfigure {
+                            let observation = super::observe(&node, crate::observability::ObservedOperation::Reconfigure,
+                                &lifecycle_parent, Default::default())?;
                             let update = lease.pending_update.clone()
                                 .ok_or_else(|| topology("component update has no accepted factory plan"))?;
                             if !lease.initialized || lease.disposal_started {
                                 return Err(topology("component update requires an initialized, retained object"));
                             }
-                            tokio::time::timeout_at(construction_deadline, apply_component_update(&mut lease, &node, &hooks, construction_deadline, update, context))
+                            tokio::time::timeout_at(construction_deadline, observation.run(apply_component_update(&mut lease, &node, &hooks, construction_deadline, update, context)))
                                 .await
                                 .map_err(|_| work_identity.interrupted("update timeout"))??;
                         } else {
@@ -5070,6 +5257,7 @@ impl Operations {
                                                 replacement: false,
                                                 update: None,
                                             },
+                                            observability.as_deref().cloned().ok_or_else(|| topology("restored update has no observability owner"))?,
                                         ).await.map_err(|error| component_error(&node, "resolve update", error.source))?;
                                         apply_component_update(&mut lease, &node, &hooks, construction_deadline, update, context).await
                                     }).await.map_err(|_| work_identity.interrupted("restored update timeout"))??;
@@ -5206,7 +5394,10 @@ impl Operations {
                         let context = crate::computation::v1::StartContext::new(
                             hooks.scope("start", HookScopes::after(activation_timeout)),
                         );
-                        lease.component.start(&context).await
+                        super::observe(&node, crate::observability::ObservedOperation::Start,
+                            &lifecycle_parent, Default::default())?
+                            .run(lease.component.start(&context))
+                            .await
                             .map_err(|source| component_error(&node, "start", source))?;
                     }
                     if let Some(update) = lease.pending_update.clone() {
@@ -5236,6 +5427,7 @@ impl Operations {
                                     replacement: false,
                                     update: None,
                                 },
+                                *observability.ok_or_else(|| topology("restored update has no observability owner"))?,
                             ).await.map_err(|error| component_error(&node, "resolve update", error.source))?;
                             apply_component_update(&mut lease, &node, &hooks, HookScopes::after(activation_timeout), update, context).await?;
                         }
@@ -5445,9 +5637,9 @@ impl Operations {
                             hooks.scope("stop", HookScopes::after(timeout)),
                             mode,
                         );
-                        lease
-                            .component
-                            .stop(&context)
+                        super::observe(&node, crate::observability::ObservedOperation::Stop,
+                            &lifecycle_parent, Default::default())?
+                            .run(lease.component.stop(&context))
                             .await
                             .map_err(|source| component_error(&node, "stop", source))?;
                         lease.attempted = false;
@@ -5510,6 +5702,10 @@ impl Operations {
                 })?,
             }
         };
+        // The observation, execution-scope, tracing and abort wrappers below
+        // move their inner future by value; boxing keeps those moves to one
+        // pointer so unoptimized builds do not overflow 2 MiB worker stacks.
+        let future = Box::pin(future);
         let (abort, registration) = AbortHandle::new_pair();
         let joined = graph
             .tasks
@@ -5518,15 +5714,17 @@ impl Operations {
                 let result = identity
                     .run(async {
                         Abortable::new(
-                            async move {
-                                let guard = operation_token.drop_guard();
-                                let result = future.await;
-                                if result.is_ok() {
-                                    guard.disarm();
+                            observations.scope(execution_scope.scope(
+                                async move {
+                                    let guard = operation_token.drop_guard();
+                                    let result = future.await;
+                                    if result.is_ok() {
+                                        guard.disarm();
+                                    }
+                                    result
                                 }
-                                result
-                            }
-                            .instrument(span),
+                                .instrument(span),
+                            )),
                             registration,
                         )
                         .await
@@ -5603,6 +5801,10 @@ impl Operations {
             if let Some(activity) = &graph.feedback {
                 activity.resume();
             }
+        }
+        for index in &selected {
+            self.lifecycle_contexts
+                .insert(*index, crate::observability::ExecutionContext::current());
         }
         update(graph, |state| {
             for index in &selected {
@@ -5919,7 +6121,7 @@ impl Operations {
     /// Rejects queued handle starts for `component`, which a later stop
     /// supersedes; otherwise they would restart the component afterwards.
     fn supersede_queued_starts(&mut self, component: &ComponentId) {
-        let is_superseded = |queued: &HandleRequest| match queued {
+        let is_superseded = |queued: &PendingHandleRequest| match &queued.request {
             HandleRequest::Start { component: id, .. } => id == component,
             HandleRequest::StartMembers { members, .. } => members.contains_key(component),
             _ => false,
@@ -5933,7 +6135,7 @@ impl Operations {
                 .partition(is_superseded);
         self.handle_requests = retained;
         for start in superseded {
-            start.reject(GraphError::StartSuperseded {
+            start.request.reject(GraphError::StartSuperseded {
                 component: component.clone(),
             });
         }
@@ -6120,6 +6322,10 @@ impl Operations {
         selected: BTreeSet<usize>,
         reply: StopReply,
     ) -> GraphResult<()> {
+        for index in &selected {
+            self.lifecycle_contexts
+                .insert(*index, crate::observability::ExecutionContext::current());
+        }
         let mut group = Stopping {
             revision: graph.snapshot.revision,
             selected: selected.clone(),
@@ -7012,6 +7218,18 @@ fn accept_addition(
     }
 }
 
+struct PendingHandleRequest {
+    request: HandleRequest,
+    context: crate::observability::ExecutionContext,
+}
+
+impl std::ops::Deref for PendingHandleRequest {
+    type Target = HandleRequest;
+    fn deref(&self) -> &Self::Target {
+        &self.request
+    }
+}
+
 /// Accepts a single-component start or stop. A request that conflicts only
 /// with the operation in flight, or follows a queued request for the same
 /// component, is queued for the controller loop instead of failing. A stop
@@ -7051,7 +7269,10 @@ async fn submit_handle_request(
         if operations.handle_requests.len() >= COMMAND_CAPACITY {
             request.reject(GraphError::OperationInProgress);
         } else {
-            operations.handle_requests.push_back(request);
+            operations.handle_requests.push_back(PendingHandleRequest {
+                request,
+                context: crate::observability::ExecutionContext::current(),
+            });
         }
         Ok(())
     } else {
@@ -7079,7 +7300,11 @@ async fn begin_handle_requests(
             blocked.extend(request.components());
             position += 1;
         } else if let Some(request) = operations.handle_requests.remove(position) {
-            request.begin(graph, operations, controls, cancel).await?;
+            let scope =
+                crate::observability::ExecutionScope::capture().with_context(request.context);
+            scope
+                .scope(request.request.begin(graph, operations, controls, cancel))
+                .await?;
             began = true;
         }
     }
@@ -7459,7 +7684,9 @@ fn handle_command<'a>(
     command: Command,
     commands: &'a mut CommandReceiver,
 ) -> BoxFuture<'a, GraphResult<()>> {
-    async move {
+    let scope =
+        crate::observability::ExecutionScope::capture().with_context(commands.context.clone());
+    scope.scope(async move {
         if operations.reconciliation.as_ref().is_some_and(|reservation| !reservation.committed) {
             let key = match &command {
                 Command::ObserveResources { component, generation, .. } =>
@@ -7564,7 +7791,7 @@ fn handle_command<'a>(
                                 graph.snapshot.readiness_required.remove(&component);
                             }
                             graph.snapshot.revision = GraphRevision(revision);
-                            graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
+                            graph.publish_desired();
                             update(graph, |state| state.revision = GraphRevision(revision));
                         }
                         Ok(())
@@ -7623,7 +7850,7 @@ fn handle_command<'a>(
                             .expect("component").output_streams.insert(port, stream);
                         graph.snapshot.nodes = nodes.into();
                         graph.snapshot.revision = revision;
-                        graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
+                        graph.publish_desired();
                         update(graph, |state| state.revision = revision);
                         Ok(())
                     })();
@@ -7936,7 +8163,7 @@ fn handle_command<'a>(
                                     candidate.revision = GraphRevision(revision);
                                     graph.snapshot = candidate;
                                     graph.order = order;
-                                    graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
+                                    graph.publish_desired();
                                     update(graph, |state| state.revision = GraphRevision(revision));
                                     Ok(())
                                 })
@@ -8134,7 +8361,7 @@ fn handle_command<'a>(
                             graph.snapshot.revision = GraphRevision(graph.snapshot.revision.0.checked_add(1)
                                 .ok_or_else(|| topology("graph revision exhausted"))?);
                             graph.snapshot.lifecycle_policies.insert(component, policy);
-                            graph.desired.send_replace(Arc::new(graph.snapshot.clone()));
+                            graph.publish_desired();
                             update(graph, |state| state.revision = graph.snapshot.revision);
                         }
                         Ok(graph.snapshot.revision)
@@ -8186,7 +8413,7 @@ fn handle_command<'a>(
                 None => unreachable!("a received command is present"),
         }
         Ok(())
-    }
+    })
     .boxed()
 }
 
@@ -8663,7 +8890,13 @@ mod command_tests {
             };
             drop(closed);
             assert!(receiver.recv().now_or_never().is_none());
-            remaining.send(Command::AutoStart).await.unwrap();
+            remaining
+                .send(ContextualCommand {
+                    command: Command::AutoStart,
+                    context: Default::default(),
+                })
+                .await
+                .unwrap();
             assert!(matches!(receiver.recv().await, Some(Command::AutoStart)));
             drop(remaining);
             assert!(receiver.recv().await.is_none());

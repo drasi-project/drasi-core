@@ -158,7 +158,7 @@ impl Fixture {
             .unwrap()
             .unwrap()
             .into_parts()
-            .1
+            .2
             .unwrap()
             .complete(HandlingOutcome::Handled)
             .await
@@ -229,7 +229,7 @@ async fn feedback_fence_preserves_submitted_external_request_and_uncertain_resul
         if uncertain {
             fixture.gate.mode.store(2, Ordering::SeqCst);
         }
-        let processed = lease.process(&mut quiesce, |_| Ok(())).await;
+        let processed = lease.process(&mut quiesce, None, |_| Ok(())).await;
         let result = request.await;
         if uncertain {
             assert!(processed.is_err());
@@ -275,7 +275,7 @@ async fn external_capacity_wait_is_revoked_without_consuming_sequence() {
     tokio::pin!(waiting);
     assert!(futures::poll!(&mut waiting).is_pending());
     assert_eq!(
-        lease.process(&mut quiesce, |_| Ok(())).await.unwrap(),
+        lease.process(&mut quiesce, None, |_| Ok(())).await.unwrap(),
         Some(false)
     );
     assert!(futures::poll!(&mut waiting).is_pending());
@@ -311,14 +311,14 @@ async fn waits_for_cursor_commit_contention_while_admit_stays_fail_fast() {
     let input = input(2);
     let (result, processed) = tokio::join!(
         service.admit(&fixture.session, 2, &input),
-        lease.process(&mut quiesce, |_| Ok(())),
+        lease.process(&mut quiesce, None, |_| Ok(())),
     );
     rejected(result.unwrap_err(), AdmissionRejection::Busy);
     assert_eq!(processed.unwrap(), Some(false));
     let waiting = service.admit_wait(&fixture.session, 2, &input);
     tokio::pin!(waiting);
     assert!(futures::poll!(&mut waiting).is_pending());
-    let mut process = Box::pin(lease.process(&mut quiesce, |_| Ok(())));
+    let mut process = Box::pin(lease.process(&mut quiesce, None, |_| Ok(())));
     assert!(futures::poll!(&mut process).is_pending());
     assert!(futures::poll!(&mut waiting).is_pending());
     fixture.gate.release.notify_one();
@@ -351,14 +351,14 @@ async fn capacity_change_before_rejection_is_observed_does_not_lose_wakeup() {
     tokio::pin!(waiting);
     assert!(futures::poll!(&mut waiting).is_pending());
     assert_eq!(
-        lease.process(&mut quiesce, |_| Ok(())).await.unwrap(),
+        lease.process(&mut quiesce, None, |_| Ok(())).await.unwrap(),
         Some(false)
     );
     // The rejection is in the reply slot, but the caller has not observed it.
     fixture.acknowledge().await;
     assert!(futures::poll!(&mut waiting).is_pending());
     assert_eq!(
-        lease.process(&mut quiesce, |_| Ok(())).await.unwrap(),
+        lease.process(&mut quiesce, None, |_| Ok(())).await.unwrap(),
         Some(true)
     );
     assert_eq!(waiting.await.unwrap().position, 2);
@@ -382,7 +382,7 @@ async fn capacity_notification_wakes_all_waiters_without_duplicate_admission() {
     assert!(futures::poll!(&mut second).is_pending());
     for _ in 0..2 {
         assert_eq!(
-            lease.process(&mut quiesce, |_| Ok(())).await.unwrap(),
+            lease.process(&mut quiesce, None, |_| Ok(())).await.unwrap(),
             Some(false)
         );
     }
@@ -393,7 +393,7 @@ async fn capacity_notification_wakes_all_waiters_without_duplicate_admission() {
     assert!(futures::poll!(&mut second).is_pending());
     for _ in 0..2 {
         assert_eq!(
-            lease.process(&mut quiesce, |_| Ok(())).await.unwrap(),
+            lease.process(&mut quiesce, None, |_| Ok(())).await.unwrap(),
             Some(true)
         );
     }
@@ -417,7 +417,7 @@ async fn capacity_wait_is_quiet_and_cancelled_wait_does_not_consume_sequence() {
         tokio::pin!(waiting);
         assert!(futures::poll!(&mut waiting).is_pending());
         assert_eq!(
-            lease.process(&mut quiesce, |_| Ok(())).await.unwrap(),
+            lease.process(&mut quiesce, None, |_| Ok(())).await.unwrap(),
             Some(false)
         );
         assert!(futures::poll!(&mut waiting).is_pending());
@@ -439,7 +439,7 @@ async fn capacity_wait_is_quiet_and_cancelled_wait_does_not_consume_sequence() {
         .is_none());
     let (result, processed) = tokio::join!(
         service.admit_wait(&fixture.session, 2, &input),
-        lease.process(&mut quiesce, |_| Ok(())),
+        lease.process(&mut quiesce, None, |_| Ok(())),
     );
     assert_eq!(processed.unwrap(), Some(true));
     assert_eq!(result.unwrap().position, 2);
@@ -477,7 +477,7 @@ async fn mailbox_backpressure_and_cancellation_remain_bounded() {
     assert!(futures::poll!(&mut waiting).is_pending());
     let (_pause, mut quiesce) = watch::channel(false);
     assert_eq!(
-        lease.process(&mut quiesce, |_| Ok(())).await.unwrap(),
+        lease.process(&mut quiesce, None, |_| Ok(())).await.unwrap(),
         Some(true)
     );
     assert_eq!(waiting.await.unwrap().position, 1);
@@ -502,7 +502,7 @@ async fn cancelling_queued_or_mutex_waiting_request_never_admits_it() {
         let mut waiting = Box::pin(service.admit_wait(&fixture.session, 1, &input));
         assert!(futures::poll!(&mut waiting).is_pending());
         let mut processing =
-            Box::pin(lease.process(&mut quiesce, |_| panic!("cancelled input validated")));
+            Box::pin(lease.process(&mut quiesce, None, |_| panic!("cancelled input validated")));
         if executing {
             assert!(futures::poll!(&mut processing).is_pending());
         }
@@ -532,7 +532,7 @@ async fn capacity_wait_is_fenced_by_stop_even_if_immediately_restarted() {
     let waiting = service.admit_wait(&fixture.session, 2, &input);
     tokio::pin!(waiting);
     assert!(futures::poll!(&mut waiting).is_pending());
-    lease.process(&mut quiesce, |_| Ok(())).await.unwrap();
+    lease.process(&mut quiesce, None, |_| Ok(())).await.unwrap();
     assert!(futures::poll!(&mut waiting).is_pending());
     drop(lease);
     drop(activation);
@@ -572,7 +572,7 @@ async fn closed_channel_wakes_mailbox_and_capacity_waiters() {
         tokio::pin!(waiting);
         assert!(futures::poll!(&mut waiting).is_pending());
         if !full_mailbox {
-            lease.process(&mut quiesce, |_| Ok(())).await.unwrap();
+            lease.process(&mut quiesce, None, |_| Ok(())).await.unwrap();
             assert!(futures::poll!(&mut waiting).is_pending());
         }
         service.channel.shutdown().await.unwrap();
@@ -607,7 +607,7 @@ async fn revoked_waiters_retain_the_current_activations_typed_graph_failure() {
         tokio::pin!(waiting);
         assert!(futures::poll!(&mut waiting).is_pending());
         if !full_mailbox {
-            lease.process(&mut quiesce, |_| Ok(())).await.unwrap();
+            lease.process(&mut quiesce, None, |_| Ok(())).await.unwrap();
             assert!(futures::poll!(&mut waiting).is_pending());
         }
         let cause = Arc::new(GraphError::StaleGeneration);
@@ -641,7 +641,7 @@ async fn mutex_waiters_observe_worker_and_typed_graph_failures_before_storage() 
         tokio::pin!(waiting);
         assert!(futures::poll!(&mut waiting).is_pending());
         let mut processing =
-            Box::pin(lease.process(&mut quiesce, |_| panic!("failed input validated")));
+            Box::pin(lease.process(&mut quiesce, None, |_| panic!("failed input validated")));
         assert!(futures::poll!(&mut processing).is_pending());
         let cause = Arc::new(GraphError::StaleGeneration);
         if graph_failure {
@@ -690,7 +690,7 @@ async fn channel_close_wakes_mutex_waiter_before_mutex_is_released() {
     let waiting = service.admit_wait(&fixture.session, 1, &input);
     tokio::pin!(waiting);
     assert!(futures::poll!(&mut waiting).is_pending());
-    let processing = lease.process(&mut quiesce, |_| panic!("closed input validated"));
+    let processing = lease.process(&mut quiesce, None, |_| panic!("closed input validated"));
     tokio::pin!(processing);
     assert!(futures::poll!(&mut processing).is_pending());
     let shutdown = service.channel.shutdown();
@@ -714,7 +714,7 @@ async fn full_journal_still_returns_duplicate_receipt_and_payload_conflict() {
         let input = input(sequence);
         let (result, processed) = tokio::join!(
             service.admit_wait(&fixture.session, 1, &input),
-            lease.process(&mut quiesce, |_| panic!(
+            lease.process(&mut quiesce, None, |_| panic!(
                 "retry must not revalidate or append"
             )),
         );
@@ -742,7 +742,7 @@ async fn uncertain_commit_is_not_retried_and_receipt_survives_reconstruction() {
     let input = input(1);
     let (result, processed) = tokio::join!(
         service.admit_wait(&fixture.session, 1, &input),
-        lease.process(&mut quiesce, |_| Ok(())),
+        lease.process(&mut quiesce, None, |_| Ok(())),
     );
     assert!(matches!(result, Err(PipeError::AcceptanceUnknown { .. })));
     assert!(processed.is_err());
@@ -797,7 +797,7 @@ async fn capacity_wait_wakes_on_producer_retirement_and_worker_failure() {
         tokio::pin!(waiting);
         assert!(futures::poll!(&mut waiting).is_pending());
         assert_eq!(
-            lease.process(&mut quiesce, |_| Ok(())).await.unwrap(),
+            lease.process(&mut quiesce, None, |_| Ok(())).await.unwrap(),
             Some(false)
         );
         assert!(futures::poll!(&mut waiting).is_pending());
@@ -809,7 +809,7 @@ async fn capacity_wait_wakes_on_producer_retirement_and_worker_failure() {
                 .unwrap();
             assert!(futures::poll!(&mut waiting).is_pending());
             lease
-                .process(&mut quiesce, |_| panic!("retired producer validated"))
+                .process(&mut quiesce, None, |_| panic!("retired producer validated"))
                 .await
                 .unwrap();
             rejected(
@@ -842,7 +842,7 @@ async fn capacity_wait_wakes_on_transaction_fence_without_retrying() {
         let waiting = service.admit_wait(&fixture.session, 2, &input);
         tokio::pin!(waiting);
         assert!(futures::poll!(&mut waiting).is_pending());
-        lease.process(&mut quiesce, |_| Ok(())).await.unwrap();
+        lease.process(&mut quiesce, None, |_| Ok(())).await.unwrap();
         assert!(futures::poll!(&mut waiting).is_pending());
         // Producer metadata uses the same transaction and can fence a full journal.
         fixture
@@ -888,7 +888,7 @@ async fn successful_registration_does_not_wake_capacity_waiters() {
     let waiting = service.admit_wait(&fixture.session, 2, &input);
     tokio::pin!(waiting);
     assert!(futures::poll!(&mut waiting).is_pending());
-    lease.process(&mut quiesce, |_| Ok(())).await.unwrap();
+    lease.process(&mut quiesce, None, |_| Ok(())).await.unwrap();
     assert!(futures::poll!(&mut waiting).is_pending());
     service
         .channel
@@ -917,7 +917,7 @@ async fn quiescing_mutex_waiter_returns_closed_without_consuming_input() {
     let waiting = service.admit_wait(&fixture.session, 1, &input);
     tokio::pin!(waiting);
     assert!(futures::poll!(&mut waiting).is_pending());
-    let processing = lease.process(&mut quiesce, |_| panic!("quiesced input validated"));
+    let processing = lease.process(&mut quiesce, None, |_| panic!("quiesced input validated"));
     tokio::pin!(processing);
     assert!(futures::poll!(&mut processing).is_pending());
     pause.send(true).unwrap();

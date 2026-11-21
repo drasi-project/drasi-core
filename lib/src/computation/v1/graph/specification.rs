@@ -293,6 +293,7 @@ pub struct ResourceHandle {
     cleanup: Option<Arc<dyn ResourceCleanup>>,
     identity: Option<Arc<dyn ResourceIdentity>>,
     capabilities: drasi_computation_contracts::ResourceCapabilities,
+    telemetry_owner: Option<Arc<crate::observability::ComponentObservations>>,
 }
 
 trait ResourceIdentity: Send + Sync {
@@ -361,6 +362,7 @@ pub(crate) struct WeakResourceHandle {
     cleanup: Option<std::sync::Weak<dyn ResourceCleanup>>,
     identity: Option<std::sync::Weak<dyn ResourceIdentity>>,
     capabilities: drasi_computation_contracts::ResourceCapabilities,
+    telemetry_owner: Option<std::sync::Weak<crate::observability::ComponentObservations>>,
 }
 
 impl WeakResourceHandle {
@@ -377,6 +379,10 @@ impl WeakResourceHandle {
                 None => None,
             },
             capabilities: self.capabilities,
+            telemetry_owner: match &self.telemetry_owner {
+                Some(owner) => Some(owner.upgrade()?),
+                None => None,
+            },
         })
     }
 }
@@ -398,6 +404,7 @@ impl ResourceHandle {
             cleanup: self.cleanup.as_ref().map(Arc::downgrade),
             identity: self.identity.as_ref().map(Arc::downgrade),
             capabilities: self.capabilities,
+            telemetry_owner: self.telemetry_owner.as_ref().map(Arc::downgrade),
         }
     }
     pub fn new<T: Any + Send + Sync>(role: ResourceRole, value: Arc<T>) -> Self {
@@ -407,6 +414,7 @@ impl ResourceHandle {
             cleanup: None,
             identity: None,
             capabilities: drasi_computation_contracts::ResourceCapabilities::UNDECLARED,
+            telemetry_owner: None,
         }
     }
 
@@ -441,6 +449,16 @@ impl ResourceHandle {
 
     pub fn with_cleanup(mut self, cleanup: Arc<dyn ResourceCleanup>) -> Self {
         self.cleanup = Some(cleanup);
+        self
+    }
+
+    pub(super) fn with_telemetry_owner(
+        mut self,
+        owner: Arc<crate::observability::ComponentObservations>,
+    ) -> Self {
+        if self.telemetry_owner.is_none() {
+            self.telemetry_owner = Some(owner);
+        }
         self
     }
 
@@ -804,6 +822,7 @@ pub struct ConstructionContext {
     input_bindings: Vec<InputBinding>,
     bootstrap_producers: Vec<ComponentId>,
     replacement: bool,
+    observability: crate::observability::RuntimeObservability,
     update_directive: Option<crate::computation::v1::ComponentUpdateDirective>,
 }
 
@@ -843,6 +862,50 @@ impl ConstructionContext {
     /// same immutable component identity.
     pub fn is_replacement(&self) -> bool {
         self.replacement
+    }
+
+    pub fn plugin_metrics(
+        &self,
+        kind: &str,
+    ) -> crate::observability::Result<crate::observability::ScopedMetricEmitter> {
+        use crate::observability::TelemetryScope;
+        let binding = self.telemetry().plugin_binding(
+            TelemetryScope::graph(self.instance_id.clone(), self.graph_id.clone())?.component(
+                self.component_id.clone(),
+                self.specification.role,
+                drasi_computation_contracts::ComponentSemanticKind::for_component(
+                    self.specification.role,
+                    &self.specification.descriptor,
+                ),
+            ),
+            self.generation.0,
+            kind,
+            self.component_logging().cloned(),
+        )?;
+        Ok(binding.metrics())
+    }
+
+    pub fn telemetry(&self) -> &crate::observability::GraphTelemetry {
+        &self.observability.telemetry
+    }
+
+    pub fn component_logging(&self) -> Option<&crate::observability::ComponentLogRuntime> {
+        self.observability.logging.as_ref()
+    }
+
+    pub fn component_log_binding(&self) -> Option<crate::observability::ComponentLogBinding> {
+        self.component_logging()
+            .map(|logging| crate::observability::ComponentLogBinding {
+                registry: logging.registry(),
+                key: crate::observability::ComponentLogKey::new(
+                    self.instance_id.as_ref(),
+                    crate::observability::ComponentLogType::for_component(
+                        self.specification.role,
+                        self.specification.descriptor.semantic_kind(),
+                    ),
+                    self.component_id.clone(),
+                ),
+            })
     }
 
     /// The accepted update intent when this object is being reconstructed.
@@ -911,6 +974,7 @@ impl ConstructionContext {
         schema: &ConfigurationSchema,
         output_catalogue: crate::computation::v1::OutputCatalogue,
         bindings: ConstructionBindings,
+        observability: crate::observability::RuntimeObservability,
     ) -> Result<Self, ComponentCreationError> {
         let configuration = schema
             .resolve_values(&specification.configuration, &resources)
@@ -924,6 +988,7 @@ impl ConstructionContext {
             configuration,
             resources,
             output_catalogue,
+            observability,
             input_bindings: bindings.inputs,
             bootstrap_producers: bindings.bootstrap_producers,
             replacement: bindings.replacement,

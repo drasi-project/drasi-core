@@ -43,6 +43,7 @@ async fn submit(
     };
     let output = query
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: GraphChangeCodec::encode_change(
                 change,

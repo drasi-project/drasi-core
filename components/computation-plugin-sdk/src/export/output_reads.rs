@@ -60,6 +60,7 @@ struct Lifecycle {
 
 /// The component's captured providers and their activation fence.
 pub(super) struct ReadBinding {
+    pub(super) execution_scope: crate::telemetry::ExecutionScope,
     pub(super) descriptor: ComponentDescriptor,
     pub(super) codec: Arc<BinaryEnvelopeCodec>,
     pub(super) readers: OutputReaders,
@@ -94,6 +95,8 @@ pub(super) fn capture(
     }
     let queries = describe_queries(&readers);
     Ok(Some(Arc::new(ReadBinding {
+        execution_scope: crate::telemetry::ExecutionScope::capture()
+            .with_context(Default::default()),
         descriptor: descriptor.clone(),
         codec,
         readers,
@@ -1091,7 +1094,12 @@ unsafe extern "C" fn request(
         let (guard, mut changed) = handle.binding.claim_read(code)?;
         let runtime = io_runtime()?;
         let damaged = handle.binding.damaged.clone();
-        let operation = transport::export_component_operation(
+        let scope = handle
+            .binding
+            .execution_scope
+            .has_plugin_telemetry()
+            .then(|| handle.binding.execution_scope.clone());
+        let operation = crate::telemetry_transport::export_operation(
             async move {
                 guard.validate()?;
                 let bytes = tokio::select! {
@@ -1111,6 +1119,7 @@ unsafe extern "C" fn request(
             Some(runtime),
             damaged,
             false,
+            scope,
         );
         unsafe { transport::write_out(out, operation) }
     })

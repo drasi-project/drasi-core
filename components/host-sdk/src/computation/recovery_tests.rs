@@ -267,6 +267,7 @@ async fn native_recovery_sqlite_replays_through_a_separate_binary_and_real_query
     let duplicate = replay.envelope.clone();
     let output = consumer
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: replay.envelope,
         })
@@ -293,6 +294,7 @@ async fn native_recovery_sqlite_replays_through_a_separate_binary_and_real_query
     assert_eq!(rows, [serde_json::json!({"id":1, "value":"final"})]);
     assert!(consumer
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: duplicate
         })
@@ -352,6 +354,7 @@ async fn native_recovery_sqlite_replays_through_a_separate_binary_and_real_query
     .await?;
     let output = consumer
         .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: next(&mut source).await?.envelope,
         })
