@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! Optional read-only progress for a producer's immutable consumer set. This
-//! extension changes neither base ABI 2.0 nor the single-owner recovery-v1 ABI.
+//! extension changes neither base ABI 0.1 nor the single-owner recovery-v1 ABI.
 
 use super::*;
 

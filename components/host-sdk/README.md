@@ -241,17 +241,19 @@ No application SQL read/write API is added to DrasiLib or the native ABI.
 
 ## Native output snapshot, replay and follow
 
-The Host negotiates `output_reads_v1` and `output_follow_v1` only for factories
+The Host negotiates `output_reads_v2` and `output_follow_v2` only for factories
 that declare `output_snapshots`, `output_replays` or `output_follows`, and opens
 exactly the declared providers at construction. `NativeComponentProxy` exposes
 them through `ComputationComponent::output_readers()` as real shared
 `SnapshotProvider`, `ReplayProvider` and `SnapshotFollowProvider` objects; no
 executor, row store or graph is created. Reads never use the component's data
-operation slot. The proxy's fence ends reads and closes follow leases on stop,
-restart and release, whatever the library does, and decoded snapshots, replays and
-live items are validated (schema, owner, full images, logical progress, complete
-tail, item order) before they are returned; malformed or oversized buffers are
-`Invalid` or explicit limit errors. A lease's follow acknowledges only items it
+operation slot. Snapshots and replays arrive through the extension's paged
+transfers, each page bounded, so a large observation is read page by page. The
+proxy's fence ends reads and closes follow leases on stop, restart and release,
+whatever the library does, and decoded snapshots, replays and live items are
+validated (schema, owner, full images, logical progress, complete tail, item
+order) before they are returned; malformed or oversized buffers are `Invalid` or
+explicit limit errors. A lease's follow acknowledges only items it
 actually returned. Providers hold only their own library's handles, released once
 when the last provider reference is dropped.
 
@@ -531,7 +533,7 @@ The Drasi Host SDK provides the host-side counterpart to the [Drasi Plugin SDK](
 
 ## Overview
 
-When the Drasi Server is built with the `dynamic-plugins` feature, it uses this crate to:
+Drasi Server uses this crate to:
 
 1. **Discover** plugin shared libraries (`.so`/`.dylib`/`.dll`) in a directory
 2. **Validate** plugin metadata (SDK version, target triple) before initialization
@@ -594,9 +596,9 @@ The result is that the rest of the server code works with normal Rust trait obje
 Plugin-side `NativeComponent` interfaces and shared messages no longer depend on
 the runtime. This host package is where those operations become graph-owned
 components, runtime configuration schemas and actual storage/progress bindings.
-The current native ABI is **0.1.0**, with wire version **1**. Rebuild native
-libraries against the matching SDK; binaries built for another ABI major are
-rejected before any plugin callback.
+The native ABI is **0.1.0**, with wire version **1**. Rebuild native
+libraries against the matching SDK; binaries built for another ABI major or
+minor are rejected before any plugin callback.
 
 Optional recovery-v1 source progress binds only an actual
 `QuerySourceProgressResource` under `source_progress`; it is mutually exclusive
@@ -611,7 +613,7 @@ Host unit tests also load a separately built, test-only SQLite replay plugin.
 Set `DRASI_NATIVE_RECOVERY_PLUGIN` to select an explicit fixture path.
 
 The independent `computation` module loads native graph factories without changing
-the independent ordinary ABI (0.18; older layouts are rejected):
+the independent ordinary ABI (0.19.0; other major.minor versions are rejected):
 
 ```rust,ignore
 use drasi_host_sdk::computation;
@@ -719,9 +721,10 @@ for plugin in plugins {
 ### Creating component instances
 
 ```rust
-// SourcePluginProxy implements SourcePluginDescriptor
+// SourcePluginProxy implements SourcePluginDescriptor; the host assigns the UUID
+let id = ComponentId::generate();
 let source: Box<dyn Source> = source_factory
-    .create_source("my-source-1", &config_json, true)
+    .create_source(&id, &config_json, true)
     .await?;
 
 // The returned SourceProxy implements Source — use it normally
@@ -838,7 +841,7 @@ The host-sdk includes integration tests that load real cdylib plugins and exerci
 
 ```sh
 # Prerequisites: build the test plugins as cdylib shared libraries
-make build-dynamic-plugins
+make build-test-plugins
 
 # Run the integration tests
 cargo test -p drasi-host-sdk --test integration_test

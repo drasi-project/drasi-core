@@ -1,8 +1,8 @@
 # Native ComputationGraph ABI
 
 This dependency-free crate freezes the C layouts for native computation plugins.
-The ABI version is **0.1.0**, independent of crate releases and the
-Source/Reaction/Bootstrap SDK **0.17.0** (which also accepts 0.16 fast-mode plugins).
+The ABI version is **0.1.0**, independent of crate releases and of the
+Source/Reaction/Bootstrap SDK ABI **0.19.0**.
 Its two symbols are
 `drasi_computation_plugin_metadata` and `drasi_computation_plugin_entry`.
 Do not call a legacy registration function to interpret native metadata.
@@ -10,7 +10,7 @@ The native payload contract is **wire version 1**: UUID component identities,
 bounded MessagePack with bulk binary buffers and binary computation envelopes.
 Other wire versions are rejected. The family magic is `DRASICG0` and the header
 major is 0. This does not change BinaryEnvelopeCodec/EnvelopeCodec serialization
-version 2.
+version 3.
 
 Wire 1 descriptors carry a port `kind` (`Data` or `Bootstrap`, serialized only
 for bootstrap ports). Bootstrap ports are optional graph connections that carry
@@ -248,7 +248,7 @@ recovery guarantees. See the SDK's authoring and lifecycle contracts.
 
 `drasi_computation_plugin_output_reads_v2` and
 `drasi_computation_plugin_output_follow_v2` are independent extensions; base ABI
-5.0, wire 1 and every other table are unchanged. A factory declares the output
+0.1, wire 1 and every other table are unchanged. A factory declares the output
 ports it serves in manifest `capabilities.output_snapshots`, `output_replays` and
 `output_follows` (empty lists are omitted); the Host requires the matching
 extension exactly then.

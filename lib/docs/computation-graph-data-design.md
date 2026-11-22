@@ -776,11 +776,12 @@ as a prerequisite for it.
 
 ```text
 ElementReference
-  source_id
+  namespace
   element_id
 ```
 
-Both fields participate in identity. Two sources can use the same `element_id`
+Both fields participate in identity. The namespace names a dataset, not
+necessarily a source component. Two namespaces can use the same `element_id`
 without referring to the same element. Conversely, changing a label or property
 does not give an element a new identity.
 
@@ -889,7 +890,7 @@ continuous-query data:
 
 | Schema ID | Version | Record encoding | Record meaning |
 |---|---:|---|---|
-| `drasi.graph-change` | 1 | `drasi-element-msgpack-v1` | Canonical element images, element patches and before-images, from sources, transformers, query results **and complete source transactions** |
+| `drasi.graph-change` | 2 | `drasi-element-msgpack-v2` | Canonical element images, element patches and before-images, from sources, transformers, query results **and complete source transactions** |
 
 `SourceTransactionCodec::schema()` returns this same descriptor; there is no
 separate transaction data schema.
@@ -1076,7 +1077,7 @@ The result projector constructs an ordinary full graph node:
 ```text
 Added operation
   record key: drasi.graph-element + ElementReference
-    source_id:  the query output's dataset namespace
+    namespace:  the query output's dataset namespace
     element_id: lowercase hex of R's eight bytes
   ElementImage::Node
     labels: ["Result"]
@@ -1200,7 +1201,7 @@ format:
 ```text
 record key  = "drasi.graph-element" + canonical ElementReference
 ElementReference
-  source_id  = the output's dataset namespace (section 10.1)
+  namespace  = the output's dataset namespace (section 10.1)
   element_id = lowercase hex of the opaque row identity
 node
   labels     = ["Result"]            (default; see below)
@@ -1319,7 +1320,7 @@ remain **separate rows**. Comparing only the visible column values loses that
 distinction. Conversely, changing a value under one identity updates that row
 rather than introducing an unrelated one.
 
-The node's `source_id` is the output's **dataset namespace**, so two outputs
+The node's `namespace` is the output's **dataset namespace**, so two outputs
 never share row identities even when their signatures coincide:
 
 ```text
@@ -1381,9 +1382,10 @@ that owner has processed input, not a timestamp-based estimate.
 
 Source-facing checkpoints and generic stream/producer checkpoints have different
 keys (`SourceProgressKey::Source` and `SourceProgressKey::Stream`); callers must
-use the owner's published binding/key rather than manufacture one from a record's
-`source_id`. An identity-preserving path must be validated by the runtime's
-binding/progress contracts. An inherited annotation alone cannot prove one.
+use the owner's published binding/key rather than manufacture one from an
+element's `ElementReference::namespace`. An identity-preserving path must be
+validated by the runtime's binding/progress contracts. An inherited annotation
+alone cannot prove one.
 
 These are scoped identities used by the implementation, not cryptographic
 proofs of data uniqueness. Row signatures and configuration hashes must not be
@@ -1790,7 +1792,7 @@ Choose the boundary before choosing a recovery mechanism:
 |---|---|---|
 | One current query answer | `QueryApi` / `QueryResultsCatalog` snapshot | Current scoped rows at an output sequence/generation; no new evaluation |
 | Future notifications only | Connected output/outlet subscription | New events; connecting alone supplies no prior state |
-| Current query answer plus live changes | `subscribe_query_results` | Opens live before snapshot, filters overlap, uses retained history for recoverable lag; connection-local |
+| Current query answer plus live changes | `subscribe_query_results_by_id` (or `_by_name`) | Opens live before snapshot, filters overlap, uses retained history for recoverable lag; connection-local |
 | Generic producer snapshot plus available history | `OutputHandle::catch_up` | Snapshot then replay suffix; detects gaps but does not follow later events |
 | Disposable current-plus-live generic view | `snapshot_and_follow` through a registered provider | Coherent snapshot/cursor plus bounded volatile tail; expiry/overflow are errors |
 | Durable query-result consumer | `QueryReplayTransformer` / `CheckpointedSink` with `ConsumerProgressStore` | Persists query identity/generation/position and explicit recovery decisions |
@@ -1822,7 +1824,7 @@ decode the nodes with `GraphChangeCodec::decode_element` or
 ### 13.4 The snapshot cut and live overlap
 
 Reading a snapshot and subscribing later can lose changes that occur between
-those actions. `subscribe_query_results` instead establishes the live reader
+those actions. `subscribe_query_results_by_id` instead establishes the live reader
 before taking the snapshot, then filters out output already represented by that
 snapshot's sequence.
 
@@ -2387,8 +2389,8 @@ query's local preprocessing.
 ### 16.6 Native wire and port format selection
 
 The native plugin boundary carries binary envelope frames with native wire
-version 2 and ABI layout 2.0. There is no reader for an earlier native wire or
-earlier query-row records: build the host and native libraries from matching
+version 1 and ABI layout 0.1. There is no reader for another native wire version
+or earlier query-row records: build the host and native libraries from matching
 sources. These are deployment compatibility constraints, not another record schema.
 
 A factory implementing several actual formats on a port declares a

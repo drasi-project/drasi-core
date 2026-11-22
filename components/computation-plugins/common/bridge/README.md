@@ -188,7 +188,7 @@ and logical progress remain in inherited context/lineage; a bounded
 `drasi.bridge.origin.v1` annotation identifies the admission.
 
 Namespace version one is an **explicit identity mapping**, not automatic
-rewriting. Every element namespace (`ElementReference::source_id`) — of a record
+rewriting. Every element namespace (`ElementReference::namespace`) — of a record
 key, relation endpoint, or reference embedded in a value — must match an entry of
 `sourcePrefixes`. That single list covers physical source namespaces and derived
 output dataset namespaces alike, because both are graph element namespaces. An

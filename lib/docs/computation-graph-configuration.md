@@ -104,10 +104,12 @@ Ordinary memory-only constructors also use this path. Supply lifecycle and input
 metadata before constructing:
 
 ```rust,ignore
-let source = core.create_source("orders", false, |id| make_source(id)).await?;
+let source = core
+    .create_source(ComponentName::try_new("orders")?, false, |id| make_source(id))
+    .await?;
 let reaction = core.create_reaction(
-    "consumer",
-    vec![ComponentReference::by_name("view")?],
+    ComponentName::try_new("consumer")?,
+    vec![ComponentReference::by_name(ComponentName::try_new("view")?)],
     true,
     |id, inputs| make_reaction(id, inputs),
 ).await?;
@@ -175,10 +177,11 @@ ComponentUpdateContext)` at the accepted Pause or Stop boundary. Before applying
 the graph re-assesses the live object and refuses the update if it is now
 unsupported or requires a stronger boundary. Apply returns `ApplyError::Refused`
 (optionally with `now_requires`) or `Failed`, both of which leave the object
-unchanged and may be retried, or `Damaged`, which quarantines the component: it
-is stopped with `Abort`, disposed and left failed rather than replaced
-automatically. An interrupted or cancelled apply is never retried on the same
-object. Replacement uses the factory with an owner-issued
+unchanged and may be retried, or `Damaged`, which means the object cannot
+continue: the graph quarantines it and reports the component as failed rather
+than replacing it automatically, and its later stop uses `StopMode::Abort`. An
+interrupted or cancelled apply is never retried on the same object. Replacement
+uses the factory with an owner-issued
 `ComponentUpdateDirective`. There is no opaque-object or replacement-callback
 update API. Source/reaction update façades accept `OrdinaryComponentRecord`;
 native definitions use `apply_configuration`. Memory-only constructor callbacks
@@ -367,12 +370,12 @@ settings are rejected rather than silently ignored.
 For example:
 
 ```rust,ignore
-use drasi_lib::{channels::DispatchMode, Query, RecoveryPolicy};
+use drasi_lib::{channels::DispatchMode, ComponentName, Query, RecoveryPolicy};
 
-let query = Query::cypher("order-names")
+let query = Query::cypher(ComponentName::try_new("order-names")?)
     .query("MATCH (o:Order) RETURN o.name AS name")
-    .from_input("primary")
-    .from_input("secondary")
+    .from_input_by_name(ComponentName::try_new("primary")?)
+    .from_input_by_name(ComponentName::try_new("secondary")?)
     .enable_bootstrap(false)
     .auto_start(true)
     .with_priority_queue_capacity(10_000)
@@ -381,13 +384,13 @@ let query = Query::cypher("order-names")
     .with_outbox_capacity(2_000)
     .with_bootstrap_timeout_secs(60)
     .with_recovery_policy(RecoveryPolicy::Strict)
-    .build();
+    .build()?;
 ```
 
 The corresponding library query configuration is:
 
 ```yaml
-id: order-names
+name: order-names
 query: "MATCH (o:Order) RETURN o.name AS name"
 queryLanguage: Cypher
 inputs:

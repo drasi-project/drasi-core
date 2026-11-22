@@ -1171,7 +1171,7 @@ impl Query {
     ///
     /// The pipeline is a list of middleware names (strings) that will be applied to
     /// data from this input before it reaches the query.
-    /// Input ordering follows the same merge policy as [`Self::from_input`].
+    /// Input ordering follows the same merge policy as [`Self::from_input_by_name`].
     pub fn from_input_with_pipeline_by_name(
         mut self,
         component: ComponentName,

@@ -87,9 +87,15 @@ class Stockroom:
         staged.replace(self.directory / filename)
 
     def wait_output(self, expected):
+        self.wait_for(self.stdout, expected)
+
+    def wait_error(self, expected):
+        self.wait_for(self.stderr, expected)
+
+    def wait_for(self, stream, expected):
         deadline = time.monotonic() + DEADLINE
         while time.monotonic() < deadline:
-            if expected in self.stdout.read_text():
+            if expected in stream.read_text():
                 self.alive()
                 return
             if self.process.poll() is not None:
@@ -101,9 +107,12 @@ class Stockroom:
         assert self.process.poll() is None, self.diagnostics()
 
     def stop(self):
+        self.interrupt()
+        assert self.process.wait(timeout=DEADLINE) == 0, self.diagnostics()
+
+    def interrupt(self):
         self.alive()
         self.process.send_signal(signal.SIGINT)
-        assert self.process.wait(timeout=DEADLINE) == 0, self.diagnostics()
 
     def expect_failure(self, *messages):
         assert self.process.wait(timeout=DEADLINE) != 0, self.diagnostics()
@@ -113,9 +122,14 @@ class Stockroom:
 
 
 class Receiver:
+    def __init__(self, port=0, reject=False):
+        self.requested_port = port
+        self.reject = reject
+
     def __enter__(self):
         self.messages = queue.Queue()
         messages = self.messages
+        reject = self.reject
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
@@ -129,6 +143,15 @@ class Receiver:
                     messages.put(error)
                     self.send_error(400)
                     return
+                if reject:
+                    messages.put(body)
+                    message = b"rejected by --reject"
+                    self.send_response(400)
+                    self.send_header("Content-Type", "text/plain")
+                    self.send_header("Content-Length", str(len(message)))
+                    self.end_headers()
+                    self.wfile.write(message)
+                    return
                 self.send_response(200)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
@@ -137,7 +160,7 @@ class Receiver:
             def log_message(self, *arguments):
                 pass
 
-        self.server = HTTPServer(("127.0.0.1", 0), Handler)
+        self.server = HTTPServer(("127.0.0.1", self.requested_port), Handler)
         self.port = self.server.server_port
         self.url = f"http://127.0.0.1:{self.port}/reorders"
         self.thread = threading.Thread(
@@ -269,13 +292,33 @@ def webhook(binary, libraries):
             app.stop()
 
 
-def unreachable_webhook(binary, libraries):
-    with refused_endpoint() as url:
+def webhook_retries_until_receiver_returns(binary, libraries):
+    with socket.socket() as reservation:
+        reservation.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Own the port without listening: requests are refused until the receiver starts.
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+        url = f"http://127.0.0.1:{port}/reorders"
         with Stockroom(binary, ["webhook", libraries, url]) as app:
             app.wait_output("Connected live webhook destination")
             app.save_inventory(3)
-            app.expect_failure("component 'webhook' failed", "error sending request")
-            assert url in app.diagnostics(), app.diagnostics()
+            app.wait_error("component 'webhook' is retrying")
+            assert "error sending request" in app.stderr.read_text(), app.diagnostics()
+            reservation.close()
+            with Receiver(port) as receiver:
+                receiver.receive("ADD", after=row(3))
+                app.wait_error("component 'webhook' recovered")
+                app.stop()
+
+
+def rejected_webhook(binary, libraries):
+    with Receiver(reject=True) as receiver:
+        with Stockroom(binary, ["webhook", libraries, receiver.url]) as app:
+            app.wait_output("Connected live webhook destination")
+            app.save_inventory(3)
+            receiver.receive("ADD", after=row(3))
+            app.expect_failure("component 'webhook' failed", "400 Bad Request: rejected by --reject")
+            assert "is retrying" not in app.stderr.read_text(), app.diagnostics()
 
 
 def live_destination(binary, libraries):
@@ -292,10 +335,13 @@ def live_destination(binary, libraries):
             receiver.receive("DELETE", before=row(2))
             app.wait_output("low-stock: []")
             receiver.close()
-            with refused_endpoint(receiver.port) as url:
+            with refused_endpoint(receiver.port):
                 app.save_inventory(3)
-                app.expect_failure("component 'webhook' failed", "error sending request")
-                assert url in app.diagnostics(), app.diagnostics()
+                app.wait_error("component 'webhook' is retrying")
+                # Stopping must not wait for a destination that never answers. The
+                # drain cannot deliver the held change, so shutdown reports it.
+                app.interrupt()
+                app.expect_failure("shutting down computation graph", "error sending request")
 
 
 def unsupported_destination_changes(binary, libraries):
@@ -313,8 +359,8 @@ def run(binary, libraries):
     if os.name != "posix":
         raise SystemExit("Native network smoke tests currently qualify Linux/macOS only.")
     for scenario in (
-        http_to_sse, webhook, unreachable_webhook, live_destination,
-        unsupported_destination_changes,
+        http_to_sse, webhook, webhook_retries_until_receiver_returns, rejected_webhook,
+        live_destination, unsupported_destination_changes,
     ):
         scenario(binary, libraries)
         print(f"Passed native network lesson: {scenario.__name__}", flush=True)

@@ -35,8 +35,8 @@ compatibility shims or automatic migration of old state are planned.
 
 | Work area | Entries |
 |---|---|
-| Managed updates and lifecycle | [Rebootstrap coordination](#cw-92), [named endpoints](#cw-93), [graph changes and live rebinding](#cw-94) (deferred), [plugin upgrade and configuration migration](#cw-95) (deferred), [late progress binding startup hold](#cw-104), [cleanup deadline for large graphs](#cw-107), [declared component descriptions](#cw-106), [durable query-edge resume](#cw-109) |
-| Connectors and runtime boundaries | [Data connections](#cw-44), [old plugin support](#cw-63), [linked query entry points](#cw-80), [oversized query records](#cw-76), [element JSON in results](#cw-108), [bootstrap through transformers](#cw-110) |
+| Managed updates and lifecycle | [Rebootstrap coordination](#cw-92), [named endpoints](#cw-93), [graph changes and live rebinding](#cw-94) (deferred), [plugin upgrade and configuration migration](#cw-95) (deferred), [late progress binding startup hold](#cw-104), [cleanup deadline for large graphs](#cw-107), [declared component descriptions](#cw-106), [durable query-edge resume](#cw-109), [retrying sinks at start and shutdown](#cw-115), [constructed bootstrap providers in batches](#cw-116), [input label selection validation](#cw-114) |
+| Connectors and runtime boundaries | [Data connections](#cw-44), [old plugin support](#cw-63), [ordinary sources without replay](#cw-117), [ordinary PostgreSQL source](#cw-112), [query names in reaction results](#cw-113), [linked query entry points](#cw-80), [oversized query records](#cw-76), [element JSON in results](#cw-108), [bootstrap through transformers](#cw-110) |
 | Native plugins: shared work | [Pause and stop](#cw-96), [erasing disposal](#cw-98), [conformance kit](#source-x-02), [configuration and secrets](#source-x-03), [update planning](#source-x-04), [retry policy](#source-x-05), [delivery contract](#sink-x-03), [observability](#source-x-07), [starter project](#dx-1), [packaging](#dx-10), [provider and transformer review](#cw-103) |
 | Native sources | [Network runtime](#plugin-source-network), [PostgreSQL](#plugin-source-postgres), [MySQL](#plugin-source-mysql), [SQL Server](#plugin-source-mssql), [SQLite](#plugin-source-sqlite), [HTTP](#plugin-source-http), [gRPC](#plugin-source-grpc), [bridge](#plugin-source-bridge), [counter and mock](#plugin-source-counter-mock) |
 | Native sinks | [Network runtime](#plugin-sink-network-runtime), [HTTP](#plugin-sink-http), [gRPC](#plugin-sink-grpc), [SSE](#plugin-sink-sse), [log](#plugin-sink-log), [capture](#plugin-sink-capture), [profiler](#plugin-sink-profiler), [stored procedures](#plugin-sink-storedproc-shared), [PostgreSQL](#plugin-sink-storedproc-postgres), [MySQL](#plugin-sink-storedproc-mysql), [SQL Server](#plugin-sink-storedproc-mssql), [bridge](#plugin-sink-bridge), [legacy reactions](#plugin-legacy-reactions) |
@@ -351,6 +351,18 @@ far.
 - Component progress persistence is declared but not yet compared along an
   edge: nothing refuses a `Volatile` source feeding a query with durable
   progress (see [MY-36](#my-36)).
+- `CheckpointedSink` and `QueryReplayTransformer` return
+  `ComponentDescription::undeclared()`. The graph therefore applies Stall to a
+  wrapped sink whose policy is Skip and treats its inputs as unkeyed, and the
+  replay transformer's outputs satisfy no keyed input
+  (`drasi-core/lib/src/computation/v1/consumer_recovery.rs:887-890,966-969`).
+- The in-process graph does not refuse a consumer that keys delivery on
+  producer identity without declaring a keyed input; only the Host SDK refuses
+  such native consumers
+  (`drasi-core/components/host-sdk/src/computation/factory.rs:582-584`). An
+  incompatible producer is then found only when the consumer's delivery
+  runner rejects a delivery. **Unverified:** whether that rejection reaches
+  the graph unclassified, which the graph retries as transient.
 - Bootstrap edges do not compare output volatility with a persistent
   consumer. A persistent query given a volatile upstream output snapshot is
   accepted at binding (a `Durable` acceptance takes any completion) and fails
@@ -442,6 +454,93 @@ report a cleanup timeout even though each would have stopped promptly.
 **Done when:** stopping a 4,096-node graph with default settings succeeds in
 debug builds on both Tokio flavours, or the limit is documented with
 guidance, and the test runs with the default deadline.
+
+<a id="cw-115"></a>
+
+### Treat a retrying sink as running at instance start and shutdown (CW-115)
+
+**Kind:** Issue. **Area:** Core lifecycle (`DrasiLib`). **Priority:** Medium.
+**Effort:** Small to medium.
+
+A sink that is retrying a transient delivery failure is running: its lifecycle
+is `Running`, its health `Degraded`, and the graph keeps retrying the same input
+until it is delivered. Two instance-wide operations report it as failed:
+
+- `DrasiLib::start()` returns a `PartialStartError` ("managed components did not
+  all become ready: starting managed component '<name>' (<id>) failed during
+  Processing") when a sink's first delivery fails transiently while start waits
+  for readiness. The instance stays running and the sink recovers on its own,
+  but a second `start()` fails with "Server is already running".
+- `DrasiLib::shutdown()` while a sink is retrying returns an error carrying the
+  sink's last transient failure ("instance shutdown failed: shutting down
+  computation graph: … failed during handle: transient delivery failure …"),
+  although cleanup completes (`ShutdownOutcome::completion` is `Complete`).
+  Stopping only that sink with `GraphControl::stop_components` during its retry
+  wait reports `StopOutcome::Stopped`. **Unverified:** which step of the
+  shutdown stop turns the recorded retryable failure into a stop failure.
+
+**What remains:** define how start and shutdown treat a retrying sink,
+consistently with `stop_components`: start should not report a running,
+retrying sink as a startup failure, and shutdown should report an undelivered
+held input as a distinct outcome rather than as a component failure.
+
+**Example:** in the developer guide's webhook lesson, stopping the receiver,
+saving a low quantity and pressing Ctrl-C makes Stockroom exit with the
+webhook's connection error.
+
+**Evidence:** `drasi-core/lib/src/lib_core.rs:600-616` (managed readiness during
+start); `drasi-core/lib/src/computation/instance.rs:248-290` (`finish_driver`
+collects stop-report failures); `drasi-core/lib/src/computation/v1/graph/sink_batching.rs:450-466`
+(an interrupted retry); `drasi-core/lib/tests/computation_sink_delivery_failures.rs:317-352`
+(`stop_during_retry_backoff_exits_without_waiting_for_it`). Both behaviors were
+reproduced with a test sink that always fails transiently, and the shutdown
+case also with the native HTTP sink.
+
+**Done when:** start does not report a retrying sink as a startup failure,
+shutdown during a retry reports a documented outcome consistent with
+`stop_components`, and tests cover both.
+
+<a id="cw-116"></a>
+
+### Add constructed bootstrap providers to DrasiLib batches (CW-116)
+
+**Kind:** Improvement. **Area:** Core public API. **Priority:** Low.
+**Effort:** Small.
+
+`ComponentBatchBuilder` adds constructed sources, transformers, sinks and
+services, but it has no method for a constructed bootstrap provider, the fifth
+component role. Within `DrasiLib` a provider node must come from a factory
+specification (`component`), although the standalone `ComputationGraph`
+builder accepts constructed providers (`bootstrap_provider`).
+
+**Evidence:** `drasi-core/lib/src/computation/components.rs:45-73`;
+`drasi-core/lib/src/computation/v1/graph.rs:1015`.
+
+**Done when:** `ComponentBatchBuilder` accepts a constructed bootstrap provider,
+a test connects one over a bootstrap edge, and the developer guide's bootstrap
+chapter shows it.
+
+<a id="cw-114"></a>
+
+### Reject label selections on native query inputs when the query is accepted (CW-114)
+
+**Kind:** Issue. **Area:** Core query assembly and management validation.
+**Priority:** Low. **Effort:** Small.
+
+A query input can carry `nodes` and `relations` label selections, which are
+subscription settings for ordinary sources. For an input from a component in
+the graph, such as another query or a native source, the declaration is
+accepted and the query then fails at construction with "native input label
+selection belongs in the graph, not Source-plugin subscription settings". Drasi
+Server's API therefore answers 200 for a query that can never start.
+
+**Example:** learning-drasi-server's Curbside Pickup tutorial: adding `nodes` to
+a query-to-query input is accepted, then the query fails to construct.
+
+**Evidence:** `drasi-core/lib/src/computation/v1/pipeline.rs:556-573`.
+
+**Done when:** such a declaration is rejected when it is accepted, with the same
+message, and a test covers it.
 
 <a id="cw-44"></a>
 <a id="hosting-connectors-server-and-examples"></a>
@@ -900,6 +999,118 @@ as compatibility with pre-0.10 plugins, which the loader already rejects.
 libraries and malformed current data fail with a clear error; native interfaces
 cover the behavior the removed code provided; behavior assertions are kept,
 not deleted.
+
+<a id="cw-117"></a>
+
+### Make ordinary sources declare whether they can replay (CW-117)
+
+**Kind:** Issue. **Area:** Core ordinary source API and source plugins.
+**Priority:** Medium. **Effort:** Small to medium.
+
+The ordinary `Source` trait defaults `supports_replay()` to `true`, and the
+check that refuses a source without replay as a persistent query's input
+relies on it. Only the application, gRPC, HTTP, Kafka, OpenTelemetry and
+WebSocket sources override it. A source that cannot replay and keeps the
+default, such as the Kubernetes source, is accepted as a persistent query's
+input: the first start bootstraps normally, and the next start fails with
+"source subscription requires reset/rebootstrap before this query can resume …
+bootstrap provider requires an explicit reset under Strict recovery". Drasi
+Server then exits because startup was partial.
+
+**What remains:** make replay support an explicit declaration in every ordinary
+source (no default, or a default of `false`). Decide each source's answer;
+besides Kubernetes, the polling and push sources (for example GTFS-RT, HERE
+traffic, Hyperliquid, Open511, RIS Live and Sui DeepBook) are unlikely to
+replay. **Unverified:** each source other than Kubernetes.
+
+**Example:** learning-drasi-server's High Risk Containers tutorial with
+`persistIndex: true`: change a container image while Server is stopped, then
+start Server again.
+
+**Evidence:** `drasi-core/lib/src/sources/traits.rs:234-244` (the default);
+`drasi-core/components/sources/kubernetes/src` (no override);
+`drasi-core/components/computation-contracts/src/query_recovery.rs:109` (the
+error).
+
+**Done when:** every ordinary source states whether it can replay, a source
+that cannot is refused as a persistent query's input when the query is
+accepted, and a test covers the Kubernetes case.
+
+<a id="cw-112"></a>
+
+### Make the ordinary PostgreSQL source verify its database and survive outages (CW-112)
+
+**Kind:** Issue. **Area:** Ordinary PostgreSQL source and initial-data provider.
+**Priority:** Medium. **Effort:** Medium.
+
+Drasi Server's tutorials and examples use the ordinary PostgreSQL source, which
+has three gaps that the native PostgreSQL source does not:
+
+- **A replaced database is not detected.** A source with saved progress resumes
+  from its saved log position (LSN) without comparing the database's system
+  identifier. After the database is recreated, replication starts at the old
+  position, changes before it are skipped, and the persistent queries keep
+  their old results. The native source binds its cursors to the system
+  identifier and database name.
+- **An outage fails the source.** After a lost connection the source waits 5
+  seconds and tries one reconnect; if that fails, the source fails ("Replication
+  failed: Connection refused"). Queries that read it directly fail with "lost
+  its explicit lifecycle dependency", and Drasi Server cannot restart them
+  without a reset ([SW-38](../../../drasi-server/docs/remaining-work.md#sw-38)).
+  The native source reconnects with a bounded backoff policy.
+- **Initial-data warnings.** The ordinary PostgreSQL initial-data provider
+  receives every label the query reads, including labels served by the query's
+  other inputs, and logs "Table '<label>' does not exist, skipping" for each one
+  at every start.
+
+**What remains:** fix these in the ordinary source and provider, or move Drasi
+Server's tutorials and examples to the native source
+([SW-25](../../../drasi-server/docs/remaining-work.md#sw-25)) and retire the
+ordinary ones with [CW-63](#cw-63).
+
+**Example:** in learning-drasi-server's Building Comfort tutorial with durable
+indexes, removing the database volume and starting again resumes from the old
+LSN: a room's temperature is 40 in the database, but its comfort result still
+reflects 46.
+
+**Evidence:** `drasi-core/components/sources/postgres/src/stream.rs:200-218`
+(`read_lsn = start_lsn.unwrap_or(slot_lsn)`) and `:783-798`
+(`recover_connection`); `drasi-core/components/bootstrappers/postgres/src/postgres.rs:436-441`;
+for comparison, `drasi-core/components/postgres-common/src/replication.rs:339-357`
+(`source_binding`) and
+`drasi-core/components/computation-plugins/sources/postgres/src/worker.rs:282`
+(`BackoffPolicy`).
+
+**Done when:** the tutorials either use the native source, or the ordinary
+source detects a replaced database, reconnects with bounded backoff, and its
+provider warns only about labels the source serves, with tests for each.
+
+<a id="cw-113"></a>
+
+### Fill query names in ordinary reaction results (CW-113)
+
+**Kind:** Issue. **Area:** Core ordinary reaction host and reaction plugins.
+**Priority:** Low. **Effort:** Small.
+
+`QueryResult.query_name` carries the query's current name "when attached by a
+host with name authority", and the log reaction documents a `query_name`
+template variable. The ordinary reaction host never sets it: the shared adapter
+creates every result with `query_name: None`, and the host fills only
+`input_alias`, although it holds a `ComponentDirectory` that can resolve the
+name. Templates that use `{{query_name}}` therefore render an empty string, as
+in Drasi Server's tutorials. The log reaction also logs its queries at start
+with Rust's debug formatting ("receiving results from queries: [Id { id:
+ComponentId { … } }]").
+
+**Evidence:** `drasi-core/components/computation-contracts/src/exchange.rs:244-245`;
+`drasi-core/components/computation-contracts/src/internal/typed_change/adapters.rs:692-694`;
+`drasi-core/lib/src/computation/v1/plugin_reaction.rs:310-315`;
+`drasi-core/components/reactions/log/README.md:276`;
+`drasi-core/components/reactions/log/src/log.rs:407`.
+
+**Done when:** ordinary reactions receive the query's current name, every
+documented log-reaction variable renders, and the log reaction's start message
+lists its queries in plain form.
 
 <a id="cw-34"></a>
 
@@ -1465,34 +1676,72 @@ query returning a node shows the node's properties in its results.
 
 ### Resume a persistent query bootstrapped over a query edge without gaps (CW-109)
 
-**Kind:** Investigation (probable issue). **Area:** Core. **Priority:** High
-before claiming restart safety for durable query-to-query chains.
-**Effort:** Medium.
+**Kind:** Issue (not yet reproduced). **Area:** Core query bootstrap and
+recovery. **Priority:** High before claiming restart safety for durable
+query-to-query chains. **Effort:** Medium.
 
 A query can bootstrap either from a bound output resource
 (`OutputBootstrapProvider`) or over a graph bootstrap edge from an upstream
-query or transformer (`PipeBootstrapProvider`). The resource path detects a
-gap after restart (`BootstrapPreparation::ResetRequired`) and replays retained
-input (`take_input_replay`). The edge path has neither: a persistent consumer
-saves its sessions and sends resume requests, but nothing proves that changes
-the upstream published while the consumer was down are replayed rather than
-skipped, or that a broken resume forces a reset. **Unverified** as a
-reproduced defect; confirmed only as missing code.
+query or transformer (`PipeBootstrapProvider`). A query that reads another
+query's output through the query builder (`from_input_by_name`), with bootstrap
+enabled as it is by default, takes the edge path from the upstream query's
+`snapshot` output. The resource path detects a gap after restart
+(`BootstrapPreparation::ResetRequired`) and replays retained input after a
+cursor (`replay_after`, `take_input_replay`). The edge path has neither:
 
-**Example:** `source → query A (durable) → query B (durable)` over bootstrap
-and data edges. B is killed after its bootstrap completes; A keeps processing.
-When B restarts, no test shows B receives A's intervening output exactly once,
-or refuses to continue when A's retained output no longer covers B's position.
+- A persistent consumer saves resume state only when its producer returns
+  some, and the upstream query's snapshot session completes with a watermark
+  and no resume state. The downstream therefore saves nothing to resume from
+  and sends no resume request when it restarts.
+- `PipeBootstrapProvider` does not supply input replay, and edge inputs are
+  excluded from `OutputBootstrapProvider`.
+- The data edge is a volatile input queue, and the upstream confirms its output
+  as soon as its outgoing edges accept it, before the downstream commits it.
 
-**Evidence:** `drasi-core/lib/src/computation/v1/graph_bootstrap.rs:766-1180`
-(`PipeBootstrapProvider`: `RefreshVolatile` only, no replay or reset
-preparation) versus `drasi-core/lib/src/computation/v1/output_bootstrap.rs:121,134`
-(`ResetRequired`) and `:266` (`take_input_replay`).
+From the code, output that the downstream had received but not committed
+before an abrupt stop is lost. The downstream then fails on the next upstream
+output with "graph input logical progress has a gap", and fails the same way
+after every restart. `AutoReset` does not apply, because the gap is found while
+processing rather than as a recovery error at startup. Volatile downstream
+queries rebuild from a fresh snapshot and are not affected. **Unverified:** no
+test reproduces this yet; the edge-path chain tests use volatile queries, and
+the durable chain test attaches `OutputBootstrapProvider` explicitly.
 
-**Done when:** a process-kill test of a durable query-to-query chain over edges
-shows no loss or duplicate after restart, and an uncoverable gap produces a
-typed reset (or `IncompleteBootstrap` under strict recovery) instead of silent
-continuation. Covered by the chain matrix in [CW-111](#cw-111).
+**What remains:** give the edge path a resume that replays the upstream's
+retained output after the downstream's saved cursor, for example in
+`PipeBootstrapProvider`, mirroring `OutputBootstrapProvider::replay_after`, and
+report a missing range or a changed upstream epoch as a typed recovery error so
+that Strict and `AutoReset` behave as they do for other inputs.
+
+**Example:** a persistent `low-stock-count` query reads a persistent `low-stock`
+query. The process stops after `low-stock` confirmed an output but before
+`low-stock-count` committed it. After a restart, the next `low-stock` change
+fails `low-stock-count`, and every later restart fails it again.
+
+**Evidence:** `drasi-core/lib/src/computation/runtime/query_assembly.rs:778-784,816-819`
+(bootstrap edges for query inputs);
+`drasi-core/lib/src/computation/v1/pipeline.rs:1118-1153` (edge inputs excluded
+from `OutputBootstrapProvider`);
+`drasi-core/lib/src/computation/v1/graph_bootstrap.rs:634-637,947-949,1080-1086`
+(no resume state) and `:766-1180` (`PipeBootstrapProvider`: `RefreshVolatile`
+only, no replay or reset preparation);
+`drasi-core/lib/src/computation/v1/query_bootstrap.rs:177-179` and
+`drasi-core/lib/src/computation/v1/query.rs:1575-1578` (no input replay);
+`drasi-core/lib/src/computation/v1/output_bootstrap.rs:121-145`
+(`ResetRequired`, `replay_after`) and `:266` (`take_input_replay`);
+`drasi-core/lib/src/computation/v1/graph.rs:3614-3626` (upstream confirmation);
+`drasi-core/lib/src/computation/v1/producer_progress.rs:472-479` (the gap
+error); `drasi-core/lib/src/computation/v1/query_recovery.rs:168-262`
+(`AutoReset` triggers); `drasi-core/lib/tests/computation_graph_bootstrap.rs` and
+`drasi-core/components/host-sdk/tests/native_query_plugin/durable_chain.rs`
+(current coverage).
+
+**Done when:** a process-kill test of a durable query-to-query chain over edges,
+for both the linked and the native query, shows no loss or duplicate after
+restart, and an uncoverable gap produces a typed startup reset (or
+`IncompleteBootstrap` under strict recovery) that `AutoReset` can repair,
+instead of silent continuation or a processing failure. Covered by the chain
+matrix in [CW-111](#cw-111).
 
 <a id="cw-110"></a>
 
@@ -1532,8 +1781,6 @@ bootstrap ports for native plugins).
 
 **Done when:** each listed chain either bootstraps end to end in a test or is
 refused at binding with a documented reason.
-
-<a id="testing-and-qualification"></a>
 
 <a id="native-plugins-shared-work"></a>
 
@@ -1762,35 +2009,40 @@ the supported live changes.
 
 **Kind:** Improvement. **Priority:** Medium (P1). **Effort:** Medium.
 
-The only shared retry helper lives in `common/network` and is used by network
-sinks. The PostgreSQL, MySQL and SQL Server sources share
-`BackoffPolicy` from `computation-contracts/src/reconnect.rs`; the database
-sinks and the bridge still have no common policy. `ConsumerFailure::retryable` defaults to
-`false`, so most sinks report every failure as permanent.
+Sink delivery already has one model: a sink classifies a failed delivery with
+`DeliveryFailure` (transient, permanent or skipped), and the graph retries a
+transient failure in place with bounded backoff. The stored-procedure sinks
+make one attempt per call and rely on it. The retries that plugins make
+themselves still use separate helpers: network sinks share
+`common/network/src/retry.rs` for their own attempts within one delivery, the
+PostgreSQL, MySQL and SQL Server sources share `BackoffPolicy` from
+`computation-contracts/src/reconnect.rs` for reconnects, the bridge sink retries
+with a fixed delay ([BS-01](#bs-01)), and the legacy gRPC code classifies errors
+by matching message text (`categorize_error`).
 
 **What remains:**
 
-- Move the retry/backoff policy to a family-neutral crate usable by sources,
-  providers and sinks; adopt it in each plugin.
+- Move the retry and backoff policy to a family-neutral crate usable by
+  sources, initial-data providers and sinks, and adopt it in each plugin that
+  retries.
 - A typed error taxonomy (transient, permanent, configuration, authentication)
-  that maps onto `retryable` and onto activation failure, replacing string
-  matching such as the legacy `categorize_error`.
-- Implement `retryable` in every durable consumer sink. The three
-  stored-procedure sinks do, each with its own classification (SQLSTATE,
-  MySQL and SQL Server error numbers) and its own copy of jittered backoff;
-  they should move onto the shared policy.
+  that maps onto `DeliveryFailure` for deliveries and onto `LifecycleError`
+  kinds for activation failures, replacing string matching such as the legacy
+  `categorize_error`.
 
-**Example:** the stored-procedure sinks, the database sources and the network
-sinks each implement full-jitter backoff separately, with different ceilings.
+**Example:** the network sinks, the database sources and the bridge sink each
+implement retry delays separately, with different ceilings and jitter.
 
 **Evidence:** `drasi-core/components/computation-plugins/common/network/src/retry.rs`;
 `drasi-core/components/computation-contracts/src/reconnect.rs`;
+`drasi-core/components/computation-plugins/sinks/bridge/src/component.rs:305-320`;
 `drasi-core/components/grpc-common/src/output/send.rs:309`;
-`drasi-core/components/computation-plugin-sdk/src/consumer.rs:59`.
+`drasi-core/components/computation-plugins/common/storedproc/src/driver.rs:12-16`;
+`drasi-core/lib/src/computation/v1/graph/sink_delivery.rs` (the graph's
+delivery-failure model).
 
-**Done when:** one policy crate is used by every native plugin that retries;
-errors are classified by type, not message text; and each durable consumer sink
-implements `retryable` with tests.
+**Done when:** one policy crate is used by every native plugin that retries,
+and errors are classified by type, not message text.
 
 <a id="sink-x-03"></a>
 <a id="sink-x-04"></a>
@@ -1918,23 +2170,42 @@ plugin and cause, and the rule is enforced.
 
 **Kind:** Issue. **Priority:** Medium (P1). **Effort:** Small.
 
-The quoted ABI versions are fixed: every native document now states ABI 0.1.0,
-wire 1 and ordinary ABI 0.19, and
-`computation-plugin-sdk/tests/documented_abi_version.rs` fails when a document
-quotes another native ABI, wire version or ordinary ABI. Only some plugins have
-`DESIGN.md` and `CONFIGURATION.md`.
+The shared documents now state the current versions: native ABI 0.1.0, which
+before 1.0 loads only a library with the same major and minor; wire version 1;
+and ordinary ABI 0.19. They also say that native libraries stay loaded for the
+life of the process. `computation-plugin-sdk/tests/documented_abi_version.rs`
+passed while several documents still quoted old versions, because it:
 
-**What remains:** require the two documents for every native plugin
-(per-plugin READMEs are plugin work). Explain in the guides that native
-libraries stay loaded for the process lifetime, so a rebuild needs a restart.
+- reads only five named documents and the files under
+  `components/computation-plugins`;
+- finds a version only directly after `ABI `, `ABI is ` or `wire version `, so
+  it missed "wire version is **2**", "ordinary ABI (0.18" and
+  "wire-version-2";
+- accepts any `0.x` after `ABI ` as the native version, because the native
+  major is 0, so an old ordinary version such as "ABI 0.15" passes.
 
-**Example:** a vendor reading the Host SDK README builds against "wire 2" and
-gets an ABI rejection.
+A version scan also cannot catch a stale rule, such as "binaries built for
+another ABI major are rejected". Only some native plugins have `DESIGN.md` and
+`CONFIGURATION.md`.
 
-**Evidence:** `drasi-core/components/host-sdk/README.md:544,594`;
-`drasi-core/components/computation-plugin-abi/src/lib.rs:26-30`.
+**What remains:**
 
-**Done when:** no shared doc states a stale version, and a check catches drift.
+- Widen the check: compare the native major and minor exactly, check ordinary
+  versions separately, accept the phrasings above, and scan every document
+  that quotes a version, including the data-design doc. The ordinary
+  plugins' own READMEs are excluded; they are removed with the ordinary
+  plugins ([CW-63](#cw-63)).
+- Require both documents for every native plugin (per-plugin READMEs are plugin
+  work).
+
+**Example:** "Native wire version is **2**" passed the check until it was
+corrected by hand.
+
+**Evidence:** `drasi-core/components/computation-plugin-sdk/tests/documented_abi_version.rs:36-98`;
+`drasi-core/components/computation-plugin-abi/src/lib.rs:28-33,77-83`.
+
+**Done when:** the check fails on each stale form above, and every native
+plugin has both documents.
 
 <a id="source-x-10"></a>
 <a id="sink-x-15"></a>
@@ -4821,7 +5092,7 @@ developer book check runs in `test.yml`. The gaps are elsewhere.
 | Core | Python tests for CI tooling: `ci/test_native_dependencies.py`, `ci/test_install_protoc.py`. Node test `xtask/src/runtime_architecture/report.test.cjs`. | No workflow or Makefile target references them (`grep` of `drasi-core/.github/workflows`, `Makefile`). |
 | Core | `make test-ffi-layout-mismatch` (nightly-toolchain layout-randomization regression for issue #602). | `drasi-core/Makefile:116-134`; not referenced by any workflow. |
 | Core | Native SQL Server tests and cross-OS network peers. They need explicit credentials or prebuilt peers, so the integration-matrix discovery deliberately skips files that read `DRASI_MSSQL_TEST_MODE` or `DRASI_NETWORK_CONTAINER`. | `drasi-core/xtask/src/integration_matrix.rs:59-70`; `make test-native-mssql` at `drasi-core/Makefile:90-92`. Needs a declared environment job (scheduled or manual) that reports "not run" rather than passing. |
-| Learning | Deterministic tutorial tests: `tutorials/*/scripts/test_demo.py` (6 tutorials), `tutorials/sse-cli/tests/test_{build,cli}.py`, `scripts/test_local_build.py`. The only PR workflow is the agent-driven getting-started evaluation, which passes when the agent writes `## STATUS: SUCCESS`, and is skipped for fork PRs because it needs secrets. | `learning-drasi-server/.github/workflows/tutorial-evaluation-scheduled.yml:17-40,93,135,176`. |
+| Learning | Deterministic tutorial tests: `tutorials/*/scripts/test_demo.py` (6 tutorials), `tutorials/sse-cli/tests/test_{build,cli}.py` and the SSE CLI's `cargo test`, and the shared `scripts/test_{local_build,graph_view,webhook_receiver}.py`. The repository has no pull-request workflow. | Its only workflow, `learning-drasi-server/.github/workflows/release-tutorials.yml:17-22`, is started by hand and packages the tutorials for a release. |
 | test-infra | Rust unit tests for `e2e-test-framework` and `data-tools/arn`. PR workflows only build images (`build.yml`) and run clippy/fmt (`lint.yml`). The recovery-comparison Python tests run only in the manual `e2e-building-comfort-completion.yml`. | `test-infra/.github/workflows/build.yml:17-31,85-87`, `lint.yml:17-28`, `e2e-building-comfort-completion.yml:3-4,55-59`. |
 
 **Before merging this branch to `main`:**

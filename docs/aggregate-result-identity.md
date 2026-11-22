@@ -80,7 +80,7 @@ pre-fix query state from authoritative input.
 ## Synthetic join identities
 
 Directed synthetic relationships include the join name and both complete
-`(source_id, element_id)` endpoints. Length-delimited fields prevent separator
+`(namespace, element_id)` endpoints. Length-delimited fields prevent separator
 ambiguities. The in-memory, RocksDB and Garnet indexes share
 `QueryJoin::relationship_id`; equal element names in different sources cannot
 overwrite the opposite-direction relationship. This keeps multi-source bootstrap

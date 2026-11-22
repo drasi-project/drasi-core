@@ -411,7 +411,7 @@ Register that same catalogue as the resource of a `QueryResultsOutletFactory`
 component and connect the query's `out` port to the outlet. Merely exposing
 native read providers does not create a subscription path.
 
-With that actual connection, `Query::subscribe`, `subscribe_query_results` and
+With that actual connection, `Query::subscribe`, `subscribe_query_results_by_id` and
 ordinary reactions use the existing library delivery implementation. Channel
 subscribers backpressure publication; broadcast subscribers recover lag from
 retained history or report an explicit gap. Snapshot attachment registers the

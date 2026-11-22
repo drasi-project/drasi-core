@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! Independent native ComputationGraph plugin hosting. The legacy PluginLoader
-//! and ABI 0.15 are unchanged. Try this family first during explicit discovery:
+//! and ordinary ABI 0.19 are unchanged. Try this family first during explicit discovery:
 //! no native symbols returns None; any malformed native declaration is an error
 //! and must not fall through to legacy registration.
 //!

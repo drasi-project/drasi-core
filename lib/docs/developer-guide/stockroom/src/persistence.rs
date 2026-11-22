@@ -165,9 +165,16 @@ struct DurableAlerts {
 
 #[async_trait]
 impl ComputationComponent for DurableAlerts {
-    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
-        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    // ANCHOR: durable-description
+    fn description(&self) -> ComponentDescription {
+        // Saved reorders survive a restart, and the runner's ledger keys each
+        // delivery on the producer's identity, so the input needs a producer
+        // whose identity and replay position also survive a restart.
+        ComponentDescription::new(ProgressPersistence::Durable)
+            .with_inputs(&self.descriptor, InputDelivery::ExactlyOnce)
     }
+    // ANCHOR_END: durable-description
+
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -221,6 +228,14 @@ impl EnvelopeSink for DurableAlerts {
         }
         let mut runner = self.runner.lock().await;
         // ANCHOR: durable-handle
+        if runner.recovery_required() {
+            // An earlier commit's outcome is unknown. Only a runner reopened
+            // from storage can tell, so stop instead of retrying here.
+            return Err(LifecycleError::terminal(anyhow::anyhow!(
+                "a reorder commit's outcome is unknown; restart Stockroom to resume from storage"
+            ))
+            .into());
+        }
         runner.deliver_transactional(&input, &SaveReorder).await?;
         let sequence = QueryChangeCodec::query_sequence(&input.envelope)?;
         println!("Saved reorder changes through query sequence {sequence}.");

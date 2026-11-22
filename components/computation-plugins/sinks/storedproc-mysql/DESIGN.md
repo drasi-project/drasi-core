@@ -225,12 +225,12 @@ absent, never dropped).
 
 ## Management
 
-`Factory::assess` and `NativeManagement` classify every field (see
-[CONFIGURATION.md](CONFIGURATION.md#updates)). In-place updates require a
-completed pause; restart updates require a stopped sink; Replace is never an
-instance update. `host`, `port`, `database` and `progressTable` are
-Unsupported: they locate the receipts, so moving them would drop the receipt
-of an in-flight operation and orphan this owner's rows. Remove the component
+The factory's `UpdatePlanner::assess` and `NativeManagement` classify every
+field (see [CONFIGURATION.md](CONFIGURATION.md#updates)). In-place updates
+require a completed pause; restart updates require a stopped sink; Replace is
+never an instance update. `host`, `port`, `database` and `progressTable` are
+Unsupported: they locate the receipts, so moving them would drop the receipt of
+an in-flight operation and orphan this owner's rows. Remove the component
 (Erase) and add it again.
 
 ## Security model

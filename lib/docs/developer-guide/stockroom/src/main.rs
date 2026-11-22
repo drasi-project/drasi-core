@@ -301,11 +301,21 @@ impl<T: FileRow> FileSource<T> {
     }
 }
 
+// ANCHOR: file-description
+fn file_source_description(descriptor: &ComponentDescriptor) -> ComponentDescription {
+    // Comparison state lives in memory, and outputs carry no producer identity
+    // that survives a restart.
+    ComponentDescription::new(ProgressPersistence::Volatile)
+        .with_outputs(descriptor, OutputDescription::UNTRACKED)
+}
+// ANCHOR_END: file-description
+
 #[async_trait]
 impl<T: FileRow> ComputationComponent for FileSource<T> {
-    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
-        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    fn description(&self) -> ComponentDescription {
+        file_source_description(&self.descriptor)
     }
+
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -395,9 +405,11 @@ struct Audit {
 // ANCHOR: audit-component
 #[async_trait]
 impl ComputationComponent for Audit {
-    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
-        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    fn description(&self) -> ComponentDescription {
+        ComponentDescription::new(ProgressPersistence::Volatile)
+            .with_outputs(&self.descriptor, OutputDescription::UNTRACKED)
     }
+
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -525,11 +537,21 @@ fn reorder_messages(envelope: &ChangeEnvelope, previous: &ResultView) -> anyhow:
     Ok(message)
 }
 
+// ANCHOR: alert-description
+fn alert_description(descriptor: &ComponentDescriptor) -> ComponentDescription {
+    // The view lives in memory. Its input accepts changes from any producer;
+    // it does not key delivery on the producer's identity.
+    ComponentDescription::new(ProgressPersistence::Volatile)
+        .with_inputs(descriptor, InputDelivery::Unkeyed)
+}
+// ANCHOR_END: alert-description
+
 #[async_trait]
 impl ComputationComponent for Alerts {
-    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
-        drasi_lib::computation::v1::ComponentDescription::undeclared()
+    fn description(&self) -> ComponentDescription {
+        alert_description(&self.descriptor)
     }
+
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -597,13 +619,26 @@ impl ComponentManagement for Alerts {
 // ANCHOR: alert-sink
 #[async_trait]
 impl EnvelopeSink for Alerts {
-    // ANCHOR: alert-completion
     fn completion(&self) -> SinkCompletion {
         SinkCompletion::Handled
     }
-    // ANCHOR_END: alert-completion
 
     async fn handle(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
+        // A change this sink cannot read fails the same way on every retry,
+        // so it is permanent. Output errors stay transient and are retried.
+        let (view, message) = self.render(&input).map_err(DeliveryFailure::permanent)?;
+        if self.display {
+            self.output.write_all(message.as_bytes()).await?;
+            self.output.flush().await?;
+        }
+        self.view.send_replace(view);
+        Ok(())
+    }
+}
+// ANCHOR_END: alert-sink
+
+impl Alerts {
+    fn render(&self, input: &InputEnvelope) -> anyhow::Result<(ResultView, String)> {
         let mut view = self.view.borrow().clone();
         let mut message = String::new();
         if self.reorders {
@@ -624,21 +659,43 @@ impl EnvelopeSink for Alerts {
             );
             message.push_str("audit: checked-by=stockroom\n");
         }
-        if self.display {
-            message.push_str(&format!(
-                "{}: {}\n",
-                self.label,
-                serde_json::to_string(&view.rows())?
-            ));
-            self.output.write_all(message.as_bytes()).await?;
-            self.output.flush().await?;
-        }
-        self.view.send_replace(view);
-        Ok(())
+        message.push_str(&format!(
+            "{}: {}\n",
+            self.label,
+            serde_json::to_string(&view.rows())?
+        ));
+        Ok((view, message))
     }
 }
 
-// ANCHOR_END: alert-sink
+// ANCHOR: late-query
+async fn add_low_stock_count(
+    core: &DrasiLib,
+    bootstrap: bool,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    // `add_query` constructs queries with the instance's registered query factory.
+    let reference = ImplementationIdentity::try_new("drasi/continuous-query", "1")?;
+    let factory = FactoryRegistry::standard()
+        .get(&reference)
+        .context("reference query factory")?
+        .clone();
+    core.register_query_factory(factory)?;
+    let name = ComponentName::try_new("low-stock-count")?;
+    let query = core
+        .add_query_with_handle(
+            drasi_lib::Query::cypher(name.clone())
+                .query("MATCH (r:Result) RETURN count(r) AS items")
+                .from_input_by_name(ComponentName::try_new("low-stock")?)
+                .enable_bootstrap(bootstrap)
+                .build()?,
+        )
+        .await?;
+    tokio::time::timeout(Duration::from_secs(10), query.wait_started())
+        .await
+        .context("wait for query 'low-stock-count' readiness")??;
+    Ok(core.get_query_results_by_name(&name).await?)
+}
+// ANCHOR_END: late-query
 
 async fn finish<T>(core: &DrasiLib, work: anyhow::Result<T>) -> anyhow::Result<T> {
     let cleanup = core.shutdown().await.map_err(anyhow::Error::from);
@@ -664,7 +721,8 @@ fn application_callback(view: watch::Sender<ResultView>) -> anyhow::Result<Box<d
             let view = view.clone();
             async move {
                 let mut next = view.borrow().clone();
-                next.apply(&input.envelope)?;
+                next.apply(&input.envelope)
+                    .map_err(DeliveryFailure::permanent)?;
                 let message = format!("callback: {}\n", serde_json::to_string(&next.rows())?);
                 let mut output = tokio::io::stdout();
                 output.write_all(message.as_bytes()).await?;
@@ -1059,9 +1117,8 @@ async fn run_cli_inner() -> anyhow::Result<()> {
         Some("reorders") => Scenario::Reorders,
         Some("stream") => Scenario::Stream,
         Some("callback") => Scenario::Callback,
-        Some("plugins") | Some("webhook") | Some("live") | Some("--state") | Some("managed") => {
-            Scenario::LowStock
-        }
+        Some("plugins") | Some("webhook") | Some("live") | Some("--state") | Some("managed")
+        | Some("chain") => Scenario::LowStock,
         Some("help") => {
             println!(
                 "stockroom [totals|totals-filtered|audit|join|sustained|normalize|reorders|stream|callback]"
@@ -1071,6 +1128,7 @@ async fn run_cli_inner() -> anyhow::Result<()> {
                 "stockroom webhook <native-library-directory> <url> (requires --features plugins)"
             );
             println!("stockroom live <native-library-directory> (requires --features plugins)");
+            println!("stockroom chain [--no-bootstrap]");
             println!(
                 "stockroom --state <directory> [--hold-alerts] (requires --features persistence)"
             );
@@ -1144,6 +1202,15 @@ async fn run_cli_inner() -> anyhow::Result<()> {
     } else {
         (9080, 9081)
     };
+    let chain = if mode.as_deref() == Some("chain") {
+        Some(match args.next().as_deref() {
+            None => true,
+            Some("--no-bootstrap") => false,
+            Some(value) => anyhow::bail!("unsupported chain option {value:?}"),
+        })
+    } else {
+        None
+    };
     ensure!(args.next().is_none(), "unexpected additional arguments");
     let path = Path::new(if scenario == Scenario::Normalize {
         "encoded-inventory.json"
@@ -1158,7 +1225,7 @@ async fn run_cli_inner() -> anyhow::Result<()> {
         .as_deref()
         .filter(|_| mode.as_deref() == Some("plugins"))
         .map(|directory| (directory, http_port, sse_port));
-    let (core, _view, mut events, mut health) = build_application(path, scenario, plugins).await?;
+    let (core, view, mut events, mut health) = build_application(path, scenario, plugins).await?;
     let work = async {
         if mode.as_deref() == Some("live") {
             let directory = native_directory.as_deref().context("missing native library directory")?;
@@ -1178,6 +1245,28 @@ async fn run_cli_inner() -> anyhow::Result<()> {
             println!("Ready: HTTP input at 127.0.0.1:{http_port}; SSE output at 127.0.0.1:{sse_port}/events.");
         } else {
             println!("Ready. Watching {} for saved changes.", path.display());
+        }
+        if let Some(bootstrap) = chain {
+            // Add the second query once the first one has an answer to start from.
+            let mut results = view.clone();
+            let rows = tokio::select! {
+                biased;
+                result = health.failed() => { result?; None }
+                signal = shutdown.requested() => { signal?; None }
+                ready = results.wait_for(|view| !view.rows().is_empty()) => {
+                    Some(ready.context("low-stock view closed")?.rows().len())
+                }
+            };
+            let Some(rows) = rows else {
+                health.check()?;
+                return Ok(());
+            };
+            let count = add_low_stock_count(&core, bootstrap).await?;
+            println!(
+                "Added low-stock-count while low-stock had {rows} row{}.",
+                if rows == 1 { "" } else { "s" }
+            );
+            println!("low-stock-count: {}", serde_json::to_string(&count)?);
         }
         if let Some(events) = &mut events {
             loop {
@@ -1244,9 +1333,9 @@ mod tests {
 
     #[async_trait]
     impl ComputationComponent for LifecycleProbe {
-    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
-        drasi_lib::computation::v1::ComponentDescription::undeclared()
-    }
+        fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+            drasi_lib::computation::v1::ComponentDescription::undeclared()
+        }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.descriptor
         }
@@ -1294,12 +1383,12 @@ mod tests {
 
     #[async_trait]
     impl ComponentFactory for ProbeFactory {
-    fn describe(
-        &self,
-        _context: &drasi_lib::computation::v1::ConstructionContext,
-    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
-        Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
-    }
+        fn describe(
+            &self,
+            _context: &drasi_lib::computation::v1::ConstructionContext,
+        ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
+            Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
+        }
         fn descriptor(&self) -> &FactoryDescriptor {
             &self.descriptor
         }
@@ -1441,9 +1530,9 @@ mod tests {
 
     #[async_trait]
     impl ComputationComponent for FailsLater {
-    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
-        drasi_lib::computation::v1::ComponentDescription::undeclared()
-    }
+        fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
+            drasi_lib::computation::v1::ComponentDescription::undeclared()
+        }
         fn descriptor(&self) -> &ComponentDescriptor {
             &self.descriptor
         }
@@ -1527,6 +1616,117 @@ mod tests {
             ensure!(
                 messages.contains("injected destination failure"),
                 "{messages}"
+            );
+            Ok(())
+        }
+        .await;
+        finish(&core, work).await
+    }
+
+    struct FlakySink {
+        descriptor: ComponentDescriptor,
+        failures: usize,
+        delivered: watch::Sender<usize>,
+    }
+
+    #[async_trait]
+    impl ComputationComponent for FlakySink {
+        fn description(&self) -> ComponentDescription {
+            alert_description(&self.descriptor)
+        }
+
+        fn descriptor(&self) -> &ComponentDescriptor {
+            &self.descriptor
+        }
+
+        drasi_lib::passive_component_lifecycle!();
+    }
+
+    #[async_trait]
+    impl EnvelopeSink for FlakySink {
+        fn completion(&self) -> SinkCompletion {
+            SinkCompletion::Handled
+        }
+
+        async fn handle(&mut self, _input: InputEnvelope) -> anyhow::Result<()> {
+            if self.failures > 0 {
+                self.failures -= 1;
+                anyhow::bail!("destination offline");
+            }
+            self.delivered.send_modify(|count| *count += 1);
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn health_reports_retries_and_recovery_without_failing() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("inventory.json");
+        save(&path, &inventory(8)).await?;
+        let (query, _results) = low_stock_query().await?;
+        let (delivered, mut deliveries) = watch::channel(0);
+        let schema = QueryChangeCodec::schema().descriptor().clone();
+        let sink = FlakySink {
+            descriptor: descriptor(component_id(759), &[("in", PortDirection::Input, schema)])?,
+            failures: 2,
+            delivered,
+        };
+        let mut batch = ComponentBatch::builder()
+            .source(
+                ComponentName::try_new("inventory")?,
+                Box::new(Inventory::new(&path)?),
+            )
+            .transformer(ComponentName::try_new("low-stock")?, Box::new(query))
+            .sink(ComponentName::try_new("alerts")?, Box::new(sink));
+        for (name, producer, consumer) in [
+            ("inventory", component_id(758), component_id(757)),
+            ("low-stock", component_id(757), component_id(759)),
+        ] {
+            batch = batch
+                .bind_stream(
+                    endpoint(producer.clone(), "out")?,
+                    StreamId::try_new(format!("{name}/out"))?,
+                )
+                .connect(
+                    EdgeDefinition::new(endpoint(producer, "out")?, endpoint(consumer, "in")?),
+                    Box::new(BoundedPipeConfig { capacity: 8 }),
+                );
+        }
+        let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
+            .with_component_logging(component_logging()?)
+            .with_id("retry-test")
+            .with_components(batch.build()?)
+            .build()
+            .await?;
+        let work = async {
+            let mut health = cli::Health::new(&core)?;
+            core.start().await?;
+            for name in ["inventory", "low-stock", "alerts"] {
+                cli::wait_started(&core, name, Duration::from_secs(5)).await?;
+            }
+            // Lowering stock sends the first change; the sink fails twice, then succeeds.
+            save(&path, &inventory(3)).await?;
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                deliveries.wait_for(|count| *count > 0),
+            )
+            .await??;
+            health.check()?;
+            ensure!(
+                health.notices.iter().any(|notice| notice
+                    .starts_with("component 'alerts' is retrying")
+                    && notice.contains("destination offline")),
+                "{:?}",
+                health.notices
+            );
+            ensure!(
+                health
+                    .notices
+                    .iter()
+                    .any(|notice| notice == "component 'alerts' recovered"),
+                "{:?}",
+                health.notices
             );
             Ok(())
         }
@@ -1913,6 +2113,31 @@ mod tests {
                     vec![west.clone()]
                 };
                 expect_view(&mut view, expected).await
+            }
+            .await;
+            finish(&core, work).await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn late_query_bootstraps_from_upstream() -> anyhow::Result<()> {
+        for (bootstrap, expected) in
+            [(true, vec![serde_json::json!({"items": 1})]), (false, vec![])]
+        {
+            let directory = tempfile::tempdir()?;
+            let path = directory.path().join("inventory.json");
+            save(&path, &inventory(3)).await?;
+            let (core, mut view, _, _) = build_application(&path, Scenario::LowStock, None).await?;
+            let work = async {
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    view.wait_for(|view| !view.rows().is_empty()),
+                )
+                .await??;
+                let rows = add_low_stock_count(&core, bootstrap).await?;
+                ensure!(rows == expected, "bootstrap {bootstrap}: {rows:?}");
+                Ok(())
             }
             .await;
             finish(&core, work).await?;

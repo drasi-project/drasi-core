@@ -288,15 +288,15 @@ never purged.
 
 ## Management
 
-`Factory::assess` (pure) and `NativeManagement` classify every field; see
-[CONFIGURATION.md](CONFIGURATION.md#updates). `reconnectBudgetMs` applies in
-place after a completed pause. Connection, credential, TLS, `serverId`,
-heartbeat, timeout and limit changes apply at Stop (transaction limits may
-only grow). Anything the cursor or element identities are bound to
-(`stream`, `database`, `tables`, `tableKeys`, `retention`, `persistent`) is
-unsupported; start fields are a restart only for untracked factories or
-before the first checkpoint. `apply` refuses when the current configuration,
-the plan or the proposed configuration does not match.
+The factory's `UpdatePlanner::assess` (pure) and `NativeManagement` classify
+every field; see [CONFIGURATION.md](CONFIGURATION.md#updates).
+`reconnectBudgetMs` applies in place after a completed pause. Connection,
+credential, TLS, `serverId`, heartbeat, timeout and limit changes apply at Stop
+(transaction limits may only grow). Anything the cursor or element identities
+are bound to (`stream`, `database`, `tables`, `tableKeys`, `retention`,
+`persistent`) is unsupported; start fields are a restart only for untracked
+factories or before the first checkpoint. `apply` refuses when the current
+configuration, the plan or the proposed configuration does not match.
 
 ## Security
 

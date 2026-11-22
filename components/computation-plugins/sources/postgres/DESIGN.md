@@ -201,14 +201,15 @@ headless Kubernetes Service returns NXDOMAIN for a while.
 
 ## Management
 
-`Factory::assess` and `NativeManagement` classify every field (table in
-[CONFIGURATION.md](CONFIGURATION.md#settings)). InPlace (`reconnectBudgetMs`)
-applies to the running worker after a completed pause. Restart fields apply
-while stopped. Fields the cursor is bound to are unsupported: a replacement
-would need every downstream query rebuilt from a new snapshot, which this
-source cannot coordinate, so it does not claim a Recreate plan. A `startLsn`
-change is a Restart only while the live object sees no committed cursor (the
-assessment's fingerprint names that fact, and apply re-assesses).
+The factory's `UpdatePlanner::assess` and `NativeManagement` classify every
+field (table in [CONFIGURATION.md](CONFIGURATION.md#settings)). InPlace
+(`reconnectBudgetMs`) applies to the running worker after a completed pause.
+Restart fields apply while stopped. Fields the cursor is bound to are
+unsupported: a replacement would need every downstream query rebuilt from a new
+snapshot, which this source cannot coordinate, so it does not claim a Recreate
+plan. A `startLsn` change is a Restart only while the live object sees no
+committed cursor (the assessment's fingerprint names that fact, and apply
+re-assesses).
 
 ## Security
 

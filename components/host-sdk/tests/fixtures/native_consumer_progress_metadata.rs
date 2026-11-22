@@ -36,7 +36,7 @@ pub extern "C" fn drasi_computation_plugin_metadata() -> *const abi::Metadata {
 
 /// # Safety
 /// `out` must be writable and unowned; release the returned handle through its
-/// producer callback as required by native ABI 1.0.
+/// producer callback as required by the native ABI.
 #[no_mangle]
 pub unsafe extern "C" fn drasi_computation_plugin_entry(
     out: *mut abi::PluginHandle,

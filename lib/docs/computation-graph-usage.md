@@ -42,16 +42,20 @@ Add whichever source/reaction crates your application uses. Keep the Drasi
 dependencies from the same checkout; the complete example above already does so.
 
 In an existing application, keep constructing your source and reaction objects.
-This excerpt assumes `source`,
-`query_config` and `reaction` have already been created:
+This excerpt assumes `query_factory`, `source`, `query_config` and `reaction`
+have already been created. Objects constructed with their own UUIDs require
+`with_allow_external_component_ids(true)`; `with_source_factory` and
+`with_reaction_factory` instead pass a DrasiLib-assigned UUID to your constructor:
 
 ```rust,ignore
-use drasi_lib::DrasiLib;
+use drasi_lib::{ComponentName, DrasiLib};
 
 let drasi = DrasiLib::builder()
-    .with_source(source)
+    .with_allow_external_component_ids(true)
+    .with_query_factory(query_factory)
+    .with_source(ComponentName::try_new("orders")?, source)
     .with_query(query_config)
-    .with_reaction(reaction)
+    .with_reaction(ComponentName::try_new("order-alerts")?, reaction)
     .build()
     .await?;
 
@@ -70,16 +74,16 @@ use drasi_lib::{Query, computation::v1::*};
 
 let application = ComponentId::try_new("378f451c-8e3b-435b-9c2a-a91ac4fb1762")?;
 let query = ComponentId::derive_owned(&application, "order-names")?;
-let source = drasi.component_by_name("orders")?;
+let source = drasi.component_by_name(&ComponentName::try_new("orders")?)?;
 let source_output = Endpoint::new(
     source.id().clone(),
     PortId::try_new("out")?,
 );
 let batch = drasi.computation_pipeline()?
     .native_source(source_output)?
-    .query(Query::cypher("order-names")
+    .query(Query::cypher(ComponentName::try_new("order-names")?)
         .query("MATCH (o:Order) RETURN o.name AS name")
-        .from_input("orders")
+        .from_input_by_name(ComponentName::try_new("orders")?)
         .build()?
         .with_assigned_id(query))
     .build()?;
@@ -110,9 +114,12 @@ outlet instead of adding a temporary application reaction:
 The example uses `futures = "0.3"` for stream iteration.
 
 ```rust,ignore
+use drasi_lib::ComponentName;
 use futures::StreamExt;
 
-let subscription = drasi.subscribe_query_results("order-names").await?;
+let subscription = drasi
+    .subscribe_query_results_by_name(&ComponentName::try_new("order-names")?)
+    .await?;
 println!("Initial rows: {:?}", subscription.snapshot.to_vec());
 let mut results = subscription.stream;
 while let Some(result) = results.next().await {
@@ -161,17 +168,17 @@ Use a handle when subsequent work requires successful creation or startup.
 In this example, `drasi` is running and a source named `orders` already exists:
 
 ```rust,ignore
-use drasi_lib::Query;
+use drasi_lib::{ComponentName, Query};
 use std::time::Duration;
 
 let component = drasi
     .add_query_with_handle(
-        Query::cypher("order-names")
+        Query::cypher(ComponentName::try_new("order-names")?)
             .query("MATCH (o:Order) RETURN o.name AS name")
-            .from_input("orders")
+            .from_input_by_name(ComponentName::try_new("orders")?)
             .enable_bootstrap(false)
             .auto_start(false)
-            .build(),
+            .build()?,
     )
     .await?;
 
@@ -201,15 +208,15 @@ such a constructor is different from a recorded initialization error.
 
 ## Choose source order deliberately
 
-The order of `from_source` calls is the tie-breaker when queued events have the
-same source-reported timestamp:
+The order of `from_input_by_name` (and related input) calls is the tie-breaker
+when queued events have the same source-reported timestamp:
 
 ```rust,ignore
-let query = Query::cypher("combined")
+let query = Query::cypher(ComponentName::try_new("combined")?)
     .query("MATCH (n:Item) RETURN n.name AS name")
-    .from_input("primary")
-    .from_input("secondary")
-    .build();
+    .from_input_by_name(ComponentName::try_new("primary")?)
+    .from_input_by_name(ComponentName::try_new("secondary")?)
+    .build()?;
 ```
 
 Here `primary` ranks before `secondary`. Within a source, its sequence number
@@ -226,7 +233,10 @@ update, deletion, aggregation update or no-op; it is not just a JSON row.
 For a current view rather than the change stream:
 
 ```rust,ignore
-let query_id = drasi.component_by_name("order-names")?.id().clone();
+let query_id = drasi
+    .component_by_name(&ComponentName::try_new("order-names")?)?
+    .id()
+    .clone();
 let rows = drasi.get_query_results_by_id(&query_id).await?;
 let metrics = drasi.get_query_output_metrics_by_id(&query_id).await?;
 ```
@@ -257,7 +267,7 @@ and coordinates lifecycle and downstream boundaries. Current Core rejects every
 without a safe snapshot/live handover. Supported state-preserving updates retain
 the logical UUID; recreation gives the object a fresh generation.
 
-Ordinary dynamically loaded Source/Reaction ABI 0.18 plugins do not expose managed
+Ordinary dynamically loaded Source/Reaction ABI 0.19 plugins do not expose managed
 update planning. For those or other externally constructed components without an
 update-capable factory, explicitly disconnect dependencies, remove the old
 component, create the replacement and reconnect using its new UUID. There is no
@@ -299,15 +309,15 @@ factory and connection changes use computation operations.
 Start with the component's status and error, then inspect its instance graph:
 
 ```rust,ignore
-let status = drasi.get_query_status("order-names").await?;
-let query = drasi.component_by_name("order-names")?;
-let graph = drasi.inspect_query_computation(query.id().as_str()).await?;
+let query = drasi.component_by_name(&ComponentName::try_new("order-names")?)?;
+let status = drasi.get_query_status_by_id(query.id()).await?;
+let graph = drasi.inspect_query_computation_by_id(query.id()).await?;
 let inventory = drasi.inspect_computation_inventory().await?;
 ```
 
 The inventory contains the instance's one ComputationGraph, including ordinary
-queries and their helpers. `inspect_query_computation` validates the query and
-returns that same graph's inspector; it does not create or expose a private query graph.
+queries and their helpers. `inspect_query_computation_by_id` validates the query
+and returns that same graph's inspector; it does not create or expose a private query graph.
 Logs and metrics use the DrasiLib APIs. Failure objects may
 contain configuration or provider details; do not publish them as sanitized
 error messages without checking them.
@@ -373,12 +383,12 @@ A standalone `GraphRun` must be awaited by its caller. Within DrasiLib, submit
 component batches to its owned ComputationGraph:
 
 ```rust,ignore
-use drasi_lib::computation::v1::ComponentBatch;
+use drasi_lib::computation::v1::{ComponentBatch, ComponentName};
 
 let batch = ComponentBatch::builder()
-    .source(source)
-    .transformer(transformer)
-    .sink(sink)
+    .source(ComponentName::try_new("orders")?, source)
+    .transformer(ComponentName::try_new("enrich")?, transformer)
+    .sink(ComponentName::try_new("audit")?, sink)
     .bind_stream(source_output, source_stream)
     .bind_stream(transformer_output, transformer_stream)
     .connect(source_to_transformer, input_pipe)

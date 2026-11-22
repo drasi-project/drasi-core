@@ -27,7 +27,7 @@ drasi-middleware = { version = "0.3", features = ["jq", "decoder", "map"] }
 - **`promote`** - Promote nested properties to top level
 - **`relabel`** - Transform element labels
 - **`unwind`** - Unwind arrays into multiple elements
-- **`all`** - Enable all middleware (convenience feature, includes `bundled-jq`)
+- **`all`** - Enable all middleware (convenience feature; `jq` links the system library, so add `bundled-jq` to build jq from source)
 
 ### Updates, Removals and Replacements
 

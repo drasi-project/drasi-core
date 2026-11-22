@@ -444,7 +444,7 @@ callbacks. No-op lifecycle hooks are not capability evidence.
 
 Native SDK operations retain panic-damage state, reject further normal work on
 a damaged component, and allow cleanup. The Host preserves typed failure causes.
-The ordinary 0.18 bridge returns supported source/reaction initialization
+The ordinary ABI 0.19 bridge returns supported source/reaction initialization
 panics as failures and prevents reuse of that damaged instance while allowing
 disposal. Old component layouts are rejected, not upgraded. Neither family can contain `panic=abort`,
 unsafe-memory corruption or arbitrary non-yielding code within the process.

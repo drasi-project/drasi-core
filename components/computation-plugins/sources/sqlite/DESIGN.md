@@ -283,9 +283,9 @@ source wrote into user tables; those are the application's data.
 
 ## Management
 
-`Factory::assess` and `NativeManagement::assess` are pure: they parse the
-current and proposed configuration and classify each changed field by the
-weakest safe boundary; the strongest wins.
+The factory's `UpdatePlanner::assess` and `NativeManagement::assess` are pure:
+they parse the current and proposed configuration and classify each changed
+field by the weakest safe boundary; the strongest wins.
 
 | Boundary | Fields |
 |---|---|

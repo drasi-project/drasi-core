@@ -6,7 +6,7 @@
 // under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
 // CONDITIONS OF ANY KIND, either express or implied.
 
-//! Native ComputationGraph ABI, deliberately unrelated to Source/Reaction ABI 0.15.
+//! Native ComputationGraph ABI, deliberately unrelated to Source/Reaction ABI 0.19.0.
 //!
 //! Every pointer is either borrowed for the duration of a call or an opaque,
 //! producer-owned handle. Only the producer may dereference or release a handle.

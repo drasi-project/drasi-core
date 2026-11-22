@@ -32,6 +32,9 @@ pub(super) struct Health {
     inspector: ComputationInspector,
     changes: watch::Receiver<Arc<ComputationInspection>>,
     sequence: u64,
+    retrying: BTreeSet<ComponentId>,
+    #[cfg(test)]
+    pub(super) notices: Vec<String>,
 }
 
 impl Health {
@@ -39,32 +42,51 @@ impl Health {
         let inspector = core.computation_control()?.inspector();
         let mut changes = inspector.subscribe();
         let initial = changes.borrow_and_update().clone();
-        Self::inspect(&initial)?;
-        Ok(Self {
+        let mut health = Self {
             inspector,
             changes,
             sequence: initial.sequence,
-        })
+            retrying: BTreeSet::new(),
+            #[cfg(test)]
+            notices: Vec::new(),
+        };
+        health.inspect(&initial)?;
+        Ok(health)
     }
 
-    fn inspect(snapshot: &ComputationInspection) -> anyhow::Result<()> {
-        let failures: Vec<_> = snapshot
-            .observed
-            .components
-            .iter()
-            .filter_map(|(id, component)| {
-                let label = snapshot
-                    .desired
-                    .component_by_id(id)
-                    .map_or_else(|| id.to_string(), |node| node.name.to_string());
-                component.failure.as_ref().map(|failure| {
+    // ANCHOR: health-inspect
+    fn inspect(&mut self, snapshot: &ComputationInspection) -> anyhow::Result<()> {
+        let mut failures = Vec::new();
+        for (id, component) in &snapshot.observed.components {
+            let label = snapshot
+                .desired
+                .component_by_id(id)
+                .map_or_else(|| id.to_string(), |node| node.name.to_string());
+            match &component.failure {
+                // The graph keeps retrying this input; the component has not failed.
+                Some(failure)
+                    if failure.phase == FailurePhase::Processing
+                        && failure.disposition == FailureDisposition::Retryable
+                        && component.lifecycle != ComponentLifecycle::Failed =>
+                {
+                    if self.retrying.insert(id.clone()) {
+                        let cause = delivery_cause(&failure.cause);
+                        self.notice(format!("component '{label}' is retrying: {cause}"));
+                    }
+                }
+                Some(failure) => failures.push(
                     anyhow::Error::new(GraphError::Reported {
                         cause: failure.cause.clone(),
                     })
-                    .context(format!("component '{label}' failed"))
-                })
-            })
-            .collect();
+                    .context(format!("component '{label}' failed")),
+                ),
+                None => {
+                    if self.retrying.remove(id) && component.health == ComponentHealth::Healthy {
+                        self.notice(format!("component '{label}' recovered"));
+                    }
+                }
+            }
+        }
         if failures.is_empty() {
             Ok(())
         } else {
@@ -73,6 +95,13 @@ impl Health {
                     .into(),
             )
         }
+    }
+    // ANCHOR_END: health-inspect
+
+    fn notice(&mut self, message: String) {
+        eprintln!("{message}");
+        #[cfg(test)]
+        self.notices.push(message);
     }
 
     pub(super) fn check(&mut self) -> anyhow::Result<()> {
@@ -83,7 +112,7 @@ impl Health {
             .history(self.sequence)
             .context("component observation history was lost; stop and inspect the graph")?
         {
-            Self::inspect(&snapshot)?;
+            self.inspect(&snapshot)?;
             self.sequence = snapshot.sequence;
         }
         Ok(())
@@ -121,6 +150,7 @@ pub(super) async fn wait_started(
     }
 }
 
+#[cfg(any(test, feature = "plugins"))]
 pub(super) async fn accepted_component(
     core: &DrasiLib,
     receipt: &drasi_lib::management::AcceptanceReceipt,
@@ -146,6 +176,7 @@ pub(super) async fn accepted_component(
     declared_component(core, &id, name).await
 }
 
+#[cfg(any(test, feature = "plugins", feature = "management"))]
 pub(super) async fn declared_component(
     core: &DrasiLib,
     id: &ComponentId,
@@ -163,14 +194,61 @@ pub(super) async fn declared_component(
     Ok(core.component_by_id(id)?)
 }
 
+/// The outermost context and the root cause of one failure.
+fn summary<'a>(
+    causes: impl IntoIterator<Item = &'a (dyn std::error::Error + 'static)>,
+) -> Option<String> {
+    let causes: Vec<_> = causes.into_iter().collect();
+    let root = causes.last()?.to_string();
+    let context = causes.iter().find_map(|cause| {
+        cause.source()?;
+        let message = cause.to_string();
+        // Framework displays may already embed the root cause several times.
+        (!message.contains(&root)).then_some(message)
+    });
+    Some(context.map_or_else(|| root.clone(), |context| format!("{context}: {root}")))
+}
+
+/// What a sink reported, without the graph's component and delivery-class wrappers.
+fn delivery_cause(cause: &GraphError) -> String {
+    let error: &(dyn std::error::Error + 'static) = cause;
+    let chain: Vec<_> = std::iter::successors(Some(error), |error| error.source()).collect();
+    // The sink's own error starts below its delivery classification, if it has one.
+    let own = chain
+        .iter()
+        .rposition(|error| error.is::<DeliveryFailure>())
+        .or_else(|| chain.iter().rposition(|error| error.is::<GraphError>()))
+        .map_or(0, |wrapper| wrapper + 1);
+    summary(chain[own..].iter().copied()).unwrap_or_else(|| error.to_string())
+}
+
 pub(super) fn error_messages(error: &anyhow::Error) -> Vec<String> {
-    fn collect(error: &anyhow::Error, messages: &mut Vec<String>, seen: &mut BTreeSet<String>) {
+    use drasi_lib::error::OperationFailures;
+    fn collect(
+        error: &anyhow::Error,
+        context: Option<&str>,
+        messages: &mut Vec<String>,
+        seen: &mut BTreeSet<String>,
+    ) {
+        let within = |message: String| match context {
+            Some(context) => format!("{context}: {message}"),
+            None => message,
+        };
         if let Some(group) = error
             .chain()
-            .find_map(|cause| cause.downcast_ref::<drasi_lib::error::OperationFailures>())
+            .find_map(|cause| cause.downcast_ref::<OperationFailures>())
         {
+            // Keep what was being done, such as shutting down, when a group is wrapped.
+            // Transparent wrappers repeat the group's own message; skip those.
+            let shown = group.to_string();
+            let outer = error
+                .chain()
+                .take_while(|cause| !cause.is::<OperationFailures>())
+                .map(|cause| cause.to_string())
+                .find(|message| !message.contains(&shown))
+                .map(within);
             for failure in group.failures() {
-                collect(failure, messages, seen);
+                collect(failure, outer.as_deref().or(context), messages, seen);
             }
             return;
         }
@@ -209,9 +287,10 @@ pub(super) fn error_messages(error: &anyhow::Error) -> Vec<String> {
                 _ => Vec::new(),
             };
             if !failures.is_empty() {
-                for (context, cause) in failures {
+                for (operation, cause) in failures {
                     collect(
-                        &anyhow::Error::new(GraphError::Reported { cause }).context(context),
+                        &anyhow::Error::new(GraphError::Reported { cause }).context(operation),
+                        context,
                         messages,
                         seen,
                     );
@@ -219,20 +298,13 @@ pub(super) fn error_messages(error: &anyhow::Error) -> Vec<String> {
                 return;
             }
         }
-        let root = error.root_cause().to_string();
-        let context = error.chain().find_map(|cause| {
-            cause.source()?;
-            let message = cause.to_string();
-            // Framework displays may already embed the root cause several times.
-            (!message.contains(&root)).then_some(message)
-        });
-        let message = context.map_or_else(|| root.clone(), |context| format!("{context}: {root}"));
+        let message = within(summary(error.chain()).unwrap_or_default());
         if seen.insert(message.clone()) {
             messages.push(message);
         }
     }
     let mut messages = Vec::new();
-    collect(error, &mut messages, &mut BTreeSet::new());
+    collect(error, None, &mut messages, &mut BTreeSet::new());
     messages
 }
 

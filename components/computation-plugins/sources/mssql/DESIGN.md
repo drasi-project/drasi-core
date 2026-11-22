@@ -277,8 +277,9 @@ instead. Typed failures (`SchemaChanged`, `PositionUnavailable`,
 
 ## Management
 
-`Factory::assess` and `NativeManagement` classify every field (table in
-[CONFIGURATION.md](CONFIGURATION.md#settings)); assessment is pure.
+The factory's `UpdatePlanner::assess` and `NativeManagement` classify every
+field (table in [CONFIGURATION.md](CONFIGURATION.md#settings)); assessment is
+pure.
 
 - **InPlace** (after a completed pause): `pollIntervalMs`, `maxRows`,
   `maxBytes`, `reconnectBudgetMs`; the worker reads them before each poll or

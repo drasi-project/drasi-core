@@ -118,8 +118,8 @@ For example, gRPC sink `batchSize` is bounded to `1..=65536`, and the network
 sources mark `authToken` and `tlsPrivateKeyPem` as secret fields. These
 descriptions do not enable missing features. Rebuild the component library to
 publish the new details; host and plugins must use native ABI 0.1.0 and the
-UUID wire-version-2 contract. Libraries built against older native ABIs are
-rejected.
+UUID wire-version-1 contract. Libraries built for another native ABI major or
+minor are rejected.
 
 ## Shared code and contracts
 

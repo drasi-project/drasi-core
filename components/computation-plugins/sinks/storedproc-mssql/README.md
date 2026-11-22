@@ -50,7 +50,7 @@ effect exactly once when the procedure does not commit on its own.
 | Lifecycle | Start honours cancellation and the deadline and creates or checks the progress and dead-letter tables; host-driven pause; Drain closes gracefully within `shutdownTimeoutMs`, Abort drops; Erase deletes only this sink's rows. |
 | Authentication | SQL authentication; activation credentials (SQL login or Microsoft Entra ID access token as Tiberius `AADToken`). The Host does not yet bind identities to consumers. |
 | TLS | Required by default with certificate verification; extra CA via `trustedCaPem`; plaintext and `trustServerCertificate` are explicit opt-ins with warnings. |
-| Management | `Factory::assess` and `NativeManagement`; every field classified (InPlace, Restart, Recreate, or Unsupported for `host`, `port`, `database` and `progressTable`). |
+| Management | `UpdatePlanner::assess` (from `Factory::update_planner`) and `NativeManagement`; every field classified (InPlace, Restart, Recreate, or Unsupported for `host`, `port`, `database` and `progressTable`). |
 | Configuration | Flat camelCase, unknown fields rejected, only `password` secret, published defaults, redacting `Debug`. |
 | Cancellation | Tiberius cannot send ATTENTION; an interrupted statement drops the connection and SQL Server rolls the transaction back. |
 

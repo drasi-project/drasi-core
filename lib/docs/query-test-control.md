@@ -15,11 +15,12 @@ Attach it before building:
 let check = QueryTestControl::new(epoch_ms);
 let deadline = QueryTestControl::new(epoch_ms);
 let lib = DrasiLib::builder()
-    .with_source(source)
+    .with_query_factory(query_factory)
+    .with_source_factory(ComponentName::try_new("events")?, true, make_source)
     .with_query(check_query)
     .with_query(deadline_query)
-    .with_query_test_control("check", check.clone())
-    .with_query_test_control("deadline", deadline.clone())
+    .with_query_test_control_by_name(ComponentName::try_new("check")?, check.clone())
+    .with_query_test_control_by_name(ComponentName::try_new("deadline")?, deadline.clone())
     .build().await?;
 ```
 

@@ -34,7 +34,7 @@ use drasi_core::models::SourceMiddlewareConfig;
 /// # Query Languages
 ///
 /// - **Cypher**: Default graph query language with pattern matching
-/// - **GQL**: GraphQL-style queries compiled to Cypher
+/// - **GQL**: ISO/IEC 39075 graph query language, not GraphQL
 ///
 /// # Default Behavior
 ///
@@ -46,7 +46,7 @@ use drasi_core::models::SourceMiddlewareConfig;
 ///
 /// ```yaml
 /// queries:
-///   - id: active_orders
+///   - name: active_orders
 ///     query: "MATCH (o:Order) WHERE o.status = 'active' RETURN o"
 ///     queryLanguage: Cypher  # Optional, this is the default
 ///     inputs: [orders_db]
@@ -56,22 +56,18 @@ use drasi_core::models::SourceMiddlewareConfig;
 ///
 /// ```yaml
 /// queries:
-///   - id: user_data
+///   - name: user_data
 ///     query: |
-///       {
-///         users(status: "active") {
-///           id
-///           name
-///           email
-///         }
-///       }
+///       MATCH (u:User)
+///       WHERE u.status = 'active'
+///       RETURN u.id, u.name, u.email
 ///     queryLanguage: GQL
 ///     inputs: [users_db]
 /// ```
 ///
 /// # Important Limitations
 ///
-/// **Unsupported Clauses**: ORDER BY, TOP, and LIMIT clauses are not supported in continuous
+/// **Unsupported Clauses**: ORDER BY, LIMIT, and SKIP clauses are not supported in continuous
 /// queries as they conflict with incremental result computation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum QueryLanguage {
@@ -316,7 +312,8 @@ impl Default for DrasiLibConfig {
 ///
 /// # Configuration Fields
 ///
-/// - **id**: Unique identifier (referenced by reactions)
+/// - **name**: Required, case-sensitive name; reactions and other components select the query by it
+/// - **id**: Optional UUID, accepted only by instances constructed with `allowExternalComponentIds`
 /// - **query**: Query string in specified language
 /// - **queryLanguage**: Cypher or GQL (default: Cypher)
 /// - **inputs**: Ordered upstream components, each a name or an object with `component`, optional `port`, and optional label/pipeline mappings
@@ -334,7 +331,7 @@ impl Default for DrasiLibConfig {
 ///
 /// ```yaml
 /// queries:
-///   - id: active_orders
+///   - name: active_orders
 ///     query: "MATCH (o:Order) WHERE o.status = 'active' RETURN o"
 ///     queryLanguage: Cypher  # Optional, this is default
 ///     inputs:
@@ -347,7 +344,7 @@ impl Default for DrasiLibConfig {
 ///
 /// ```yaml
 /// queries:
-///   - id: order_customer_join
+///   - name: order_customer_join
 ///     query: |
 ///       MATCH (o:Order)-[:BELONGS_TO]->(c:Customer)
 ///       WHERE o.status = 'active'
@@ -361,7 +358,7 @@ impl Default for DrasiLibConfig {
 ///
 /// ```yaml
 /// queries:
-///   - id: synthetic_join_query
+///   - name: synthetic_join_query
 ///     query: |
 ///       MATCH (o:Order)-[:CUSTOMER]->(c:Customer)
 ///       RETURN o.id, c.name
@@ -381,7 +378,7 @@ impl Default for DrasiLibConfig {
 ///
 /// ```yaml
 /// queries:
-///   - id: high_volume_processing
+///   - name: high_volume_processing
 ///     query: "MATCH (n:Event) WHERE n.timestamp > timestamp() - 60000 RETURN n"
 ///     inputs:
 ///       - event_stream
@@ -393,7 +390,7 @@ impl Default for DrasiLibConfig {
 ///
 /// ```yaml
 /// queries:
-///   - id: gql_users
+///   - name: gql_users
 ///     query: |
 ///       MATCH (u:User)
 ///       WHERE u.status = 'active'

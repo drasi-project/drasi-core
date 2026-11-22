@@ -120,20 +120,23 @@ input, and can serve its own current output as a snapshot to downstream
 consumers.
 
 - **Quiescent initialization:** declare `quiescent_bootstrap = Some(port)` and
-  return the same port from `quiescent_bootstrap_input`. Records arrive through
-  `bootstrap(InputEnvelope)`; `bootstrap_completed` publishes the initialized
-  state. The provider must be quiescent; the graph refuses any other provider
-  when the edge binds. The Host blocks data operations and output reads until
-  completion.
+  return `BootstrapInput::Quiescent`, a `NativeBootstrapInput` handler, from
+  `NativeTransformer::bootstrap_input`; the input port comes from the
+  declaration. Records arrive through `bootstrap(InputEnvelope)`;
+  `bootstrap_completed` publishes the initialized state. The provider must be
+  quiescent; the graph refuses any other provider when the edge binds. The Host
+  blocks data operations and output reads until completion.
 - **Durable initialization:** declare `durable_bootstrap = Some(port)` (it
   requires indexed processing and committed input progress on that port),
-  return it from `durable_bootstrap_input`, and stage watermarks and
-  completion state atomically in `bootstrap_completed`.
+  return `BootstrapInput::Durable`, a `NativeDurableBootstrapInput` handler,
+  from `bootstrap_input`, and stage watermarks and completion state atomically
+  in `bootstrap_completed`.
 - **Status:** `bootstrap_status` reports `configured` (the configuration asks
   for a provider), `complete` and `reset_allowed`. Declare
   `bootstrap_optional` when the configuration decides whether a provider is
   used; the Host checks the status against the bound edges before activation.
-  Implement `reset_bootstrap` only when `reset_allowed` can be true.
+  A durable handler also implements the required `reset_bootstrap`, which the
+  Host calls only while initializing and only when `reset_allowed` is true.
 - **Relay to consumers:** list the output ports whose current state can be
   read as a snapshot in `output_snapshots` and register exactly those
   providers in `NativeComponent::output_readers`. A downstream query then

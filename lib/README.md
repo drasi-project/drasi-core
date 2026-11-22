@@ -1,7 +1,7 @@
 # DrasiLib
 
 [![Crates.io](https://img.shields.io/crates/v/drasi-lib.svg)](https://crates.io/crates/drasi-lib)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](../LICENSE)
 
 DrasiLib is a Rust library that brings [Drasi](https://drasi.io/) change processing into your application as an embedded library. It monitors data sources using **continuous queries** and delivers precise change notifications to reactions — all in-process, with no external infrastructure required.
 
@@ -98,7 +98,7 @@ Start with the guide for your task:
 | [Implementation reference](docs/computation-graph-reference.md) | API types, state transitions, custom components, connections and code locations |
 | [Runtime architecture review](docs/runtime-architecture.md) | Ownership diagrams, complete type inventory, cardinality matrix, namespace LOC heatmap and repeatable drift review |
 | [ComputationGraph remaining work](docs/computation-graph-remaining-work.md) | Single active list of validated issues, investigations, qualification gaps and improvements, including per-plugin native source and sink work, with priorities, scope and completion criteria |
-| [Testing and qualification](#testing-and-qualification) | Executable requirements, mandatory feature profiles and interpretation of qualification evidence |
+| [Testing](#testing) | Test commands, supported feature configurations and container-backed tests |
 | [Managed-query test controls](docs/query-test-control.md) | Opt-in independent physical clocks and actual due-work/output frontiers; no production clock or downstream completion substitution |
 
 From the drasi-core repository root, run a complete in-process example:
@@ -202,7 +202,11 @@ let identity = AwsIdentityProvider::with_assumed_role(
 All identity providers implement the `IdentityProvider` trait and can be passed to any reaction or source that supports it:
 
 ```rust
-let reaction = PostgresStoredProcReaction::builder("my-reaction")
+use drasi_reaction_storedproc_postgres::PostgresStoredProcReaction;
+
+// `reaction_id` is the UUID that DrasiLib assigns, for example the `id` passed
+// to a reaction factory.
+let reaction = PostgresStoredProcReaction::builder(reaction_id)
     .with_hostname("mydb.postgres.database.azure.com")
     .with_database("mydb")
     .with_identity_provider(identity)
@@ -227,13 +231,13 @@ The builder provides a fluent interface for configuring sources, queries, and re
 ### Basic Example
 
 ```rust
-use drasi_lib::{DrasiLib, Query};
+use drasi_lib::config::ComponentReference;
+use drasi_lib::{ComponentName, DrasiLib, Query};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Sources and reactions are plugins — create instances from plugin crates
-    let source = my_source::MySource::new("sensors", config)?;
-    let reaction = my_reaction::MyReaction::new("alerts", vec!["high-temp".into()]);
+    // Sources and reactions are plugins. DrasiLib assigns each component's UUID
+    // and passes it to the plugin's constructor.
     let query_plugin = drasi_host_sdk::computation::NativePlugin::from_definition(
         drasi_computation_transformer_query::plugin()?,
     )?;
@@ -241,22 +245,29 @@ async fn main() -> anyhow::Result<()> {
     let core = DrasiLib::builder()
         .with_id("my-app")
         .with_query_factory(query_plugin.query_factory()?)
-        .with_source(source)
-        .with_reaction(reaction)
+        .with_source_factory(ComponentName::try_new("sensors")?, true, |id| {
+            my_source::MySource::new(id)
+        })
+        .with_reaction_factory(
+            ComponentName::try_new("alerts")?,
+            vec![ComponentReference::by_name(ComponentName::try_new("high-temp")?)],
+            true,
+            |id, queries| Ok(my_reaction::MyReaction::new(id, queries)),
+        )
         .with_query(
-            Query::cypher("high-temp")
+            Query::cypher(ComponentName::try_new("high-temp")?)
                 .query("MATCH (s:Sensor) WHERE s.temperature > 75 RETURN s.id, s.temperature")
-                .from_input("sensors")
-                .build()
+                .from_input_by_name(ComponentName::try_new("sensors")?)
+                .build()?,
         )
         .build()
         .await?;
 
     core.start().await?;
 
-    // DrasiLib runs until you stop it
+    // DrasiLib runs until you shut it down
     tokio::signal::ctrl_c().await?;
-    core.stop().await?;
+    core.shutdown().await?;
     Ok(())
 }
 ```
@@ -299,9 +310,10 @@ Create a DrasiLib instance with `DrasiLib::builder()`:
 let core = DrasiLib::builder()
     .with_id("my-app")                           // Builder default: "drasi-lib"
     .with_query_factory(query_plugin.query_factory()?) // Explicit native query selection
-    .with_source(source1)                        // Add a source plugin
-    .with_source(source2)                        // Add another source
-    .with_reaction(reaction)                     // Add a reaction plugin
+    .with_source_factory(sensors, true, |id| MySource::new(id)) // DrasiLib assigns the UUID
+    .with_reaction_factory(alerts, inputs, true, |id, queries| {
+        Ok(MyReaction::new(id, queries))         // Receives the resolved query UUIDs
+    })
     .with_query(query_config)                    // Add a query (see Query Builder)
     .with_priority_queue_capacity(50_000)         // Event queue depth (default: 10,000)
     .with_dispatch_buffer_capacity(5_000)         // Channel buffer size (default: 1,000)
@@ -312,7 +324,12 @@ let core = DrasiLib::builder()
     .await?;
 ```
 
-Sources and reactions are **owned by DrasiLib** after calling `with_source()` / `with_reaction()`. You cannot use the instance after passing it to the builder.
+Sources and reactions are **owned by DrasiLib**. A factory receives the UUID
+that DrasiLib assigns to the component; `sensors` and `alerts` are
+`ComponentName` values, and `inputs` are the reaction's query references.
+Passing an already constructed object with `with_source(name, source)` or
+`with_reaction(name, reaction)` also transfers ownership, but requires
+`with_allow_external_component_ids(true)`.
 
 ### Builder Method Reference
 
@@ -322,8 +339,11 @@ Sources and reactions are **owned by DrasiLib** after calling `with_source()` / 
 | `with_telemetry(TelemetryOptions)` | Runtime-only trace/metric collection policy | `Off` |
 | `with_component_logging(ComponentLogRuntime)` | Supply host-composed capture instead of automatic setup | Automatic default logging |
 | `with_query_factory(Arc<dyn ComponentFactory>)` | Explicit ordinary-query implementation | None; no linked fallback |
-| `with_source(impl Source + 'static)` | Source plugin (chainable) | — |
-| `with_reaction(impl Reaction + 'static)` | Reaction plugin (chainable) | — |
+| `with_source_factory(ComponentName, bool, FnOnce(ComponentId) -> Result<S>)` | Source plugin constructed with its assigned UUID; the `bool` is auto-start (chainable) | — |
+| `with_reaction_factory(ComponentName, Vec<ComponentReference>, bool, FnOnce(ComponentId, Vec<ComponentId>) -> Result<R>)` | Reaction plugin constructed with its UUID and resolved query UUIDs (chainable) | — |
+| `with_allow_external_component_ids(bool)` | Permit caller-assigned UUIDs and preconstructed objects | `false` |
+| `with_source(ComponentName, impl Source + 'static)` | Preconstructed source; requires external component IDs | — |
+| `with_reaction(ComponentName, impl Reaction + 'static)` | Preconstructed reaction; requires external component IDs | — |
 | `with_query(QueryConfig)` | Query config from `Query` builder | — |
 | `with_priority_queue_capacity(usize)` | Default event queue capacity | `10,000` |
 | `with_dispatch_buffer_capacity(usize)` | Default channel buffer size | `1,000` |
@@ -340,25 +360,25 @@ Sources and reactions are **owned by DrasiLib** after calling `with_source()` / 
 Use the `Query` builder to create query configurations:
 
 ```rust
-use drasi_lib::Query;
+use drasi_lib::{ComponentName, Query};
 
-let config = Query::cypher("active-orders")
+let config = Query::cypher(ComponentName::try_new("active-orders")?)
     .query(r#"
         MATCH (o:Order)
         WHERE o.status = 'active' AND o.total > 100
         RETURN o.id, o.customer, o.total
     "#)
-    .from_input("orders-db")
-    .build();
+    .from_input_by_name(ComponentName::try_new("orders-db")?)
+    .build()?;
 ```
 
 For GQL (ISO 9074:2024 graph query language — not GraphQL):
 
 ```rust
-let config = Query::gql("active-orders")
+let config = Query::gql(ComponentName::try_new("active-orders")?)
     .query("MATCH (o:Order) WHERE o.status = 'active' RETURN o.id, o.total")
-    .from_input("orders-db")
-    .build();
+    .from_input_by_name(ComponentName::try_new("orders-db")?)
+    .build()?;
 ```
 
 ### Query Builder Methods
@@ -366,10 +386,12 @@ let config = Query::gql("active-orders")
 | Method | Description | Default |
 |--------|-------------|---------|
 | `query(impl Into<String>)` | Cypher or GQL query string | **Required** |
-| `from_input(impl Into<String>)` | Consume an upstream component (a source, another query or a transformer) by ID | **Required** (at least one) |
-| `from_input_port(id, port)` | Consume a named output port of an upstream component | — |
-| `from_input_with_pipeline(id, Vec<String>)` | Consume with a named middleware pipeline | — |
+| `from_input_by_name(ComponentName)` | Consume an upstream component (a source, another query or a transformer) by name | **Required** (at least one input) |
+| `from_input_by_id(ComponentId)` | Consume an upstream component by its UUID | — |
+| `from_input_port_by_name(ComponentName, PortId)` / `from_input_port_by_id(ComponentId, PortId)` | Consume a named output port of an upstream component | — |
+| `from_input_with_pipeline_by_name(ComponentName, Vec<String>)` / `from_input_with_pipeline_by_id(ComponentId, Vec<String>)` | Consume with a named middleware pipeline | — |
 | `with_input(QueryInputConfig)` | Add a fully specified input (port, label selectors, pipeline) | — |
+| `with_id(ComponentId)` | Choose the query's UUID; requires external component IDs | Assigned by DrasiLib |
 | `with_result_label(impl Into<String>)` | Label published result nodes (the output schema is unchanged) | `Result` |
 | `auto_start(bool)` | Start with `core.start()` | `true` |
 | `enable_bootstrap(bool)` | Load initial data from sources | `true` |
@@ -381,7 +403,9 @@ let config = Query::gql("active-orders")
 | `with_storage_backend(StorageBackendRef)` | Persistent storage for this query | In-memory |
 | `with_recovery_policy(RecoveryPolicy)` | Gap-recovery behavior for persistent queries (`Strict` fails on gap, `AutoReset` wipes + re-bootstraps) | `Strict` (via global default) |
 | `with_middleware(SourceMiddlewareConfig)` | Add middleware transformation | `[]` |
-| `build() -> QueryConfig` | Build the configuration | — |
+| `with_bootstrap_provider(ComponentReference)` | Bootstrap only from this local provider, never from the inputs | — |
+| `with_bootstrap_timeout_secs(u64)` | How long snapshot and outbox reads wait for bootstrap to finish | `300` |
+| `build() -> anyhow::Result<QueryConfig>` | Build the configuration | — |
 
 ---
 
@@ -392,14 +416,14 @@ A single query can span data from multiple sources. Define **synthetic joins** t
 ```rust
 use drasi_lib::config::{QueryJoinConfig, QueryJoinKeyConfig};
 
-let config = Query::cypher("orders-with-customers")
+let config = Query::cypher(ComponentName::try_new("orders-with-customers")?)
     .query(r#"
         MATCH (o:Order)-[:PLACED_BY]->(c:Customer)
         WHERE o.status = 'pending'
         RETURN o.id, c.name, c.email, o.total
     "#)
-    .from_input("orders-db")
-    .from_input("customers-db")
+    .from_input_by_name(ComponentName::try_new("orders-db")?)
+    .from_input_by_name(ComponentName::try_new("customers-db")?)
     .with_joins(vec![QueryJoinConfig {
         id: "PLACED_BY".to_string(),
         keys: vec![
@@ -407,7 +431,7 @@ let config = Query::cypher("orders-with-customers")
             QueryJoinKeyConfig { label: "Customer".into(), property: "id".into() },
         ],
     }])
-    .build();
+    .build()?;
 ```
 
 DrasiLib creates `PLACED_BY` relationships whenever `Order.customer_id == Customer.id`, even though the orders and customers come from different databases.
@@ -459,12 +483,12 @@ RETURN t.id, t.title, t.assignee
 
 ## Runtime Management
 
-String component selectors in the ordinary `DrasiLib` facade are exact current
-names. This includes names whose text looks like a UUID; no string method parses,
-falls back to, or guesses an identity. The name is resolved once when the
-operation is admitted, so a later rename or reuse of that name does not retarget
-the operation. Use the paired `*_by_id(&ComponentId)` method for explicit
-identity-based access.
+Component operations in the ordinary `DrasiLib` facade come in pairs. A
+`*_by_name(&ComponentName)` method selects a component by its exact current
+name; a `*_by_id(&ComponentId)` method selects its immutable UUID. A name whose
+text looks like a UUID is still a name; no name method parses, falls back to, or
+guesses an identity. The name is resolved once when the operation is admitted,
+so a later rename or reuse of that name does not retarget the operation.
 
 ### Lifecycle
 
@@ -477,80 +501,108 @@ let running = core.is_running().await;  // Check if running
 ### Adding, Removing, and Updating Components at Runtime
 
 ```rust
-// Add (auto-starts if server is running and component has auto_start=true)
-core.add_source(new_source).await?;
+use drasi_lib::config::ComponentReference;
+use drasi_lib::ComponentName;
+
+let source = ComponentName::try_new("my-source")?;
+let query = ComponentName::try_new("my-query")?;
+let reaction = ComponentName::try_new("my-reaction")?;
+
+// Add. DrasiLib assigns each UUID and passes it to the constructor; a component
+// starts immediately when the instance is running and its auto_start is true.
+core.create_source(source.clone(), true, |id| MySource::new(id)).await?;
 core.add_query(query_config).await?;
-core.add_reaction(new_reaction).await?;
+core.create_reaction(
+    reaction.clone(),
+    vec![ComponentReference::by_name(query.clone())],
+    true,
+    |id, queries| Ok(MyReaction::new(id, queries)),
+)
+.await?;
 
-// Remove (cleanup=true calls deprovision() for resource cleanup)
-core.remove_source("my-source", /* cleanup */ true).await?;
-core.remove_query("my-query").await?;
-core.remove_reaction("my-reaction", /* cleanup */ false).await?;
+// Remove. cleanup = true also calls the component's delete_owned_resources()
+// hook and erases its stored state.
+core.remove_source_by_name(&source, /* cleanup */ true).await?;
+core.remove_query_by_name(&query).await?;
+core.remove_reaction_by_name(&reaction, /* cleanup */ false).await?;
 
-// Hot-swap (preserves graph edges, event history, and relationships)
-core.update_source("my-source", replacement_source).await?;
-core.update_query("my-query", new_query_config).await?;
-core.update_reaction("my-reaction", replacement_reaction).await?;
+// Update. The registered factory assesses the change; the UUID and name stay.
+core.update_query_by_name(&query, new_query_config).await?;
+core.update_source_by_name(&source, source_record).await?;       // OrdinaryComponentRecord
+core.update_reaction_by_name(&reaction, reaction_record).await?; // OrdinaryComponentRecord
 
 // Start / stop individual components
-core.start_source("my-source").await?;
-core.stop_source("my-source").await?;
-core.start_query("my-query").await?;
-core.stop_query("my-query").await?;
-core.start_reaction("my-reaction").await?;
-core.stop_reaction("my-reaction").await?;
+core.start_source_by_name(&source).await?;
+core.stop_source_by_name(&source).await?;
+core.start_query_by_name(&query).await?;
+core.stop_query_by_name(&query).await?;
+core.start_reaction_by_name(&reaction).await?;
+core.stop_reaction_by_name(&reaction).await?;
 
-// Explicit identity access uses a typed ComponentId, not a UUID string selector.
-let source_id = core.component_by_name("my-source")?.id().clone();
+// Explicit identity access uses a typed ComponentId, not a name.
+let source_id = core.component_by_name(&source)?.id().clone();
 core.start_source_by_id(&source_id).await?;
 ```
 
-`stop_query()` also cleans up queries in `Error`, including failures during
-startup or bootstrap. It releases active subscriptions and processing tasks before
-reporting `Stopped`, while preserving the query configuration and persisted state.
+Source and reaction updates take an `OrdinaryComponentRecord`: a
+reconstructible recipe, with the component's existing UUID and name, that the
+instance's registered resolver can construct. An object added through
+`create_source`, `add_source` or a builder factory cannot be updated in place;
+remove it and add its replacement.
+
+`stop_query_by_name()` and `stop_query_by_id()` also clean up queries in `Error`,
+including failures during startup or bootstrap. They release active
+subscriptions and processing tasks before reporting `Stopped`, while preserving
+the query configuration and persisted state.
 Stopping acknowledges the failure; its details remain in the component events,
 and the next start retries the query, including a failed construction. A terminal
 construction failure stays in `Error` until the query is updated or removed.
-The managed `stop_query()` command rejects an already stopped query with an
+The managed `stop_query_by_*()` command rejects an already stopped query with an
 "already stopped" error. In contrast, calling a query runtime's `Query::stop()`
 directly is idempotent and returns `Ok(())` when already stopped.
 Updating or removing a failed query, and stopping the instance, also release its
 active lifecycle resources. Updating a failed query leaves its replacement stopped
 until explicitly started.
 
-`stop_source()` likewise invokes cleanup for sources in `Error`. Source plugins
+`stop_source_by_name()` likewise invokes cleanup for sources in `Error`. Source plugins
 must release their resources and report `Stopped` before returning success; a
 legacy plugin that no-ops in `Error` is rejected instead of leaving the graph at
 `Stopping`. Updating/removing failed sources and instance shutdown also invoke
 cleanup. Updating a failed source leaves its replacement stopped. Managed
-`stop_source()` rejects an already stopped source, even if its direct `stop()`
+`stop_source_by_*()` rejects an already stopped source, even if its direct `stop()`
 is idempotent.
 
 ### Inspecting Components
 
 ```rust
-// List all components with their current status
-let sources: Vec<(String, ComponentStatus)> = core.list_sources().await?;
+use drasi_lib::{AssignedQueryConfig, ComponentName, ComponentStatus, DrasiLibConfig};
+
+let source = ComponentName::try_new("my-source")?;
+let query = ComponentName::try_new("my-query")?;
+let reaction = ComponentName::try_new("my-reaction")?;
+
+// List components with their UUID, name and current status
+let sources = core.list_sources().await?;       // Vec<ComponentListEntry>
 let queries = core.list_queries().await?;
 let reactions = core.list_reactions().await?;
 
 // Get status of a specific component
-let status: ComponentStatus = core.get_source_status("my-source").await?;
+let status: ComponentStatus = core.get_source_status_by_name(&source).await?;
 
 // Get detailed info (type, status, configuration metadata)
-let info = core.get_source_info("my-source").await?;       // -> SourceRuntime
-let info = core.get_query_info("my-query").await?;         // -> QueryRuntime
-let info = core.get_reaction_info("my-reaction").await?;   // -> ReactionRuntime
+let info = core.get_source_info_by_name(&source).await?;     // -> SourceRuntime
+let info = core.get_query_info_by_name(&query).await?;       // -> QueryRuntime
+let info = core.get_reaction_info_by_name(&reaction).await?; // -> ReactionRuntime
 
 // Get current query result set as a JSON snapshot
-let results: Vec<serde_json::Value> = core.get_query_results("my-query").await?;
+let results: Vec<serde_json::Value> = core.get_query_results_by_name(&query).await?;
 
 // Use the typed identity variant when a ComponentId is already available
-let query_id = core.component_by_name("my-query")?.id().clone();
+let query_id = core.component_by_name(&query)?.id().clone();
 let results = core.get_query_results_by_id(&query_id).await?;
 
 // Get query configuration
-let config: QueryConfig = core.get_query_config("my-query").await?;
+let config: AssignedQueryConfig = core.get_query_config_by_name(&query).await?;
 
 // Export full DrasiLib configuration
 let config: DrasiLibConfig = core.get_current_config().await?;
@@ -568,12 +620,14 @@ for regression coverage, empty-group semantics, and compatibility limits.
 
 | Status | Meaning |
 |--------|---------|
-| `Stopped` | Not running (initial state) |
+| `Added` | Registered in the graph but not yet started (initial state) |
 | `Starting` | Initialization in progress |
 | `Running` | Actively processing |
 | `Stopping` | Graceful shutdown in progress |
+| `Stopped` | Not running after previously running |
+| `Removed` | Removed from the graph |
 | `Error` | Failed (check events for details) |
-| `Reconfiguring` | Being updated via `update_*()` |
+| `Reconfiguring` | Being updated via an `update_*_by_name()` or `update_*_by_id()` method |
 
 ---
 
@@ -583,9 +637,14 @@ Every status change is recorded and can be subscribed to in real-time:
 
 ```rust
 // Subscribe to events for a specific component (returns history + live stream)
-let (history, mut rx) = core.subscribe_source_events("my-source").await?;
-let (history, mut rx) = core.subscribe_query_events("my-query").await?;
-let (history, mut rx) = core.subscribe_reaction_events("my-reaction").await?;
+let source = ComponentName::try_new("my-source")?;
+let (history, mut rx) = core.subscribe_source_events_by_name(&source).await?;
+let (history, mut rx) = core
+    .subscribe_query_events_by_name(&ComponentName::try_new("my-query")?)
+    .await?;
+let (history, mut rx) = core
+    .subscribe_reaction_events_by_name(&ComponentName::try_new("my-reaction")?)
+    .await?;
 
 // Process historical events
 for event in &history {
@@ -612,7 +671,7 @@ while let Ok(event) = rx.recv().await {
 
 ```rust
 pub struct ComponentEvent {
-    pub component_id: String,
+    pub component_id: ComponentId,
     pub component_type: ComponentType,  // Source, Query, Reaction, ...
     pub status: ComponentStatus,
     pub timestamp: DateTime<Utc>,
@@ -644,14 +703,18 @@ Instance ("my-app")
 let snapshot: GraphSnapshot = core.get_graph().await?;
 let json = serde_json::to_string_pretty(&snapshot)?;
 
+let orders_db = ComponentName::try_new("orders-db")?;
+
 // Find what depends on a component
-let dependents: Vec<ComponentNode> = core.get_dependents("orders-db").await?;
+let dependents: Vec<ComponentNode> = core.get_dependents_by_name(&orders_db).await?;
 
 // Find what a component depends on
-let deps: Vec<ComponentNode> = core.get_dependencies("my-query").await?;
+let deps: Vec<ComponentNode> = core
+    .get_dependencies_by_name(&ComponentName::try_new("my-query")?)
+    .await?;
 
 // Check if safe to remove (errors if other components depend on it)
-core.can_remove_component("orders-db").await?;
+core.can_remove_component_by_name(&orders_db).await?;
 ```
 
 Graph inspection and manager inventory, configuration, labels and subscriptions
@@ -680,13 +743,15 @@ Configure how query results are routed to reaction subscribers:
 | **`Broadcast`** | No — fast fire-and-forget | Possible if receivers lag | High fanout (many subscribers), uniform speeds |
 
 ```rust
-Query::cypher("my-query")
-    .with_dispatch_mode(DispatchMode::Channel)    // Default: dedicated channel per subscriber
-    .build()
+use drasi_lib::DispatchMode;
 
-Query::cypher("my-query")
+let channel = Query::cypher(ComponentName::try_new("my-query")?)
+    .with_dispatch_mode(DispatchMode::Channel)    // Default: dedicated channel per subscriber
+    .build()?;
+
+let broadcast = Query::cypher(ComponentName::try_new("my-query")?)
     .with_dispatch_mode(DispatchMode::Broadcast)  // Shared broadcast channel
-    .build()
+    .build()?;
 ```
 
 ---
@@ -705,7 +770,7 @@ backends can be configured inline.
 
 ```rust
 use drasi_index_rocksdb::RocksDbIndexProvider;
-use drasi_lib::{DrasiLib, Query, StorageBackendRef};
+use drasi_lib::{ComponentName, DrasiLib, Query, StorageBackendRef};
 use std::sync::Arc;
 
 let provider = RocksDbIndexProvider::new("/data/drasi-indexes", false, false)
@@ -716,14 +781,14 @@ let core = DrasiLib::builder()
     .with_query_factory(query_plugin.query_factory()?) // Same explicit selection as above
     // 1. Register the provider under a name
     .with_index_provider("rocks", Arc::new(provider))
-    .with_source(source)
+    .with_source_factory(ComponentName::try_new("sensors")?, true, |id| MySource::new(id))
     .with_query(
-        Query::cypher("my-query")
+        Query::cypher(ComponentName::try_new("my-query")?)
             .query("MATCH (n:Sensor) RETURN n")
-            .from_input("sensors")
+            .from_input_by_name(ComponentName::try_new("sensors")?)
             // 2. Assign the backend to a specific query by name
             .with_storage_backend(StorageBackendRef::Named("rocks".to_string()))
-            .build()
+            .build()?,
     )
     .build()
     .await?;
@@ -764,16 +829,18 @@ Plugins access the state store through their runtime context:
 
 ```rust
 // Inside a Source or Reaction implementation:
-async fn initialize(&self, context: SourceRuntimeContext) {
-    self.base.initialize(context).await;
+async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+    self.base.bind_runtime_context(context).await;
 }
 
 async fn start(&self) -> Result<()> {
     if let Some(store) = self.base.state_store().await {
+        // The component's own partition of the store
+        let partition = drasi_lib::StorePartition::component(self.base.id.clone());
         // Read persisted state
-        let cursor = store.get("my-store", "last-cursor").await?;
+        let cursor = store.get(&partition, "last-cursor").await?;
         // Write state
-        store.set("my-store", "last-cursor", new_cursor.as_bytes().to_vec()).await?;
+        store.set(&partition, "last-cursor", new_cursor.as_bytes().to_vec()).await?;
     }
     Ok(())
 }
@@ -851,9 +918,15 @@ Migration notes:
 
 ```rust
 // Returns (recent_history, live_broadcast_receiver)
-let (history, mut rx) = core.subscribe_source_logs("my-source").await?;
-let (history, mut rx) = core.subscribe_query_logs("my-query").await?;
-let (history, mut rx) = core.subscribe_reaction_logs("my-reaction").await?;
+let (history, mut rx) = core
+    .subscribe_source_logs_by_name(&ComponentName::try_new("my-source")?)
+    .await?;
+let (history, mut rx) = core
+    .subscribe_query_logs_by_name(&ComponentName::try_new("my-query")?)
+    .await?;
+let (history, mut rx) = core
+    .subscribe_reaction_logs_by_name(&ComponentName::try_new("my-reaction")?)
+    .await?;
 
 for msg in &history {
     println!("[{}] {} {}: {}", msg.timestamp, msg.level, msg.component_id, msg.message);
@@ -871,8 +944,9 @@ pub struct LogMessage {
     pub level: LogLevel,              // Trace, Debug, Info, Warn, Error
     pub message: String,
     pub instance_id: String,          // DrasiLib instance that owns the component
-    pub component_id: String,         // e.g., "my-source"
+    pub component_id: ComponentId,    // The component's UUID
     pub component_type: ComponentLogType, // Includes native execution roles
+    pub metadata: Option<LogMetadata>, // Native log details, when supplied
 }
 ```
 
@@ -1303,7 +1377,7 @@ Middleware transforms data between sources and queries. Each middleware is a Car
 
 ```toml
 [dependencies]
-drasi-lib = { version = "0.4", features = ["middleware-promote", "middleware-decoder"] }
+drasi-lib = { path = "../drasi-core/lib", features = ["middleware-promote", "middleware-decoder"] }
 ```
 
 ### Available Middleware
@@ -1311,16 +1385,18 @@ drasi-lib = { version = "0.4", features = ["middleware-promote", "middleware-dec
 | Feature | Kind | Description |
 |---------|------|-------------|
 | `middleware-jq` | Transform | Apply jq expressions to incoming data |
-| `middleware-bundled-jq` | Transform | Same as above, but bundles jq (no system dep) |
+| `middleware-bundled-jq` | Transform | Same as above, with jq compiled from source instead of the system `libjq` |
 | `middleware-map` | Transform | Map properties using JSONPath selectors |
 | `middleware-promote` | Transform | Copy nested values to top-level properties |
 | `middleware-relabel` | Transform | Rename element labels |
-| `middleware-decoder` | Transform | Decode base64, hex, URL-encoded, or JSON-escaped strings |
+| `middleware-decoder` | Transform | Decode base64, base64url, hex, URL-encoded or JSON-escaped strings |
 | `middleware-parse-json` | Transform | Parse JSON strings into structured objects |
 | `middleware-unwind` | Transform | Expand arrays into separate graph elements |
-| `middleware-all` | Convenience | Enable all middleware |
+| `middleware-all` | Convenience | Enable all middleware; jq links against the system `libjq` unless `middleware-bundled-jq` is also enabled |
 
-> **Note:** `middleware-jq` compiles jq from source and requires build tools:
+> **Note:** `middleware-jq` links against the system jq library
+> (macOS: `brew install jq` / Ubuntu: `sudo apt-get install libjq-dev`).
+> `middleware-bundled-jq` compiles jq from source instead and requires build tools:
 > macOS: `brew install autoconf automake libtool` /
 > Ubuntu: `sudo apt-get install autoconf automake libtool flex bison`
 
@@ -1328,11 +1404,12 @@ drasi-lib = { version = "0.4", features = ["middleware-promote", "middleware-dec
 
 ```rust
 use drasi_core::models::SourceMiddlewareConfig;
+use drasi_lib::{ComponentName, Query};
 use serde_json::json;
 
-let config = Query::cypher("my-query")
+let config = Query::cypher(ComponentName::try_new("my-query")?)
     .query("MATCH (n:Device) RETURN n")
-    .from_input("iot-source")
+    .from_input_by_name(ComponentName::try_new("iot-source")?)
     .with_middleware(SourceMiddlewareConfig {
         kind: "promote".into(),
         name: "extract-location".into(),
@@ -1340,9 +1417,9 @@ let config = Query::cypher("my-query")
             "mappings": [
                 {"path": "$.metadata.location", "target_name": "location"}
             ]
-        })).unwrap(),
+        }))?,
     })
-    .build();
+    .build()?;
 ```
 
 ---
@@ -1365,25 +1442,38 @@ When using cdylib plugins (shared libraries), the plugin loader discovers and lo
 A source implements the `Source` trait:
 
 ```rust
-use drasi_lib::{Source, SourceBase, SourceBaseParams, ComponentStatus};
-use drasi_lib::context::SourceRuntimeContext;
-use drasi_lib::channels::SubscriptionResponse;
+use std::collections::HashMap;
+
+use anyhow::Result;
 use async_trait::async_trait;
+use drasi_lib::channels::SubscriptionResponse;
+use drasi_lib::context::SourceRuntimeContext;
+use drasi_lib::{
+    ComponentId, ComponentStatus, Source, SourceBase, SourceBaseParams,
+    SourceSubscriptionSettings,
+};
 
 pub struct MySource {
     base: SourceBase,
     // your config fields
 }
 
+impl MySource {
+    /// `id` is the UUID that DrasiLib assigns to the source.
+    pub fn new(id: ComponentId) -> Result<Self> {
+        Ok(Self { base: SourceBase::new(SourceBaseParams::new(id))? })
+    }
+}
+
 #[async_trait]
 impl Source for MySource {
-    fn id(&self) -> &str { &self.base.get_id() }
+    fn id(&self) -> &ComponentId { &self.base.id }
     fn type_name(&self) -> &str { "my-source" }
     fn properties(&self) -> HashMap<String, serde_json::Value> { HashMap::new() }
     fn auto_start(&self) -> bool { self.base.get_auto_start() }
 
-    async fn initialize(&self, context: SourceRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: SourceRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {
@@ -1393,8 +1483,7 @@ impl Source for MySource {
     }
 
     async fn stop(&self) -> Result<()> {
-        self.base.stop_common().await;
-        Ok(())
+        self.base.stop_common().await
     }
 
     async fn status(&self) -> ComponentStatus {
@@ -1416,42 +1505,58 @@ impl Source for MySource {
 A reaction implements the `Reaction` trait:
 
 ```rust
-use drasi_lib::{Reaction, ReactionBase, ReactionBaseParams, ComponentStatus};
-use drasi_lib::context::ReactionRuntimeContext;
+use std::collections::HashMap;
+
+use anyhow::Result;
 use async_trait::async_trait;
+use drasi_lib::channels::QueryResult;
+use drasi_lib::config::ComponentReference;
+use drasi_lib::context::ReactionRuntimeContext;
+use drasi_lib::{ComponentId, ComponentStatus, Reaction, ReactionBase, ReactionBaseParams};
 
 pub struct MyReaction {
     base: ReactionBase,
 }
 
+impl MyReaction {
+    /// `id` is the reaction's UUID; `queries` are the resolved UUIDs of the
+    /// queries it reads, as a reaction factory receives them.
+    pub fn new(id: ComponentId, queries: Vec<ComponentId>) -> Self {
+        let queries = queries.into_iter().map(ComponentReference::by_id).collect();
+        Self { base: ReactionBase::new(ReactionBaseParams::new(id, queries)) }
+    }
+}
+
 #[async_trait]
 impl Reaction for MyReaction {
-    fn id(&self) -> &str { self.base.get_id() }
+    fn id(&self) -> &ComponentId { &self.base.id }
     fn type_name(&self) -> &str { "my-reaction" }
     fn properties(&self) -> HashMap<String, serde_json::Value> { HashMap::new() }
-    fn query_ids(&self) -> Vec<String> { self.base.get_queries().clone() }
+    fn query_inputs(&self) -> Vec<ComponentReference> { self.base.queries.clone() }
     fn auto_start(&self) -> bool { self.base.get_auto_start() }
 
-    async fn initialize(&self, context: ReactionRuntimeContext) {
-        self.base.initialize(context).await;
+    async fn bind_runtime_context(&self, context: ReactionRuntimeContext) {
+        self.base.bind_runtime_context(context).await;
     }
 
     async fn start(&self) -> Result<()> {
         self.base.set_status(ComponentStatus::Running, None).await;
-        // spawn your result processing task — use base.enqueue_query_result()
+        // spawn your result processing task; it reads the results that the
+        // host delivers through enqueue_query_result()
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        self.base.stop_common().await;
-        Ok(())
+        self.base.stop_common().await
     }
 
     async fn status(&self) -> ComponentStatus {
         self.base.get_status().await
     }
 
-    fn as_any(&self) -> &dyn std::any::Any { self }
+    async fn enqueue_query_result(&self, result: QueryResult) -> Result<()> {
+        self.base.enqueue_query_result(result).await
+    }
 }
 ```
 
@@ -1494,11 +1599,13 @@ checkpoints simply because catch-up results entered a plugin queue.
 Recovery is configured via the `Reaction` trait and `ReactionBaseParams`:
 
 ```rust
-use drasi_lib::recovery::ReactionRecoveryPolicy;
-use drasi_lib::reactions::common::base::{ReactionBase, ReactionBaseParams};
+use drasi_lib::config::ComponentReference;
+use drasi_lib::reactions::{ReactionBase, ReactionBaseParams};
+use drasi_lib::{ComponentName, ReactionRecoveryPolicy};
 
-// Per-instance configuration (highest priority):
-let params = ReactionBaseParams::new("my-reaction", vec!["q1".into()])
+// Per-instance configuration (highest priority); `id` is the reaction's UUID:
+let queries = vec![ComponentReference::by_name(ComponentName::try_new("q1")?)];
+let params = ReactionBaseParams::new(id, queries)
     .with_recovery_policy(ReactionRecoveryPolicy::AutoReset);
 
 let base = ReactionBase::new(params);
@@ -1507,6 +1614,7 @@ let base = ReactionBase::new(params);
 Or override the default in your `Reaction` trait implementation:
 
 ```rust
+#[async_trait]
 impl Reaction for MyReaction {
     // ...
 
@@ -1525,8 +1633,8 @@ impl Reaction for MyReaction {
     async fn bootstrap(&self, ctx: BootstrapContext) -> Result<()> {
         // Called on fresh start (if needs_snapshot_on_fresh_start=true)
         // and on AutoReset recovery after a gap.
-        let snapshot = ctx.fetch_snapshot().await?;
-        while let Some(row) = snapshot.next().await {
+        let mut snapshot = ctx.fetch_snapshot().await?;
+        while let Some((row_signature, row)) = snapshot.next_keyed().await {
             // Process each row...
         }
         Ok(())
@@ -1559,11 +1667,11 @@ The runtime validates these constraints at startup:
 The outbox is a bounded ring buffer on the query side:
 
 ```rust
-let query = Query::cypher("q1")
+let query = Query::cypher(ComponentName::try_new("q1")?)
     .query("MATCH (n:Sensor) RETURN n.id, n.value")
-    .from_input("sensors")
+    .from_input_by_name(ComponentName::try_new("sensors")?)
     .with_outbox_capacity(5000)   // retain last 5000 results (default: 1000)
-    .build();
+    .build()?;
 ```
 
 If a reaction's checkpoint is older than the oldest outbox entry, that's a **gap** — and the recovery policy activates.
@@ -1610,7 +1718,7 @@ priority_queue_capacity: 50000
 dispatch_buffer_capacity: 5000
 
 queries:
-  - id: high-temp-alerts
+  - name: high-temp-alerts
     query: |
       MATCH (s:Sensor)
       WHERE s.temperature > 75
@@ -1621,7 +1729,7 @@ queries:
     auto_start: true
     enableBootstrap: true
 
-  - id: cross-source
+  - name: cross-source
     query: |
       MATCH (o:Order)-[:PLACED_BY]->(c:Customer)
       WHERE o.status = 'pending'
@@ -1640,11 +1748,12 @@ queries:
 
 ### Loading YAML
 
-Inside an async function, with the source/reaction objects and selected native
-`query_plugin` already constructed:
+Inside an async function, with the selected native `query_plugin` already
+constructed and the application's own source and reaction plugin types:
 
 ```rust,ignore
-use drasi_lib::{DrasiLib, DrasiLibConfig};
+use drasi_lib::config::ComponentReference;
+use drasi_lib::{ComponentName, DrasiLib, DrasiLibConfig};
 
 let yaml = std::fs::read_to_string("config.yaml")?;
 let config: DrasiLibConfig = serde_yaml::from_str(&yaml)?;
@@ -1662,19 +1771,22 @@ if let Some(capacity) = config.dispatch_buffer_capacity {
 for q in &config.queries {
     builder = builder.with_query(q.clone());
 }
+let alert_inputs = vec![ComponentReference::by_name(ComponentName::try_new("high-temp-alerts")?)];
 let core = builder
-    .with_source(sensors_source)
-    .with_source(orders_source)
-    .with_source(customers_source)
-    .with_reaction(my_reaction)
+    .with_source_factory(ComponentName::try_new("sensors")?, true, |id| SensorSource::new(id))
+    .with_source_factory(ComponentName::try_new("orders")?, true, |id| OrderSource::new(id))
+    .with_source_factory(ComponentName::try_new("customers")?, true, |id| CustomerSource::new(id))
+    .with_reaction_factory(ComponentName::try_new("alerts")?, alert_inputs, true, |id, queries| {
+        Ok(AlertReaction::new(id, queries))
+    })
     .build()
     .await?;
 ```
 
 This excerpt uses in-memory indexes. Register actual named storage providers
 when using storage references; parsing `storage_backends` does not construct
-external providers. The three source objects must use the IDs referenced in
-the YAML above. The query factory is supplied explicitly; there is no engine
+external providers. The three sources must use the names referenced in the
+YAML above. The query factory is supplied explicitly; there is no engine
 selector. See the [ComputationGraph configuration reference](docs/computation-graph-configuration.md).
 
 ### `DrasiLibConfig` Fields
@@ -1691,7 +1803,8 @@ selector. See the [ComputationGraph configuration reference](docs/computation-gr
 
 | Field | YAML Key | Type | Default |
 |-------|----------|------|---------|
-| `id` | `id` | `String` | **Required** |
+| `name` | `name` | `ComponentName` | **Required** |
+| `id` | `id` | `Option<ComponentId>` | Assigned by DrasiLib; a supplied UUID requires `allowExternalComponentIds` |
 | `query` | `query` | `String` | **Required** |
 | `query_language` | `queryLanguage` | `Cypher` or `GQL` | `Cypher` |
 | `inputs` | `inputs` | `Vec<QueryInputConfig>` (a component name or `{component, port, nodes, relations, pipeline}`) | `[]` |
@@ -1715,12 +1828,12 @@ selector. See the [ComputationGraph configuration reference](docs/computation-gr
 All public methods return `drasi_lib::Result<T>`, which wraps `DrasiError`:
 
 ```rust
-use drasi_lib::{DrasiError, Result};
+use drasi_lib::{ComponentName, DrasiError};
 
-match core.get_source_status("unknown").await {
+match core.get_source_status_by_name(&ComponentName::try_new("unknown")?).await {
     Ok(status) => println!("Status: {:?}", status),
-    Err(DrasiError::ComponentNotFound { component_type, component_id }) => {
-        println!("{component_type} '{component_id}' does not exist");
+    Err(DrasiError::ComponentNotFound { component_type, subject }) => {
+        println!("{component_type} {subject} does not exist");
     }
     Err(e) => println!("Unexpected error: {e}"),
 }
@@ -1730,12 +1843,12 @@ match core.get_source_status("unknown").await {
 
 | Variant | When |
 |---------|------|
-| `ComponentNotFound { component_type, component_id }` | Component does not exist |
-| `AlreadyExists { component_type, component_id }` | Duplicate component ID |
+| `ComponentNotFound { component_type, subject }` | Component does not exist; `subject` is the requested name or UUID |
+| `AlreadyExists { component_type, subject }` | Duplicate component name or UUID |
 | `InvalidConfig { message }` | Configuration validation failed |
 | `InvalidState { message }` | Operation not valid in current state |
 | `Validation { message }` | Input validation failed |
-| `OperationFailed { component_type, component_id, operation, reason }` | Runtime operation failed |
+| `OperationFailed { component_type, subject, operation, reason }` | Runtime operation failed |
 | `Internal(anyhow::Error)` | Internal error or a public classification carrying its original cause |
 
 **Cause-preserving errors:** operation, state and configuration conversions now
@@ -1758,20 +1871,25 @@ makes retrying an external effect safe.
 
 ## Feature Flags
 
+No feature is enabled by default.
+
 | Feature | Description |
 |---------|-------------|
-| `middleware-jq` | JQ transformations (requires system jq build tools) |
-| `middleware-bundled-jq` | JQ transformations (bundles jq, no system dependency) |
-| `middleware-decoder` | Base64, hex, URL, JSON-escape decoding |
+| `middleware-jq` | jq transformations; links against the system jq library |
+| `middleware-bundled-jq` | jq transformations with jq compiled from source; no system jq library needed |
+| `middleware-decoder` | Base64, base64url, hex, URL and JSON-escape decoding |
 | `middleware-map` | JSONPath property mapping |
 | `middleware-parse-json` | Parse JSON strings into objects |
 | `middleware-promote` | Promote nested properties to top level |
 | `middleware-relabel` | Rename element labels |
 | `middleware-unwind` | Expand arrays into elements |
-| `middleware-all` | Enable all middleware |
-| `azure-identity` | Azure Managed Identity / Workload Identity credential provider |
-| `aws-identity` | AWS IAM / RDS credential provider |
-| `all-identity` | Enable all identity providers |
+| `middleware-all` | Enable all middleware; jq links against the system jq library unless `middleware-bundled-jq` is also enabled |
+| `otel-context` | OpenTelemetry integration: `OpenTelemetryContextAdapter`, `OpenTelemetrySpanProcessor` and `TelemetrySampler`; the host owns exporters and shutdown |
+| `test-support` | [Managed-query test controls](docs/query-test-control.md): independent per-query clocks and awaited processing frontiers |
+| `computation-rocksdb-tests` | Enables drasi-lib's RocksDB-backed integration tests; does not enable a storage backend in the runtime |
+
+Identity providers are separate crates (`drasi-identity-azure`, `drasi-identity-aws`),
+not drasi-lib features; see [Identity Providers](#identity-providers).
 
 ---
 

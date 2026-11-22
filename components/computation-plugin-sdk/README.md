@@ -4,9 +4,10 @@ This is a separate plugin family, not a replacement or layout change to the
 Source/Reaction/Bootstrap SDK. It uses `drasi-computation-plugin-abi` **0.1.0**
 with native **wire version 1**, independent of workspace package versions.
 Ordinary Source/Reaction/Bootstrap ABI **0.19.0** is independently versioned.
-Hosts accept native plugins with the same ABI major and an older or equal
-minor, and reject a newer minor or another major. Unknown native wire versions
-reject.
+While the native ABI major is 0, every minor version is breaking, so a host
+accepts only a native plugin whose ABI major and minor both equal its own. From
+1.0, a host accepts the same major with an older or equal minor. Hosts reject
+every other ABI version and any unknown native wire version.
 
 ## Authoring
 
@@ -366,7 +367,7 @@ impl NativeComponent for MySource {
     async fn resume(&mut self, ctx: &ResumeContext) -> LifecycleResult { nothing_to_do() }
     async fn stop(&mut self, ctx: &StopContext) -> LifecycleResult {
         if let Some(mut scope) = self.activation.take() {
-            scope.stop(ctx.mode()).await?;
+            scope.stop(ctx).await?;
         }
         Ok(())
     }
@@ -388,9 +389,13 @@ completion nor rollback, so check the token and return promptly. Framework
 context and services are bound at construction, independently of these hooks.
 `StartContext` carries activation credentials when the factory declares them and
 `activation_scope()` creates an `ActivationScope` whose `PauseGate` workers can
-observe pause; `StopContext::mode()` is `Drain` or `Abort`. Return
-`LifecycleError::retryable`, `terminal`, `unsupported` or `cancelled` to classify
-failures; a plain `anyhow::Error` is terminal.
+observe pause; `StopContext::mode()` is `Drain` or `Abort`.
+`ActivationScope::pause(&ctx)` and `stop(&ctx)` take the hook's context and
+observe its deadline and cancellation. If the deadline passes first, both return
+a retryable error: a pause is withdrawn, and a stop keeps the unjoined workers so
+that a retried Stop can join them. Return `LifecycleError::retryable`,
+`terminal`, `unsupported` or `cancelled` to classify failures; a plain
+`anyhow::Error` is terminal.
 
 The normal order is
 `create → initialize → (start → [pause → resume]* → stop)* → dispose → release`.
@@ -710,14 +715,15 @@ existing factory callbacks, including progress and coordinated-source creation.
 Ordinary Rust request literals set it to `false`; the base request encoding,
 base ABI 0.1.0 layouts, and wire version 1 remain unchanged.
 
-Implement `NativeComponent::start_with_credentials(ActivationCredentials)` for
-the bound path. It runs **inside the normal START operation**, with the same
+A bound instance receives the resolved credentials in `NativeComponent::start`,
+through `StartContext::credentials()` or `take_credentials()`. Credentialed
+startup is therefore part of the normal START operation, with the same
 ownership, busy/role gates, panic containment, progress activation, schema
-generation and retained STOP cleanup as `start()`. The DTO distinguishes
-`UsernamePassword` from `Token`; certificate credentials are explicitly rejected
-by the Host before startup. Credential fields are bounded to 64 KiB and Debug
-redacts both usernames and secrets. Bound startup failures are sanitized at
-the ABI boundary.
+generation and retained STOP cleanup as any other start. The
+DTO distinguishes `UsernamePassword` from `Token`; certificate credentials are
+explicitly rejected by the Host before startup. Credential fields are bounded to
+64 KiB and Debug redacts both usernames and secrets. Bound startup failures are
+sanitized at the ABI boundary.
 
 An erasing Dispose of a bound instance receives credentials too
 (`DisposeContext::credentials`/`take_credentials`), resolved anew by the Host
@@ -728,10 +734,11 @@ previous activation's. A preserving Dispose carries none.
 
 Keep acquired credentials transient. Do not modify `configuration()`, captured
 configuration, source identity or the constructor recipe, and do not fall back
-to literals after a provider failure. Unbound instances still use the unchanged
-literal `start()` path. Authentication is not a processing RPC. The SDK cannot
-make a connector's detached startup tasks safe: connector startup must remain
-cancellation-safe under the existing operation-ownership contract.
+to literals after a provider failure. An unbound instance's `StartContext`
+carries no credentials; it starts from its literal configuration. Authentication
+is not a processing RPC. The SDK cannot make a connector's detached startup
+tasks safe: connector startup must remain cancellation-safe under the existing
+operation-ownership contract.
 
 ## Configuration descriptions
 
@@ -1473,9 +1480,11 @@ Return `Component::Consumer` for a `NativeComponent + DeliveryHandler`, or
 `Component::Sink` factories retain their existing behavior and acquire no ledger.
 A consumer is always constructed with the Host's delivery service bound.
 
-The Host owns the existing `DeliveryRunner`, its bounded progress records, retries,
-transaction and cleanup. `NativeFactory::create_consumer` accepts the actual
-`ComputationIndexProvider`, `DeliveryOptions` and stable graph/component scope.
+The Host owns the existing `DeliveryRunner`, its bounded progress records,
+transaction and cleanup. The runner makes one attempt per delivery; the graph
+retries a failed delivery in place. `NativeFactory::create_consumer` accepts the
+actual `ComputationIndexProvider`, `DeliveryOptions` and stable graph/component
+scope.
 Graph factory construction instead requires exactly one `consumer` dependency:
 an `IndexBackend` resource holding `NativeConsumerResource { provider, options }`.
 The resource is managed through the graph's existing dependency lifecycle; no

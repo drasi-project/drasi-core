@@ -76,15 +76,14 @@ fn alert_descriptor(id: ComponentId) -> GraphResult<ComponentDescriptor> {
 
 #[async_trait]
 impl ComponentFactory for FileFactory {
-    fn describe(
-        &self,
-        _context: &drasi_lib::computation::v1::ConstructionContext,
-    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
-        Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
-    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.0
     }
+    // ANCHOR: describe-file-factory
+    fn describe(&self, context: &ConstructionContext) -> anyhow::Result<ComponentDescription> {
+        Ok(file_source_description(&context.specification.descriptor))
+    }
+    // ANCHOR_END: describe-file-factory
     fn validate(&self, spec: &ComponentSpecification) -> anyhow::Result<()> {
         ensure!(
             spec.descriptor == source_descriptor(spec.descriptor.id().clone())?,
@@ -113,14 +112,11 @@ impl ComponentFactory for FileFactory {
 
 #[async_trait]
 impl ComponentFactory for AlertFactory {
-    fn describe(
-        &self,
-        _context: &drasi_lib::computation::v1::ConstructionContext,
-    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
-        Ok(drasi_lib::computation::v1::ComponentDescription::undeclared())
-    }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.0
+    }
+    fn describe(&self, context: &ConstructionContext) -> anyhow::Result<ComponentDescription> {
+        Ok(alert_description(&context.specification.descriptor))
     }
     fn validate(&self, spec: &ComponentSpecification) -> anyhow::Result<()> {
         ensure!(
@@ -187,9 +183,12 @@ impl ManagementResourceResolver for MemoryResources {
                 && configuration == &serde_json::json!({"kind":"memory"}),
             "unsupported managed resource"
         );
-        Ok(drasi_lib::computation::v1::QueryIndexProviderResource::handle(ResourceRole::IndexBackend, Arc::new(
-                InMemoryComputationProvider,
-            )))
+        Ok(
+            drasi_lib::computation::v1::QueryIndexProviderResource::handle(
+                ResourceRole::IndexBackend,
+                Arc::new(InMemoryComputationProvider),
+            ),
+        )
     }
 }
 

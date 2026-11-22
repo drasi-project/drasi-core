@@ -6,8 +6,9 @@ registers its own factories and uses its package name as its plugin identity. Th
 HTTP sink library registers two: the ordinary sink and the opt-in
 `drasi.network/http-delivery` consumer.
 Native ABI is **0.1.0**, independently of the workspace package version.
-Native wire version is **2**, using binary computation envelopes
-and bulk MessagePack buffers. Rebuild libraries built against an older native ABI.
+Native wire version is **1**, using binary computation envelopes
+and bulk MessagePack buffers. Rebuild libraries built for another native ABI
+major or minor.
 Each implementation has version `"1"` and configuration version `1`. The legacy
 Source/Reaction/Bootstrap ABI **0.19** is independently versioned; earlier
 ordinary layouts are rejected.

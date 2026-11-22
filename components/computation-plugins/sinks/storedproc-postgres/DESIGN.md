@@ -288,7 +288,7 @@ to run concurrently.
 
 ## Management
 
-`Factory::assess` and `NativeManagement` classify every field
+The factory's `UpdatePlanner::assess` and `NativeManagement` classify every field
 (`src/management.rs`):
 
 | Boundary | Fields | Why |
