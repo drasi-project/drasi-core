@@ -35,12 +35,12 @@ compatibility shims or automatic migration of old state are planned.
 
 | Work area | Entries |
 |---|---|
-| Managed updates and lifecycle | [Rebootstrap coordination](#cw-92), [named endpoints](#cw-93), [graph changes and live rebinding](#cw-94) (deferred), [plugin upgrade and configuration migration](#cw-95) (deferred), [late progress binding startup hold](#cw-104), [declared component descriptions](#cw-106) |
+| Managed updates and lifecycle | [Rebootstrap coordination](#cw-92), [named endpoints](#cw-93), [graph changes and live rebinding](#cw-94) (deferred), [plugin upgrade and configuration migration](#cw-95) (deferred), [late progress binding startup hold](#cw-104), [cleanup deadline for large graphs](#cw-107), [declared component descriptions](#cw-106) |
 | Connectors and runtime boundaries | [Data connections](#cw-44), [old plugin support](#cw-63), [linked query entry points](#cw-80), [oversized query records](#cw-76) |
 | Native plugins: shared work | [Pause and stop](#cw-96), [erasing disposal](#cw-98), [conformance kit](#source-x-02), [configuration and secrets](#source-x-03), [update planning](#source-x-04), [retry policy](#source-x-05), [delivery contract](#sink-x-03), [observability](#source-x-07), [starter project](#dx-1), [packaging](#dx-10), [provider and transformer review](#cw-103) |
 | Native sources | [Network runtime](#plugin-source-network), [PostgreSQL](#plugin-source-postgres), [MySQL](#plugin-source-mysql), [SQL Server](#plugin-source-mssql), [SQLite](#plugin-source-sqlite), [HTTP](#plugin-source-http), [gRPC](#plugin-source-grpc), [bridge](#plugin-source-bridge), [counter and mock](#plugin-source-counter-mock) |
 | Native sinks | [Network runtime](#plugin-sink-network-runtime), [HTTP](#plugin-sink-http), [gRPC](#plugin-sink-grpc), [SSE](#plugin-sink-sse), [log](#plugin-sink-log), [capture](#plugin-sink-capture), [profiler](#plugin-sink-profiler), [stored procedures](#plugin-sink-storedproc-shared), [PostgreSQL](#plugin-sink-storedproc-postgres), [MySQL](#plugin-sink-storedproc-mysql), [SQL Server](#plugin-sink-storedproc-mssql), [bridge](#plugin-sink-bridge), [legacy reactions](#plugin-legacy-reactions) |
-| Data, errors and diagnostics | [Saved-data formats](#cw-18), [deep data](#cw-19), [error messages](#cw-22), [status and log updates](#cw-23), [background work](#cw-17), [logging control](#cw-24), [request tracing](#cw-25), [measurements](#cw-26), [monitoring export](#cw-27) |
+| Data, errors and diagnostics | [Saved-data formats](#cw-18), [deep data](#cw-19), [error messages](#cw-22), [status and log updates](#cw-23), [background work](#cw-17), [logging control](#cw-24), [request tracing](#cw-25), [measurements](#cw-26) |
 | Scaling and maintainability | [Removed-component bookkeeping](#cw-33), [memory limits](#cw-29), [disk work](#cw-28), [processing repetition](#cw-32), [management code](#cw-34) |
 | Public API, dependencies and release | [API curation](#cw-69), [legacy dependencies](#cw-66), [capabilities and delegation](#cw-72), [release documentation](#cw-73) |
 | Optional capabilities | [Store housekeeping](#cw-71), [pipe policies](#cw-74), [isolated hosts](#cw-75), [mixed scheduling proof](#cw-82) |
@@ -404,6 +404,37 @@ report); `drasi-core/lib/src/computation/v1/lifecycle.rs:29`
 **Done when:** both staggered-binding tests finish well under the cleanup
 timeout on both Tokio flavours, and `managed_native_wiring_multi_thread` and
 the other management and stop ordering tests still pass.
+
+<a id="cw-107"></a>
+
+### Scale the cleanup deadline for large graphs (CW-107)
+
+**Kind:** Issue. **Area:** Core lifecycle.
+**Priority:** Medium. **Effort:** Small to medium.
+
+Each component's stop has its own cleanup deadline, 5 seconds by default, but
+a graph stops all its components at once. In a large graph the stops compete
+for the same threads, so a component that stops in milliseconds on its own
+can miss its deadline. The test `publication_tests::control_latency` stops
+graphs of 16, 1,024 and 4,096 nodes; the 4,096-node case timed out in debug
+builds until the test raised the deadline to 60 seconds.
+
+**What remains:** decide whether the deadline should cover the whole stop
+rather than each component, scale with graph size, or be documented as a
+setting large deployments must raise (`DrasiLib::builder().with_cleanup_timeout_secs`,
+`drasi-core/lib/src/builder.rs:586`). **Unverified:** whether release builds
+of realistic graphs hit the default.
+
+**Example:** an application with 4,000 components calls stop; some components
+report a cleanup timeout even though each would have stopped promptly.
+
+**Evidence:** `drasi-core/lib/src/computation/v1/lifecycle.rs:29`
+(`DEFAULT_CLEANUP_TIMEOUT`); `drasi-core/lib/src/computation/runtime/events.rs:310,330`
+(the test's 60-second override).
+
+**Done when:** stopping a 4,096-node graph with default settings succeeds in
+debug builds on both Tokio flavours, or the limit is documented with
+guidance, and the test runs with the default deadline.
 
 <a id="cw-44"></a>
 <a id="hosting-connectors-server-and-examples"></a>
@@ -922,172 +953,111 @@ after each refactor. Fewer files or lines alone is not completion.
 
 <a id="cw-24"></a>
 
-### Let applications control logging and monitoring (CW-24)
+### Finish logging control for plugins and profiling (CW-24)
 
-**Kind:** Operational capability. **Area:** Core observability, native SDK/Host, applications.
-**Priority:** Medium. **Effort:** Large.
+**Kind:** Operational capability. **Area:** Core observability, native SDK/Host.
+**Priority:** Medium. **Effort:** Small to medium.
 
-An application that embeds DrasiLib cannot fully control how Drasi logs. If
-no global tracing subscriber is installed yet, DrasiLib installs its own with a
-`RUST_LOG`/`info` filter and a stdout formatter. Native plugins loaded as
-dynamic libraries have no way to send their logs to the host at all.
+Applications can compose Drasi's component logging into their own subscriber
+(`ComponentLogRuntime`, `logging.layer()`,
+`DrasiLib::builder().with_component_logging(...)`; `drasi-core/lib/README.md:803-823`),
+and every loaded native plugin forwards its `log` records to the host through
+the native logging bridge (`install_host_logger`,
+`drasi-core/components/computation-plugin-sdk/src/diagnostics.rs:94`, installed
+at `.../computation-plugin-sdk/src/lib.rs:300`). Records made inside a
+component's telemetry scope are tagged with that component
+(`drasi-core/lib/src/observability/plugin_telemetry.rs:225-250`).
 
 **What remains:**
 
-- Implement application-owned collection, filtering, export and shutdown
-  controls from the
-  [monitoring design](https://github.com/drasi-project/design-documents/tree/77b155319fd8160496ad059f6fdcb1e6bc93e43d/drasi-lib/tracing-logging),
-  so an application can keep its own subscriber and still receive per-component
-  logs.
+- Records a plugin makes outside a component scope reach the host logger
+  without a component tag. **Unverified:** whether background tasks that
+  plugins spawn keep the scope. Check the shipped plugins and either propagate
+  the scope or document how plugin authors should.
 - Settle the profiling interfaces (`drasi-core/lib/src/profiling/`) and their
   dependencies.
-- Add a native SDK/Host logging bridge. A cdylib has its own `log`/`tracing`
-  globals, separate from the host's, and the native ABI has no log callback
-  (the ordinary plugin ABI does, through `set_log_callback`). Forward plugin
-  records to the host with the component identity attached.
+- Correct the `diag!` doc comment
+  (`drasi-core/components/computation-plugins/common/network/src/lib.rs:45-48`):
+  it says a dynamically loaded library has no logger, but the bridge now sets
+  one and its `max_level`.
 
-**Example:** The network plugins log through `diag!`. Inside a loaded cdylib no
-logger is installed, so `log::max_level()` is off: `info`/`debug` records are
-dropped and `warn`/`error` records go to the process's stderr as plain text,
-without the component ID and outside the application's logging pipeline.
+**Example:** a native source spawns a reconnect task with `tokio::spawn` and
+no scope; its "connection refused" warning reaches the host log but not
+`/sources/<id>/logs`.
 
-**Evidence:**
-
-- `drasi-core/lib/src/observability/tracing_layer.rs:146-167`: installs
-  `LogTracer` and a global subscriber if none is set.
-- `drasi-core/components/computation-plugins/common/network/src/lib.rs:44-53`:
-  `diag!` falls back to `eprintln!`.
-- `drasi-core/components/computation-plugin-abi/src/` and
-  `drasi-core/components/computation-plugin-sdk/src/`: no logging callback.
-- `drasi-core/components/plugin-sdk/src/ffi/vtables.rs:862-865`: the ordinary
-  ABI's log callback, for comparison.
-
-**Done when:** An application can choose the monitoring level and destination
-without Drasi replacing its logging setup or suppressing existing logs, and
-logs from dynamically loaded native plugins reach that destination tagged with
-their component.
+**Done when:** every plugin record that belongs to a component is tagged with
+it, the profiling interfaces are settled, and the docs describe the bridge.
+Server's component-log test is
+[SW-32](../../../drasi-server/docs/remaining-work.md#sw-32).
 
 <a id="cw-25"></a>
 
-### Follow a request through processing and delivery (CW-25)
+### Finish tracing through sinks and destinations (CW-25)
 
-**Kind:** Operational capability. **Area:** Core, plugins, Server and destinations.
-**Priority:** Medium. **Effort:** Large.
+**Kind:** Operational capability. **Area:** Core, native sinks, destinations.
+**Priority:** Medium. **Effort:** Medium.
 
-Today there is no way to follow one incoming change through the queues, query,
-sinks and destination calls that it causes. An operator investigating a slow or
-missing result cannot see where the time went or which retry delivered it.
+W3C trace context is carried from source ingress through inputs, outputs,
+pipes, batches and admission; batches and joins use span links with limits;
+and the native HTTP and gRPC sources accept an incoming `traceparent`
+(`drasi-core/lib/README.md:1095-1107,1195-1200`). Replay after a restart starts
+fresh context instead of inventing durations
+(`drasi-core/lib/README.md:1268-1278`).
 
 **What remains:**
 
-- Carry trace context (for example a W3C `traceparent`) from source ingress
-  through pipes, plugins, network calls and retries, and record spans for the
-  main steps.
-- Define how one result relates to several inputs (joins, aggregates, batches),
-  for example with span links.
-- Keep this diagnostic information separate from the identity used to
-  deduplicate or recover business work, such as the `x-drasi-delivery-id`
-  idempotency key that the HTTP and gRPC sinks already send.
+- The native HTTP and gRPC sinks do not send `traceparent` to destinations, so
+  a trace stops at the sink; no `traceparent` appears in
+  `drasi-core/components/computation-plugins/sinks/*/src/`.
+- Record one span per delivery attempt, so a retry is visible.
+  **Unverified:** whether existing sink spans already distinguish attempts.
+- Keep trace context separate from the identity used to deduplicate or
+  recover business work, such as the `x-drasi-delivery-id` idempotency key.
 
-**Example:** A POST to the native HTTP source updates a row; a query joins it
-and an HTTP sink delivers the result after one retry. The operator should be
-able to see one trace: ingress, commit, query evaluation, each delivery attempt
-and the final completion, with real timings and no invented duration if the
-process restarted in between.
+**Example:** a POST to the native HTTP source updates a row, a query joins it,
+and an HTTP sink delivers the result after one retry. The trace should show
+both delivery attempts and continue in the destination service.
 
-**Evidence:**
-
-- `drasi-core/components/computation-contracts/src/internal/typed_change/mod.rs:564-600`:
-  a crate-private `TraceMetadata` slot exists in system metadata, but it can only
-  be constructed in tests and nothing propagates it.
-- No `traceparent`/OpenTelemetry tracing in `drasi-core/lib/src`, the native
-  ABI/SDK or the Host.
-
-**Done when:** A selected request can be followed through actual completion,
-including retries and batching, with meaningful timing and no invented duration
-across a restart.
+**Done when:** a selected request can be followed through each delivery
+attempt into the destination, with no invented duration across a restart.
+Persistent reconstruction has no historical context by design.
 
 <a id="cw-26"></a>
 
-### Make measurements consistent across components (CW-26)
+### Fill the remaining measurement gaps (CW-26)
 
 **Kind:** Operational capability. **Area:** Core, plugins, Server.
-**Priority:** Medium. **Effort:** Large.
+**Priority:** Medium. **Effort:** Medium.
 
-Only queries and reactions report measurements, and only one of those is
-exported. Operators cannot see source throughput, pipe or QoS backpressure,
-lag or error rates, so intentional lossless backpressure looks the same as a
-stalled runtime.
-
-**What remains:**
-
-- Define and implement metrics for every component kind: availability,
-  input/output counts, completed handling, queue pressure, progress lag, errors
-  and processing time. Use consistent names and units, avoid double counting
-  and include no sensitive data.
-- Include retained/QoS pressure, earliest-subscriber lag and blocked admission.
-- Export the existing query output gauges and reaction metrics, not only query
-  progress (export path: [CW-27](#cw-27)).
-
-Already present: query committed-input and produced-output positions, exported
-by Server as `drasi.query.progress.sequence` with a `drasi.progress.stage` of
-`input.committed` or `output.produced`; query outbox/live-row gauges, sequence
-advances, transaction durations and snapshot-fetch counts; reaction checkpoint,
-recovery and dedup counters; lifecycle startup-rejection and reset counters.
-
-**Example:** A QoS channel whose slowest required subscriber is a slow HTTP
-sink blocks admission at the source. No metric shows the blocked admission or
-the subscriber's lag, so the operator only sees query progress stop advancing.
-
-**Evidence:**
-
-- `drasi-core/lib/src/metrics/` (`query_metrics.rs`, `reaction_metrics.rs`,
-  `lifecycle_metrics.rs`): no source, pipe or QoS metrics.
-- `drasi-server/src/telemetry.rs:168-235`: the only exported instrument is
-  `drasi.query.progress.sequence`.
-
-**Done when:** Each enabled measurement reports exactly the expected counts and
-timing boundaries across normal work, retries, batching and failure. Those
-assertions live with [public observation conformance](#cw-10) and
-[completion evidence](#cw-36).
-
-<a id="cw-27"></a>
-
-### Export monitoring data without blocking useful work (CW-27)
-
-**Kind:** Operational capability. **Area:** Core, Server, export adapters.
-**Priority:** Medium. **Effort:** Large.
-
-Applications need to send Drasi's logs, metrics and traces to OpenTelemetry
-collectors or local consumers. A slow or unavailable collector must never slow
-down data processing, and export must not monitor its own traffic in a loop.
+Core records metrics for every component kind: `drasi.component.*`
+(availability, calls, inputs, outputs, operation duration), queue pressure
+(`drasi.queue.depth`, `depth_max`, `blocked_enqueues`, `drops`,
+`edge_info`), `drasi.source.events_dispatched`, `drasi.errors`,
+`drasi.pipeline.end_to_end.duration`, `drasi.query.*` and the reaction
+checkpoint, dedup, gap and recovery counters. Server exports them over OTLP.
 
 **What remains:**
 
-- Provide an optional, application-owned export path for logs, measurements and
-  completed traces to OpenTelemetry, local Drasi consumers, or both. Core has
-  none today.
-- Bound buffered monitoring data, count and report dropped records, and give
-  export, flush and shutdown an explicit owner.
-- Extend Server's existing metrics exporter to logs and traces and to the
-  measurements from [CW-26](#cw-26).
+- Earliest-subscriber or per-consumer QoS lag. Queue depth and blocked
+  enqueues show pressure but not which subscriber holds it back.
+- Connector-specific plugin metrics. The SDK facility exists
+  (`ConstructionContext::plugin_metrics`,
+  `drasi-core/lib/src/computation/v1/graph/specification.rs:867`), but no
+  connector plugin uses it yet; see [Source X-07](#source-x-07).
+- Conformance assertions that each metric reports exactly the expected counts
+  and timing boundaries across normal work, retries, batching and failure.
+  These live with [public observation conformance](#cw-10) and
+  [completion evidence](#cw-36).
+- **Unverified:** why `drasi.reaction.results_processed` stays at zero in
+  Server's walkthrough
+  ([SW-36](../../../drasi-server/docs/remaining-work.md#sw-36)).
 
-Already present: Server's optional `metrics` setting (`endpoint`,
-`exportIntervalMs`, `exportTimeoutMs`) runs a dedicated OTLP/HTTP JSON meter
-provider for query progress without replacing the application's global
-provider.
+**Example:** a QoS channel whose slowest required subscriber is a slow HTTP
+sink blocks admission at the source. `drasi.queue.blocked_enqueues` rises, but
+no metric names the lagging subscriber.
 
-**Example:** An OTLP collector that accepts connections but never responds
-must not grow memory without bound or delay source admission; the exporter
-should drop and count records once its buffer is full.
-
-**Evidence:** `drasi-server/src/telemetry.rs:30-47` (`MetricsConfig`);
-`drasi-server/src/config/types.rs:157-159`.
-
-**Done when:** Slow or broken monitoring destinations cannot stall business
-processing, dropped records are reported, and export/flush/shutdown have one
-owner. Slow-destination and cancellation tests belong to [CW-05](#cw-05) and
-[CW-39](#cw-39).
+**Done when:** subscriber lag and connector metrics exist, and the
+conformance assertions pass.
 
 <a id="cw-69"></a>
 
@@ -1772,29 +1742,40 @@ be split into bounded calls, each with a timeout.
 **Kind:** Improvement. **Priority:** Medium (P1). **Effort:** Medium.
 
 Several plugins discard their `ControlSender`, so they never report
-not-ready while a connection is down. The SDK has no metric facility, so
-plugins cannot publish counters through the Host.
+not-ready while a connection is down. The SDK now has a metric facility
+(`ConstructionContext::plugin_metrics`,
+`drasi-core/lib/src/computation/v1/graph/specification.rs:867`, and
+`ScopedMetricEmitter`,
+`drasi-core/components/computation-contracts/src/telemetry/scoped_metrics.rs:26`;
+documented in `drasi-core/components/computation-plugin-sdk/README.md:111-113`),
+but no connector plugin uses it yet. Plugin logs already reach the Host
+([CW-24](#cw-24)).
 
 **What remains:**
 
 - Use `ControlSender::ready`/`not_ready` in every plugin with an external
   connection.
-- An SDK metric facility with shared metric names (events, failures, retries,
-  lag), feeding [CW-26](#cw-26). Plugin log forwarding is [CW-24](#cw-24).
+- Agree shared metric names (events, failures, retries, reconnects, lag) and
+  emit them from the connector plugins through `plugin_metrics`, feeding
+  [CW-26](#cw-26).
 
 **Example:** the gRPC sink's endpoint goes down; the component still reports
 ready because the sink dropped its `ControlSender`.
 
-**Evidence:** `drasi-core/components/computation-plugins/sinks/grpc/src/lib.rs:98`;
-`drasi-core/components/computation-plugins/sources/postgres/src/lib.rs:196`;
-the three stored-procedure sinks discard theirs in `Factory::create`
-(`drasi-core/components/computation-plugins/sinks/storedproc-{postgres,mysql,mssql}/src/lib.rs`)
-and report Ready while their database is down, failing deliveries
-transiently instead;
-`drasi-core/components/computation-plugin-sdk/src/control.rs`.
+**Evidence:** `ControlSender` discarded in `Factory::create` at
+`drasi-core/components/computation-plugins/sinks/grpc/src/lib.rs:101`,
+`.../sources/postgres/src/lib.rs:220`, `.../sources/mysql/src/lib.rs:278`,
+`.../sources/mssql/src/lib.rs:164`, `.../sources/http/src/lib.rs:109`,
+`.../sources/grpc/src/lib.rs:112`, `.../sources/otel/src/lib.rs:113`,
+`.../sources/counter/src/lib.rs:76`, and the stored-procedure sinks
+`.../sinks/storedproc-mysql/src/lib.rs:99`, `storedproc-postgres/src/lib.rs:139`
+and `storedproc-mssql/src/lib.rs:102`. The stored-procedure sinks report Ready
+while their database is down, failing deliveries transiently instead. No
+connector under `drasi-core/components/computation-plugins/` calls
+`plugin_metrics`.
 
-**Done when:** connected plugins report readiness; the SDK exposes metrics with
-documented names; and a test observes both through the Host.
+**Done when:** connected plugins report readiness and emit the agreed metrics,
+and a test observes both through the Host.
 
 <a id="source-x-08"></a>
 <a id="sink-x-13"></a>
@@ -2093,7 +2074,7 @@ The source logs through `log` but reports no metrics, and its factories drop the
 
 **Example:** during a 30-second reconnect loop the instance status stays "running" with no indication it is retrying.
 
-**Evidence:** `_control: ControlSender` unused at `drasi-core/components/computation-plugins/sources/postgres/src/lib.rs:196,227,259,293`.
+**Evidence:** `_control: ControlSender` unused at `drasi-core/components/computation-plugins/sources/postgres/src/lib.rs:220` (shared by every factory the source registers).
 
 **Done when:** retry status and the metrics appear for a running source and are covered by a test.
 
@@ -2125,9 +2106,9 @@ A `Mode` enum drives configuration and planning, but the component still holds `
 
 **Kind:** Improvement. **Priority:** Medium. **Effort:** Small to medium.
 
-Readiness changes (streaming, reconnecting, failed), retries, skipped tables and adopted schema changes are only logged. The `ControlSender` is dropped because the factories declare no control interface, so the host never sees the source's readiness, and there are no metrics because the SDK has no metric facility yet.
+Readiness changes (streaming, reconnecting, failed), retries, skipped tables and adopted schema changes are only logged. The `ControlSender` is dropped because the factories declare no control interface, so the host never sees the source's readiness, and it emits no metrics through the SDK metric facility.
 
-**What remains:** report readiness through the host (as the SQLite source does through its `ControlSender`); the shared metric set ([CW-26](#cw-26), [Source X-07](#source-x-07)) including binlog lag, once the SDK provides it.
+**What remains:** report readiness through the host (as the SQLite source does through its `ControlSender`); the shared metric set ([CW-26](#cw-26), [Source X-07](#source-x-07)) including binlog lag, through `plugin_metrics`.
 
 **Evidence:** `drasi-core/components/computation-plugins/sources/mysql/src/lib.rs:118-121`; `drasi-core/components/computation-plugins/sources/mysql/DESIGN.md:258-265`.
 
@@ -2276,9 +2257,9 @@ The pager fails a group with more than two images or an unpaired before/after im
 
 **Kind:** Improvement. **Priority:** Low. **Effort:** Small to medium.
 
-The engine sits behind a database seam with typed failures, but readiness, reconnect attempts and held consumers are only logged: the factory drops its `ControlSender`, and the SDK has no metric facility yet.
+The engine sits behind a database seam with typed failures, but readiness, reconnect attempts and held consumers are only logged: the factory drops its `ControlSender`, and it emits no metrics.
 
-**What remains:** readiness and reconnect status through the host; metrics ([CW-26](#cw-26), [Source X-07](#source-x-07)) such as poll lag and page sizes, once the SDK provides them.
+**What remains:** readiness and reconnect status through the host; metrics ([CW-26](#cw-26), [Source X-07](#source-x-07)) such as poll lag and page sizes, through `plugin_metrics`.
 
 **Evidence:** `drasi-core/components/computation-plugins/sources/mssql/src/lib.rs:132-138`; `drasi-core/components/computation-plugins/sources/mssql/DESIGN.md:278-283`.
 
@@ -2357,7 +2338,7 @@ The REST listener has bearer authentication, TLS, body and time limits and pagin
 
 **Kind:** Improvement. **Priority:** Low. **Effort:** Small.
 
-Readiness is reported through the `ControlSender`, but counters (commits, rollbacks, journal depth, REST requests) are not exported because the SDK has no metric facility yet.
+Readiness is reported through the `ControlSender`, but counters (commits, rollbacks, journal depth, REST requests) are not exported; it does not use the SDK metric facility yet.
 
 **What remains:** emit those counters once [Source X-07](#source-x-07) and [CW-26](#cw-26) provide the facility.
 
@@ -2490,11 +2471,11 @@ Listener death is already reported: the listener task catches a panic or error, 
 
 - Keep the `ControlSender` and report readiness (listener bound) and recovery through it.
 - Publish metrics using the shared names from [CW-26](#cw-26): requests, admitted events, rejections by kind (auth, rate limit, size, paused), rate-limited clients, queue occupancy and durable commit latency.
-- Logs from a loaded plugin reach the Host only after the native logging bridge in [CW-24](#cw-24) exists; until then `diag!` writes warnings and errors to stderr and drops lower levels.
+- Check that `diag!` records from the listener tasks carry the component scope, so they reach the component's log endpoint ([CW-24](#cw-24)).
 
 **Example:** a host cannot tell when a volatile HTTP source's listener is bound and accepting, other than by probing the port.
 
-**Evidence:** `drasi-core/components/computation-plugins/sources/http/src/lib.rs:111` and `drasi-core/components/computation-plugins/sources/grpc/src/lib.rs:115` (`_control`); `drasi-core/components/computation-plugins/common/network/src/ingress.rs` (`SourceRuntime::start`, failure reporting); `drasi-core/components/computation-plugins/common/network/src/lib.rs` (`diag!`).
+**Evidence:** `drasi-core/components/computation-plugins/sources/http/src/lib.rs:109` and `drasi-core/components/computation-plugins/sources/grpc/src/lib.rs:112` (`_control`); `drasi-core/components/computation-plugins/common/network/src/ingress.rs` (`SourceRuntime::start`, failure reporting); `drasi-core/components/computation-plugins/common/network/src/lib.rs` (`diag!`).
 
 **Done when:** readiness and recovery appear in component status, and the metric set is emitted and documented for both sources.
 
@@ -3521,8 +3502,8 @@ definitions, units, window) and `CONFIGURATION.md`; add a `SINKS.md` row.
 The profiler sink logs nanosecond count/mean/percentile strings. It is
 undecided whether it should publish through the SDK metric facility instead.
 
-**Options:** (a) keep log output; (b) publish metrics once
-[the metrics entry](#source-x-07) exists. **Recommendation:** (b).
+**Options:** (a) keep log output; (b) publish through `plugin_metrics` with the names agreed in
+[the metrics entry](#source-x-07). **Recommendation:** (b).
 
 **Evidence:** `drasi-core/components/computation-plugins/sinks/profiler/src/component.rs:118`.
 
@@ -4732,6 +4713,19 @@ developer book check runs in `test.yml`. The gaps are elsewhere.
 | Learning | Deterministic tutorial tests: `tutorials/*/scripts/test_demo.py` (6 tutorials), `tutorials/sse-cli/tests/test_{build,cli}.py`, `scripts/test_local_build.py`. The only PR workflow is the agent-driven getting-started evaluation, which passes when the agent writes `## STATUS: SUCCESS`, and is skipped for fork PRs because it needs secrets. | `learning-drasi-server/.github/workflows/tutorial-evaluation-scheduled.yml:17-40,93,135,176`. |
 | test-infra | Rust unit tests for `e2e-test-framework` and `data-tools/arn`. PR workflows only build images (`build.yml`) and run clippy/fmt (`lint.yml`). The recovery-comparison Python tests run only in the manual `e2e-building-comfort-completion.yml`. | `test-infra/.github/workflows/build.yml:17-31,85-87`, `lint.yml:17-28`, `e2e-building-comfort-completion.yml:3-4,55-59`. |
 
+**Before merging this branch to `main`:**
+
+- `drasi-core/.github/workflows/ci-lint.yml:10-11` adds a TEMPORARY trigger
+  for the recovery branch, and its clippy command drops the
+  `drasi-source-salesforce/dynamic-plugin` feature that `main` checks. Remove
+  the trigger and restore the feature (keeping `--locked`), then fix any
+  clippy findings in that feature.
+- PR #1034 was merged while its Rust Lint checks failed; lint is not a
+  required check. Formatting and clippy now pass locally on the branch head.
+  **Unverified:** the FFI (Linux, macOS, Windows) and unit-test workflow
+  results for the current head; no workflow run on the branch was found.
+  Run them, and consider making lint a required check.
+
 Example of the gap: a change that breaks
 `learning-drasi-server/tutorials/building-comfort/scripts/verify_demo.py`'s
 arithmetic is caught by its `test_demo.py`, but no workflow runs that file, so
@@ -5383,7 +5377,7 @@ and external effects against an oracle:
 
 Apply the same matrix to newer capabilities instead of duplicating it under their
 own entries: view-transform snapshots and lifecycle, [CW-71](#cw-71) persistent
-housekeeping and key recovery, [CW-27](#cw-27) slow monitoring destinations, and
+housekeeping and key recovery, slow monitoring destinations (Server OTLP export), and
 [CW-29](#cw-29)/[CW-74](#cw-74) capacity and rate/window bounds (with controlled
 clocks through cancellation, slow consumers, failed replies and restart). The
 mixed query/non-query scheduling chain is [CW-82](#cw-82).
@@ -5745,7 +5739,9 @@ failures, and record results against the current revision:
 | SQL Server connector integration tests | `drasi-core/components/sources/mssql/tests/integration_test.rs` (e.g. `:1989`) | `#[ignore]` and also compiled out on `aarch64` by `#[cfg(not(target_arch = "aarch64"))]`, so on ARM they do not even appear in ignore totals; needs an x86_64 run with SQL Server |
 | FFI layout-mismatch tests | `drasi-core/components/host-sdk/tests/ffi_layout_mismatch_test.rs:78,184` | Nightly `-Zlayout-seed` + `MALLOC_CHECK_` via `make test-ffi-layout-mismatch` (`Makefile:116`); not in any workflow |
 | Cross-OS instance-host network case | `drasi-core/components/instance-host/tests/network/mod.rs:397` | `DRASI_NETWORK_CONTAINER` Podman peer |
-| Live credential/OS integrations | e.g. keyring missing-key case `drasi-core/components/secret_stores/keyring/src/lib.rs:135-182` | Real OS keychain / cloud credentials |
+| Live credential/OS integrations | e.g. keyring missing-key case `drasi-core/components/secret_stores/keyring/src/lib.rs:135-182`; Azure Key Vault `drasi-core/components/secret_stores/azure-keyvault/src/lib.rs:571` (`DRASI_TEST_AZURE_KEY_VAULT_URL` and Azure credentials) | Real OS keychain / cloud credentials |
+| Oracle source integration tests | `drasi-core/components/sources/oracle/tests/integration_test.rs:115,280,435,687,895,1069` | Oracle container plus Oracle Instant Client (`libclntsh`) on the host |
+| Live market-data sources | `drasi-core/components/sources/sui-deepbook/src/grpc.rs:379`, `.../sui-deepbook/tests/integration_test.rs:346`, `drasi-core/components/sources/hyperliquid/tests/integration_test.rs:15` | Network access to Sui and Hyperliquid mainnet with live activity; results depend on external traffic |
 
 Native Garnet currently refuses restart; that refusal test is not positive
 restart qualification. The full suites should also be re-run on Linux x86_64
@@ -5861,7 +5857,11 @@ citing test results:
 - JavaScript, tutorial, GPU Lab, Move-a-wall, cloud-provider and test-infra E2E
   behaviour has not been re-run against the current revision.
 - Environment-gated cases (SQL Server, FFI layout seed, cross-OS network,
-  live credential/OS, native Garnet restart) are listed in [CW-78](#cw-78).
+  live credential/OS, Oracle, live market data, native Garnet restart) are
+  listed in [CW-78](#cw-78).
+- `cargo test --workspace -- --include-ignored` also compiles doc examples
+  marked ```` ```ignore ````, which are not meant to build, so doctests fail in
+  that mode only. Run ignored tests with `--lib --tests` or per target.
 - Some tests named "native" still use the linked query; only targets such as
   `drasi-core/components/host-sdk/tests/native_query_plugin.rs` load actual
   factories. Check construction before citing a test as native-path evidence.
