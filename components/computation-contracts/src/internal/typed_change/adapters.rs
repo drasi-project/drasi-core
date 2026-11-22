@@ -754,6 +754,17 @@ fn query_value_to_json(value: &VariableValue) -> serde_json::Value {
             serde_json::Value::String(value.datetime().to_rfc3339())
         }
         VariableValue::Duration(value) => serde_json::Value::String(value.to_string()),
-        _ => serde_json::Value::String(format!("{value:?}")),
+        // A returned node or relation is its properties plus `$metadata`, the
+        // established element JSON shape.
+        VariableValue::Element(element) => element.as_ref().into(),
+        VariableValue::ElementMetadata(metadata) => serde_json::Value::String(metadata.to_string()),
+        VariableValue::ElementReference(reference) => {
+            serde_json::Value::String(reference.to_string())
+        }
+        VariableValue::ListRange(range) => serde_json::Value::String(range.to_string()),
+        VariableValue::Expression(expression) => {
+            serde_json::Value::String(format!("{expression:?}"))
+        }
+        VariableValue::Awaiting => serde_json::Value::String("Awaiting".to_string()),
     }
 }

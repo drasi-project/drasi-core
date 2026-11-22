@@ -1078,3 +1078,24 @@ fn all_noop_query_results_do_not_create_an_envelope() {
             .is_none()
     );
 }
+
+#[test]
+fn returned_elements_project_to_element_json_not_debug_text() {
+    let node = element(ElementPropertyMap::from(json!({ "name": "Alice" })), 1_000);
+    let metadata = node.get_metadata().clone();
+    let reference = metadata.reference.clone();
+    let json = query_variables_to_json(&variables(&[
+        ("n", VariableValue::Element(Arc::new(node))),
+        ("m", VariableValue::ElementMetadata(metadata.clone())),
+        ("r", VariableValue::ElementReference(reference.clone())),
+    ]));
+
+    assert_eq!(
+        json,
+        json!({
+            "n": { "name": "Alice", "$metadata": metadata.to_string() },
+            "m": metadata.to_string(),
+            "r": reference.to_string(),
+        })
+    );
+}
