@@ -1435,7 +1435,7 @@ Source/Reaction stack ([CW-63](#cw-63)).
 
 **Kind:** Issue. **Area:** Core (computation-contracts), Server.
 **Priority:** High for any query that returns a whole node or relation.
-**Effort:** Small; a fix is prepared but not committed.
+**Effort:** Small; the fix is committed, verification remains.
 
 When a native query result is projected to JSON (result envelopes, the
 `QueryResult` handed to reactions and Server's results endpoint, graph views),
@@ -1445,8 +1445,8 @@ values without an explicit arm fall through to a catch-all that writes Rust
 `ElementMetadata`, `ElementReference`, `ListRange`, `Expression` and `Awaiting`
 take the same path.
 
-**Prepared fix (local, uncommitted at the time of writing):**
-`query_value_to_json` gets explicit arms: `Element` uses the existing element
+**Fix (committed in `361d34c3`, not yet run through the workspace gates):**
+`query_value_to_json` now has explicit arms: `Element` uses the existing element
 JSON conversion (properties plus `$metadata`), `ElementMetadata`,
 `ElementReference` and `ListRange` use their `Display` text, and `Expression`
 and `Awaiting` stay as explicit text, so no variant reaches a catch-all. The
@@ -1455,11 +1455,11 @@ metadata and reference projection.
 
 **Evidence:** `drasi-core/components/computation-contracts/src/internal/typed_change/adapters.rs:704-758`
 (`query_variables_to_json`, `query_value_to_json` with the `_ =>
-format!("{value:?}")` catch-all); callers in `query_codec.rs:670,715` and
+format!("{value:?}")` catch-all before the fix); callers in `query_codec.rs:670,715` and
 `graph_view.rs:698`.
 
-**Done when:** the fix is committed with its test, the workspace gates pass, and
-a Server query returning a node shows the node's properties in its results.
+**Done when:** the workspace gates pass with the fix and its test, and a Server
+query returning a node shows the node's properties in its results.
 
 <a id="cw-109"></a>
 
