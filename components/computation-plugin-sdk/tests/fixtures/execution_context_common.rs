@@ -179,7 +179,8 @@ impl sdk::Factory for Factory {
     fn create(
         &self,
         request: &sdk::CreateRequest,
-        _: sdk::ControlSender, _: sdk::ServiceBindings,
+        _: sdk::ControlSender,
+        _: sdk::ServiceBindings,
     ) -> anyhow::Result<sdk::CreatedComponent> {
         for field in ["trace", "sampled", "block"] {
             anyhow::ensure!(
@@ -289,22 +290,19 @@ impl NativeComponent for Probe {
         _: &mut sdk::lifecycle::StartContext,
     ) -> sdk::lifecycle::LifecycleResult {
         let result: anyhow::Result<()> = async {
-        self.running = true;
-        Ok(())
-    }
+            self.running = true;
+            Ok(())
+        }
         .await;
         Ok(result?)
     }
-    async fn stop(
-        &mut self,
-        _: &sdk::lifecycle::StopContext,
-    ) -> sdk::lifecycle::LifecycleResult {
+    async fn stop(&mut self, _: &sdk::lifecycle::StopContext) -> sdk::lifecycle::LifecycleResult {
         let result: anyhow::Result<()> = async {
-        let mut worker = self.worker.write().await;
-        join_owned_worker(&mut worker, Duration::from_secs(2)).await?;
-        self.running = false;
-        Ok(())
-    }
+            let mut worker = self.worker.write().await;
+            join_owned_worker(&mut worker, Duration::from_secs(2)).await?;
+            self.running = false;
+            Ok(())
+        }
         .await;
         Ok(result?)
     }
@@ -314,10 +312,7 @@ impl NativeComponent for Probe {
     ) -> sdk::lifecycle::LifecycleResult {
         Ok(())
     }
-    async fn pause(
-        &mut self,
-        _: &sdk::lifecycle::PauseContext,
-    ) -> sdk::lifecycle::LifecycleResult {
+    async fn pause(&mut self, _: &sdk::lifecycle::PauseContext) -> sdk::lifecycle::LifecycleResult {
         Ok(())
     }
     async fn resume(

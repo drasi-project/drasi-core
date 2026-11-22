@@ -55,6 +55,22 @@ fn slot_name() -> String {
     format!("drasi_slot_{}", uuid::Uuid::new_v4().simple())
 }
 
+/// Bind a standalone runtime context (as DrasiLib would) and start the source.
+async fn bind_and_start(source: &PostgresReplicationSource) -> Result<()> {
+    let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(64);
+    tokio::spawn(async move { while update_rx.recv().await.is_some() {} });
+    source
+        .bind_runtime_context(drasi_lib::context::SourceRuntimeContext::new(
+            "postgres-integration",
+            source.id().clone(),
+            None,
+            update_tx,
+            None,
+        ))
+        .await;
+    source.start().await
+}
+
 /// Poll a source until it reaches Running state (or timeout after 10s).
 async fn wait_for_source_running(source: &PostgresReplicationSource) {
     let start = Instant::now();
@@ -224,6 +240,7 @@ async fn build_core_custom(
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -257,7 +274,7 @@ async fn build_core_custom(
 
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires Docker: PostgreSQL container"]
 async fn test_source_connects_and_starts() -> Result<()> {
     init_logging();
 
@@ -296,7 +313,7 @@ async fn test_source_connects_and_starts() -> Result<()> {
 
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires Docker: PostgreSQL container"]
 async fn test_schema_discovery_reports_columns_end_to_end() -> Result<()> {
     init_logging();
 
@@ -344,7 +361,7 @@ async fn test_schema_discovery_reports_columns_end_to_end() -> Result<()> {
 
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires Docker: PostgreSQL container"]
 async fn test_insert_detection() -> Result<()> {
     init_logging();
 
@@ -383,7 +400,7 @@ async fn test_insert_detection() -> Result<()> {
 
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires Docker: PostgreSQL container"]
 async fn test_update_detection() -> Result<()> {
     init_logging();
 
@@ -446,7 +463,7 @@ async fn test_update_detection() -> Result<()> {
 /// high-water-mark filter suppressed all but the first change.
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires Docker: PostgreSQL container"]
 async fn test_multi_row_transaction_propagates_all_changes() -> Result<()> {
     init_logging();
 
@@ -582,7 +599,7 @@ async fn test_multi_row_transaction_propagates_all_changes() -> Result<()> {
 
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires Docker: PostgreSQL container"]
 async fn test_update_without_old_tuple_stays_update() -> Result<()> {
     init_logging();
 
@@ -633,7 +650,7 @@ async fn test_update_without_old_tuple_stays_update() -> Result<()> {
 
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires Docker: PostgreSQL container"]
 async fn test_delete_detection() -> Result<()> {
     init_logging();
 
@@ -679,7 +696,7 @@ async fn test_delete_detection() -> Result<()> {
 
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires Docker: PostgreSQL container"]
 async fn test_full_crud_cycle() -> Result<()> {
     init_logging();
 
@@ -747,7 +764,7 @@ async fn test_full_crud_cycle() -> Result<()> {
 /// and then to empty.
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires Docker: PostgreSQL container"]
 async fn test_cdc_autodetected_primary_key_correlates_update_and_delete() -> Result<()> {
     init_logging();
 
@@ -811,7 +828,7 @@ async fn test_cdc_autodetected_primary_key_correlates_update_and_delete() -> Res
 /// generation that a single-column key does not.
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires Docker: PostgreSQL container"]
 async fn test_cdc_autodetected_composite_primary_key_correlates() -> Result<()> {
     init_logging();
 
@@ -880,7 +897,7 @@ fn element_id_int(element_id: &str) -> Option<i64> {
 
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires Docker: PostgreSQL container"]
 async fn test_bootstrap_cdc_handover_has_no_overlap_or_gap() -> Result<()> {
     init_logging();
 
@@ -934,7 +951,7 @@ async fn test_bootstrap_cdc_handover_has_no_overlap_or_gap() -> Result<()> {
     .with_bootstrap_provider(PostgresBootstrapProvider::new(bootstrap_config))
     .build()?;
 
-    source.start().await?;
+    bind_and_start(&source).await?;
     wait_for_source_running(&source).await;
 
     let mut settings = subscription_settings(
@@ -1078,7 +1095,7 @@ async fn test_bootstrap_cdc_handover_has_no_overlap_or_gap() -> Result<()> {
 
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires Docker: PostgreSQL container"]
 async fn test_decimal_datatype_serialization() -> Result<()> {
     init_logging();
 
@@ -1168,6 +1185,7 @@ async fn test_decimal_datatype_serialization() -> Result<()> {
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -1305,7 +1323,7 @@ async fn test_decimal_datatype_serialization() -> Result<()> {
 /// row via CDC and asserts it surfaces with the correct instant.
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires Docker: PostgreSQL container"]
 async fn test_timestamptz_short_offset_serialization() -> Result<()> {
     init_logging();
 
@@ -1374,6 +1392,7 @@ async fn test_timestamptz_short_offset_serialization() -> Result<()> {
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -1486,7 +1505,7 @@ fn bool_result_map(results: &[serde_json::Value]) -> HashMap<i64, bool> {
 /// - CDC UPDATE: a `true -> false` flip must be observed.
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires Docker: PostgreSQL container"]
 async fn test_boolean_datatype_bootstrap_and_cdc() -> Result<()> {
     init_logging();
 
@@ -1581,6 +1600,7 @@ async fn test_boolean_datatype_bootstrap_and_cdc() -> Result<()> {
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -1721,7 +1741,7 @@ fn lsn_to_bytes(lsn: u64) -> Bytes {
 /// returns SourceError::PositionUnavailable.
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires Docker: PostgreSQL container"]
 async fn test_resume_from_before_slot_watermark_returns_position_unavailable() -> Result<()> {
     init_logging();
 
@@ -1737,7 +1757,7 @@ async fn test_resume_from_before_slot_watermark_returns_position_unavailable() -
     create_logical_replication_slot(&client, &slot).await?;
 
     let source = build_source(pg.config(), slot)?;
-    source.start().await?;
+    bind_and_start(&source).await?;
 
     // Wait for source to become running
     wait_for_source_running(&source).await;
@@ -1785,7 +1805,7 @@ async fn test_resume_from_before_slot_watermark_returns_position_unavailable() -
 /// After subscribing and inserting data, verify the received events carry source_position.
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires Docker: PostgreSQL container"]
 async fn test_events_carry_source_position_bytes() -> Result<()> {
     init_logging();
 
@@ -1801,7 +1821,7 @@ async fn test_events_carry_source_position_bytes() -> Result<()> {
     create_logical_replication_slot(&client, &slot).await?;
 
     let source = build_source(pg.config(), slot)?;
-    source.start().await?;
+    bind_and_start(&source).await?;
 
     // Wait for source to become running
     wait_for_source_running(&source).await;
@@ -1870,7 +1890,7 @@ async fn test_events_carry_source_position_bytes() -> Result<()> {
 /// Test that the source resumes from a WAL LSN and replays events from that point.
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires Docker: PostgreSQL container"]
 async fn test_resume_subscription_replays_from_lsn() -> Result<()> {
     init_logging();
 
@@ -1886,7 +1906,7 @@ async fn test_resume_subscription_replays_from_lsn() -> Result<()> {
     create_logical_replication_slot(&client, &slot).await?;
 
     let source = build_source(pg.config(), slot)?;
-    source.start().await?;
+    bind_and_start(&source).await?;
 
     // Wait for source to become running
     wait_for_source_running(&source).await;
@@ -1924,14 +1944,15 @@ async fn test_resume_subscription_replays_from_lsn() -> Result<()> {
     }
     assert_eq!(positions.len(), 2, "Should receive 2 events with positions");
 
-    // The first position is the LSN of the first event. Try resuming from it.
-    // This should replay all events from that LSN onwards (i.e., both events).
+    // Resume from the first event's position. Resume positions are exclusive
+    // (`PositionComparator::position_reached` is strictly-after), so only the
+    // second event should be replayed.
     let resume_lsn = positions[0].clone();
     source.stop().await?;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Restart and subscribe with resume_from
-    source.start().await?;
+    bind_and_start(&source).await?;
     wait_for_source_running(&source).await;
 
     let settings = subscription_settings(
@@ -1945,15 +1966,13 @@ async fn test_resume_subscription_replays_from_lsn() -> Result<()> {
     let response = source.subscribe(settings).await?;
     let mut rx2 = response.receiver;
 
-    // Should receive at least the events from that LSN onwards
-    let mut replay_count = 0;
+    let mut replayed: Vec<Bytes> = Vec::new();
     let start2 = Instant::now();
-    while start2.elapsed() < Duration::from_secs(15) {
+    while start2.elapsed() < Duration::from_secs(5) {
         match tokio::time::timeout(Duration::from_millis(500), rx2.recv()).await {
-            Ok(Ok(_event)) => {
-                replay_count += 1;
-                if replay_count >= 2 {
-                    break;
+            Ok(Ok(event)) => {
+                if let Some(pos) = event.source_position.clone() {
+                    replayed.push(pos);
                 }
             }
             Ok(Err(_)) => break,
@@ -1961,9 +1980,10 @@ async fn test_resume_subscription_replays_from_lsn() -> Result<()> {
         }
     }
 
-    assert!(
-        replay_count >= 2,
-        "Should replay at least 2 events from the resumed LSN, got {replay_count}"
+    assert_eq!(
+        replayed,
+        vec![positions[1].clone()],
+        "Resume should replay only events strictly after the resume position"
     );
 
     source.stop().await?;
@@ -2033,7 +2053,7 @@ fn pg_matches_change(
 /// same-sequence replay and only fails on a 602 emitted at a NEW, higher sequence.
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires Docker: PostgreSQL container"]
 async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
     use drasi_index_rocksdb::RocksDbIndexProvider;
     use drasi_lib::indexes::config::StorageBackendRef;
@@ -2101,11 +2121,6 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
 
     let q1_id = "mq-query1";
     let q2_id = "mq-query2";
-    let q1_dir = tmp_dir.path().join("q1");
-    let q2_dir = tmp_dir.path().join("q2");
-    std::fs::create_dir_all(&q1_dir)?;
-    std::fs::create_dir_all(&q2_dir)?;
-
     let query1 = Query::cypher(
         drasi_core::ComponentName::try_new("mq-query1").expect("fixture component name"),
     )
@@ -2161,6 +2176,7 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -2330,7 +2346,7 @@ async fn test_postgres_multi_query_no_duplicate_on_restart() -> Result<()> {
 /// persistence, and replication slot resume from checkpoint position.
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires Docker: PostgreSQL container"]
 async fn test_postgres_stop_restart_recovers() -> Result<()> {
     use drasi_index_rocksdb::RocksDbIndexProvider;
     use drasi_lib::indexes::config::StorageBackendRef;
@@ -2355,9 +2371,6 @@ async fn test_postgres_stop_restart_recovers() -> Result<()> {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let q_id = "kr-query";
-    let q_dir = tmp_dir.path().join("kr-q");
-    std::fs::create_dir_all(&q_dir)?;
-
     let source_config = PostgresSourceConfig {
         host: pg.config().host.clone(),
         port: pg.config().port,
@@ -2429,6 +2442,7 @@ async fn test_postgres_stop_restart_recovers() -> Result<()> {
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -2521,7 +2535,7 @@ async fn test_postgres_stop_restart_recovers() -> Result<()> {
 /// - NULL columns are present as ElementValue::Null on both paths
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires Docker: PostgreSQL container"]
 async fn test_type_parity_bootstrap_and_cdc() -> Result<()> {
     use drasi_core::models::ElementValue;
     use ordered_float::OrderedFloat;
@@ -2585,7 +2599,7 @@ async fn test_type_parity_bootstrap_and_cdc() -> Result<()> {
     .with_bootstrap_provider(PostgresBootstrapProvider::new(bootstrap_config))
     .build()?;
 
-    source.start().await?;
+    bind_and_start(&source).await?;
     wait_for_source_running(&source).await;
 
     let mut settings = subscription_settings(
@@ -2783,7 +2797,7 @@ async fn test_type_parity_bootstrap_and_cdc() -> Result<()> {
 /// property (not emit Null), so merge_missing_properties can keep the stored value.
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires Docker: PostgreSQL container"]
 async fn test_toast_unchanged_omitted_on_update() -> Result<()> {
     use drasi_core::models::ElementValue;
     use postgres_helpers::execute_sql;
@@ -2871,7 +2885,7 @@ async fn test_toast_unchanged_omitted_on_update() -> Result<()> {
     .with_bootstrap_provider(PostgresBootstrapProvider::new(bootstrap_config))
     .build()?;
 
-    source.start().await?;
+    bind_and_start(&source).await?;
     wait_for_source_running(&source).await;
 
     let mut settings = subscription_settings(
@@ -2944,7 +2958,7 @@ async fn test_toast_unchanged_omitted_on_update() -> Result<()> {
 /// Regression: domain-over-integer must bootstrap as Integer, not Null.
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires Docker: PostgreSQL container"]
 async fn test_domain_over_integer_bootstrap() -> Result<()> {
     use drasi_core::models::ElementValue;
     use postgres_helpers::execute_sql;
@@ -3029,7 +3043,7 @@ async fn test_domain_over_integer_bootstrap() -> Result<()> {
     .with_bootstrap_provider(PostgresBootstrapProvider::new(bootstrap_config))
     .build()?;
 
-    source.start().await?;
+    bind_and_start(&source).await?;
     wait_for_source_running(&source).await;
 
     let mut settings = subscription_settings(

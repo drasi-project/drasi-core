@@ -121,18 +121,10 @@ async fn ready(drasi: &DrasiLib, status: ComponentStatus) {
     tokio::time::timeout(Duration::from_secs(10), async {
         let mut events = drasi.subscribe_all_component_events();
         loop {
-            if drasi
-                .get_graph()
-                .await
-                .unwrap()
-                .nodes
-                .iter()
-                .any(|node| {
-                    node.id
-                        == drasi_lib::computation::v1::GraphEntityId::Component(reaction.clone())
-                        && node.status == status
-                })
-            {
+            if drasi.get_graph().await.unwrap().nodes.iter().any(|node| {
+                node.id == drasi_lib::computation::v1::GraphEntityId::Component(reaction.clone())
+                    && node.status == status
+            }) {
                 return;
             }
             let event = events.recv().await.unwrap();
@@ -228,7 +220,8 @@ async fn blocked_worker_with_timing(
         .unwrap();
     metrics
         .wait_for(|| {
-            metrics.count("drasi.query.events_processed", &[("query_id", QUERY_ID)]) == inputs as u64
+            metrics.count("drasi.query.events_processed", &[("query_id", QUERY_ID)])
+                == inputs as u64
         })
         .await;
     assert_eq!(metrics.count("drasi.reaction.results_processed", &[]), 0);
@@ -354,10 +347,19 @@ struct CheckpointStore {
 
 #[async_trait]
 impl StateStoreProvider for CheckpointStore {
-    async fn get(&self, partition: &StorePartition, key: &str) -> StateStoreResult<Option<Vec<u8>>> {
+    async fn get(
+        &self,
+        partition: &StorePartition,
+        key: &str,
+    ) -> StateStoreResult<Option<Vec<u8>>> {
         self.inner.get(partition, key).await
     }
-    async fn set(&self, partition: &StorePartition, key: &str, value: Vec<u8>) -> StateStoreResult<()> {
+    async fn set(
+        &self,
+        partition: &StorePartition,
+        key: &str,
+        value: Vec<u8>,
+    ) -> StateStoreResult<()> {
         if key.starts_with("checkpoint:") && self.fail.load(Ordering::Acquire) {
             return Err(StateStoreError::StorageError(
                 "controlled checkpoint failure".into(),
@@ -378,10 +380,18 @@ impl StateStoreProvider for CheckpointStore {
     ) -> StateStoreResult<HashMap<String, Vec<u8>>> {
         self.inner.get_many(partition, keys).await
     }
-    async fn set_many(&self, partition: &StorePartition, entries: &[(&str, &[u8])]) -> StateStoreResult<()> {
+    async fn set_many(
+        &self,
+        partition: &StorePartition,
+        entries: &[(&str, &[u8])],
+    ) -> StateStoreResult<()> {
         self.inner.set_many(partition, entries).await
     }
-    async fn delete_many(&self, partition: &StorePartition, keys: &[&str]) -> StateStoreResult<usize> {
+    async fn delete_many(
+        &self,
+        partition: &StorePartition,
+        keys: &[&str],
+    ) -> StateStoreResult<usize> {
         self.inner.delete_many(partition, keys).await
     }
     async fn clear_store(&self, partition: &StorePartition) -> StateStoreResult<usize> {

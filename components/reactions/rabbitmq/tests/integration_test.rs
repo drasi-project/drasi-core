@@ -169,7 +169,7 @@ async fn consume_next(consumer: &mut Consumer) -> Result<lapin::message::Deliver
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: RabbitMQ container"]
 async fn test_rabbitmq_reaction_end_to_end() -> Result<()> {
     let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
@@ -293,6 +293,7 @@ async fn test_rabbitmq_reaction_end_to_end() -> Result<()> {
     let rocks = Arc::new(RocksDbIndexProvider::new(tmp_dir.path(), false, false));
     let wal = Arc::new(RedbWalProvider::new(wal_dir.path()));
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -371,7 +372,7 @@ async fn test_rabbitmq_reaction_end_to_end() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: RabbitMQ container"]
 async fn test_rabbitmq_reaction_aggregation() -> Result<()> {
     let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
@@ -486,6 +487,7 @@ async fn test_rabbitmq_reaction_aggregation() -> Result<()> {
     let rocks = Arc::new(RocksDbIndexProvider::new(tmp_dir.path(), false, false));
     let wal = Arc::new(RedbWalProvider::new(wal_dir.path()));
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(

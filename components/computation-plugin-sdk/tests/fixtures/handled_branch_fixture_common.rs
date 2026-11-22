@@ -64,7 +64,8 @@ impl sdk::Factory for Factory {
     fn create(
         &self,
         request: &sdk::CreateRequest,
-        _: sdk::ControlSender, _: sdk::ServiceBindings,
+        _: sdk::ControlSender,
+        _: sdk::ServiceBindings,
     ) -> anyhow::Result<sdk::CreatedComponent> {
         Ok(sdk::CreatedComponent {
             component: sdk::Component::Transformer(Box::new(Transformer {
@@ -94,20 +95,14 @@ impl NativeComponent for Transformer {
         &mut self,
         _: &mut sdk::lifecycle::StartContext,
     ) -> sdk::lifecycle::LifecycleResult {
-        let result: anyhow::Result<()> = async {
-        Ok(())
-    }
-        .await;
+        let result: anyhow::Result<()> = async { Ok(()) }.await;
         Ok(result?)
     }
-    async fn stop(
-        &mut self,
-        _: &sdk::lifecycle::StopContext,
-    ) -> sdk::lifecycle::LifecycleResult {
+    async fn stop(&mut self, _: &sdk::lifecycle::StopContext) -> sdk::lifecycle::LifecycleResult {
         let result: anyhow::Result<()> = async {
-        self.input = None;
-        Ok(())
-    }
+            self.input = None;
+            Ok(())
+        }
         .await;
         Ok(result?)
     }
@@ -117,10 +112,7 @@ impl NativeComponent for Transformer {
     ) -> sdk::lifecycle::LifecycleResult {
         Ok(())
     }
-    async fn pause(
-        &mut self,
-        _: &sdk::lifecycle::PauseContext,
-    ) -> sdk::lifecycle::LifecycleResult {
+    async fn pause(&mut self, _: &sdk::lifecycle::PauseContext) -> sdk::lifecycle::LifecycleResult {
         Ok(())
     }
     async fn resume(

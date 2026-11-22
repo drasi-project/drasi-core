@@ -1,7 +1,6 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-#[allow(dead_code)]
 mod computation_support;
 use computation_support::component;
 
@@ -230,7 +229,9 @@ async fn assembly_additions_and_replacement_use_the_owning_graph_policy() {
     .await
     .unwrap()
     .unwrap();
-    core.add_components(factory.batch("second", SECOND)).await.unwrap();
+    core.add_components(factory.batch("second", SECOND))
+        .await
+        .unwrap();
     tokio::time::timeout(
         Duration::from_secs(3),
         observations.wait_for(|values| values.len() >= 2),

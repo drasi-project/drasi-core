@@ -112,7 +112,8 @@ async fn parity_and_aliases() -> Result<()> {
         linked.bind_inputs(&bindings).await?;
         native.start(&crate::hooks::start_ctx()).await?;
         linked.start(&crate::hooks::start_ctx()).await?;
-        let ignored = InputEnvelope { execution_context: Default::default(),
+        let ignored = InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: GraphChangeCodec::encode_change(
                 SourceChange::Insert {
@@ -201,7 +202,8 @@ async fn derived_input_scope() -> Result<()> {
             anyhow::bail!("missing upstream output");
         };
         let converted = downstream
-            .transform(InputEnvelope { execution_context: Default::default(),
+            .transform(InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in")?,
                 envelope: output.envelope.clone(),
             })

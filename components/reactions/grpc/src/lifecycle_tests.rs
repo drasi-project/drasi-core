@@ -59,7 +59,7 @@ fn reaction(endpoint: &str, adaptive: bool) -> GrpcReaction {
     .unwrap()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "current_thread")]
 async fn worker_tracing_preserves_batch_origins_in_fixed_and_adaptive_modes() {
     use drasi_lib::observability::ExecutionContext;
     for adaptive in [false, true] {
@@ -130,12 +130,10 @@ async fn worker_tracing_preserves_batch_origins_in_fixed_and_adaptive_modes() {
                 .await;
             let spans = recording.finished();
             assert_eq!(
-                recording
-                    .metrics
-                    .count(
-                        "drasi.reaction.results_processed",
-                        &[("query_id", worker_telemetry::QUERY_ID)]
-                    ),
+                recording.metrics.count(
+                    "drasi.reaction.results_processed",
+                    &[("query_id", worker_telemetry::QUERY_ID)]
+                ),
                 4
             );
             assert_eq!(

@@ -19,6 +19,11 @@ pub extern "C" fn drasi_computation_plugin_metadata() -> *const abi::Metadata {
 }
 
 #[no_mangle]
+pub extern "C" fn drasi_computation_plugin_batching_v1() -> *const abi::batching::PluginBatchingV1 {
+    std::panic::catch_unwind(|| exported().batching()).unwrap_or(std::ptr::null())
+}
+
+#[no_mangle]
 /// # Safety
 /// `out` must be a writable component-plugin handle output.
 pub unsafe extern "C" fn drasi_computation_plugin_entry(

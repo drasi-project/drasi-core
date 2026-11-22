@@ -139,7 +139,7 @@ async fn receive_single_message(
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: ElasticMQ SQS container"]
 async fn test_sqs_reaction_end_to_end() -> Result<()> {
     setup_logger();
 
@@ -331,7 +331,7 @@ async fn test_sqs_reaction_end_to_end() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: ElasticMQ SQS container"]
 async fn test_sqs_reaction_aggregation_query() -> Result<()> {
     setup_logger();
 

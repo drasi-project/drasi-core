@@ -142,7 +142,8 @@ impl EnvelopeSource for Upstream {
             sequence,
             None,
         )?;
-        Ok(Some(OutputEnvelope { execution_context: Default::default(),
+        Ok(Some(OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out")?,
             envelope,
         }))

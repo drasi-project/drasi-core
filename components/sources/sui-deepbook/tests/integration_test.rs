@@ -207,7 +207,6 @@ fn mock_event_with_pkg(
 }
 
 #[tokio::test]
-#[ignore] // Run with: cargo test -p drasi-source-sui-deepbook --test integration_test -- --ignored --nocapture
 async fn test_sui_deepbook_change_detection_end_to_end() -> Result<()> {
     let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
@@ -263,6 +262,7 @@ async fn test_sui_deepbook_change_detection_end_to_end() -> Result<()> {
     .build();
 
     let drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -343,7 +343,7 @@ async fn test_sui_deepbook_change_detection_end_to_end() -> Result<()> {
 /// Test that the gRPC transport successfully receives DeepBook events from Sui mainnet.
 /// This test requires internet connectivity and connects to the public Sui fullnode.
 #[tokio::test]
-#[ignore]
+#[ignore = "requires network: Sui mainnet gRPC fullnode with live DeepBook activity within 30s"]
 async fn test_grpc_transport_receives_events() -> Result<()> {
     use drasi_reaction_application::subscription::SubscriptionOptions;
 
@@ -391,6 +391,7 @@ async fn test_grpc_transport_receives_events() -> Result<()> {
     .build();
 
     let mut drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(

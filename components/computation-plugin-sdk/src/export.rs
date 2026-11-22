@@ -34,6 +34,7 @@ mod output_follow;
 mod output_reads;
 #[cfg(test)]
 mod query_telemetry_tests;
+#[cfg(test)]
 mod service_tests;
 mod source_schema;
 mod update;
@@ -2213,8 +2214,14 @@ async fn execute(
 ) -> anyhow::Result<Vec<u8>> {
     let contextual = call.contexts.is_some();
     let mut output_contexts = Vec::new();
-    let payload =
-        execute_payload(instance, call, transaction, &mut output_contexts, acknowledged).await?;
+    let payload = execute_payload(
+        instance,
+        call,
+        transaction,
+        &mut output_contexts,
+        acknowledged,
+    )
+    .await?;
     crate::telemetry_transport::encode_reply(payload, &output_contexts, contextual)
 }
 

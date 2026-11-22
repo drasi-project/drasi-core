@@ -316,12 +316,10 @@ async fn worker_tracing_preserves_origins_until_actual_dispatch_in_both_modes() 
 
         let spans = recording.finished();
         assert_eq!(
-            recording
-                .metrics
-                .count(
-                    "drasi.reaction.results_processed",
-                    &[("query_id", worker_telemetry::QUERY_ID)]
-                ),
+            recording.metrics.count(
+                "drasi.reaction.results_processed",
+                &[("query_id", worker_telemetry::QUERY_ID)]
+            ),
             4
         );
         assert_eq!(

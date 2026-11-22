@@ -261,9 +261,7 @@ impl GraphTelemetry {
                 }
                 Err(error) => {
                     if names.warned.insert(id.clone()) {
-                        log::warn!(
-                            "Omitting drasi.component.info for component {id}: {error}"
-                        );
+                        log::warn!("Omitting drasi.component.info for component {id}: {error}");
                     }
                     None
                 }
@@ -451,7 +449,7 @@ impl GraphTelemetry {
                         && component.started
                         && !component.exhausted
                         && component.failure.is_none()
-                        && readiness.map_or(true, |plane| plane.is_ready(id, component.generation)),
+                        && readiness.is_none_or(|plane| plane.is_ready(id, component.generation)),
                 );
                 true
             } else {

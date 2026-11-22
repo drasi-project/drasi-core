@@ -8,7 +8,9 @@ const CRASH_ROOT: &str = "DRASI_QUERY_PLUGIN_FANOUT_ROOT";
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "process-exit fixture launched by the partial fanout cases"]
 async fn indexed_fanout_exit_child() -> Result<()> {
-    let root = PathBuf::from(std::env::var_os(CRASH_ROOT).context("missing fanout root")?);
+    let Some(root) = std::env::var_os(CRASH_ROOT).map(PathBuf::from) else {
+        return Ok(());
+    };
     let gate = Arc::new(CommitGate::default());
     let mut fixture = Fixture::with_gate(
         &root,

@@ -380,7 +380,8 @@ impl ComputationComponent for HandedSource {
 #[async_trait]
 impl EnvelopeSource for HandedSource {
     async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
-        Ok(self.inputs.recv().await.map(|envelope| OutputEnvelope { execution_context: Default::default(),
+        Ok(self.inputs.recv().await.map(|envelope| OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out").unwrap(),
             envelope,
         }))

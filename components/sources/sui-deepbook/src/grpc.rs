@@ -376,7 +376,7 @@ mod tests {
 
     /// Diagnostic test: connect to mainnet gRPC and verify messages are received.
     #[tokio::test]
-    #[ignore]
+    #[ignore = "requires network: Sui mainnet gRPC fullnode"]
     async fn test_grpc_stream_delivers_messages() {
         use sui_rpc::field::FieldMask;
 

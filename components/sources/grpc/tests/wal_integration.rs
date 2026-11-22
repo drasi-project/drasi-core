@@ -129,7 +129,6 @@ async fn init_source_with_wal(
 // ============================================================
 
 #[tokio::test]
-#[ignore]
 async fn test_grpc_wal_disabled_no_persistence() {
     let config = GrpcSourceConfig {
         host: "127.0.0.1".to_string(),
@@ -173,7 +172,6 @@ async fn test_grpc_wal_disabled_no_persistence() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_grpc_wal_enabled_source_starts() {
     let config = GrpcSourceConfig {
         host: "127.0.0.1".to_string(),
@@ -222,7 +220,6 @@ async fn test_grpc_wal_enabled_source_starts() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_grpc_crash_recovery_resumes_sequence() {
     let tmp = TempDir::new().unwrap();
     let wal = Arc::new(RedbWalProvider::new(tmp.path()));
@@ -332,7 +329,6 @@ async fn test_grpc_crash_recovery_resumes_sequence() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_grpc_deprovision_removes_wal() {
     let config = GrpcSourceConfig {
         host: "127.0.0.1".to_string(),

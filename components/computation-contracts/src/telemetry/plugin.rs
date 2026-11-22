@@ -29,10 +29,14 @@ pub trait PluginTelemetryBackend: std::fmt::Debug + Send + Sync {
         &self,
         _request: &super::QueryObservationRequest,
     ) -> Result<Option<Box<dyn super::QueryObservation>>> {
-        Err(super::TelemetryError::Unsupported("native query observations"))
+        Err(super::TelemetryError::Unsupported(
+            "native query observations",
+        ))
     }
     fn query_observation_event(&self, _event: super::QueryObservationEvent) -> Result<()> {
-        Err(super::TelemetryError::Unsupported("native query observations"))
+        Err(super::TelemetryError::Unsupported(
+            "native query observations",
+        ))
     }
     fn is_active(&self) -> Result<bool> {
         Err(super::TelemetryError::Unsupported(

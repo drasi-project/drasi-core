@@ -274,7 +274,7 @@ fn assert_add(diff: &ResultDiff, expected: &[(&str, serde_json::Value)]) {
 
 /// Metrics, traces, and logs flow through a real Collector into Drasi.
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: OpenTelemetry Collector container"]
 async fn test_change_detection_through_collector() {
     let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
@@ -341,6 +341,7 @@ async fn test_change_detection_through_collector() {
 
     let drasi = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(

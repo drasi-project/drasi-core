@@ -138,6 +138,7 @@ async fn main() -> Result<()> {
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_host_sdk::computation::NativePlugin::from_definition(
                     drasi_computation_transformer_query::plugin()?,
@@ -147,7 +148,10 @@ async fn main() -> Result<()> {
             .with_id("http-source-example")
             .with_source(drasi_lib::Source::id(&http_source).to_owned(), http_source)
             .with_query(all_prices_query)
-            .with_reaction(drasi_lib::Reaction::id(&log_reaction).to_owned(), log_reaction)
+            .with_reaction(
+                drasi_lib::Reaction::id(&log_reaction).to_owned(),
+                log_reaction,
+            )
             .build()
             .await?,
     );

@@ -27,6 +27,9 @@ pub struct K3sGuard {
 
 impl K3sGuard {
     pub async fn start() -> Result<Self> {
+        // Workspace feature unification enables both Rustls providers, so the
+        // test process must choose one before kube constructs a client.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let temp_dir = tempfile::tempdir()?;
         let container = K3s::default()
             .with_conf_mount(temp_dir.path())

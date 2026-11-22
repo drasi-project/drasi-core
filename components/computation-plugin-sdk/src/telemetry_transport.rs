@@ -546,7 +546,7 @@ mod tests {
                 .with_plugin_telemetry(Some(binding.clone()))
                 .in_scope(|| decode_creation(&bytes, factory))
         };
-        let error = create(&factory).err().expect("a foreign component binding");
+        let error = create(&factory).expect_err("a foreign component binding");
         assert!(error
             .to_string()
             .contains("does not match the constructed component"));

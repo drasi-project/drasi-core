@@ -115,6 +115,7 @@ async fn build_person_core(
 
     Ok(Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -146,7 +147,7 @@ async fn build_person_core(
 
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires Docker: Neo4j container"]
 async fn test_source_connects_and_starts() -> Result<()> {
     init_logging();
     let neo = setup_neo4j().await?;
@@ -181,7 +182,7 @@ async fn test_source_connects_and_starts() -> Result<()> {
 
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires Docker: Neo4j container"]
 async fn test_insert_update_delete_detection() -> Result<()> {
     init_logging();
     let neo = setup_neo4j().await?;
@@ -246,7 +247,7 @@ async fn test_insert_update_delete_detection() -> Result<()> {
 
 #[tokio::test]
 #[serial]
-#[ignore]
+#[ignore = "requires Docker: Neo4j container"]
 async fn test_relationship_detection() -> Result<()> {
     init_logging();
     let neo = setup_neo4j().await?;

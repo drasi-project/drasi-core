@@ -554,7 +554,11 @@ impl ReactionBase {
                 .await?;
                 let telemetry = self.worker_telemetry().await;
                 for (query, checkpoint) in &checkpoints {
-                    telemetry.checkpoint(query.as_str(), checkpoint.sequence, checkpoint.config_hash);
+                    telemetry.checkpoint(
+                        query.as_str(),
+                        checkpoint.sequence,
+                        checkpoint.config_hash,
+                    );
                 }
                 Ok(checkpoints)
             }
@@ -786,7 +790,10 @@ impl ReactionBase {
                         "[{}] Skipping already-processed event: query={}, seq={} (checkpoint={})",
                         self.id, query_id, seq, cp.sequence
                     );
-                    if let Some(subscription) = self.worker_telemetry().await.subscription(query_id.as_str())
+                    if let Some(subscription) = self
+                        .worker_telemetry()
+                        .await
+                        .subscription(query_id.as_str())
                     {
                         subscription.dedup();
                     }

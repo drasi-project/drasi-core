@@ -43,6 +43,19 @@ const TEST_DB: &str = "DrasiTest";
 const TEST_TABLE: &str = "dbo.Products";
 const QUERY_ID: &str = "products-query";
 const SOURCE_ID: &str = "mssql-source";
+const SOURCE_UUID: &str = "00000000-0000-0000-0000-00000000032a";
+
+fn component_id(uuid: &str) -> drasi_core::ComponentId {
+    drasi_core::ComponentId::try_new(uuid).expect("fixture UUID")
+}
+
+fn component_name(name: &str) -> drasi_core::ComponentName {
+    drasi_core::ComponentName::try_new(name).expect("fixture component name")
+}
+
+fn source_id() -> drasi_core::ComponentId {
+    component_id(SOURCE_UUID)
+}
 
 const TYPES_TABLE: &str = "dbo.TypesTest";
 const TYPES_QUERY_ID: &str = "types-query";
@@ -196,7 +209,7 @@ async fn prepare_database(config: &MssqlConfig) -> Result<MssqlConfig> {
 }
 
 #[tokio::test]
-#[ignore] // Run with: cargo test -p drasi-source-mssql --test integration_test -- --ignored --nocapture
+#[ignore = "requires Docker: SQL Server container (x86_64 only)"] // Run with: cargo test -p drasi-source-mssql --test integration_test -- --ignored --nocapture
 #[cfg(not(target_arch = "aarch64"))]
 async fn test_mssql_change_detection_end_to_end() -> Result<()> {
     let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
@@ -219,7 +232,7 @@ async fn test_mssql_change_detection_end_to_end() -> Result<()> {
             .build()
             .context("Failed to build MSSQL bootstrap provider")?;
 
-        let source = MsSqlSource::builder(SOURCE_ID)
+        let source = MsSqlSource::builder(source_id())
             .with_host(&db_config.host)
             .with_port(db_config.port)
             .with_database(&db_config.database)
@@ -233,24 +246,26 @@ async fn test_mssql_change_detection_end_to_end() -> Result<()> {
             .build()
             .context("Failed to build MSSQL source")?;
 
-        let query = Query::cypher(QUERY_ID)
+        let query = Query::cypher(component_name(QUERY_ID))
             .query(
                 r#"
                 MATCH (p:Products)
                 RETURN p.ProductId AS id, p.Name AS name, p.Price AS price
             "#,
             )
-            .from_input(SOURCE_ID)
+            .from_input_by_name(component_name(SOURCE_ID))
             .auto_start(true)
             .enable_bootstrap(true)
             .build()
             .expect("valid query configuration");
 
-        let (reaction, handle) = ApplicationReaction::builder("app-reaction")
-            .with_query(QUERY_ID)
-            .build();
+        let (reaction, handle) =
+            ApplicationReaction::builder(component_id("00000000-0000-0000-0000-000000000340"))
+                .with_query_by_name(component_name(QUERY_ID))
+                .build();
 
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -264,9 +279,9 @@ async fn test_mssql_change_detection_end_to_end() -> Result<()> {
                     .clone(),
             )
             .with_id("mssql-integration-test")
-            .with_source(drasi_lib::Source::id(&source).to_owned(), source)
+            .with_source(component_name(SOURCE_ID), source)
             .with_query(query)
-            .with_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction)
+            .with_reaction(component_name("app-reaction"), reaction)
             .build()
             .await
             .context("Failed to build DrasiLib")?;
@@ -335,7 +350,7 @@ async fn test_mssql_change_detection_end_to_end() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: SQL Server container (x86_64 only)"]
 #[cfg(not(target_arch = "aarch64"))]
 async fn test_mssql_bootstrap_cdc_overlap_handover() -> Result<()> {
     let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
@@ -377,7 +392,7 @@ async fn test_mssql_bootstrap_cdc_overlap_handover() -> Result<()> {
             .build()
             .context("Failed to build MSSQL bootstrap provider")?;
 
-        let source = MsSqlSource::builder(SOURCE_ID)
+        let source = MsSqlSource::builder(source_id())
             .with_host(&db_config.host)
             .with_port(db_config.port)
             .with_database(&db_config.database)
@@ -408,9 +423,9 @@ async fn test_mssql_bootstrap_cdc_overlap_handover() -> Result<()> {
         // snapshot and the CDC stream deterministically (a reaction subscription
         // can miss bootstrap events delivered before it attaches).
         let settings = SourceSubscriptionSettings {
-            source_id: SOURCE_ID.to_string(),
+            source_id: source_id(),
             enable_bootstrap: true,
-            query_id: "q-handover".to_string(),
+            query_id: component_id("00000000-0000-0000-0000-000000000330"),
             nodes: HashSet::from(["Products".to_string()]),
             relations: HashSet::new(),
             resume_from: None,
@@ -492,7 +507,7 @@ async fn test_mssql_bootstrap_cdc_overlap_handover() -> Result<()> {
                                 SourceChange::Insert { .. } => {
                                     *inserts.entry(id).or_default() += 1
                                 }
-                                SourceChange::Update { .. } => {
+                                SourceChange::Update { .. } | SourceChange::Replace { .. } => {
                                     *updates.entry(id).or_default() += 1
                                 }
                                 SourceChange::Delete { .. } => {
@@ -560,7 +575,7 @@ async fn test_mssql_bootstrap_cdc_overlap_handover() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore] // Run with: cargo test -p drasi-source-mssql --test integration_test -- --ignored --nocapture
+#[ignore = "requires Docker: SQL Server container (x86_64 only)"] // Run with: cargo test -p drasi-source-mssql --test integration_test -- --ignored --nocapture
 #[cfg(not(target_arch = "aarch64"))]
 async fn test_mssql_schema_discovery_end_to_end() -> Result<()> {
     let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
@@ -573,7 +588,7 @@ async fn test_mssql_schema_discovery_end_to_end() -> Result<()> {
             .await
             .context("Failed to prepare MSSQL database")?;
 
-        let source = MsSqlSource::builder(SOURCE_ID)
+        let source = MsSqlSource::builder(source_id())
             .with_host(&db_config.host)
             .with_port(db_config.port)
             .with_database(&db_config.database)
@@ -587,6 +602,7 @@ async fn test_mssql_schema_discovery_end_to_end() -> Result<()> {
             .context("Failed to build MSSQL source")?;
 
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -600,7 +616,7 @@ async fn test_mssql_schema_discovery_end_to_end() -> Result<()> {
                     .clone(),
             )
             .with_id("mssql-schema-test")
-            .with_source(drasi_lib::Source::id(&source).to_owned(), source)
+            .with_source(component_name(SOURCE_ID), source)
             .build()
             .await
             .context("Failed to build DrasiLib")?;
@@ -608,7 +624,7 @@ async fn test_mssql_schema_discovery_end_to_end() -> Result<()> {
         core.start().await.context("Failed to start DrasiLib")?;
 
         let schema = core
-            .get_source_schema(SOURCE_ID)
+            .get_source_schema_by_name(&component_name(SOURCE_ID))
             .await
             .context("Failed to fetch MSSQL source schema")?
             .expect("MSSQL source should report schema");
@@ -753,7 +769,7 @@ async fn prepare_types_database(config: &MssqlConfig) -> Result<MssqlConfig> {
 /// Integers should be integers, floats should be floats, booleans should be
 /// booleans, and strings should be strings — not everything coerced to string.
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: SQL Server container (x86_64 only)"]
 async fn test_mssql_column_type_mapping() -> Result<()> {
     let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 
@@ -860,6 +876,7 @@ async fn test_mssql_column_type_mapping() -> Result<()> {
         .build();
 
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -1148,7 +1165,7 @@ fn assert_zoned_datetime_field(data: &Value, field: &str, path: &str) -> Result<
 /// Uses `stop_query`/`start_query` (same pattern as the E2E checkpoint tests)
 /// to avoid RocksDB lock contention from spawned background tasks.
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: SQL Server container (x86_64 only)"]
 #[cfg(not(target_arch = "aarch64"))]
 async fn test_mssql_checkpoint_recovery_round_trip() -> Result<()> {
     use drasi_index_rocksdb::RocksDbIndexProvider;
@@ -1184,7 +1201,7 @@ async fn test_mssql_checkpoint_recovery_round_trip() -> Result<()> {
             .with_tables(vec![TEST_TABLE.to_string()])
             .build()?;
 
-        let source = MsSqlSource::builder(SOURCE_ID)
+        let source = MsSqlSource::builder(source_id())
             .with_host(&db_config.host)
             .with_port(db_config.port)
             .with_database(&db_config.database)
@@ -1197,25 +1214,27 @@ async fn test_mssql_checkpoint_recovery_round_trip() -> Result<()> {
             .with_bootstrap_provider(bp)
             .build()?;
 
-        let query = Query::cypher(QUERY_ID)
+        let query = Query::cypher(component_name(QUERY_ID))
             .query(
                 r#"
                 MATCH (p:Products)
                 RETURN p.ProductId AS id, p.Name AS name, p.Price AS price
             "#,
             )
-            .from_input(SOURCE_ID)
+            .from_input_by_name(component_name(SOURCE_ID))
             .auto_start(true)
             .enable_bootstrap(true)
             .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build()
             .expect("valid query configuration");
-        let (reaction, handle) = ApplicationReaction::builder("app-reaction-rt1")
-            .with_query(QUERY_ID)
-            .build();
+        let (reaction, handle) =
+            ApplicationReaction::builder(component_id("00000000-0000-0000-0000-000000000341"))
+                .with_query_by_name(component_name(QUERY_ID))
+                .build();
         let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
 
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -1229,9 +1248,9 @@ async fn test_mssql_checkpoint_recovery_round_trip() -> Result<()> {
                     .clone(),
             )
             .with_id("mssql-recovery-test")
-            .with_source(drasi_lib::Source::id(&source).to_owned(), source)
+            .with_source(component_name(SOURCE_ID), source)
             .with_query(query)
-            .with_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction)
+            .with_reaction(component_name("app-reaction-rt1"), reaction)
             .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
@@ -1272,14 +1291,14 @@ async fn test_mssql_checkpoint_recovery_round_trip() -> Result<()> {
         sleep(Duration::from_secs(2)).await;
 
         // --- Stop and restart the query ---
-        core.stop_query(QUERY_ID)
+        core.stop_query_by_name(&component_name(QUERY_ID))
             .await
             .context("Failed to stop query")?;
 
         // Brief pause to let checkpoint flush
         sleep(Duration::from_millis(500)).await;
 
-        core.start_query(QUERY_ID)
+        core.start_query_by_name(&component_name(QUERY_ID))
             .await
             .context("Failed to restart query")?;
 
@@ -1321,7 +1340,7 @@ async fn test_mssql_checkpoint_recovery_round_trip() -> Result<()> {
 /// Unlike the round-trip test above, this one inserts data *while the query is
 /// stopped*, verifying that the CDC stream picks up changes made during the gap.
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: SQL Server container (x86_64 only)"]
 #[cfg(not(target_arch = "aarch64"))]
 async fn test_mssql_bootstrap_then_restart_resumes_from_snapshot_lsn() -> Result<()> {
     use drasi_index_rocksdb::RocksDbIndexProvider;
@@ -1347,7 +1366,7 @@ async fn test_mssql_bootstrap_then_restart_resumes_from_snapshot_lsn() -> Result
             .with_tables(vec![TEST_TABLE.to_string()])
             .build()?;
 
-        let source = MsSqlSource::builder(SOURCE_ID)
+        let source = MsSqlSource::builder(source_id())
             .with_host(&db_config.host)
             .with_port(db_config.port)
             .with_database(&db_config.database)
@@ -1360,28 +1379,29 @@ async fn test_mssql_bootstrap_then_restart_resumes_from_snapshot_lsn() -> Result
             .with_bootstrap_provider(bp)
             .build()?;
 
-        let query = Query::cypher(QUERY_ID)
+        let query = Query::cypher(component_name(QUERY_ID))
             .query(
                 r#"
                 MATCH (p:Products)
                 RETURN p.ProductId AS id, p.Name AS name, p.Price AS price
             "#,
             )
-            .from_input(SOURCE_ID)
+            .from_input_by_name(component_name(SOURCE_ID))
             .auto_start(true)
             .enable_bootstrap(true)
             .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build().expect("valid query configuration");
-        let (reaction, handle) = ApplicationReaction::builder("app-reaction-bs1")
-            .with_query(QUERY_ID)
+        let (reaction, handle) = ApplicationReaction::builder(component_id("00000000-0000-0000-0000-000000000342"))
+            .with_query_by_name(component_name(QUERY_ID))
             .build();
         let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
 
-        let core = DrasiLib::builder().with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone())
+        let core = DrasiLib::builder()
+.with_allow_external_component_ids(true).with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone())
             .with_id("mssql-bootstrap-resume-test")
-            .with_source(drasi_lib::Source::id(&source).to_owned(), source)
+            .with_source(component_name(SOURCE_ID), source)
             .with_query(query)
-            .with_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction)
+            .with_reaction(component_name("app-reaction-bs1"), reaction)
             .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
@@ -1403,7 +1423,7 @@ async fn test_mssql_bootstrap_then_restart_resumes_from_snapshot_lsn() -> Result
         sleep(Duration::from_secs(5)).await;
 
         // Stop the query so we can insert data during the gap
-        core.stop_query(QUERY_ID)
+        core.stop_query_by_name(&component_name(QUERY_ID))
             .await
             .context("Failed to stop query")?;
 
@@ -1421,7 +1441,7 @@ async fn test_mssql_bootstrap_then_restart_resumes_from_snapshot_lsn() -> Result
         sleep(Duration::from_secs(3)).await;
 
         // --- Phase 2: Restart query and verify recovery ---
-        core.start_query(QUERY_ID)
+        core.start_query_by_name(&component_name(QUERY_ID))
             .await
             .context("Failed to restart query")?;
 
@@ -1468,7 +1488,7 @@ async fn test_mssql_bootstrap_then_restart_resumes_from_snapshot_lsn() -> Result
 /// where the source must re-connect, load its persisted LSN checkpoint, and
 /// correctly poll changes that occurred while it was offline.
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: SQL Server container (x86_64 only)"]
 #[cfg(not(target_arch = "aarch64"))]
 async fn test_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
     use drasi_index_rocksdb::RocksDbIndexProvider;
@@ -1503,7 +1523,7 @@ async fn test_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
             .with_tables(vec![TEST_TABLE.to_string()])
             .build()?;
 
-        let source = MsSqlSource::builder(SOURCE_ID)
+        let source = MsSqlSource::builder(source_id())
             .with_host(&db_config.host)
             .with_port(db_config.port)
             .with_database(&db_config.database)
@@ -1516,25 +1536,27 @@ async fn test_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
             .with_bootstrap_provider(bp)
             .build()?;
 
-        let query = Query::cypher(QUERY_ID)
+        let query = Query::cypher(component_name(QUERY_ID))
             .query(
                 r#"
                 MATCH (p:Products)
                 RETURN p.ProductId AS id, p.Name AS name, p.Price AS price
             "#,
             )
-            .from_input(SOURCE_ID)
+            .from_input_by_name(component_name(SOURCE_ID))
             .auto_start(true)
             .enable_bootstrap(true)
             .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build()
             .expect("valid query configuration");
-        let (reaction, handle) = ApplicationReaction::builder("app-reaction-full-restart")
-            .with_query(QUERY_ID)
-            .build();
+        let (reaction, handle) =
+            ApplicationReaction::builder(component_id("00000000-0000-0000-0000-000000000343"))
+                .with_query_by_name(component_name(QUERY_ID))
+                .build();
         let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
 
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -1548,9 +1570,9 @@ async fn test_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
                     .clone(),
             )
             .with_id("mssql-full-restart-test")
-            .with_source(drasi_lib::Source::id(&source).to_owned(), source)
+            .with_source(component_name(SOURCE_ID), source)
             .with_query(query)
-            .with_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction)
+            .with_reaction(component_name("app-reaction-full-restart"), reaction)
             .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
@@ -1650,7 +1672,7 @@ async fn test_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
 /// SAME sequence (at-least-once). The assertion below therefore tolerates a
 /// same-sequence replay and only fails on a 602 emitted at a NEW, higher sequence.
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: SQL Server container (x86_64 only)"]
 #[cfg(not(target_arch = "aarch64"))]
 async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
     use drasi_index_rocksdb::RocksDbIndexProvider;
@@ -1686,7 +1708,7 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
             .with_tables(vec![TEST_TABLE.to_string()])
             .build()?;
 
-        let source = MsSqlSource::builder(SOURCE_ID)
+        let source = MsSqlSource::builder(source_id())
             .with_host(&db_config.host)
             .with_port(db_config.port)
             .with_database(&db_config.database)
@@ -1702,47 +1724,47 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
         let q1_id = "query1";
         let q2_id = "query2";
 
-        let q1_dir = tmp_dir.path().join("q1");
-        let q2_dir = tmp_dir.path().join("q2");
-        std::fs::create_dir_all(&q1_dir)?;
-        std::fs::create_dir_all(&q2_dir)?;
-
-        let query1 = Query::cypher(q1_id)
+        let query1 = Query::cypher(component_name(q1_id))
             .query(
                 r#"
                 MATCH (p:Products)
                 RETURN p.ProductId AS id, p.Name AS name, p.Price AS price
             "#,
             )
-            .from_input(SOURCE_ID)
+            .from_input_by_name(component_name(SOURCE_ID))
             .auto_start(true)
             .enable_bootstrap(true)
             .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
-            .build();
+            .build()
+            .expect("valid query configuration");
 
-        let query2 = Query::cypher(q2_id)
+        let query2 = Query::cypher(component_name(q2_id))
             .query(
                 r#"
                 MATCH (p:Products)
                 RETURN p.ProductId AS id, p.Name AS name, p.Price AS price
             "#,
             )
-            .from_input(SOURCE_ID)
+            .from_input_by_name(component_name(SOURCE_ID))
             .auto_start(true)
             .enable_bootstrap(true)
             .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
-            .build();
+            .build()
+            .expect("valid query configuration");
 
-        let (reaction1, handle1) = ApplicationReaction::builder("mq-reaction1")
-            .with_query(q1_id)
-            .build();
-        let (reaction2, handle2) = ApplicationReaction::builder("mq-reaction2")
-            .with_query(q2_id)
-            .build();
+        let (reaction1, handle1) =
+            ApplicationReaction::builder(component_id("00000000-0000-0000-0000-000000000344"))
+                .with_query_by_name(component_name(q1_id))
+                .build();
+        let (reaction2, handle2) =
+            ApplicationReaction::builder(component_id("00000000-0000-0000-0000-000000000345"))
+                .with_query_by_name(component_name(q2_id))
+                .build();
 
         let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
 
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -1756,11 +1778,11 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
                     .clone(),
             )
             .with_id("mssql-multi-query-test")
-            .with_source(drasi_lib::Source::id(&source).to_owned(), source)
+            .with_source(component_name(SOURCE_ID), source)
             .with_query(query1)
             .with_query(query2)
-            .with_reaction(drasi_lib::Reaction::id(&reaction1).to_owned(), reaction1)
-            .with_reaction(drasi_lib::Reaction::id(&reaction2).to_owned(), reaction2)
+            .with_reaction(component_name("mq-reaction1"), reaction1)
+            .with_reaction(component_name("mq-reaction2"), reaction2)
             .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
@@ -1801,7 +1823,7 @@ async fn test_mssql_multi_query_no_duplicate_on_restart() -> Result<()> {
         sleep(Duration::from_secs(2)).await;
 
         // --- Phase 2: Stop query2, advance query1 further ---
-        core.stop_query(q2_id)
+        core.stop_query_by_name(&component_name(q2_id))
             .await
             .context("Failed to stop query2")?;
         sleep(Duration::from_millis(500)).await;
@@ -1969,7 +1991,7 @@ fn ffi_plugin_exists(crate_name: &str) -> bool {
 ///   cp target/debug/libdrasi_source_mssql.so target/debug/plugins/
 ///   cp target/debug/libdrasi_bootstrap_mssql.so target/debug/plugins/
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore]
+#[ignore = "requires Docker: SQL Server container (x86_64 only)"]
 #[cfg(not(target_arch = "aarch64"))]
 async fn test_ffi_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
     use drasi_host_sdk::{callbacks, loader::load_plugin_from_path};
@@ -2045,7 +2067,7 @@ async fn test_ffi_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
             "startPosition": "current"
         });
         let source = source_plugin.source_plugins[0]
-            .create_source(SOURCE_ID, &source_config, true)
+            .create_source(&source_id(), &source_config, true)
             .await
             .context("Failed to create MSSQL source through FFI")?;
 
@@ -2075,24 +2097,26 @@ async fn test_ffi_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
 
         // Build DrasiLib with persistent RocksDB backend
         let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
-        let query = Query::cypher(QUERY_ID)
+        let query = Query::cypher(component_name(QUERY_ID))
             .query(
                 r#"
                 MATCH (p:Products)
                 RETURN p.ProductId AS id, p.Name AS name, p.Price AS price
             "#,
             )
-            .from_input(SOURCE_ID)
+            .from_input_by_name(component_name(SOURCE_ID))
             .auto_start(true)
             .enable_bootstrap(true)
             .with_storage_backend(StorageBackendRef::Named("persistent".to_string()))
             .build()
             .expect("valid query configuration");
-        let (reaction, handle) = ApplicationReaction::builder("app-reaction-ffi-restart")
-            .with_query(QUERY_ID)
-            .build();
+        let (reaction, handle) =
+            ApplicationReaction::builder(component_id("00000000-0000-0000-0000-000000000346"))
+                .with_query_by_name(component_name(QUERY_ID))
+                .build();
 
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -2106,9 +2130,9 @@ async fn test_ffi_mssql_full_restart_picks_up_offline_changes() -> Result<()> {
                     .clone(),
             )
             .with_id("mssql-ffi-restart-test")
-            .with_source(drasi_lib::Source::id(&source).to_owned(), source)
+            .with_source(component_name(SOURCE_ID), source)
             .with_query(query)
-            .with_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction)
+            .with_reaction(component_name("app-reaction-ffi-restart"), reaction)
             .with_index_provider("persistent", Arc::new(provider))
             .build()
             .await
@@ -2234,8 +2258,7 @@ async fn subscribe_direct(
     );
 
     let settings = SourceSubscriptionSettings {
-        source_id: drasi_core::ComponentId::try_new("00000000-0000-0000-0000-00000000032a")
-            .expect("fixture UUID"),
+        source_id: source_id(),
         enable_bootstrap: true,
         query_id,
         nodes: HashSet::from(["Products".to_string()]),
@@ -2259,7 +2282,7 @@ async fn subscribe_direct(
 /// is a thin wrapper over `effective_from`, so a non-zero value here is exactly
 /// what makes `changeDateTime()` return a real time instead of epoch 0.
 #[tokio::test]
-#[ignore] // Run with: cargo test -p drasi-source-mssql --test integration_test -- --ignored --nocapture
+#[ignore = "requires Docker: SQL Server container (x86_64 only)"] // Run with: cargo test -p drasi-source-mssql --test integration_test -- --ignored --nocapture
 #[cfg(not(target_arch = "aarch64"))]
 async fn test_mssql_effective_from_populated() -> Result<()> {
     let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
@@ -2291,7 +2314,7 @@ async fn test_mssql_effective_from_populated() -> Result<()> {
             .build()
             .context("Failed to build MSSQL bootstrap provider")?;
 
-        let source = MsSqlSource::builder(SOURCE_ID)
+        let source = MsSqlSource::builder(source_id())
             .with_host(&db_config.host)
             .with_port(db_config.port)
             .with_database(&db_config.database)
@@ -2309,7 +2332,11 @@ async fn test_mssql_effective_from_populated() -> Result<()> {
             .start()
             .await
             .context("Failed to start MSSQL source")?;
-        let (mut bootstrap_rx, mut cdc_rx) = subscribe_direct(&source, "q-eff").await?;
+        let (mut bootstrap_rx, mut cdc_rx) = subscribe_direct(
+            &source,
+            component_id("00000000-0000-0000-0000-000000000331"),
+        )
+        .await?;
 
         // Drain bootstrap; capture the seed row's effective_from.
         let mut bootstrap_eff: Option<u64> = None;
@@ -2395,7 +2422,7 @@ async fn test_mssql_effective_from_populated() -> Result<()> {
 /// CDC and `Products:1` from bootstrap — a mismatch that makes an UPDATE create
 /// a duplicate node.
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: SQL Server container (x86_64 only)"]
 #[cfg(not(target_arch = "aarch64"))]
 async fn test_mssql_bootstrap_cdc_element_id_match() -> Result<()> {
     let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
@@ -2427,7 +2454,7 @@ async fn test_mssql_bootstrap_cdc_element_id_match() -> Result<()> {
             .build()
             .context("Failed to build MSSQL bootstrap provider")?;
 
-        let source = MsSqlSource::builder(SOURCE_ID)
+        let source = MsSqlSource::builder(source_id())
             .with_host(&db_config.host)
             .with_port(db_config.port)
             .with_database(&db_config.database)
@@ -2445,7 +2472,11 @@ async fn test_mssql_bootstrap_cdc_element_id_match() -> Result<()> {
             .start()
             .await
             .context("Failed to start MSSQL source")?;
-        let (mut bootstrap_rx, mut cdc_rx) = subscribe_direct(&source, "q-idmatch").await?;
+        let (mut bootstrap_rx, mut cdc_rx) = subscribe_direct(
+            &source,
+            component_id("00000000-0000-0000-0000-000000000332"),
+        )
+        .await?;
 
         // Capture the FULL element id the bootstrap produced for row 1.
         let mut bootstrap_id: Option<String> = None;
@@ -2515,7 +2546,7 @@ async fn test_mssql_bootstrap_cdc_element_id_match() -> Result<()> {
 /// CDC must update IN PLACE in query results — not appear as a second node.
 /// Also asserts Bug 1 at the query level: `drasi.changeDateTime()` is not epoch.
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: SQL Server container (x86_64 only)"]
 #[cfg(not(target_arch = "aarch64"))]
 async fn test_mssql_update_after_bootstrap_no_duplicate() -> Result<()> {
     let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
@@ -2552,7 +2583,7 @@ async fn test_mssql_update_after_bootstrap_no_duplicate() -> Result<()> {
             .build()
             .context("Failed to build MSSQL bootstrap provider")?;
 
-        let source = MsSqlSource::builder(SOURCE_ID)
+        let source = MsSqlSource::builder(source_id())
             .with_host(&db_config.host)
             .with_port(db_config.port)
             .with_database(&db_config.database)
@@ -2566,27 +2597,28 @@ async fn test_mssql_update_after_bootstrap_no_duplicate() -> Result<()> {
             .build()
             .context("Failed to build MSSQL source")?;
 
-        let query = Query::cypher(QUERY_ID)
+        let query = Query::cypher(component_name(QUERY_ID))
             .query(
                 r#"
                 MATCH (p:Products)
                 RETURN p.ProductId AS id, p.Name AS name, drasi.changeDateTime(p) AS cdt
             "#,
             )
-            .from_input(SOURCE_ID)
+            .from_input_by_name(component_name(SOURCE_ID))
             .auto_start(true)
             .enable_bootstrap(true)
             .build().expect("valid query configuration");
 
-        let (reaction, handle) = ApplicationReaction::builder("app-reaction")
-            .with_query(QUERY_ID)
+        let (reaction, handle) = ApplicationReaction::builder(component_id("00000000-0000-0000-0000-000000000347"))
+            .with_query_by_name(component_name(QUERY_ID))
             .build();
 
-        let core = DrasiLib::builder().with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone())
+        let core = DrasiLib::builder()
+.with_allow_external_component_ids(true).with_query_factory(drasi_lib::computation::v1::FactoryRegistry::standard().get(&drasi_lib::computation::v1::ImplementationIdentity::try_new("drasi/continuous-query", "1").expect("reference query identity")).expect("reference query factory").clone())
             .with_id("mssql-dup-test")
-            .with_source(drasi_lib::Source::id(&source).to_owned(), source)
+            .with_source(component_name(SOURCE_ID), source)
             .with_query(query)
-            .with_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction)
+            .with_reaction(component_name("app-reaction"), reaction)
             .build()
             .await
             .context("Failed to build DrasiLib")?;

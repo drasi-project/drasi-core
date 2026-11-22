@@ -74,7 +74,8 @@ fn item_with_id(id: &str, value: i64, effective_from: u64) -> Element {
 }
 
 fn input(change: SourceChange, sequence: u64) -> Result<InputEnvelope> {
-    Ok(InputEnvelope { execution_context: Default::default(),
+    Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_change(
             change,
@@ -669,7 +670,8 @@ impl ComputationComponent for Source {
 #[async_trait]
 impl EnvelopeSource for Source {
     async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
-        Ok(self.envelope.take().map(|envelope| OutputEnvelope { execution_context: Default::default(),
+        Ok(self.envelope.take().map(|envelope| OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out").expect("constant port"),
             envelope,
         }))

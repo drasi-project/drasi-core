@@ -215,6 +215,41 @@ pub fn person_query(source_name: &ComponentName, outbox_capacity: usize) -> Quer
         .expect("shared recovery query must be valid")
 }
 
+/// Latest published output sequence of a query, whether or not its retained
+/// outbox still reaches back to sequence zero.
+pub async fn latest_query_sequence(core: &DrasiLib, query_id: &ComponentId) -> Result<u64> {
+    let query = core
+        .query_manager()
+        .get_query_instance_by_id(query_id)
+        .await
+        .map_err(|error| anyhow!("query {query_id} is unavailable: {error}"))?;
+    match query.fetch_outbox(0).await {
+        Ok(outbox) => Ok(outbox.latest_sequence),
+        Err(drasi_lib::queries::FetchError::OutboxGap(gap)) => Ok(gap.latest_sequence),
+        Err(error) => Err(anyhow!("query {query_id} outbox is unavailable: {error}")),
+    }
+}
+
+/// Poll until a query has published at least `expected` output sequences.
+pub async fn wait_for_query_sequence(
+    core: &DrasiLib,
+    query_id: &ComponentId,
+    expected: u64,
+    timeout_duration: Duration,
+) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + timeout_duration;
+    loop {
+        let latest = latest_query_sequence(core, query_id).await?;
+        if latest >= expected {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!("query {query_id} reached sequence {latest}, expected {expected}");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// Poll the state store until a checkpoint exists for the given reaction+query pair.
 pub async fn wait_for_checkpoint(
     state_store: &DurableMemoryStateStoreProvider,
@@ -596,6 +631,7 @@ where
     .await?;
 
     stop_reaction_and_wait(&core, &reaction_component_id).await?;
+    let before_gap = latest_query_sequence(&core, &query_id).await?;
 
     for i in 0..5 {
         insert_person(
@@ -606,6 +642,9 @@ where
         )
         .await?;
     }
+    // Restart only after the query has published every insert, so the
+    // two-entry outbox has evicted the reaction's checkpointed position.
+    wait_for_query_sequence(&core, &query_id, before_gap + 5, Duration::from_secs(10)).await?;
 
     // start_reaction may return Err synchronously (current behavior) or Ok(())
     // with an async transition to Error. Either way, we verify the reaction

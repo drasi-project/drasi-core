@@ -80,7 +80,8 @@ impl sdk::Factory for Factory {
     fn create(
         &self,
         request: &sdk::CreateRequest,
-        _: sdk::ControlSender, _: sdk::ServiceBindings,
+        _: sdk::ControlSender,
+        _: sdk::ServiceBindings,
     ) -> anyhow::Result<sdk::CreatedComponent> {
         let emitter = ScopedMetricEmitter::current()?;
         let counter = emitter.counter(
@@ -180,29 +181,26 @@ impl sdk::NativeComponent for Probe {
         _: &mut sdk::lifecycle::StartContext,
     ) -> sdk::lifecycle::LifecycleResult {
         let result: anyhow::Result<()> = async {
-        spawn_owned_component_worker(&self.worker, async {
-            anyhow::ensure!(
-                ExecutionContext::current().is_empty(),
-                "component worker inherited startup trace"
-            );
-            log::info!(target: "telemetry_fixture", "worker.started");
-            Ok(())
-        })
-        .await?;
-        join(&self.worker).await
-    }
+            spawn_owned_component_worker(&self.worker, async {
+                anyhow::ensure!(
+                    ExecutionContext::current().is_empty(),
+                    "component worker inherited startup trace"
+                );
+                log::info!(target: "telemetry_fixture", "worker.started");
+                Ok(())
+            })
+            .await?;
+            join(&self.worker).await
+        }
         .await;
         Ok(result?)
     }
-    async fn stop(
-        &mut self,
-        _: &sdk::lifecycle::StopContext,
-    ) -> sdk::lifecycle::LifecycleResult {
+    async fn stop(&mut self, _: &sdk::lifecycle::StopContext) -> sdk::lifecycle::LifecycleResult {
         let result: anyhow::Result<()> = async {
-        join(&self.worker).await?;
-        log::info!(target: "telemetry_fixture", "stopped");
-        Ok(())
-    }
+            join(&self.worker).await?;
+            log::info!(target: "telemetry_fixture", "stopped");
+            Ok(())
+        }
         .await;
         Ok(result?)
     }
@@ -212,10 +210,7 @@ impl sdk::NativeComponent for Probe {
     ) -> sdk::lifecycle::LifecycleResult {
         Ok(())
     }
-    async fn pause(
-        &mut self,
-        _: &sdk::lifecycle::PauseContext,
-    ) -> sdk::lifecycle::LifecycleResult {
+    async fn pause(&mut self, _: &sdk::lifecycle::PauseContext) -> sdk::lifecycle::LifecycleResult {
         Ok(())
     }
     async fn resume(

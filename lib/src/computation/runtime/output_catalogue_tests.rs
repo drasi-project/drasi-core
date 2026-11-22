@@ -2191,7 +2191,8 @@ async fn persistent_query_inputs_replay_missed_changes_and_report_retention_gaps
         .ensure_same_epoch(replayed.cursor())
         .unwrap();
     // Both replays leave two rows after the first insertion; wait for the update too.
-    let derived = drasi_core_types::ComponentName::try_new("derived").expect("fixture component name");
+    let derived =
+        drasi_core_types::ComponentName::try_new("derived").expect("fixture component name");
     let rows = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let mut rows = core.get_query_results_by_name(&derived).await.unwrap();

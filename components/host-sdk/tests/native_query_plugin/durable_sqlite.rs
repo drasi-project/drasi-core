@@ -508,7 +508,8 @@ async fn snapshot_live_reopen() -> Result<()> {
             .await?;
         let output = graph.output(0).await?;
         aggregate(
-            &[OutputEnvelope { execution_context: Default::default(),
+            &[OutputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("out")?,
                 envelope: output,
             }],
@@ -554,7 +555,8 @@ async fn snapshot_live_reopen() -> Result<()> {
             .await?;
         let output = graph.output(0).await?;
         aggregate(
-            &[OutputEnvelope { execution_context: Default::default(),
+            &[OutputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("out")?,
                 envelope: output,
             }],

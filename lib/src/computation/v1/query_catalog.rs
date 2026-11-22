@@ -328,7 +328,10 @@ impl QueryResultsCatalog {
         observers: &ObserverGate,
     ) -> anyhow::Result<()> {
         self.publish_message(
-            super::EnvelopeMessage::new(envelope, crate::observability::ExecutionContext::current()),
+            super::EnvelopeMessage::new(
+                envelope,
+                crate::observability::ExecutionContext::current(),
+            ),
             observers,
         )
         .await

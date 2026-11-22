@@ -269,7 +269,8 @@ fn query_output(generation: u64, sequence: u64) -> InputEnvelope {
         .annotate(&mut envelope, &query)
         .expect("annotated");
     QueryChangeCodec::set_generation(&mut envelope, &query, generation).expect("generation");
-    InputEnvelope { execution_context: Default::default(),
+    InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in").expect("port"),
         envelope,
     }

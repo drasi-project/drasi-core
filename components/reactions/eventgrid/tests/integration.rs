@@ -121,6 +121,7 @@ async fn eventgrid_end_to_end_unpacked_cloudevents() -> Result<()> {
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -165,7 +166,11 @@ async fn eventgrid_end_to_end_unpacked_cloudevents() -> Result<()> {
         let insert = events.last().expect("insert event");
         assert_eq!(insert["type"], "Drasi.ChangeEvent", "cloudevents type");
         assert_eq!(insert["specversion"], "1.0");
-        assert_eq!(insert["subject"], "people-query");
+        let query_id = core
+            .get_query_info_by_name(&drasi_core::ComponentName::try_new("people-query")?)
+            .await?
+            .id;
+        assert_eq!(insert["subject"], query_id.to_string());
         assert_eq!(insert["data"]["op"], "i", "insert op");
         assert_eq!(insert["data"]["payload"]["after"]["name"], "Ada");
     }
@@ -248,6 +253,7 @@ async fn eventgrid_end_to_end_eventgrid_schema_insert() -> Result<()> {
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -290,7 +296,11 @@ async fn eventgrid_end_to_end_eventgrid_schema_insert() -> Result<()> {
     // Native EventGrid schema field names.
     assert_eq!(insert["eventType"], "Drasi.ChangeEvent");
     assert_eq!(insert["dataVersion"], "1");
-    assert_eq!(insert["subject"], "people-query");
+    let query_id = core
+        .get_query_info_by_name(&drasi_core::ComponentName::try_new("people-query")?)
+        .await?
+        .id;
+    assert_eq!(insert["subject"], query_id.to_string());
     assert_eq!(insert["data"]["op"], "i");
     assert_eq!(insert["data"]["payload"]["after"]["name"], "Grace");
 
@@ -354,6 +364,7 @@ async fn eventgrid_template_metadata_becomes_extension_attributes() -> Result<()
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -441,6 +452,7 @@ async fn eventgrid_publish_failure_keeps_reaction_running() -> Result<()> {
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(

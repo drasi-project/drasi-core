@@ -5399,6 +5399,7 @@ dependencies = [
  "ordered-float 3.9.2",
  "rcgen",
  "rsa",
+ "rustls",
  "serde",
  "serde_json",
  "sha1",

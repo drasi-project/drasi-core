@@ -123,6 +123,7 @@ async fn test_kafka_source_detects_changes() {
     // Build and start DrasiLib
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -335,6 +336,7 @@ async fn test_kafka_source_custom_mapping() {
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -464,7 +466,7 @@ async fn produce_order(producer: &FutureProducer, topic: &str, id: &str, total: 
         .expect("Failed to produce order");
 }
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Kafka container"]
 async fn test_kafka_bootstrap_source_overlap_handover() {
     let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
     let (_kafka_container, bootstrap_servers) = start_kafka().await;
@@ -507,6 +509,17 @@ async fn test_kafka_bootstrap_source_overlap_handover() {
         .set_bootstrap_provider(Box::new(bootstrap_provider))
         .await;
 
+    let (update_tx, mut update_rx) = tokio::sync::mpsc::channel(64);
+    tokio::spawn(async move { while update_rx.recv().await.is_some() {} });
+    source
+        .bind_runtime_context(drasi_lib::context::SourceRuntimeContext::new(
+            "kafka-integration",
+            source.id().clone(),
+            None,
+            update_tx,
+            None,
+        ))
+        .await;
     source.start().await.unwrap();
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(15) {

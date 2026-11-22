@@ -11,7 +11,7 @@ use drasi_source_application::{ApplicationSource, ApplicationSourceConfig, Prope
 use loki_helpers::{setup_loki, wait_for_line_contains};
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Loki container"]
 async fn test_loki_reaction_insert_update_delete() {
     let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 

@@ -103,7 +103,7 @@ fn create_temp_secrets_file(secrets: &serde_json::Value) -> (tempfile::TempDir, 
 // ============================================================================
 
 #[test]
-#[ignore]
+#[ignore = "requires prebuilt drasi-secret-store-file plugin (make build-plugins)"]
 fn test_load_file_secret_store_plugin() {
     if !plugin_exists("drasi-secret-store-file") {
         panic!("SKIP: drasi-secret-store-file not built as cdylib");
@@ -147,7 +147,7 @@ fn test_load_file_secret_store_plugin() {
 // ============================================================================
 
 #[test]
-#[ignore]
+#[ignore = "requires prebuilt drasi-secret-store-file plugin (make build-plugins)"]
 fn test_file_secret_store_descriptor_kind() {
     if !plugin_exists("drasi-secret-store-file") {
         panic!("SKIP: drasi-secret-store-file not built as cdylib");
@@ -176,7 +176,7 @@ fn test_file_secret_store_descriptor_kind() {
 // ============================================================================
 
 #[test]
-#[ignore]
+#[ignore = "requires prebuilt drasi-secret-store-file plugin (make build-plugins)"]
 fn test_file_secret_store_schema_is_valid_json() {
     if !plugin_exists("drasi-secret-store-file") {
         panic!("SKIP: drasi-secret-store-file not built as cdylib");
@@ -211,7 +211,7 @@ fn test_file_secret_store_schema_is_valid_json() {
 // ============================================================================
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires prebuilt drasi-secret-store-file plugin (make build-plugins)"]
 async fn test_create_file_secret_store_and_resolve() {
     if !plugin_exists("drasi-secret-store-file") {
         panic!("SKIP: drasi-secret-store-file not built as cdylib");
@@ -259,7 +259,7 @@ async fn test_create_file_secret_store_and_resolve() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires prebuilt drasi-secret-store-file plugin (make build-plugins)"]
 async fn test_file_secret_store_missing_secret() {
     if !plugin_exists("drasi-secret-store-file") {
         panic!("SKIP: drasi-secret-store-file not built as cdylib");
@@ -297,7 +297,7 @@ async fn test_file_secret_store_missing_secret() {
 // ============================================================================
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires prebuilt drasi-secret-store-file plugin (make build-plugins)"]
 async fn test_file_secret_store_as_value_resolver() {
     if !plugin_exists("drasi-secret-store-file") {
         panic!("SKIP: drasi-secret-store-file not built as cdylib");
@@ -345,7 +345,7 @@ async fn test_file_secret_store_as_value_resolver() {
 // ============================================================================
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires prebuilt drasi-secret-store-file plugin (make build-plugins)"]
 async fn test_dto_mapper_with_file_secret_store() {
     if !plugin_exists("drasi-secret-store-file") {
         panic!("SKIP: drasi-secret-store-file not built as cdylib");
@@ -400,7 +400,7 @@ async fn test_dto_mapper_with_file_secret_store() {
 // ============================================================================
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires prebuilt drasi-secret-store-file plugin (make build-plugins)"]
 async fn test_file_secret_store_drop_safety() {
     if !plugin_exists("drasi-secret-store-file") {
         panic!("SKIP: drasi-secret-store-file not built as cdylib");

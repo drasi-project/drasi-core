@@ -169,7 +169,8 @@ pub(super) async fn deliver(
     outputs: Vec<OutputEnvelope>,
 ) -> Result<()> {
     for output in outputs {
-        sink.handle(InputEnvelope { execution_context: Default::default(),
+        sink.handle(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: output.envelope,
         })
@@ -306,7 +307,8 @@ async fn retained_consumers() -> Result<()> {
                 deliver(
                     &mut destination,
                     resumed
-                        .transform(InputEnvelope { execution_context: Default::default(),
+                        .transform(InputEnvelope {
+                            execution_context: Default::default(),
                             port: PortId::try_new("in")?,
                             envelope: output.envelope,
                         })

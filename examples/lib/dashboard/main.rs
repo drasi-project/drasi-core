@@ -317,6 +317,7 @@ async fn main() -> Result<()> {
     // =========================================================================
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_host_sdk::computation::NativePlugin::from_definition(
                     drasi_computation_transformer_query::plugin()?,
@@ -330,7 +331,10 @@ async fn main() -> Result<()> {
             .with_query(humid_sensors)
             .with_query(sensor_overview)
             .with_query(sensor_mesh)
-            .with_reaction(drasi_lib::Reaction::id(&dashboard_reaction).to_owned(), dashboard_reaction)
+            .with_reaction(
+                drasi_lib::Reaction::id(&dashboard_reaction).to_owned(),
+                dashboard_reaction,
+            )
             .build()
             .await?,
     );

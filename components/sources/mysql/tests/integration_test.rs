@@ -29,6 +29,12 @@ use tokio::time::{sleep, timeout, Duration};
 use drasi_bootstrap_mysql::MySqlBootstrapProvider;
 use drasi_source_mysql::{MySqlReplicationSource, SslMode, StartPosition, TableKeyConfig};
 
+/// Workspace feature unification enables both Rustls providers, so the test
+/// process must choose one before any TLS-capable client is constructed.
+fn install_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 /// Extract the trailing integer primary key from an element id of the form
 /// `table:pk` (e.g. `items:42` → 42).
 fn element_id_int(element_id: &str) -> Option<i64> {
@@ -36,8 +42,9 @@ fn element_id_int(element_id: &str) -> Option<i64> {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: MySQL container"]
 async fn test_mysql_source_change_detection() {
+    install_crypto_provider();
     let mysql_image = Mysql::default()
         .with_env_var("MYSQL_DATABASE", "test")
         .with_env_var("MYSQL_USER", "test")
@@ -268,8 +275,9 @@ fn matches_row(diff: &ResultDiff, name: &str, email: &str) -> bool {
 /// 5. Compare unchanged columns between bootstrap (Add.data) and CDC (Update.after)
 ///    - If type mappings are consistent, the values must be identical
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: MySQL container"]
 async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
+    install_crypto_provider();
     let mysql_image = Mysql::default()
         .with_env_var("MYSQL_DATABASE", "test")
         .with_env_var("MYSQL_USER", "test")
@@ -581,7 +589,7 @@ async fn test_type_mapping_consistency_between_bootstrap_and_cdc() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: MySQL container"]
 async fn test_mysql_bootstrap_cdc_overlap_handover_no_duplicates_or_gaps() {
     use std::collections::{HashMap, HashSet};
 
@@ -807,6 +815,7 @@ async fn start_mysql_fixture(
     mut request: ContainerRequest<Mysql>,
     fixture_source: &'static str,
 ) -> anyhow::Result<testcontainers::ContainerAsync<Mysql>> {
+    install_crypto_provider();
     let attribution = Attribution::from_env(Fixture::new(
         "mysql",
         request.descriptor(),
@@ -836,6 +845,7 @@ async fn setup_mysql_container() -> (testcontainers::ContainerAsync<Mysql>, u16)
 async fn setup_mysql_container_with_gtid(
     gtid_enabled: bool,
 ) -> (testcontainers::ContainerAsync<Mysql>, u16) {
+    install_crypto_provider();
     let mysql_image = Mysql::default()
         .with_env_var("MYSQL_DATABASE", "test")
         .with_env_var("MYSQL_USER", "test")
@@ -935,7 +945,7 @@ async fn test_conn(port: u16) -> Conn {
 /// Run with:
 /// `cargo test -p drasi-source-mysql --test integration_test -- --ignored`
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: MySQL container"]
 #[allow(clippy::unwrap_used)]
 async fn test_if_available_negotiates_tls_against_real_server() {
     use drasi_mysql_common::{connect_with_ssl_mode, SslMode};
@@ -981,12 +991,13 @@ async fn test_if_available_negotiates_tls_against_real_server() {
 /// Run with:
 /// `cargo test -p drasi-source-mysql --test integration_test -- --ignored`
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: MySQL container"]
 #[allow(clippy::unwrap_used)]
 async fn test_require_connects_to_tls12_only_server() {
     use drasi_mysql_common::{connect_with_ssl_mode, SslMode};
     use mysql_async::prelude::Query;
 
+    install_crypto_provider();
     let mysql_image = Mysql::default()
         .with_env_var("MYSQL_DATABASE", "test")
         .with_env_var("MYSQL_USER", "test")
@@ -1065,7 +1076,7 @@ fn is_add_with_name(diff: &ResultDiff, expected_name: &str) -> bool {
 /// 4. Insert a new row post-restart to verify the query resumes streaming
 ///    from the checkpointed position without re-bootstrapping.
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: MySQL container"]
 async fn test_mysql_checkpoint_recovery_round_trip() {
     use drasi_index_rocksdb::RocksDbIndexProvider;
     use std::sync::Arc;
@@ -1260,7 +1271,7 @@ async fn test_mysql_checkpoint_recovery_round_trip() {
 /// 4. Full restart — source reconnects from persisted position (set during
 ///    bootstrap), picks up the row inserted during the outage.
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: MySQL container"]
 async fn test_mysql_bootstrap_then_restart_resumes_from_snapshot_position() {
     use drasi_index_rocksdb::RocksDbIndexProvider;
     use std::sync::Arc;
@@ -1410,7 +1421,7 @@ async fn test_mysql_bootstrap_then_restart_resumes_from_snapshot_position() {
 /// 4. Restart ALL components via `core.start()`.
 /// 5. Verify the row inserted during the outage is delivered to the reaction.
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: MySQL container"]
 async fn test_mysql_full_restart_picks_up_offline_changes() {
     use drasi_index_rocksdb::RocksDbIndexProvider;
     use std::sync::Arc;

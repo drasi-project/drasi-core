@@ -12,7 +12,7 @@ const PRICE_QUERY: &str = "price-query";
 const TRADE_QUERY: &str = "latest-trade";
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires network: live Hyperliquid mainnet market data within 60s"]
 async fn test_hyperliquid_source_live() -> Result<()> {
     let bootstrap_config = drasi_source_hyperliquid::HyperliquidSourceConfig::default();
     let bootstrap = HyperliquidBootstrapProvider::new(bootstrap_config.clone());
@@ -79,6 +79,7 @@ async fn test_hyperliquid_source_live() -> Result<()> {
     .build();
 
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -107,6 +108,15 @@ async fn test_hyperliquid_source_live() -> Result<()> {
 
     core.start().await?;
 
+    let price_query_id = core
+        .get_query_info_by_name(&drasi_core::ComponentName::try_new("price-query")?)
+        .await?
+        .id;
+    let trade_query_id = core
+        .get_query_info_by_name(&drasi_core::ComponentName::try_new("latest-trade")?)
+        .await?
+        .id;
+
     let mut subscription = handle
         .subscribe_with_options(SubscriptionOptions::default().with_timeout(Duration::from_secs(2)))
         .await?;
@@ -121,10 +131,7 @@ async fn test_hyperliquid_source_live() -> Result<()> {
 
     while start.elapsed() < timeout {
         if let Some(result) = subscription.recv().await {
-            if result.query_id
-                == drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000382")
-                    .expect("fixture UUID")
-            {
+            if result.query_id == price_query_id {
                 for entry in &result.results {
                     match entry {
                         ResultDiff::Add { data, .. } if data.get("coin").is_some() => {
@@ -143,10 +150,7 @@ async fn test_hyperliquid_source_live() -> Result<()> {
                 }
             }
 
-            if result.query_id
-                == drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000383")
-                    .expect("fixture UUID")
-            {
+            if result.query_id == trade_query_id {
                 for entry in &result.results {
                     if matches!(
                         entry,

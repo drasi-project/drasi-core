@@ -89,7 +89,8 @@ fn automatic_default_logging_and_shared_shutdown() {
             log_component("two");
             logging.flush().await.unwrap();
             for instance in ["one", "two"] {
-                let key = ComponentLogKey::new(instance, ComponentLogType::Source, shared_component());
+                let key =
+                    ComponentLogKey::new(instance, ComponentLogType::Source, shared_component());
                 let history = logging.registry().get_history_by_key(&key).await;
                 assert_eq!(history.len(), 2);
                 assert_eq!(history[0].instance_id, instance);
@@ -219,7 +220,8 @@ fn custom_capture_can_disable_logs_without_disabling_traces() {
                 let span = tracing::debug_span!(target: TELEMETRY_TARGET, "query.evaluate");
                 drop(span);
                 logging.flush().await.unwrap();
-                let key = ComponentLogKey::new("custom", ComponentLogType::Source, shared_component());
+                let key =
+                    ComponentLogKey::new("custom", ComponentLogType::Source, shared_component());
                 assert_eq!(logging.registry().log_count_by_key(&key).await, 0);
                 assert_eq!(traces.load(Ordering::SeqCst), 1);
                 assert!(drasi_lib::observability::default_log_level()

@@ -83,7 +83,8 @@ impl Group {
     async fn apply(&mut self, output: &OutputEnvelope, members: &[usize]) -> Result<()> {
         for member in members {
             let results = self.queries[*member]
-                .transform(InputEnvelope { execution_context: Default::default(),
+                .transform(InputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("in")?,
                     envelope: output.envelope.clone(),
                 })

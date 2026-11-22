@@ -120,7 +120,8 @@ fn element(id: &str, name: &str) -> Element {
 }
 
 fn envelope(source: &str, changes: &[SourceChange], sequence: u64) -> Result<InputEnvelope> {
-    Ok(InputEnvelope { execution_context: Default::default(),
+    Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_changes(changes, stream(source)?, sequence, None)?,
     })

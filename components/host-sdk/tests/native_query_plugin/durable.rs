@@ -405,7 +405,8 @@ async fn indexed_confirmation_cannot_discard_a_different_pending_output() -> Res
             1,
         )?)
         .await?;
-    let wrong = vec![OutputEnvelope { execution_context: Default::default(),
+    let wrong = vec![OutputEnvelope {
+        execution_context: Default::default(),
         port: output[0].port.clone(),
         envelope: output[0].envelope.reemit(999)?,
     }];
@@ -449,8 +450,9 @@ async fn indexed_persistence_rejects_unqualified_storage() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "process-exit fixture launched by the durable graph cases"]
 async fn indexed_commit_exit_child() -> Result<()> {
-    let path =
-        PathBuf::from(std::env::var_os(CRASH_ROOT).context("durability child needs a directory")?);
+    let Some(path) = std::env::var_os(CRASH_ROOT).map(PathBuf::from) else {
+        return Ok(());
+    };
     if let Some(phase) = std::env::var_os(non_atomic::CRASH_PHASE) {
         return non_atomic::exit_child(&path, phase.to_str().context("invalid crash phase")?).await;
     }
@@ -588,7 +590,8 @@ async fn process_exit_and_graph_replay() -> Result<()> {
             received.len() == 1,
             "graph must replay exactly one output without new input"
         );
-        vec![OutputEnvelope { execution_context: Default::default(),
+        vec![OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out")?,
             envelope: received[0].clone(),
         }]

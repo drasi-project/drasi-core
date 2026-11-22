@@ -5714,17 +5714,19 @@ impl Operations {
                 let result = identity
                     .run(async {
                         Abortable::new(
-                            observations.scope(execution_scope.scope(
-                                async move {
-                                    let guard = operation_token.drop_guard();
-                                    let result = future.await;
-                                    if result.is_ok() {
-                                        guard.disarm();
+                            observations.scope(
+                                execution_scope.scope(
+                                    async move {
+                                        let guard = operation_token.drop_guard();
+                                        let result = future.await;
+                                        if result.is_ok() {
+                                            guard.disarm();
+                                        }
+                                        result
                                     }
-                                    result
-                                }
-                                .instrument(span),
-                            )),
+                                    .instrument(span),
+                                ),
+                            ),
                             registration,
                         )
                         .await

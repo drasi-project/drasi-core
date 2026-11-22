@@ -221,7 +221,8 @@ impl EnvelopeSource for RelaySource {
             return Ok(None);
         };
         let sequence = self.emitted.fetch_add(1, Ordering::SeqCst) + 1;
-        Ok(Some(OutputEnvelope { execution_context: Default::default(),
+        Ok(Some(OutputEnvelope {
+            execution_context: Default::default(),
             port: port("out"),
             envelope: GraphChangeCodec::encode_change(change, self.out.clone(), sequence, None)?,
         }))

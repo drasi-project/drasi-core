@@ -50,7 +50,8 @@ impl EnvelopeSource for ReleasedSource {
         }
         if self.source.envelope.is_none() {
             if let Some(envelope) = self.extra.pop_front() {
-                return Ok(Some(OutputEnvelope { execution_context: Default::default(),
+                return Ok(Some(OutputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("out")?,
                     envelope,
                 }));
@@ -380,7 +381,8 @@ async fn backpressure() -> Result<()> {
         let rows = seen.lock().expect("shared result capture poisoned");
         assert_eq!(rows.len(), 2);
         aggregate(
-            &[OutputEnvelope { execution_context: Default::default(),
+            &[OutputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("out")?,
                 envelope: rows[1].clone(),
             }],
@@ -437,7 +439,8 @@ async fn shared_output() -> Result<()> {
             let rows = seen.lock().expect("shared result capture poisoned");
             assert_eq!(rows.len(), 1);
             aggregate(
-                &[OutputEnvelope { execution_context: Default::default(),
+                &[OutputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("out")?,
                     envelope: rows[0].clone(),
                 }],
@@ -457,7 +460,9 @@ async fn shared_output() -> Result<()> {
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "process-exit fixture launched by the shared commit-boundary cases"]
 async fn indexed_shared_exit_child() -> Result<()> {
-    let root = PathBuf::from(std::env::var_os(SHARED_ROOT).context("missing shared crash root")?);
+    let Some(root) = std::env::var_os(SHARED_ROOT).map(PathBuf::from) else {
+        return Ok(());
+    };
     let phase = std::env::var(SHARED_PHASE)?;
     anyhow::ensure!(
         phase == "before" || phase == "after",
@@ -532,7 +537,8 @@ async fn shared_crash(phase: &str) -> Result<()> {
             let rows = seen.lock().expect("shared result capture poisoned");
             assert_eq!(rows.len(), 1);
             aggregate(
-                &[OutputEnvelope { execution_context: Default::default(),
+                &[OutputEnvelope {
+                    execution_context: Default::default(),
                     port: PortId::try_new("out")?,
                     envelope: rows[0].clone(),
                 }],

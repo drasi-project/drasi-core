@@ -112,7 +112,7 @@ where
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Oracle container and Oracle Instant Client (libclntsh)"]
 #[serial]
 async fn test_oracle_change_detection_end_to_end() -> Result<()> {
     let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
@@ -188,6 +188,7 @@ async fn test_oracle_change_detection_end_to_end() -> Result<()> {
         .build();
 
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -276,7 +277,7 @@ async fn test_oracle_change_detection_end_to_end() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Oracle container and Oracle Instant Client (libclntsh)"]
 #[serial]
 async fn test_oracle_start_position_beginning() -> Result<()> {
     let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
@@ -347,6 +348,7 @@ async fn test_oracle_start_position_beginning() -> Result<()> {
         .build();
 
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -430,7 +432,7 @@ async fn test_oracle_start_position_beginning() -> Result<()> {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Oracle container and Oracle Instant Client (libclntsh)"]
 #[serial]
 async fn test_oracle_checkpoint_resume() -> Result<()> {
     let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
@@ -502,6 +504,7 @@ async fn test_oracle_checkpoint_resume() -> Result<()> {
             .build();
 
             let core = DrasiLib::builder()
+                .with_allow_external_component_ids(true)
                 .with_query_factory(
                     drasi_lib::computation::v1::FactoryRegistry::standard()
                         .get(
@@ -608,6 +611,7 @@ async fn test_oracle_checkpoint_resume() -> Result<()> {
             .build();
 
             let core = DrasiLib::builder()
+                .with_allow_external_component_ids(true)
                 .with_query_factory(
                     drasi_lib::computation::v1::FactoryRegistry::standard()
                         .get(
@@ -680,7 +684,7 @@ async fn test_oracle_checkpoint_resume() -> Result<()> {
 /// 4. Insert a new row post-restart to verify the query resumes streaming
 ///    from the checkpointed position without re-bootstrapping.
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Oracle container and Oracle Instant Client (libclntsh)"]
 #[serial]
 async fn test_oracle_checkpoint_recovery_round_trip() -> Result<()> {
     use drasi_index_rocksdb::RocksDbIndexProvider;
@@ -762,6 +766,7 @@ async fn test_oracle_checkpoint_recovery_round_trip() -> Result<()> {
         let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
 
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -887,7 +892,7 @@ async fn test_oracle_checkpoint_recovery_round_trip() -> Result<()> {
 /// 4. Restart the same DrasiLib instance.
 /// 5. Verify the instance picks up the row inserted during downtime.
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Oracle container and Oracle Instant Client (libclntsh)"]
 #[serial]
 async fn test_oracle_full_restart_picks_up_offline_changes() -> Result<()> {
     use drasi_index_rocksdb::RocksDbIndexProvider;
@@ -965,6 +970,7 @@ async fn test_oracle_full_restart_picks_up_offline_changes() -> Result<()> {
         let provider = RocksDbIndexProvider::new(tmp_dir.path(), false, false);
 
         let core = DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -1060,7 +1066,7 @@ async fn test_oracle_full_restart_picks_up_offline_changes() -> Result<()> {
 /// once with no seed row replayed (Oracle is source-first: the boundary SCN is
 /// captured in `subscribe()` and the snapshot is taken `AS OF` that SCN).
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Oracle container and Oracle Instant Client (libclntsh)"]
 #[serial]
 async fn test_oracle_bootstrap_cdc_overlap_handover_no_duplicates_or_gaps() -> Result<()> {
     use std::collections::HashMap;

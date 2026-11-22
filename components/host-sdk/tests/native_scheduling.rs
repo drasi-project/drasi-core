@@ -171,7 +171,8 @@ fn input(key: &str, action: &str, value: u64, sequence: u64) -> Result<InputEnve
         Some(chrono::DateTime::from_timestamp_millis(123).context("logical event timestamp")?),
     )?;
     GraphProducerProgress::annotate(&mut envelope, &producer, sequence)?;
-    Ok(InputEnvelope { execution_context: Default::default(),
+    Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope,
     })
@@ -556,7 +557,8 @@ impl ComputationComponent for Source {
 #[async_trait]
 impl EnvelopeSource for Source {
     async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
-        Ok(self.envelope.take().map(|envelope| OutputEnvelope { execution_context: Default::default(),
+        Ok(self.envelope.take().map(|envelope| OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out").expect("fixture output"),
             envelope,
         }))
@@ -582,7 +584,8 @@ impl EnvelopeSink for Capture {
         SinkCompletion::Handled
     }
     async fn handle(&mut self, input: InputEnvelope) -> Result<()> {
-        self.outputs.send(OutputEnvelope { execution_context: Default::default(),
+        self.outputs.send(OutputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("out")?,
             envelope: input.envelope,
         })?;

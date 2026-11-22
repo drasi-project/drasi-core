@@ -188,7 +188,7 @@ fn empty_hijack_response() -> Value {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: WireMock container"]
 async fn test_cloudflare_radar_hijack_changes() -> Result<()> {
     let _logging = drasi_lib::init_default_subscriber().expect("initialize component logging");
 

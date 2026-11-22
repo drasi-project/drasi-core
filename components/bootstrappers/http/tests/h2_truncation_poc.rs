@@ -166,7 +166,7 @@ async fn start_h2_truncating_server(
 /// Proves: Without Content-Length, h2 END_STREAM after 50% of body causes
 /// the client to get `Ok(partial_body)` — silent truncation, no transport error.
 #[tokio::test]
-#[ignore]
+#[ignore = "manual proof-of-concept for issue #493; demonstrates truncation rather than asserting fixed behavior"]
 async fn test_h2_premature_end_stream_no_content_length() {
     let _ = env_logger::try_init();
 
@@ -261,7 +261,7 @@ async fn test_h2_premature_end_stream_no_content_length() {
 /// Proves: With Content-Length set to full body size but only 50% of data sent,
 /// the h2 implementation detects the mismatch and returns a proper error.
 #[tokio::test]
-#[ignore]
+#[ignore = "manual proof-of-concept for issue #493; demonstrates truncation rather than asserting fixed behavior"]
 async fn test_h2_premature_end_stream_with_content_length() {
     let _ = env_logger::try_init();
 
@@ -340,7 +340,7 @@ async fn test_h2_premature_end_stream_with_content_length() {
 /// Proves: HTTP/1.1 client (`.http1_only()`) cannot connect to an h2-only server,
 /// preventing h2-specific truncation entirely.
 #[tokio::test]
-#[ignore]
+#[ignore = "manual proof-of-concept for issue #493; demonstrates truncation rather than asserting fixed behavior"]
 async fn test_h1_prevents_premature_end_stream() {
     let _ = env_logger::try_init();
 

@@ -584,7 +584,8 @@ impl sdk::Factory for QueryFactory {
     fn create(
         &self,
         _: &sdk::CreateRequest,
-        _: sdk::ControlSender, _: sdk::ServiceBindings,
+        _: sdk::ControlSender,
+        _: sdk::ServiceBindings,
     ) -> anyhow::Result<sdk::CreatedComponent> {
         panic!("required-capability validation must precede construction")
     }

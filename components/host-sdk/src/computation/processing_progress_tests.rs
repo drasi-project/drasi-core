@@ -154,7 +154,8 @@ async fn native_indexed_processing_progress_requires_prepared_input_to_be_staged
     let failure: anyhow::Result<()> = service
         .run(|context| async move {
             let changed = element("uncommitted");
-            let input = InputEnvelope { execution_context: Default::default(),
+            let input = InputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("in")?,
                 envelope: GraphChangeCodec::encode_change(
                     drasi_core::models::SourceChange::Insert {

@@ -66,7 +66,12 @@ impl Factory for QueryFactory {
         self.0
     }
 
-    fn create(&self, _: &CreateRequest, _: ControlSender, _: crate::ServiceBindings,) -> anyhow::Result<CreatedComponent> {
+    fn create(
+        &self,
+        _: &CreateRequest,
+        _: ControlSender,
+        _: crate::ServiceBindings,
+    ) -> anyhow::Result<CreatedComponent> {
         panic!("capability discovery must not construct a query")
     }
 }

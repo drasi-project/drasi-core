@@ -304,7 +304,12 @@ mod publication_tests {
                 )),
             );
         }
-        builder.build().unwrap()
+        // Every node's stop is launched at once with its own deadline; give
+        // thousands of nodes in unoptimized builds room to drain on cancel.
+        builder
+            .cleanup_timeout(std::time::Duration::from_secs(60))
+            .build()
+            .unwrap()
     }
 
     fn publication(count: usize) -> ComputationInspection {
@@ -376,7 +381,11 @@ mod publication_tests {
                             samples[64], samples[121], samples[127],
                         );
                 control.cancel();
-                assert!(matches!(run.await, Ok(()) | Err(GraphError::Cancelled)));
+                let result = run.await;
+                assert!(
+                    matches!(result, Ok(()) | Err(GraphError::Cancelled)),
+                    "{result:?}"
+                );
             }
             graph.dispose().await.unwrap();
         }

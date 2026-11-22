@@ -98,7 +98,8 @@ fn deletion(id: &str, time: u64) -> SourceChange {
 }
 
 fn input(changes: &[SourceChange], sequence: u64) -> Result<InputEnvelope> {
-    Ok(InputEnvelope { execution_context: Default::default(),
+    Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_changes(
             changes,
@@ -387,7 +388,8 @@ async fn changed_keys_retract_old_identity_and_identity_only_delete_needs_no_map
     system =
         system.with_timestamp(DateTime::<Utc>::from_timestamp_millis(3).context("valid time")?);
     let outputs = view
-        .transform(InputEnvelope { execution_context: Default::default(),
+        .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: ordinary.port,
             envelope: ChangeEnvelope::new(ordinary.envelope.id().clone(), changes, system),
         })
@@ -1047,7 +1049,8 @@ async fn unknown_ports_controls_and_excessive_lineage_do_not_publish_state() -> 
         DateTime::<Utc>::UNIX_EPOCH,
     )?;
     assert!(view
-        .transform(InputEnvelope { execution_context: Default::default(),
+        .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: control
         })

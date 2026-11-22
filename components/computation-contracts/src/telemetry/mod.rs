@@ -412,7 +412,7 @@ impl ResolvedTelemetry {
             && METRICS
                 .iter()
                 .find(|metric| metric.name == name)
-                .map_or(true, |metric| {
+                .is_none_or(|metric| {
                     if metric.name == "drasi.pipeline.end_to_end.duration" {
                         self.handled_branch.is_some() && self.profile != TelemetryProfile::Off
                     } else {

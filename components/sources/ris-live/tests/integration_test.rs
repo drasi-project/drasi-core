@@ -166,7 +166,6 @@ async fn start_mock_ris_server(listener: tokio::net::TcpListener) -> mpsc::Sende
 }
 
 #[tokio::test]
-#[ignore]
 async fn test_change_detection_with_websocket_harness() {
     let (listener, port) = find_available_port().await;
     let harness_tx = start_mock_ris_server(listener).await;
@@ -219,6 +218,7 @@ async fn test_change_detection_with_websocket_harness() {
 
     let drasi = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -249,6 +249,17 @@ async fn test_change_detection_with_websocket_harness() {
 
     drasi.start().await.unwrap();
 
+    let routes_query_id = drasi
+        .get_query_info_by_name(&drasi_core::ComponentName::try_new("routes-query").unwrap())
+        .await
+        .unwrap()
+        .id;
+    let peer_query_id = drasi
+        .get_query_info_by_name(&drasi_core::ComponentName::try_new("peer-query").unwrap())
+        .await
+        .unwrap()
+        .id;
+
     let mut subscription = handle
         .subscribe_with_options(SubscriptionOptions::default().with_timeout(Duration::from_secs(1)))
         .await
@@ -264,10 +275,7 @@ async fn test_change_detection_with_websocket_harness() {
         .unwrap();
 
     let found_insert = wait_for_result(&mut subscription, Duration::from_secs(10), |result| {
-        if result.query_id
-            != drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000007")
-                .expect("fixture UUID")
-        {
+        if result.query_id != routes_query_id {
             return false;
         }
         result.results.iter().any(|diff| match diff {
@@ -288,10 +296,7 @@ async fn test_change_detection_with_websocket_harness() {
         .unwrap();
 
     let found_update = wait_for_result(&mut subscription, Duration::from_secs(10), |result| {
-        if result.query_id
-            != drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000007")
-                .expect("fixture UUID")
-        {
+        if result.query_id != routes_query_id {
             return false;
         }
         result.results.iter().any(|diff| match diff {
@@ -311,10 +316,7 @@ async fn test_change_detection_with_websocket_harness() {
         .unwrap();
 
     let found_delete = wait_for_result(&mut subscription, Duration::from_secs(10), |result| {
-        if result.query_id
-            != drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000007")
-                .expect("fixture UUID")
-        {
+        if result.query_id != routes_query_id {
             return false;
         }
         result.results.iter().any(|diff| match diff {
@@ -335,10 +337,7 @@ async fn test_change_detection_with_websocket_harness() {
         .unwrap();
 
     let found_peer_state = wait_for_result(&mut subscription, Duration::from_secs(10), |result| {
-        if result.query_id
-            != drasi_core::ComponentId::try_new("00000000-0000-0000-0000-000000000008")
-                .expect("fixture UUID")
-        {
+        if result.query_id != peer_query_id {
             return false;
         }
         result.results.iter().any(|diff| match diff {

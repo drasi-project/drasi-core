@@ -158,6 +158,7 @@ async fn start_drasi_with_reaction(
         .build().expect("valid query configuration");
 
     let drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -252,7 +253,7 @@ async fn read_blob_text(
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Azurite container"]
 #[serial]
 async fn test_queue_reaction_insert_update_delete() {
     let azurite = AzuriteRuntime::start().await;
@@ -354,7 +355,7 @@ async fn test_queue_reaction_insert_update_delete() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Azurite container"]
 #[serial]
 async fn test_queue_reaction_aggregation() {
     let azurite = AzuriteRuntime::start().await;
@@ -413,6 +414,7 @@ async fn test_queue_reaction_aggregation() {
     .expect("valid query configuration");
 
     let drasi = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_lib::computation::v1::FactoryRegistry::standard()
                 .get(
@@ -555,7 +557,7 @@ async fn test_queue_reaction_aggregation() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Azurite container"]
 #[serial]
 async fn test_blob_reaction_insert_update_delete() {
     let azurite = AzuriteRuntime::start().await;
@@ -678,7 +680,7 @@ async fn test_blob_reaction_insert_update_delete() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Azurite container"]
 #[serial]
 async fn test_table_reaction_insert_update_delete() {
     let azurite = AzuriteRuntime::start().await;

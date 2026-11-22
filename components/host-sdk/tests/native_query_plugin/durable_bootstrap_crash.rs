@@ -11,7 +11,9 @@ const INTENT: &str = "BOOTSTRAP-STATE:";
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "process-exit fixture launched by the bootstrap crash cases"]
 async fn indexed_bootstrap_exit_child() -> Result<()> {
-    let root = PathBuf::from(std::env::var_os(ROOT).context("bootstrap crash root missing")?);
+    let Some(root) = std::env::var_os(ROOT).map(PathBuf::from) else {
+        return Ok(());
+    };
     let phase = std::env::var(PHASE)?;
     let database = root.join("source.sqlite");
     let indexes = root.join("indexes");
@@ -116,7 +118,8 @@ async fn recover_after_exit(phase: &str) -> Result<()> {
             .await?;
         let output = graph.output(0).await?;
         aggregate(
-            &[OutputEnvelope { execution_context: Default::default(),
+            &[OutputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("out")?,
                 envelope: output,
             }],

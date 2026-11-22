@@ -53,8 +53,9 @@ fn rows(snapshot: &OutputSnapshot) -> Result<BTreeMap<u64, (RecordId, i64)>> {
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "process-exit fixture launched by the snapshot cases"]
 async fn indexed_snapshot_exit_child() -> Result<()> {
-    let path =
-        PathBuf::from(std::env::var_os(SNAPSHOT_ROOT).context("snapshot child needs a directory")?);
+    let Some(path) = std::env::var_os(SNAPSHOT_ROOT).map(PathBuf::from) else {
+        return Ok(());
+    };
     let mut query = create(&path, TEXT, 1)?;
     query.initialize(&crate::hooks::initialize_ctx()).await?;
     query.start(&crate::hooks::start_ctx()).await?;
@@ -64,7 +65,8 @@ async fn indexed_snapshot_exit_child() -> Result<()> {
         })
         .collect();
     let output = query
-        .transform(InputEnvelope { execution_context: Default::default(),
+        .transform(InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: GraphChangeCodec::encode_changes(
                 &changes,

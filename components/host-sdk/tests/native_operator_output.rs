@@ -125,7 +125,8 @@ fn input(sequence: u64) -> Result<InputEnvelope> {
         },
         properties,
     };
-    Ok(InputEnvelope { execution_context: Default::default(),
+    Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope: GraphChangeCodec::encode_changes(
             &[drasi_core::models::SourceChange::Insert { element }],

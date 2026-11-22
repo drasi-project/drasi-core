@@ -76,6 +76,7 @@ async fn main() -> Result<()> {
         .build()?;
 
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_host_sdk::computation::NativePlugin::from_definition(
                 drasi_computation_transformer_query::plugin()?,
@@ -86,8 +87,14 @@ async fn main() -> Result<()> {
         .with_state_store_provider(Arc::new(state_store))
         .with_source(drasi_lib::Source::id(&invoices).to_owned(), invoices)
         .with_query(overdue)
-        .with_reaction(drasi_lib::Reaction::id(&log_reaction).to_owned(), log_reaction)
-        .with_reaction(drasi_lib::Reaction::id(&a2a_reaction).to_owned(), a2a_reaction)
+        .with_reaction(
+            drasi_lib::Reaction::id(&log_reaction).to_owned(),
+            log_reaction,
+        )
+        .with_reaction(
+            drasi_lib::Reaction::id(&a2a_reaction).to_owned(),
+            a2a_reaction,
+        )
         .build()
         .await?;
 

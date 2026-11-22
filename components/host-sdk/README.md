@@ -2,7 +2,7 @@
 
 ## Shared native telemetry
 
-The loader negotiates telemetry V2 separately from native base ABI 2 and ordinary
+The loader negotiates telemetry V2 separately from native base ABI 0.1.0 and ordinary
 plugin interfaces. Native factories bind the actual graph-owned telemetry before
 calling constructors, including service-aware construction. Opaque metric tokens
 are scoped to the binding and generation; updates call the host recorder directly

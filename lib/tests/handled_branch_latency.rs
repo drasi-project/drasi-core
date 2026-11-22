@@ -10,7 +10,6 @@ use drasi_lib::{computation::v1::*, observability::*, ComponentName};
 use std::{collections::VecDeque, num::NonZeroUsize, sync::Arc, time::Duration};
 use tokio::sync::{Notify, Semaphore};
 
-#[allow(dead_code)]
 mod computation_support;
 use computation_support::{port, stream};
 #[path = "computation_support/metrics.rs"]
@@ -257,13 +256,10 @@ async fn exact_fan_out_duration_is_per_envelope_and_sink_without_tracing() {
             .await;
         let query = component("query");
         let query_label = ("query_id", query.as_str());
-        assert_eq!(
-            metrics.histogram(
-                LATENCY,
-                &[("component_id", component("a").as_str()), query_label, ("phase", "steady")]
-            ),
-            [0.100]
-        );
+        let a_id = component("a");
+        let a_label = ("component_id", a_id.as_str());
+        let steady_labels = [a_label, query_label, ("phase", "steady")];
+        assert_eq!(metrics.histogram(LATENCY, &steady_labels), [0.100]);
         assert!(metrics
             .histogram(LATENCY, &[("component_id", component("b").as_str())])
             .is_empty());

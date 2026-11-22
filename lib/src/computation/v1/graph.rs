@@ -3613,22 +3613,19 @@ async fn run_node(
             } else {
                 forward_emissions(node, sequences, &emissions, outputs, budget, None).await?;
             }
-            match component {
-                Component::Transformer(transformer) => {
-                    observe(
-                        node,
-                        crate::observability::ObservedOperation::Confirm,
-                        processing_scope.context(),
-                        crate::observability::OperationFields {
-                            output_count: Some(emissions.len()),
-                            ..Default::default()
-                        },
-                    )?
-                    .run(transformer.delivery_completed(&emissions))
-                    .await
-                    .map_err(|source| component_error(node, "complete delivery", source))?;
-                }
-                _ => {}
+            if let Component::Transformer(transformer) = component {
+                observe(
+                    node,
+                    crate::observability::ObservedOperation::Confirm,
+                    processing_scope.context(),
+                    crate::observability::OperationFields {
+                        output_count: Some(emissions.len()),
+                        ..Default::default()
+                    },
+                )?
+                .run(transformer.delivery_completed(&emissions))
+                .await
+                .map_err(|source| component_error(node, "complete delivery", source))?;
             }
             let continuation = match component {
                 Component::Transformer(transformer) if transformer.has_pending_emissions() => {
@@ -3754,11 +3751,10 @@ async fn forward_emissions(
     publication_context: Option<&ExecutionContext>,
 ) -> GraphResult<()> {
     let owner = crate::observability::ComponentObservations::current_or_disabled();
-    validate_emissions(node, sequences, emissions).map_err(|error| {
+    validate_emissions(node, sequences, emissions).inspect_err(|_| {
         if publication_context.is_none() {
             owner.failed(crate::observability::ObservedOperation::Transform);
         }
-        error
     })?;
     owner.outputs(emissions.len());
     let mut first_branch = true;
@@ -3808,11 +3804,10 @@ async fn forward_emissions(
                 )))
                 .await;
             result
-                .map_err(|error| {
+                .inspect_err(|_| {
                     if publication_context.is_none() {
                         owner.failed(crate::observability::ObservedOperation::Acknowledge);
                     }
-                    error
                 })
                 .map_err(|source| GraphError::Forward {
                     edge: output.edge,

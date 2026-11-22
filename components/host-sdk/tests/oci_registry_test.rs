@@ -47,7 +47,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
+    #[ignore = "requires network: GHCR OCI registry"]
     async fn list_tags_returns_error_for_nonexistent_package() {
         let c = client();
         let result = c
@@ -63,7 +63,7 @@ mod tests {
     /// page (when all tags fit in the first page). The oci-client crate cannot
     /// deserialize null into Vec<String>, so list_tags_all must handle it.
     #[tokio::test]
-    #[ignore]
+    #[ignore = "requires network: GHCR OCI registry"]
     async fn list_tags_handles_null_tags_from_ghcr_pagination() {
         let c = client();
 
@@ -92,7 +92,7 @@ mod tests {
     /// source/postgres has >100 tags (versions + .sig tags), which exceeds
     /// GHCR's default page size.
     #[tokio::test]
-    #[ignore]
+    #[ignore = "requires network: GHCR OCI registry"]
     async fn list_tags_fetches_all_pages() {
         let c = client();
         let tags = c.list_tags("source/postgres").await.unwrap();
@@ -114,7 +114,7 @@ mod tests {
     /// It lists the drasi-plugin-directory package, then fetches version tags
     /// for each discovered plugin.
     #[tokio::test]
-    #[ignore]
+    #[ignore = "requires network: GHCR OCI registry"]
     async fn search_plugins_discovers_all_plugins() {
         let c = client();
         let results = c.search_plugins("*").await.unwrap();
@@ -143,7 +143,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
+    #[ignore = "requires network: GHCR OCI registry"]
     async fn search_plugins_filters_by_kind() {
         let c = client();
         let results = c.search_plugins("postgres").await.unwrap();
@@ -170,7 +170,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
+    #[ignore = "requires network: GHCR OCI registry"]
     async fn search_plugins_exact_match() {
         let c = client();
         let results = c.search_plugins("source/postgres").await.unwrap();
@@ -191,7 +191,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
+    #[ignore = "requires network: GHCR OCI registry"]
     async fn search_plugins_no_match_returns_empty() {
         let c = client();
         let results = c

@@ -592,6 +592,24 @@ impl Model {
                                 )?;
                             }
                         }
+                    } else if matches!(
+                        value.mac.path.to_token_stream().to_string().as_str(),
+                        "pin_project" | "pin_project_lite :: pin_project"
+                    ) {
+                        // `pin_project!` wraps ordinary struct and impl
+                        // syntax; inventory the declared structs.
+                        for generated in &syn::parse2::<syn::File>(value.mac.tokens.clone())?.items
+                        {
+                            if matches!(generated, Item::Struct(_)) {
+                                self.definition(
+                                    generated,
+                                    module,
+                                    file,
+                                    &condition,
+                                    Some(value.span().start().line),
+                                )?;
+                            }
+                        }
                     } else if value.mac.path.to_token_stream().to_string() == "tokio :: task_local"
                     {
                         // Declares task-local values, not types: nothing to

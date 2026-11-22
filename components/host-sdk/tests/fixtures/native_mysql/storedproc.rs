@@ -133,7 +133,8 @@ pub(crate) fn input(
     let mut envelope =
         GraphChangeCodec::encode_changes(changes, stream(&stream_name), sequence, None)?;
     GraphProducerProgress::annotate(&mut envelope, &identity, sequence)?;
-    Ok(InputEnvelope { execution_context: Default::default(),
+    Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope,
     })
@@ -590,7 +591,8 @@ fn volatile_input(incarnation: &str, sequence: u64, id: i64, value: &str) -> Res
         "query_id": query.as_str(), "configuration_hash": 7, "incarnation": incarnation
     }))?;
     identity.annotate(&mut envelope, &query)?;
-    Ok(InputEnvelope { execution_context: Default::default(),
+    Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope,
     })

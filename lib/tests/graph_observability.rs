@@ -3,7 +3,6 @@
 
 #![cfg(test)]
 
-#[allow(dead_code)]
 mod computation_support;
 
 use async_trait::async_trait;
@@ -280,7 +279,12 @@ async fn processing_failure_and_cancellation_have_one_local_outcome() {
                 )
                 .sink(
                     name("sink"),
-                    Box::new(CollectSink::new(id("sink"), "sink", &["in"], Arc::default())),
+                    Box::new(CollectSink::new(
+                        id("sink"),
+                        "sink",
+                        &["in"],
+                        Arc::default(),
+                    )),
                 )
                 .bind_stream(endpoint(&id("source"), "out"), stream("source"))
                 .bind_stream(endpoint(&id("pending"), "out"), stream("pending"))
@@ -304,9 +308,7 @@ async fn processing_failure_and_cancellation_have_one_local_outcome() {
                     } else {
                         let mut observed = control.subscribe_observed();
                         observed
-                            .wait_for(|graph| {
-                                graph.components[&id("pending")].failure.is_some()
-                            })
+                            .wait_for(|graph| graph.components[&id("pending")].failure.is_some())
                             .await
                             .unwrap();
                     }
@@ -518,7 +520,12 @@ async fn supported_acknowledgements_record_physical_queue_and_input_identity() {
             )
             .sink(
                 name("sink"),
-                Box::new(CollectSink::new(id("sink"), "sink", &["in"], Arc::default())),
+                Box::new(CollectSink::new(
+                    id("sink"),
+                    "sink",
+                    &["in"],
+                    Arc::default(),
+                )),
             )
             .bind_stream(endpoint(&id("source"), "out"), stream("source"))
             .connect(
@@ -657,7 +664,12 @@ async fn admitted_publication_attempts_and_retries_do_not_duplicate_physical_out
             )
             .sink(
                 name("sink"),
-                Box::new(CollectSink::new(id("sink"), "sink", &["in"], received.clone())),
+                Box::new(CollectSink::new(
+                    id("sink"),
+                    "sink",
+                    &["in"],
+                    received.clone(),
+                )),
             )
             .bind_stream(endpoint(&id("source"), "out"), stream("source"))
             .connect(
@@ -672,10 +684,7 @@ async fn admitted_publication_attempts_and_retries_do_not_duplicate_physical_out
             tokio::join!(run, async {
                 control.startup_report().await.unwrap();
                 admission.wait_active().await.unwrap();
-                let session = admission
-                    .register_producer(id("client"))
-                    .await
-                    .unwrap();
+                let session = admission.register_producer(id("client")).await.unwrap();
                 assert_eq!(
                     metrics.count("drasi.component.calls", &[("operation", "publish")]),
                     0
@@ -908,11 +917,21 @@ async fn burst_case(count: usize, continuation: bool, tracing: bool) {
             )
             .sink(
                 name("one"),
-                Box::new(CollectSink::new(id("one"), "one", &["in"], collected.clone())),
+                Box::new(CollectSink::new(
+                    id("one"),
+                    "one",
+                    &["in"],
+                    collected.clone(),
+                )),
             )
             .sink(
                 name("two"),
-                Box::new(CollectSink::new(id("two"), "two", &["in"], collected.clone())),
+                Box::new(CollectSink::new(
+                    id("two"),
+                    "two",
+                    &["in"],
+                    collected.clone(),
+                )),
             )
             .bind_stream(endpoint(&id("source"), "out"), stream("source"))
             .bind_stream(endpoint(&id("transform"), "out"), stream("transform"))
@@ -948,20 +967,14 @@ async fn burst_case(count: usize, continuation: bool, tracing: bool) {
     assert_eq!(
         metrics.count(
             "drasi.component.calls",
-            &[
-                ("component_id", id("transform").as_str()),
-                ("operation", "continue_transform")
-            ]
+            &[("component_id", id("transform").as_str()), ("operation", "continue_transform")]
         ),
         u64::from(continuation)
     );
     assert_eq!(
         metrics.count(
             "drasi.component.calls",
-            &[
-                ("component_id", id("transform").as_str()),
-                ("operation", "confirm_outputs")
-            ]
+            &[("component_id", id("transform").as_str()), ("operation", "confirm_outputs")]
         ),
         attempts as u64
     );
@@ -1057,7 +1070,12 @@ async fn off_has_no_production_series_or_operation_spans() {
             )
             .sink(
                 name("sink"),
-                Box::new(CollectSink::new(id("sink"), "sink", &["in"], Arc::default())),
+                Box::new(CollectSink::new(
+                    id("sink"),
+                    "sink",
+                    &["in"],
+                    Arc::default(),
+                )),
             )
             .bind_stream(endpoint(&id("source"), "out"), stream("source"))
             .connect(
@@ -1112,11 +1130,21 @@ async fn retained_and_multicast_backlog_counts_physical_records_not_subscribers_
         )
         .sink(
             name("one"),
-            Box::new(CollectSink::new(id("one"), "one", &["in"], received.clone())),
+            Box::new(CollectSink::new(
+                id("one"),
+                "one",
+                &["in"],
+                received.clone(),
+            )),
         )
         .sink(
             name("two"),
-            Box::new(CollectSink::new(id("two"), "two", &["in"], received.clone())),
+            Box::new(CollectSink::new(
+                id("two"),
+                "two",
+                &["in"],
+                received.clone(),
+            )),
         )
         .bind_stream(endpoint(&id("source"), "out"), stream("source"))
         .connect(
@@ -1192,10 +1220,7 @@ fn component_info(metrics: &RecordingMetrics, component: &str, component_name: &
     metrics
         .matching(
             "drasi.component.info",
-            &[
-                ("component_id", id(component).as_str()),
-                ("component_name", component_name),
-            ],
+            &[("component_id", id(component).as_str()), ("component_name", component_name)],
         )
         .into_iter()
         .map(|values| values.gauge)
@@ -1254,7 +1279,10 @@ async fn component_info_rename_to_an_overlong_name_still_succeeds() {
     let long = "a".repeat(1_100);
     let (_, ()) = tokio::join!(run, async {
         control.deployment_report().await.unwrap();
-        control.rename_component(&id("one"), name(&long)).await.unwrap();
+        control
+            .rename_component(&id("one"), name(&long))
+            .await
+            .unwrap();
         assert_eq!(
             control
                 .desired_snapshot()

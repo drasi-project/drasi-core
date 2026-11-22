@@ -86,7 +86,8 @@ async fn shared_output_lifecycle() -> Result<()> {
         query.delivery_completed(&output).await?;
         let followed = tokio::time::timeout(Duration::from_secs(1), tail.next()).await??;
         aggregate(
-            &[OutputEnvelope { execution_context: Default::default(),
+            &[OutputEnvelope {
+                execution_context: Default::default(),
                 port: PortId::try_new("out")?,
                 envelope: followed.clone(),
             }],

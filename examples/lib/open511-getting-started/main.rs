@@ -125,6 +125,7 @@ async fn main() -> Result<()> {
         .build()?;
 
     let core = DrasiLib::builder()
+        .with_allow_external_component_ids(true)
         .with_query_factory(
             drasi_host_sdk::computation::NativePlugin::from_definition(
                 drasi_computation_transformer_query::plugin()?,
@@ -132,7 +133,10 @@ async fn main() -> Result<()> {
             .query_factory()?,
         )
         .with_id("open511-example")
-        .with_source(drasi_lib::Source::id(&open511_source).to_owned(), open511_source)
+        .with_source(
+            drasi_lib::Source::id(&open511_source).to_owned(),
+            open511_source,
+        )
         .with_query(query)
         .with_reaction(drasi_lib::Reaction::id(&reaction).to_owned(), reaction)
         .build()

@@ -70,8 +70,7 @@ async fn incoming_http_trace_context_survives_requests_batches_and_native_transp
             NETWORK_SOURCE_ID,
             json!({
                 "stream":"facilities-db/out", "host":"127.0.0.1", "port":port,
-                "ingressCapacity":8, "adaptiveEnabled":true,
-                "adaptiveMinBatchSize":2, "adaptiveMaxBatchSize":2,
+                "ingressCapacity":8, "adaptive":{"minBatchSize":2,"maxBatchSize":2},
             }),
             linked,
         )?;

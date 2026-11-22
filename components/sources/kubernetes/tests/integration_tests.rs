@@ -33,7 +33,7 @@ use std::sync::Arc;
 use tokio::time::{sleep, Instant};
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: privileged k3s container"]
 async fn test_kubernetes_source_configmap_crud_cycle() -> Result<()> {
     let k3s = K3sGuard::start().await?;
     let config = KubernetesSourceConfig {
@@ -82,6 +82,7 @@ async fn test_kubernetes_source_configmap_crud_cycle() -> Result<()> {
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(
@@ -172,7 +173,7 @@ async fn test_kubernetes_source_configmap_crud_cycle() -> Result<()> {
 
 /// Bootstrap more ConfigMaps than one list page so `continue_` pagination runs.
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: privileged k3s container"]
 async fn test_kubernetes_bootstrap_paginates_existing_configmaps() -> Result<()> {
     let k3s = K3sGuard::start().await?;
     let client = k3s.client().await?;
@@ -242,6 +243,7 @@ async fn test_kubernetes_bootstrap_paginates_existing_configmaps() -> Result<()>
 
     let core = Arc::new(
         DrasiLib::builder()
+            .with_allow_external_component_ids(true)
             .with_query_factory(
                 drasi_lib::computation::v1::FactoryRegistry::standard()
                     .get(

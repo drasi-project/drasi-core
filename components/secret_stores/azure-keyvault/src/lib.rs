@@ -568,7 +568,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
+    #[ignore = "requires Azure Key Vault: DRASI_TEST_AZURE_KEY_VAULT_URL and Azure credentials"]
     async fn test_live_get_secret_with_developer_tools() {
         let vault_url = std::env::var("DRASI_TEST_AZURE_KEY_VAULT_URL")
             .expect("DRASI_TEST_AZURE_KEY_VAULT_URL must be set");

@@ -373,7 +373,7 @@ impl HandledBranchTracker {
             state.diagnostics.sealed_requests = state.diagnostics.sealed_requests.saturating_add(1);
             return Err(TelemetryError::Capacity("sealed handled-branch origin"));
         }
-        let words = required_rows / 64 + usize::from(required_rows % 64 != 0);
+        let words = required_rows.div_ceil(64);
         let bytes = words
             .checked_mul(size_of::<u64>())
             .and_then(|bytes| bytes.checked_add(BRANCH_BYTES + key.sink.len()));

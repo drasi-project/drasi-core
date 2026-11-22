@@ -210,7 +210,7 @@ test/application tracing layer. No host globals are replaced in static builds.
 `export_computation_plugin!` advertises both the unchanged context-only
 `drasi_computation_plugin_telemetry_v1` and unified
 `drasi_computation_plugin_telemetry_v2` extensions. The host negotiates them
-independently of frozen ABI 1.0/base wire version 1. Contextual creation and
+independently of native ABI 0.1.0/base wire version 1. Contextual creation and
 operation capsules contain unchanged base payload bytes and separate bounded
 context records. Batch operation context is distinct from every input context.
 Admission and handled-consumer callbacks use the same negotiated context family.
@@ -248,7 +248,7 @@ Old hosts retain supported base/V1 behavior with scoped metrics disabled.
 Required native metrics fail before construction when their capability is absent.
 
 Native query instrumentation negotiates telemetry V4, alongside the unchanged
-V1/V2/V3 and native ABI 2/wire 2 contracts. Its separate query table delegates
+V1/V2/V3 and native ABI 0.1.0/wire 1 contracts. Its separate query table delegates
 allowlisted query boundaries to the host's existing query span and metric
 machinery; it cannot register framework metrics. `query_telemetry::QueryTelemetry`
 captures the current binding and exposes `enabled`, `begin`, and `event`.

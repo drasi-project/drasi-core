@@ -1160,7 +1160,8 @@ fn volatile_batch(incarnation: &str) -> anyhow::Result<InputEnvelope> {
         "configuration_hash": 7, "incarnation": incarnation
     }))?;
     identity.annotate(&mut envelope, &query)?;
-    Ok(InputEnvelope { execution_context: Default::default(),
+    Ok(InputEnvelope {
+        execution_context: Default::default(),
         port: PortId::try_new("in")?,
         envelope,
     })

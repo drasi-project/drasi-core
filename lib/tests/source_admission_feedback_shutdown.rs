@@ -214,7 +214,8 @@ impl Transformer for ScheduledRelay {
         Ok(Vec::new())
     }
     async fn transform(&mut self, input: InputEnvelope) -> anyhow::Result<Vec<OutputEnvelope>> {
-        Ok(vec![OutputEnvelope { execution_context: Default::default(),
+        Ok(vec![OutputEnvelope {
+            execution_context: Default::default(),
             port: port("out"),
             envelope: input.envelope.derive(
                 input.envelope.id().clone(),

@@ -63,7 +63,7 @@ fn unique_query_id() -> drasi_core::ComponentId {
 // ─── OutboxWriter Tests ──────────────────────────────────────────────────────
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Redis container"]
 async fn test_garnet_outbox_append_and_read() {
     let con = get_connection().await;
     let qid = unique_query_id();
@@ -130,7 +130,7 @@ async fn test_garnet_outbox_append_and_read() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Redis container"]
 async fn test_garnet_outbox_read_latest_sequence() {
     let con = get_connection().await;
     let qid = unique_query_id();
@@ -175,7 +175,7 @@ async fn test_garnet_outbox_read_latest_sequence() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Redis container"]
 async fn test_garnet_outbox_clear() {
     let con = get_connection().await;
     let qid = unique_query_id();
@@ -225,7 +225,7 @@ async fn test_garnet_outbox_clear() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Redis container"]
 async fn test_garnet_outbox_trim_to_capacity() {
     let con = get_connection().await;
     let qid = unique_query_id();
@@ -267,7 +267,7 @@ async fn test_garnet_outbox_trim_to_capacity() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Redis container"]
 async fn test_garnet_outbox_trim_before() {
     let con = get_connection().await;
     let qid = unique_query_id();
@@ -311,7 +311,7 @@ fn outbox_sequences(entries: &[(u64, Vec<u8>)]) -> Vec<u64> {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Redis container"]
 async fn test_garnet_outbox_trim_before_without_active_session() {
     let con = get_connection().await;
     let qid = unique_query_id();
@@ -358,7 +358,7 @@ async fn test_garnet_outbox_trim_before_without_active_session() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Redis container"]
 async fn test_garnet_outbox_trim_before_in_session_rolls_back() {
     let con = get_connection().await;
     let qid = unique_query_id();
@@ -454,7 +454,7 @@ async fn test_garnet_outbox_trim_before_in_session_rolls_back() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Redis container"]
 async fn test_garnet_outbox_trim_to_capacity_sees_uncommitted_appends() {
     let con = get_connection().await;
     let qid = unique_query_id();
@@ -500,7 +500,7 @@ async fn test_garnet_outbox_trim_to_capacity_sees_uncommitted_appends() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Redis container"]
 async fn test_garnet_outbox_trim_no_op() {
     let con = get_connection().await;
     let qid = unique_query_id();
@@ -526,7 +526,7 @@ async fn test_garnet_outbox_trim_no_op() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Redis container"]
 async fn test_garnet_outbox_isolation_between_queries() {
     let con = get_connection().await;
     let qid1 = unique_query_id();
@@ -584,7 +584,7 @@ async fn test_garnet_outbox_isolation_between_queries() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Redis container"]
 async fn test_garnet_scoped_primary_and_metadata_outputs_reopen_without_aliasing() {
     let connection = get_connection().await;
     let storage_scope = drasi_core::interface::StorageScope::new(Uuid::new_v4().to_string());
@@ -671,7 +671,7 @@ async fn test_garnet_scoped_primary_and_metadata_outputs_reopen_without_aliasing
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Redis container"]
 async fn test_garnet_outbox_sequence_order_is_exact_above_double_precision() {
     let connection = get_connection().await;
     let query_id = unique_query_id();
@@ -756,7 +756,7 @@ async fn test_garnet_outbox_sequence_order_is_exact_above_double_precision() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Redis container"]
 async fn test_garnet_scoped_provider_binds_output_and_commits_all_resources_together() {
     let redis = shared_redis().await;
     let storage_scope = drasi_core::interface::StorageScope::new(unique_query_id().to_string());
@@ -1036,7 +1036,7 @@ async fn test_garnet_scoped_provider_binds_output_and_commits_all_resources_toge
 // ─── LiveResultsWriter Tests ─────────────────────────────────────────────────
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Redis container"]
 async fn test_garnet_live_results_apply_upserts() {
     let con = get_connection().await;
     let qid = unique_query_id();
@@ -1061,7 +1061,7 @@ async fn test_garnet_live_results_apply_upserts() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Redis container"]
 async fn test_garnet_live_results_apply_delete() {
     let con = get_connection().await;
     let qid = unique_query_id();
@@ -1094,7 +1094,7 @@ async fn test_garnet_live_results_apply_delete() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Redis container"]
 async fn test_garnet_live_results_upsert_overwrites() {
     let con = get_connection().await;
     let qid = unique_query_id();
@@ -1128,7 +1128,7 @@ async fn test_garnet_live_results_upsert_overwrites() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Redis container"]
 async fn test_garnet_live_results_clear() {
     let con = get_connection().await;
     let qid = unique_query_id();
@@ -1151,7 +1151,7 @@ async fn test_garnet_live_results_clear() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Redis container"]
 async fn test_garnet_live_results_isolation_between_queries() {
     let con = get_connection().await;
     let qid1 = unique_query_id();
@@ -1191,7 +1191,7 @@ async fn test_garnet_live_results_isolation_between_queries() {
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires Docker: Redis container"]
 async fn test_garnet_live_results_atomic_batch() {
     let con = get_connection().await;
     let qid = unique_query_id();

@@ -1280,19 +1280,19 @@ impl NativeFactory {
         )?;
         super::telemetry::scope(telemetry_binding.as_ref(), || {
             match &source_bootstrap {
-            Some((coordinator, _, _)) => {
-                coordinator.validate_factory(self.raw.state, &self._plugin)?;
-                coordinator.validate_identity(
-                    activation_identity.as_ref().map(|(resource, _)| resource),
-                )?;
-                coordinator.with_source(
-                    &request,
-                    progress.as_ref().map(|progress| &progress.owner),
-                    consumer_progress.as_ref().map(|progress| &progress.owner),
-                    |coordinator| create_with_processing(coordinator, &mut component),
-                )?;
-            }
-            None => create_with_processing(std::ptr::null(), &mut component)?,
+                Some((coordinator, _, _)) => {
+                    coordinator.validate_factory(self.raw.state, &self._plugin)?;
+                    coordinator.validate_identity(
+                        activation_identity.as_ref().map(|(resource, _)| resource),
+                    )?;
+                    coordinator.with_source(
+                        &request,
+                        progress.as_ref().map(|progress| &progress.owner),
+                        consumer_progress.as_ref().map(|progress| &progress.owner),
+                        |coordinator| create_with_processing(coordinator, &mut component),
+                    )?;
+                }
+                None => create_with_processing(std::ptr::null(), &mut component)?,
             }
             Ok(())
         })?;

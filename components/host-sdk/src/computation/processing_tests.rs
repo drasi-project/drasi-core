@@ -955,7 +955,8 @@ async fn loaded_plugin_case(plugin: &NativePlugin) -> anyhow::Result<()> {
         component
             .start(&crate::computation::test_hooks::start_ctx())
             .await?;
-        let input = InputEnvelope { execution_context: Default::default(),
+        let input = InputEnvelope {
+            execution_context: Default::default(),
             port: PortId::try_new("in")?,
             envelope: super::envelope(
                 &ComponentId::try_new("794abcc2-d807-5d24-9408-573e63650685")?,

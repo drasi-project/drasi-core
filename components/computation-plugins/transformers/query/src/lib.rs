@@ -748,14 +748,14 @@ impl NativeTransformer for QueryTransformer {
                     && GraphChangeCodec::is_futures_due(&input.envelope);
                 if futures_due {
                     let progress = GraphProducerProgress::from_envelope(&input.envelope)?;
-                    if progress
-                        .as_ref()
-                        .is_none_or(|progress| !progress.identity().persistent() && self.durable.volatile)
-                    {
+                    if progress.as_ref().is_none_or(|progress| {
+                        !progress.identity().persistent() && self.durable.volatile
+                    }) {
                         return self.on_wakeup().await;
                     }
                 }
-                let scope = drasi_query_common::query_input_scope(self.input_scopes.as_ref(), &input)?;
+                let scope =
+                    drasi_query_common::query_input_scope(self.input_scopes.as_ref(), &input)?;
                 self.failed = true;
                 let publication = self.output.processing();
                 let mut output = self
@@ -779,8 +779,11 @@ impl NativeTransformer for QueryTransformer {
                 Ok(output
                     .into_iter()
                     .map(|envelope| {
-                        OutputEnvelope::new(PortId::try_new("out").expect("constant port"), envelope)
-                            .with_current_context()
+                        OutputEnvelope::new(
+                            PortId::try_new("out").expect("constant port"),
+                            envelope,
+                        )
+                        .with_current_context()
                     })
                     .collect())
             })

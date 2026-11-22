@@ -22,7 +22,6 @@ use std::{
     time::Duration,
 };
 
-#[allow(dead_code)]
 mod computation_support;
 use computation_support::{component, edge, endpoint, port, stream};
 #[path = "computation_support/metrics.rs"]
