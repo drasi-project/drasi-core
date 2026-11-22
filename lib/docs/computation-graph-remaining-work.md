@@ -35,8 +35,8 @@ compatibility shims or automatic migration of old state are planned.
 
 | Work area | Entries |
 |---|---|
-| Managed updates and lifecycle | [Rebootstrap coordination](#cw-92), [named endpoints](#cw-93), [graph changes and live rebinding](#cw-94) (deferred), [plugin upgrade and configuration migration](#cw-95) (deferred), [late progress binding startup hold](#cw-104), [cleanup deadline for large graphs](#cw-107), [declared component descriptions](#cw-106) |
-| Connectors and runtime boundaries | [Data connections](#cw-44), [old plugin support](#cw-63), [linked query entry points](#cw-80), [oversized query records](#cw-76) |
+| Managed updates and lifecycle | [Rebootstrap coordination](#cw-92), [named endpoints](#cw-93), [graph changes and live rebinding](#cw-94) (deferred), [plugin upgrade and configuration migration](#cw-95) (deferred), [late progress binding startup hold](#cw-104), [cleanup deadline for large graphs](#cw-107), [declared component descriptions](#cw-106), [durable query-edge resume](#cw-109) |
+| Connectors and runtime boundaries | [Data connections](#cw-44), [old plugin support](#cw-63), [linked query entry points](#cw-80), [oversized query records](#cw-76), [element JSON in results](#cw-108), [bootstrap through transformers](#cw-110) |
 | Native plugins: shared work | [Pause and stop](#cw-96), [erasing disposal](#cw-98), [conformance kit](#source-x-02), [configuration and secrets](#source-x-03), [update planning](#source-x-04), [retry policy](#source-x-05), [delivery contract](#sink-x-03), [observability](#source-x-07), [starter project](#dx-1), [packaging](#dx-10), [provider and transformer review](#cw-103) |
 | Native sources | [Network runtime](#plugin-source-network), [PostgreSQL](#plugin-source-postgres), [MySQL](#plugin-source-mysql), [SQL Server](#plugin-source-mssql), [SQLite](#plugin-source-sqlite), [HTTP](#plugin-source-http), [gRPC](#plugin-source-grpc), [bridge](#plugin-source-bridge), [counter and mock](#plugin-source-counter-mock) |
 | Native sinks | [Network runtime](#plugin-sink-network-runtime), [HTTP](#plugin-sink-http), [gRPC](#plugin-sink-grpc), [SSE](#plugin-sink-sse), [log](#plugin-sink-log), [capture](#plugin-sink-capture), [profiler](#plugin-sink-profiler), [stored procedures](#plugin-sink-storedproc-shared), [PostgreSQL](#plugin-sink-storedproc-postgres), [MySQL](#plugin-sink-storedproc-mysql), [SQL Server](#plugin-sink-storedproc-mssql), [bridge](#plugin-sink-bridge), [legacy reactions](#plugin-legacy-reactions) |
@@ -46,7 +46,7 @@ compatibility shims or automatic migration of old state are planned.
 | Optional capabilities | [Store housekeeping](#cw-71), [pipe policies](#cw-74), [isolated hosts](#cw-75), [mixed scheduling proof](#cw-82) |
 | Test quality and CI | [Credential-provider tests](#cw-83), [CI gates](#cw-85), [repeated tests](#cw-86), [asynchronous tests](#cw-37), [build and fixture cost](#cw-87) |
 | Behavior coverage | [Backend conformance](#cw-89), [loaded query plugin](#cw-77), [status and results](#cw-10), [query matching](#cw-13), [grouped results](#cw-12) |
-| Recovery and failure | [Native input recovery](#cw-14), [completion proof](#cw-36), [interrupted reset](#cw-20), [safe stop](#cw-05), [overlapping changes](#cw-07), [cleanup](#cw-08), [combined failures](#cw-39), [extension failures](#cw-03), [retry questions](#cw-21), [ownership and limits](#cw-35) |
+| Recovery and failure | [Native input recovery](#cw-14), [chained bootstrap](#cw-111), [completion proof](#cw-36), [interrupted reset](#cw-20), [safe stop](#cw-05), [overlapping changes](#cw-07), [cleanup](#cw-08), [combined failures](#cw-39), [extension failures](#cw-03), [retry questions](#cw-21), [ownership and limits](#cw-35) |
 | Native boundaries, platforms and performance | [Real plugin libraries](#cw-41), [Protocol Buffers compiler](#cw-67), [isolated host profiles](#cw-91), [complete suites](#cw-78), [large applications](#cw-40), [native query overhead](#cw-79) |
 
 Native plugin work is grouped by plugin under [Native sources](#native-sources)
@@ -351,6 +351,13 @@ far.
 - Component progress persistence is declared but not yet compared along an
   edge: nothing refuses a `Volatile` source feeding a query with durable
   progress (see [MY-36](#my-36)).
+- Bootstrap edges do not compare output volatility with a persistent
+  consumer. A persistent query given a volatile upstream output snapshot is
+  accepted at binding (a `Durable` acceptance takes any completion) and fails
+  only when the bootstrap runs ("persistent query cannot bootstrap from a
+  volatile output", `drasi-core/lib/src/computation/v1/query.rs:174-180`,
+  `output_bootstrap.rs:167`). Declare snapshot durability on bootstrap outputs
+  and refuse this in `check_bootstrap_edge`.
 - The further facts identified by the compatibility audit (recovery and
   control messages, ordering, bootstrap capabilities, archive and atomic
   publication support, credential kinds) belong in this model rather than in
@@ -1421,6 +1428,110 @@ set).
 query runtime, a missing native registration still fails explicitly, and native
 behavior coverage is intact. This does not require removing the ordinary
 Source/Reaction stack ([CW-63](#cw-63)).
+
+<a id="cw-108"></a>
+
+### Return query result elements as element JSON (CW-108)
+
+**Kind:** Issue. **Area:** Core (computation-contracts), Server.
+**Priority:** High for any query that returns a whole node or relation.
+**Effort:** Small; a fix is prepared but not committed.
+
+When a native query result is projected to JSON (result envelopes, the
+`QueryResult` handed to reactions and Server's results endpoint, graph views),
+values without an explicit arm fall through to a catch-all that writes Rust
+`Debug` text. A query such as `MATCH (n:Person) RETURN n` therefore returns
+`"n": "Element(Node { ... })"` as a string instead of the node's properties.
+`ElementMetadata`, `ElementReference`, `ListRange`, `Expression` and `Awaiting`
+take the same path.
+
+**Prepared fix (local, uncommitted at the time of writing):**
+`query_value_to_json` gets explicit arms: `Element` uses the existing element
+JSON conversion (properties plus `$metadata`), `ElementMetadata`,
+`ElementReference` and `ListRange` use their `Display` text, and `Expression`
+and `Awaiting` stay as explicit text, so no variant reaches a catch-all. The
+test `returned_elements_project_to_element_json_not_debug_text` covers node,
+metadata and reference projection.
+
+**Evidence:** `drasi-core/components/computation-contracts/src/internal/typed_change/adapters.rs:704-758`
+(`query_variables_to_json`, `query_value_to_json` with the `_ =>
+format!("{value:?}")` catch-all); callers in `query_codec.rs:670,715` and
+`graph_view.rs:698`.
+
+**Done when:** the fix is committed with its test, the workspace gates pass, and
+a Server query returning a node shows the node's properties in its results.
+
+<a id="cw-109"></a>
+
+### Resume a persistent query bootstrapped over a query edge without gaps (CW-109)
+
+**Kind:** Investigation (probable issue). **Area:** Core. **Priority:** High
+before claiming restart safety for durable query-to-query chains.
+**Effort:** Medium.
+
+A query can bootstrap either from a bound output resource
+(`OutputBootstrapProvider`) or over a graph bootstrap edge from an upstream
+query or transformer (`PipeBootstrapProvider`). The resource path detects a
+gap after restart (`BootstrapPreparation::ResetRequired`) and replays retained
+input (`take_input_replay`). The edge path has neither: a persistent consumer
+saves its sessions and sends resume requests, but nothing proves that changes
+the upstream published while the consumer was down are replayed rather than
+skipped, or that a broken resume forces a reset. **Unverified** as a
+reproduced defect; confirmed only as missing code.
+
+**Example:** `source → query A (durable) → query B (durable)` over bootstrap
+and data edges. B is killed after its bootstrap completes; A keeps processing.
+When B restarts, no test shows B receives A's intervening output exactly once,
+or refuses to continue when A's retained output no longer covers B's position.
+
+**Evidence:** `drasi-core/lib/src/computation/v1/graph_bootstrap.rs:766-1180`
+(`PipeBootstrapProvider`: `RefreshVolatile` only, no replay or reset
+preparation) versus `drasi-core/lib/src/computation/v1/output_bootstrap.rs:121,134`
+(`ResetRequired`) and `:266` (`take_input_replay`).
+
+**Done when:** a process-kill test of a durable query-to-query chain over edges
+shows no loss or duplicate after restart, and an uncoverable gap produces a
+typed reset (or `IncompleteBootstrap` under strict recovery) instead of silent
+continuation. Covered by the chain matrix in [CW-111](#cw-111).
+
+<a id="cw-110"></a>
+
+### Bootstrap chains through transformers and into sinks (CW-110)
+
+**Kind:** Unsupported capability. **Area:** Core, Host SDK, transformer plugins.
+**Priority:** Medium. **Effort:** Medium to large.
+
+Initial data reaches a component only when it has a compatible bootstrap input
+connected to a compatible bootstrap output. Several realistic chains have no
+such path today (survey of 2026-11-20 at `4385703a`, rechecked against the
+current tree for the middleware facts):
+
+- `source → stateless transformer → query`: the query cannot bootstrap from the
+  source edge because it does not read the source's data directly, and a
+  stateless transformer may expose no bootstrap output.
+- `query → middleware`: refused at binding, because the middleware accepts only
+  a quiescent bootstrap (`quiescent_bootstrap`, optional) while a query's
+  output snapshot completes durably.
+- `query → view`: the view transformer has no bootstrap input, and its own
+  snapshot output is volatile.
+- Arithmetic has no bootstrap ports; native sinks have none, so a sink never
+  receives initial rows as changes, only through snapshot reads.
+- The geometry, optimization and policy transformers were not part of the
+  survey; their bootstrap ports need the same review.
+
+**What remains:** decide per combination whether it should be supported
+(for example a quiescent re-serve of a durable snapshot for middleware, or a
+transformer relay that forwards a bootstrap through itself) or is inherently
+unsupported, declare that in the component descriptions, and document the
+refusals in the transformer guide. Do not infer support from configuration.
+
+**Evidence:** `drasi-core/components/computation-plugins/transformers/middleware/src/lib.rs:81-82`
+(quiescent, optional bootstrap input), `.../middleware/src/output.rs:134`;
+`drasi-core/components/host-sdk/src/computation/factory.rs` (Host-added
+bootstrap ports for native plugins).
+
+**Done when:** each listed chain either bootstraps end to end in a test or is
+refused at binding with a documented reason.
 
 <a id="testing-and-qualification"></a>
 
@@ -5564,6 +5675,56 @@ completion, scheduling-request commit and due-work/output commit. Fresh processe
 recover exact checkpoints, pending work, rows and output identities without
 duplicate committed completion or abandoned cleanup. Other multi-failure
 scenarios remain in [CW-39](#cw-39).
+
+<a id="cw-111"></a>
+
+#### Qualify chained bootstrap and subscription topologies (CW-111)
+
+**Kind:** Qualification. **Area:** Core, Host SDK. **Priority:** High before
+claiming support for multi-stage query pipelines. **Effort:** Medium.
+
+Each consumer opens its own bootstrap session with its upstream, receives a
+snapshot and a cut-off watermark, and then drops live input at or below that
+watermark. Bootstrap evaluation is not emitted on the output pipe. This handover
+is tested for chains that start at a source (relay fan-out, fan-in of two
+relays, a late consumer off a relay, restart via a relay) but query-to-query
+bootstrap is tested for only two hops: once in-process
+(`source_relay_and_upstream_query_snapshot_merge`) and once with two volatile
+loaded queries (`native_query_plugin/upstream_snapshot.rs`).
+
+**What remains** (build a topology matrix, linked components first, then loaded
+plugins; harnesses: `lib/tests/computation_graph_bootstrap.rs` helpers,
+including late join via `control.add_component` + `control.connect`, and
+`native_query_plugin/{upstream_snapshot,durable_chain,durable_sqlite,middleware_bootstrap}.rs`):
+
+1. Three or more queries in a row over bootstrap edges.
+2. A consumer added to a running chain off an upstream query or transformer,
+   not only off a source relay.
+3. Restart and process kill partway down a durable chain over edges (see
+   [CW-109](#cw-109)).
+4. One upstream query bootstrapping several downstream queries (fan-out over
+   query edges).
+5. One query bootstrapping from two upstream queries (fan-in over query edges).
+6. An end-to-end chain into a sink, checking how initial state reaches it (see
+   [CW-110](#cw-110)).
+7. The refusals: `query → middleware`, and persistent-from-volatile once it is
+   a binding refusal ([CW-106](#cw-106)).
+
+**Known limits that bound this work:** [CW-92](#cw-92) (no graph-wide
+rebootstrap), [CW-106](#cw-106) and [MY-36](#my-36) (progress persistence not
+compared along edges), [CW-104](#cw-104) (late progress binding hold),
+[CW-94](#cw-94) (no live rebinding), [CW-82](#cw-82) and [CW-05](#cw-05).
+
+**Evidence:** `drasi-core/lib/tests/computation_graph_bootstrap.rs:607`
+(two-hop merge), `:770` (late consumer via relay only);
+`drasi-core/components/host-sdk/tests/native_query_plugin/upstream_snapshot.rs`;
+`drasi-core/lib/src/computation/v1/graph_bootstrap.rs:62` (`served_source`),
+`:611-660` (`serve_output_snapshot`, `BootstrapSnapshotServer`).
+
+**Done when:** every topology above passes with independent result oracles
+(no loss, no duplicate across the snapshot/live boundary) on both Tokio
+flavours, through linked components and loaded plugins, or is refused at
+binding with a documented reason.
 
 ### Native boundaries, platforms and execution qualification
 
