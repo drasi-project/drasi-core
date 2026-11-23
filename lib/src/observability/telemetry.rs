@@ -26,7 +26,7 @@ pub(crate) struct RuntimeObservability {
     pub telemetry: GraphTelemetry,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct TelemetryOptions {
     settings: TelemetrySettings,
     instance_id: Option<Arc<str>>,
@@ -36,6 +36,91 @@ pub struct TelemetryOptions {
     link_limits: TraceLinkLimits,
     native_spans: Option<super::NativeSpanCollector>,
     plugin_limits: TelemetryLimits,
+}
+
+/// DrasiLib collects the `Basic` profile unless the host selects another one.
+impl Default for TelemetryOptions {
+    fn default() -> Self {
+        Self {
+            settings: TelemetrySettings::new(TelemetryProfile::Basic),
+            instance_id: None,
+            metrics: None,
+            trace_directives: None,
+            context_adapter: None,
+            link_limits: TraceLinkLimits::default(),
+            native_spans: None,
+            plugin_limits: TelemetryLimits::default(),
+        }
+    }
+}
+
+/// Forwards to the recorder current at registration: thread-local, then
+/// global, otherwise a no-op. Drasi never installs one.
+struct CurrentRecorder;
+
+impl metrics::Recorder for CurrentRecorder {
+    fn describe_counter(
+        &self,
+        key: metrics::KeyName,
+        unit: Option<metrics::Unit>,
+        description: metrics::SharedString,
+    ) {
+        metrics::with_recorder(|recorder| recorder.describe_counter(key, unit, description));
+    }
+
+    fn describe_gauge(
+        &self,
+        key: metrics::KeyName,
+        unit: Option<metrics::Unit>,
+        description: metrics::SharedString,
+    ) {
+        metrics::with_recorder(|recorder| recorder.describe_gauge(key, unit, description));
+    }
+
+    fn describe_histogram(
+        &self,
+        key: metrics::KeyName,
+        unit: Option<metrics::Unit>,
+        description: metrics::SharedString,
+    ) {
+        metrics::with_recorder(|recorder| recorder.describe_histogram(key, unit, description));
+    }
+
+    fn register_counter(
+        &self,
+        key: &metrics::Key,
+        metadata: &metrics::Metadata<'_>,
+    ) -> metrics::Counter {
+        metrics::with_recorder(|recorder| recorder.register_counter(key, metadata))
+    }
+
+    fn register_gauge(
+        &self,
+        key: &metrics::Key,
+        metadata: &metrics::Metadata<'_>,
+    ) -> metrics::Gauge {
+        metrics::with_recorder(|recorder| recorder.register_gauge(key, metadata))
+    }
+
+    fn register_histogram(
+        &self,
+        key: &metrics::Key,
+        metadata: &metrics::Metadata<'_>,
+    ) -> metrics::Histogram {
+        metrics::with_recorder(|recorder| recorder.register_histogram(key, metadata))
+    }
+}
+
+/// One process-wide context, so instances without a host context share one
+/// registry for the current recorder.
+fn implicit_metric_context() -> MetricRegistrationContext {
+    static CONTEXT: std::sync::OnceLock<MetricRegistrationContext> = std::sync::OnceLock::new();
+    CONTEXT
+        .get_or_init(|| {
+            MetricRegistrationContext::new(Arc::new(CurrentRecorder), RegistrationLimits::default())
+                .expect("default registration limits are valid")
+        })
+        .clone()
 }
 
 impl From<TelemetrySettings> for TelemetryOptions {
@@ -98,6 +183,17 @@ impl TelemetryOptions {
         graph_id: &str,
         instance_id: Option<&str>,
     ) -> Result<GraphTelemetry> {
+        self.resolve_with_implicit_metrics(graph_id, instance_id, implicit_metric_context)
+    }
+
+    /// `implicit` supplies the context used when metrics are enabled without a
+    /// host-owned one.
+    pub(crate) fn resolve_with_implicit_metrics(
+        &self,
+        graph_id: &str,
+        instance_id: Option<&str>,
+        implicit: impl FnOnce() -> MetricRegistrationContext,
+    ) -> Result<GraphTelemetry> {
         let policy = Arc::new(self.settings.resolve()?);
         let link_limits = self.link_limits.validate()?;
         let plugin_limits = self.plugin_limits.validate()?;
@@ -106,11 +202,11 @@ impl TelemetryOptions {
                 "distributed trace context adapter",
             ));
         }
-        if policy.metrics_enabled() && self.metrics.is_none() {
-            return Err(TelemetryError::Invalid(
-                "enabled metrics require a host-owned MetricRegistrationContext".into(),
-            ));
-        }
+        let metrics = match &self.metrics {
+            Some(context) => Some(context.clone()),
+            None if policy.metrics_enabled() => Some(implicit()),
+            None => None,
+        };
         if let (Some(actual), Some(requested)) = (instance_id, self.instance_id.as_deref()) {
             if actual != requested {
                 return Err(TelemetryError::Invalid(
@@ -147,7 +243,7 @@ impl TelemetryOptions {
         Ok(GraphTelemetry {
             policy,
             scope,
-            metrics: self.metrics.clone(),
+            metrics,
             filter: Arc::new(filter),
             context_adapter: self.context_adapter.clone(),
             link_limits,
@@ -529,11 +625,6 @@ mod tests {
                 .resolve("graph", None),
             Err(TelemetryError::Unsupported(_))
         ));
-        assert!(!TelemetryOptions::default()
-            .resolve("graph", None)
-            .unwrap()
-            .policy()
-            .enabled());
         let tracing = TelemetryOptions::new(
             TelemetrySettings::new(TelemetryProfile::Basic).with_metrics(false),
         );
@@ -549,7 +640,39 @@ mod tests {
         assert!(TelemetryOptions::new(TelemetryProfile::Basic)
             .with_instance_id("host")
             .resolve("graph", None)
-            .is_err());
+            .unwrap()
+            .metric_context()
+            .is_some());
+    }
+
+    #[test]
+    fn default_options_are_basic_and_off_is_explicit() {
+        let default = TelemetryOptions::default()
+            .resolve("graph", Some("host"))
+            .unwrap();
+        assert!(default.policy().enabled());
+        assert!(default.policy().metrics_enabled());
+        let off = TelemetryOptions::new(TelemetryProfile::Off)
+            .resolve("graph", Some("host"))
+            .unwrap();
+        assert!(!off.policy().enabled());
+        assert!(off.scope().is_none() && off.metric_context().is_none());
+    }
+
+    #[test]
+    fn host_context_overrides_the_implicit_one() {
+        let host =
+            MetricRegistrationContext::new(Arc::new(metrics::NoopRecorder), Default::default())
+                .unwrap();
+        let resolved = TelemetryOptions::default()
+            .with_metric_context(host.clone())
+            .resolve("graph", Some("host"))
+            .unwrap();
+        assert!(resolved.policy().metrics_enabled());
+        assert!(std::ptr::eq(
+            resolved.metric_context().unwrap().registrations(),
+            host.registrations()
+        ));
     }
 
     #[test]
@@ -581,7 +704,7 @@ mod tests {
             .with_instance_id("other")
             .resolve("actual-graph", Some("actual-instance"))
             .is_err());
-        assert!(TelemetryOptions::default()
+        assert!(TelemetryOptions::new(TelemetryProfile::Off)
             .with_trace_directives("target=not-a-level")
             .resolve("graph", None)
             .is_err());

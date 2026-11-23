@@ -2003,7 +2003,9 @@ impl ComputationGraph {
         ComputationGraphBuilder {
             feedback_shutdown: false,
             id: id.into(),
-            telemetry: crate::observability::TelemetryOptions::default(),
+            telemetry: crate::observability::TelemetryOptions::new(
+                crate::observability::TelemetryProfile::Off,
+            ),
             resolved_telemetry: None,
             logging: None,
             components: Vec::new(),
