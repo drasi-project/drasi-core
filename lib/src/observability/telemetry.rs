@@ -202,9 +202,10 @@ impl TelemetryOptions {
                 "distributed trace context adapter",
             ));
         }
+        let implicit_metrics = self.metrics.is_none() && policy.metrics_enabled();
         let metrics = match &self.metrics {
             Some(context) => Some(context.clone()),
-            None if policy.metrics_enabled() => Some(implicit()),
+            None if implicit_metrics => Some(implicit()),
             None => None,
         };
         if let (Some(actual), Some(requested)) = (instance_id, self.instance_id.as_deref()) {
@@ -244,6 +245,7 @@ impl TelemetryOptions {
             policy,
             scope,
             metrics,
+            implicit_metrics,
             filter: Arc::new(filter),
             context_adapter: self.context_adapter.clone(),
             link_limits,
@@ -261,6 +263,9 @@ pub struct GraphTelemetry {
     policy: Arc<ResolvedTelemetry>,
     scope: Option<TelemetryScope>,
     metrics: Option<MetricRegistrationContext>,
+    /// The shared implicit context, which skips registrations at capacity
+    /// rather than failing components the host never asked to measure.
+    implicit_metrics: bool,
     filter: Arc<EnvFilter>,
     context_adapter: Option<Arc<dyn TraceContextAdapter>>,
     link_limits: TraceLinkLimits,
@@ -302,6 +307,7 @@ impl Default for GraphTelemetry {
             policy: Arc::new(ResolvedTelemetry::default()),
             scope: None,
             metrics: None,
+            implicit_metrics: false,
             filter: Arc::new(EnvFilter::new("trace")),
             context_adapter: None,
             link_limits: TraceLinkLimits::default(),
@@ -504,7 +510,24 @@ impl GraphTelemetry {
         labels: Vec<(String, String)>,
     ) -> Result<RegisteredMetric> {
         match (&self.metrics, &self.scope) {
-            (Some(context), Some(scope)) => context.framework(&self.policy, scope, name, labels),
+            (Some(context), Some(scope)) => {
+                match context.framework(&self.policy, scope, name, labels) {
+                    Err(TelemetryError::Capacity(limit)) if self.implicit_metrics => {
+                        static WARNED: std::sync::atomic::AtomicBool =
+                            std::sync::atomic::AtomicBool::new(false);
+                        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            log::warn!(
+                                "Default telemetry metric registration reached its {limit} \
+                                 limit; new metrics are not recorded. Supply \
+                                 TelemetryOptions::with_metric_context with larger \
+                                 RegistrationLimits to record them."
+                            );
+                        }
+                        Ok(RegisteredMetric::Disabled)
+                    }
+                    result => result,
+                }
+            }
             _ => Ok(RegisteredMetric::Disabled),
         }
     }
@@ -672,6 +695,47 @@ mod tests {
         assert!(std::ptr::eq(
             resolved.metric_context().unwrap().registrations(),
             host.registrations()
+        ));
+    }
+
+    #[test]
+    fn only_the_implicit_context_degrades_when_full() {
+        use drasi_computation_contracts::{ComponentRole, ComponentSemanticKind};
+        let tiny = || {
+            MetricRegistrationContext::new(
+                Arc::new(metrics::NoopRecorder),
+                RegistrationLimits {
+                    series: 1,
+                    ..RegistrationLimits::default()
+                },
+            )
+            .unwrap()
+        };
+        let register = |graph: &GraphTelemetry, name: &str| {
+            graph
+                .component(
+                    crate::test_helpers::named_component_id(name),
+                    ComponentRole::Source,
+                    ComponentSemanticKind::Source,
+                )
+                .register("drasi.component.up", Vec::new())
+        };
+        let implicit = TelemetryOptions::default()
+            .resolve_with_implicit_metrics("graph", Some("host"), tiny)
+            .unwrap();
+        assert!(register(&implicit, "a").is_ok());
+        assert!(matches!(
+            register(&implicit, "b"),
+            Ok(RegisteredMetric::Disabled)
+        ));
+        let host = TelemetryOptions::default()
+            .with_metric_context(tiny())
+            .resolve("graph", Some("host"))
+            .unwrap();
+        assert!(register(&host, "a").is_ok());
+        assert!(matches!(
+            register(&host, "b"),
+            Err(TelemetryError::Capacity(_))
         ));
     }
 
