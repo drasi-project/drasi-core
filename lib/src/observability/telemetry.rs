@@ -124,6 +124,14 @@ impl TelemetryOptions {
                     "enabled direct-graph telemetry requires an explicit stable instance ID".into(),
                 )
             })?;
+            drasi_computation_contracts::validate_identifier("telemetry instance ID", instance_id)
+                .map_err(|_| {
+                    TelemetryError::Invalid(format!(
+                        "telemetry requires a valid instance ID, but '{instance_id}' is empty or \
+                         contains whitespace or control characters; change the ID or disable \
+                         telemetry with TelemetryProfile::Off"
+                    ))
+                })?;
             Some(TelemetryScope::graph(instance_id, graph_id)?)
         } else {
             None
@@ -542,6 +550,22 @@ mod tests {
             .with_instance_id("host")
             .resolve("graph", None)
             .is_err());
+    }
+
+    #[test]
+    fn invalid_instance_id_names_the_id_and_the_opt_out() {
+        let options = TelemetryOptions::new(
+            TelemetrySettings::new(TelemetryProfile::Basic).with_metrics(false),
+        );
+        let error = options
+            .resolve("graph", Some("my server"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("'my server'"), "{error}");
+        assert!(error.contains("TelemetryProfile::Off"), "{error}");
+        assert!(TelemetryOptions::new(TelemetryProfile::Off)
+            .resolve("graph", Some("my server"))
+            .is_ok());
     }
 
     #[test]
