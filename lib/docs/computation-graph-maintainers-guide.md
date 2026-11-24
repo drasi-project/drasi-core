@@ -3122,12 +3122,14 @@ context in `LogMessage::metadata`.
 
 `with_telemetry(TelemetryOptions)` on `DrasiLibBuilder` (or on
 `ComputationGraphBuilder` for a direct graph) sets collection policy. It is not
-part of graph snapshots or configuration.
+part of graph snapshots or configuration. `DrasiLibBuilder` and
+`TelemetryOptions::default()` start at `Basic`; a direct graph starts at `Off`,
+and the contract defaults (`TelemetryProfile`, `TelemetrySettings`) stay `Off`.
 
 | `TelemetryProfile` | Collects |
 |---|---|
-| `Off` (default) | No traces or metrics; logs are unaffected |
-| `Basic` | Source publication, processing, sink handling, bootstrap, scheduled and replay attempts, reaction workers, lifecycle operations and control requests |
+| `Off` | No traces or metrics; logs are unaffected |
+| `Basic` (DrasiLib default) | Source publication, processing, sink handling, bootstrap, scheduled and replay attempts, reaction workers, lifecycle operations and control requests |
 | `Debug` | `Basic` plus operation detail: query phases and commits, pipe acceptance, output confirmation and acknowledgements |
 | `Persistence` | `Basic` plus supported persistence detail |
 
@@ -3135,8 +3137,11 @@ part of graph snapshots or configuration.
 and root sampling. Resolution (`TelemetryOptions::resolve`) makes `build` fail
 rather than run with a hidden gap:
 
-- enabled metrics need a host-owned `MetricRegistrationContext`
-  (`with_metric_context`); share one context per recorder;
+- enabled metrics use the host-owned `MetricRegistrationContext`
+  (`with_metric_context`; share one context per recorder) or, without one, a
+  process-wide implicit context that forwards to the current `metrics`
+  recorder. Only the implicit context skips new series at capacity (warning
+  once) instead of failing;
 - enabled telemetry on a direct graph needs an explicit, stable instance ID, and
   telemetry can never override a library instance's identity;
 - distributed tracing needs a `TraceContextAdapter`. The `otel-context` feature

@@ -526,6 +526,21 @@ pub fn init_component_logging() -> LoggingResult<ComponentLogRuntime> {
     ComponentLogRuntime::new(LogPolicy::from_env()?)
 }
 
+/// The automatic console filter: the log policy, minus Drasi's operation spans,
+/// so telemetry never adds span prefixes to console log lines.
+pub(crate) fn default_console_filter<S>(
+    policy: &LogPolicy,
+) -> impl tracing_subscriber::layer::Filter<S> + Send + Sync + 'static
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    use tracing_subscriber::filter::FilterExt;
+    tracing_subscriber::filter::filter_fn(|metadata| {
+        !(metadata.is_span() && metadata.target() == super::TELEMETRY_TARGET)
+    })
+    .and(policy.filter())
+}
+
 /// Installs or borrows the known process-wide default logging service.
 /// Does not install a metric recorder or an exporter. Shutdown is terminal.
 pub fn init_default_subscriber() -> LoggingResult<ComponentLogRuntime> {
@@ -545,9 +560,9 @@ pub fn init_default_subscriber() -> LoggingResult<ComponentLogRuntime> {
     )?;
     let installed = (|| {
         tracing_log::LogTracer::init().map_err(|_| LoggingError::LoggerConflict)?;
-        let subscriber = tracing_subscriber::registry()
-            .with(runtime.layer())
-            .with(tracing_subscriber::fmt::layer().with_filter(runtime.policy().filter()));
+        let subscriber = tracing_subscriber::registry().with(runtime.layer()).with(
+            tracing_subscriber::fmt::layer().with_filter(default_console_filter(runtime.policy())),
+        );
         tracing::subscriber::set_global_default(subscriber)
             .map_err(|_| LoggingError::SubscriberConflict)?;
         Ok(runtime.clone())
@@ -617,6 +632,37 @@ mod tests {
         assert_eq!(messages[0].level, LogLevel::Warn);
         info.shutdown(Duration::from_secs(2)).await.unwrap();
         warn.shutdown(Duration::from_secs(2)).await.unwrap();
+    }
+
+    #[test]
+    fn default_console_filter_hides_only_telemetry_spans() {
+        #[derive(Clone, Default)]
+        struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let console = tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .with_filter(default_console_filter(&LogPolicy::new("info").unwrap()));
+        tracing::subscriber::with_default(tracing_subscriber::registry().with(console), || {
+            tracing::info_span!(target: crate::observability::TELEMETRY_TARGET, "query.process")
+                .in_scope(|| tracing::info!("INSIDE_TELEMETRY"));
+            tracing::info_span!("computation_component")
+                .in_scope(|| tracing::info!("INSIDE_COMPONENT"));
+        });
+        let output = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("INSIDE_TELEMETRY"), "{output}");
+        assert!(!output.contains("query.process"), "{output}");
+        assert!(output.contains("computation_component: "), "{output}");
     }
 
     #[tokio::test]

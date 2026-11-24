@@ -852,11 +852,14 @@ async fn start(&self) -> Result<()> {
 
 DrasiLib provides component-aware logging built on [tracing](https://docs.rs/tracing/). Logging is **initialized automatically** when you call `build()` — no manual setup required.
 
-Logging is independent of new tracing/metrics collection. Both new signals
-default to `Off`; enabling them never changes the log filter. Automatic setup
-installs no metric recorder or exporter. Invalid log directives and conflicts
-with an unrelated host subscriber/logger are returned as initialization errors,
-not silently ignored.
+Logging is independent of new tracing/metrics collection. DrasiLib collects
+both new signals with the `Basic` telemetry profile by default; pass
+`TelemetryProfile::Off` to `with_telemetry` to disable them. Telemetry never
+changes the log filter, and the automatic console output omits Drasi's
+operation spans (target `drasi::telemetry`), so log lines keep their format.
+Automatic setup installs no metric recorder or exporter. Invalid log directives
+and conflicts with an unrelated host subscriber/logger are returned as
+initialization errors, not silently ignored.
 
 Control verbosity with `RUST_LOG`:
 
@@ -1189,6 +1192,14 @@ static SDK integrations targeting that recorder. Pass it through
 handles. No global installation is required when the recorder is supplied.
 Do not construct independent contexts to bypass cross-instance conflicts.
 Cached no-op handles are not rebound when a recorder is installed later.
+
+Without `with_metric_context`, enabled metrics use one process-wide implicit
+context that forwards to the current `metrics` recorder (thread-local, then
+global, otherwise none). Install a global recorder before `build()`; handles
+registered earlier stay no-op. When the implicit context reaches a
+`RegistrationLimits` capacity, new framework series are skipped and one warning
+is logged, so components still start; a host-supplied context instead fails the
+registration.
 
 Registration is atomic across callers: the same emitted name must retain its
 type, unit and label schema. Label order is normalized; different permitted

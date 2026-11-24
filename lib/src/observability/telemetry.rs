@@ -56,7 +56,7 @@ impl Default for TelemetryOptions {
 
 /// Forwards to the recorder current at registration: thread-local, then
 /// global, otherwise a no-op. Drasi never installs one.
-struct CurrentRecorder;
+pub(super) struct CurrentRecorder;
 
 impl metrics::Recorder for CurrentRecorder {
     fn describe_counter(

@@ -653,18 +653,30 @@ fn implicit_metrics_share_one_context_and_forward_to_the_current_recorder() {
         one.metric_context().unwrap().registrations(),
         two.metric_context().unwrap().registrations(),
     ));
+    // Other tests in this process may have filled the shared context, so
+    // forwarding is checked through a fresh context over the same recorder.
+    let forwarding = TelemetryOptions::default()
+        .resolve_with_implicit_metrics("graph", Some("one"), || {
+            MetricRegistrationContext::new(
+                Arc::new(super::telemetry::CurrentRecorder),
+                RegistrationLimits::default(),
+            )
+            .unwrap()
+        })
+        .unwrap();
     let recording = RecordingMetrics::default();
     metrics::with_local_recorder(&recording, || {
-        one.component(
-            crate::test_helpers::named_component_id("implicit-recorder"),
-            ComponentRole::Source,
-            ComponentSemanticKind::Source,
-        )
-        .register("drasi.component.up", Vec::new())
-        .unwrap()
-        .gauge()
-        .unwrap()
-        .set(1.0);
+        forwarding
+            .component(
+                crate::test_helpers::named_component_id("implicit-recorder"),
+                ComponentRole::Source,
+                ComponentSemanticKind::Source,
+            )
+            .register("drasi.component.up", Vec::new())
+            .unwrap()
+            .gauge()
+            .unwrap()
+            .set(1.0);
     });
     assert_eq!(
         recording.gauge_samples("drasi.component.up", &[]),
