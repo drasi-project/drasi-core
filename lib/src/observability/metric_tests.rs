@@ -642,6 +642,49 @@ fn checkpoint_lag_requires_known_compatible_progress_and_tracks_both_owners() {
 }
 
 #[test]
+fn implicit_metrics_share_one_context_and_forward_to_the_current_recorder() {
+    let one = TelemetryOptions::default()
+        .resolve("graph", Some("one"))
+        .unwrap();
+    let two = TelemetryOptions::new(TelemetryProfile::Basic)
+        .resolve("graph", Some("two"))
+        .unwrap();
+    assert!(std::ptr::eq(
+        one.metric_context().unwrap().registrations(),
+        two.metric_context().unwrap().registrations(),
+    ));
+    // Other tests in this process may have filled the shared context, so
+    // forwarding is checked through a fresh context over the same recorder.
+    let forwarding = TelemetryOptions::default()
+        .resolve_with_implicit_metrics("graph", Some("one"), || {
+            MetricRegistrationContext::new(
+                Arc::new(super::telemetry::CurrentRecorder),
+                RegistrationLimits::default(),
+            )
+            .unwrap()
+        })
+        .unwrap();
+    let recording = RecordingMetrics::default();
+    metrics::with_local_recorder(&recording, || {
+        forwarding
+            .component(
+                crate::test_helpers::named_component_id("implicit-recorder"),
+                ComponentRole::Source,
+                ComponentSemanticKind::Source,
+            )
+            .register("drasi.component.up", Vec::new())
+            .unwrap()
+            .gauge()
+            .unwrap()
+            .set(1.0);
+    });
+    assert_eq!(
+        recording.gauge_samples("drasi.component.up", &[]),
+        vec![1.0]
+    );
+}
+
+#[test]
 fn exclusions_leave_no_detail_observer_or_recorder_registrations() {
     let metrics = RecordingMetrics::default();
     let graph = TelemetryOptions::new(

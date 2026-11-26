@@ -79,7 +79,7 @@ fn automatic_default_logging_and_shared_shutdown() {
             );
             let one = one.unwrap();
             let two = two.unwrap();
-            assert!(!one.telemetry().policy().enabled());
+            assert!(one.telemetry().policy().enabled());
             let logging = one.component_logging().unwrap().clone();
             assert!(Arc::ptr_eq(
                 &logging.registry(),
@@ -274,11 +274,18 @@ fn invalid_settings_fail_before_global_installation() {
                 .build()
                 .await
                 .is_err());
-            assert!(DrasiLib::builder()
-                .with_telemetry(TelemetryProfile::Basic)
-                .build()
-                .await
-                .is_err());
+            let Err(error) = DrasiLib::builder().with_id("my server").build().await else {
+                panic!("an instance ID telemetry rejects must fail the default build");
+            };
+            let chain =
+                std::iter::successors(Some(&error as &dyn std::error::Error), |e| e.source())
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(": ");
+            assert!(
+                chain.contains("'my server'") && chain.contains("TelemetryProfile::Off"),
+                "{chain}"
+            );
             tracing::subscriber::set_global_default(tracing_subscriber::registry()).unwrap();
             log::set_logger(&HOST_LOGGER).unwrap();
             assert!(metrics::set_global_recorder(metrics::NoopRecorder).is_ok());

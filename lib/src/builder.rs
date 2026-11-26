@@ -307,6 +307,10 @@ impl DrasiLibBuilder {
     }
 
     /// Configure new trace/metric collection independently of ordinary logging.
+    ///
+    /// Defaults to `TelemetryProfile::Basic`; pass `TelemetryProfile::Off` to
+    /// disable traces and metrics. Without `with_metric_context`, metrics go to
+    /// the current `metrics` recorder; install it before `build()`.
     pub fn with_telemetry(
         mut self,
         settings: impl Into<crate::observability::TelemetryOptions>,

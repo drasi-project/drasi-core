@@ -3278,15 +3278,16 @@ not an audit log.
 
 Logs describe what one component did. *Traces* follow one change through the
 graph, from the source that published it to the sink that handled it, and
-*metrics* count and time the work. Drasi records traces and metrics only when
-you select a *telemetry profile*, and it never exports them itself: your
-application supplies the OpenTelemetry tracer, the metrics recorder, and the
-endpoints that serve them.
+*metrics* count and time the work. A *telemetry profile* selects what Drasi
+records; `DrasiLib` uses `Basic` unless you pass another profile to
+`with_telemetry`, and `TelemetryProfile::Off` turns traces and metrics off.
+Drasi never exports them itself: your application supplies the OpenTelemetry
+tracer, the metrics recorder, and the endpoints that serve them.
 
 | Profile | Records |
 |---|---|
-| `TelemetryProfile::Off` (default) | No traces or metrics; logging is unaffected |
-| `TelemetryProfile::Basic` | Spans for publishing, processing, and handling each change, for bootstrap and scheduled work, and for lifecycle and control operations; component, source, queue, query, and reaction metrics |
+| `TelemetryProfile::Off` | No traces or metrics; logging is unaffected |
+| `TelemetryProfile::Basic` (default) | Spans for publishing, processing, and handling each change, for bootstrap and scheduled work, and for lifecycle and control operations; component, source, queue, query, and reaction metrics |
 | `TelemetryProfile::Debug` | Everything in Basic, plus detailed query spans (input and output preparation, evaluation, commit, finalization), pipe sends and acknowledgements, and output confirmation |
 | `TelemetryProfile::Persistence` | Everything in Basic, plus query commit durations, outbox and live-result sizes, and reaction checkpoint-lag and recovery metrics; not Debug's spans |
 
@@ -3319,7 +3320,9 @@ A host sets up telemetry in six steps:
    `tracing_opentelemetry` layer that uses a tracer from your provider. Give the
    OpenTelemetry layer its own filter that passes Drasi's operation spans:
    spans whose target is `TELEMETRY_TARGET` (`"drasi::telemetry"`) and whose
-   name your settings allow, `settings.resolve()?.allows_span(name)`.
+   name your settings allow, `settings.resolve()?.allows_span(name)`. Exclude
+   that target from your console layer's filter, as Drasi's automatic console
+   does, or log lines gain operation-span prefixes.
 4. **Configure each instance.** Create
    `TelemetryOptions::new(TelemetrySettings::new(TelemetryProfile::Basic))`, then
    add `with_context_adapter(Arc::new(OpenTelemetryContextAdapter))`, which
@@ -3327,11 +3330,13 @@ A host sets up telemetry in six steps:
    `with_metric_context(...)`. Pass the options to the builder's
    `with_telemetry`, together with `with_component_logging` and an instance ID
    from `with_id`. Spans and metrics carry that ID as `instance_id`, and the
-   default is `"drasi-lib"`, so give each instance its own. If the profile
-   records metrics and the options have no metric registration context,
-   `build()` fails with `invalid telemetry settings`. For traces alone, use
-   `TelemetrySettings::new(profile).with_metrics(false)`; for metrics alone,
-   `with_tracing(false)`.
+   default is `"drasi-lib"`, so give each instance its own; an ID that is empty
+   or contains whitespace or control characters fails `build()` while telemetry
+   is on. If the profile records metrics and the options have no metric
+   registration context, Drasi registers them with whatever `metrics` recorder is
+   current, usually the global one, so install it before `build()`. For traces
+   alone, use `TelemetrySettings::new(profile).with_metrics(false)`; for metrics
+   alone, `with_tracing(false)`.
 5. **Verify.** Submit a change that produces a query result. Its trace contains
    `source.publish`, `query.process`, and `sink.handle` (`reaction.process` for
    an ordinary reaction), and metrics such as `drasi.component.calls` are
@@ -7731,7 +7736,7 @@ action.
 | Publication | One consistent `ComputationInspection`: a sequence number, the desired graph, and every component's observed state |
 | Subscriber | The process's single global `tracing` collector, which filters log messages and spans and writes them out; see [Set up logging](#set-up-logging) |
 | Component-log runtime | A `ComponentLogRuntime`: captures each component's recent log messages through its subscriber layer, for `subscribe_computation_logs_by_name` |
-| Telemetry profile | Which traces and metrics Drasi records: `Off` (default), `Basic`, `Debug`, or `Persistence`; logging is configured separately |
+| Telemetry profile | Which traces and metrics Drasi records: `Off`, `Basic` (default), `Debug`, or `Persistence`; logging is configured separately |
 | Metric registration context | A `MetricRegistrationContext`: one host metrics recorder and the instruments registered with it, shared by every instance that uses the recorder |
 | Factory / resource | Code that constructs a component from a specification / a shared service it uses |
 | Lifecycle hooks | `initialize` prepares an object once; `start` and `stop` begin and end an activation; `pause` and `resume` hold processing temporarily; `dispose` retires the object |
