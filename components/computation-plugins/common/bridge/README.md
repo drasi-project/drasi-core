@@ -433,7 +433,9 @@ short-lived test certificates; no credentials or certificates are checked in.
 ### Compatibility coverage
 
 The shared library's protocol unit tests and `bridge` integration-test binary
-cover current-thread operation and both separate endpoint crates. The
+cover current-thread operation and both endpoint plugins. Every graph-level
+test runs each plugin statically linked and through its loaded library (staged
+by `make build-test-plugins`). The
 [Host network profile](../../../instance-host/README.md#qualified-unix-platforms-and-prepared-network-peer)
 adds actual mutual-TLS macOS/Linux-VM traffic, receipt loss/delay,
 version/authentication rejection, persistent reopen and independent peer
@@ -466,8 +468,13 @@ integration::full_volatile_queue_keeps_receipts_and_control_live_and_retries_fif
 integration::lost_wire_ack_and_real_two_sided_reopen_resolve_exact_persisted_mapping
 integration::receiver_state_loss_and_missing_sender_state_never_create_fresh_input
 integration::malformed_peer_and_stale_connections_do_not_stop_the_receiver_or_control_lane
-integration::transactional_sender_mapping_persists_gaps_rejects_expiry_and_configuration_changes
+integration::durable_sender_refuses_a_volatile_producer_when_wired
+integration::paused_receiver_refuses_new_data_as_busy_and_keeps_control_live
+integration::sender_mapping_file_persists_gaps_rejects_expiry_and_configuration_changes
+integration::durable_sender_erase_removes_its_mapping_idempotently
+integration::sender_mapping_lock_refuses_a_second_owner
 integration::sealed_volatile_cut_requires_actual_queue_handoff_and_revokes_old_lifetimes
-integration::durable_cut_waits_for_actual_required_subscriber_acknowledgement
+integration::durable_cut_drains_through_the_journal_owners_subscriber_progress
 tls::mutual_tls_uses_the_same_protocol_and_rejects_wrong_peer_pins_and_plaintext
+tls::receiver_local_observer_observes_and_seals_but_never_sends
 ```
