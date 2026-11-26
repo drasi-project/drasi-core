@@ -14,12 +14,12 @@
 
 use std::collections::BTreeMap;
 
-use drasi_core::models::{
-    Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue,
+use drasi_computation_contracts::{
+    decode_bounded_messagepack, ElementBeforeImage, ElementImage, ElementPatch, RecordImage,
 };
 use drasi_core_types::data_value::{DataExpression, DataLiteral, DataUnary, DataValue};
-use drasi_lib::computation::v1::{
-    decode_bounded_messagepack, ElementBeforeImage, ElementImage, ElementPatch, RecordImage,
+use drasi_core_types::models::{
+    Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue,
 };
 
 use crate::{codec::preflight_nested, BridgeError, Limits, Namespace, Result};
@@ -104,7 +104,7 @@ impl<'a> PayloadGuard<'a> {
         preflight_nested(bytes, 4096, 16, 1)?;
         let reference: ElementReference = decode_bounded_messagepack(bytes, bytes.len())
             .map_err(|error| BridgeError::invalid(error.to_string()))?;
-        let expected = drasi_lib::computation::v1::GraphChangeCodec::element_reference(&reference)
+        let expected = drasi_computation_contracts::GraphChangeCodec::element_reference(&reference)
             .map_err(|error| BridgeError::invalid(error.to_string()))?;
         if expected.identity().namespace() != namespace || expected.identity().value() != bytes {
             return Err(BridgeError::invalid("graph element key is not canonical"));

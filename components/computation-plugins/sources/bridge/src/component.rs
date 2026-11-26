@@ -2,91 +2,72 @@
 // Licensed under the Apache License, Version 2.0.
 
 use std::{
-    num::NonZeroUsize,
+    path::Path,
     sync::{atomic::Ordering, Arc},
+    time::Duration,
 };
 
 use async_trait::async_trait;
-use drasi_lib::{
-    computation::v1::{
-        AdmissionOptions, ComponentDescriptor, ComponentRecovery, ComponentRole,
-        ComputationComponent, EnvelopeSource, LifecycleError, OutputEnvelope, SourceAdmission,
-    },
-    context::workers::{
-        join_owned_worker_gracefully, spawn_owned_component_worker, WorkerCompletion,
-    },
-};
-use futures_util::FutureExt;
-use tokio::sync::{mpsc, watch, RwLock};
-use tokio::task::JoinHandle;
-
-use crate::{
+use drasi_computation_bridge_common::{
     receiver::{Observations, Receiver},
     transport::Listener,
-    BridgeConfig, BridgeIngressControl, LinkStatus, Profile, TlsResource,
+    BridgeConfig, LinkStatus, Profile, TlsResource,
+};
+use drasi_computation_contracts::{ComponentDescriptor, ComponentRole, OutputEnvelope};
+use drasi_computation_plugin_sdk::{
+    lifecycle::{
+        DisposeContext, InitializeContext, LifecycleError, LifecycleResult, PauseContext,
+        ResumeContext, StartContext, StopContext,
+    },
+    NativeAdmission, NativeComponent, NativeSource,
+};
+use futures_util::FutureExt;
+use tokio::{
+    sync::{mpsc, watch},
+    task::JoinHandle,
 };
 
 struct Runtime {
     receiver: Arc<Receiver>,
     queue: Option<mpsc::Receiver<OutputEnvelope>>,
-    workers: [RwLock<Option<JoinHandle<()>>>; 2],
+    workers: Vec<JoinHandle<()>>,
     failures: watch::Receiver<Option<String>>,
 }
 
+/// The receiving endpoint. Construction binds nothing; Start binds the data
+/// and control listeners and Stop joins their workers.
 pub struct BridgeSource {
     config: BridgeConfig,
     graph_id: String,
     descriptor: ComponentDescriptor,
-    admission: Option<Arc<SourceAdmission>>,
-    tls: Option<Arc<TlsResource>>,
+    admission: Option<NativeAdmission>,
     observations: Arc<Observations>,
     runtime: Option<Runtime>,
-    ingress_control: Arc<BridgeIngressControl>,
 }
 
 impl BridgeSource {
     pub fn new(
         config: BridgeConfig,
         graph_id: String,
-        admission: Option<Arc<SourceAdmission>>,
-        tls: Option<Arc<TlsResource>>,
+        admission: Option<NativeAdmission>,
     ) -> anyhow::Result<Self> {
+        config.validate_role(ComponentRole::Source)?;
         let descriptor = config.descriptor(ComponentRole::Source)?;
-        crate::config::identifier(&graph_id)?;
+        drasi_computation_bridge_common::config::identifier(&graph_id)?;
         anyhow::ensure!(
             (config.profile == Profile::Durable) == admission.is_some(),
             "durable source requires admission; volatile source forbids it"
         );
-        anyhow::ensure!(
-            config.transport.is_tls() == tls.is_some(),
-            "TLS transport requires exactly its identity resource"
-        );
-        if let Some(tls) = &tls {
-            tls.validate_role(true)?;
-        }
         if let Some(admission) = &admission {
+            let identity = admission.identity();
+            // The journal's durability, subscribers and producer bound are
+            // the Host's admission binding; only its scope is visible here.
             anyhow::ensure!(
-                admission.component_id() == &config.receiver_endpoint
-                    && admission.identity().construction_scope() == config.receiver_instance
-                    && admission.identity().graph_id() == graph_id
-                    && admission.port().as_str() == "out"
-                    && admission.channel().definition().stream == config.stream,
+                identity.component_id() == &config.receiver_endpoint
+                    && identity.construction_scope() == config.receiver_instance
+                    && identity.graph_id() == graph_id
+                    && identity.stream() == &config.stream,
                 "admission service scope, stream or component does not match bridge source"
-            );
-            admission
-                .channel()
-                .durability()
-                .require(config.failure_scope)?;
-            anyhow::ensure!(
-                !admission.channel().definition().subscribers.is_empty()
-                    && admission.channel().definition().subscribers.len() <= 16
-                    && admission
-                        .channel()
-                        .definition()
-                        .subscribers
-                        .keys()
-                        .all(|id| id.len() <= 256),
-                "bridge journals require 1..=16 bounded subscribers"
             );
         }
         Ok(Self {
@@ -94,10 +75,8 @@ impl BridgeSource {
             graph_id,
             descriptor,
             admission,
-            tls,
             observations: Arc::new(Observations::default()),
             runtime: None,
-            ingress_control: Arc::new(BridgeIngressControl::new()),
         })
     }
 
@@ -105,24 +84,41 @@ impl BridgeSource {
         self.observations.snapshot()
     }
 
-    pub fn ingress_control(&self) -> Arc<BridgeIngressControl> {
-        self.ingress_control.clone()
+    fn tls(&self) -> anyhow::Result<Option<Arc<TlsResource>>> {
+        let Some(recipe) = &self.config.tls else {
+            return Ok(None);
+        };
+        let tls = recipe.resolve(Path::new("."))?;
+        tls.validate_role(true)?;
+        Ok(Some(tls))
     }
 
-    pub fn with_ingress_control(mut self, control: Arc<BridgeIngressControl>) -> Self {
-        self.ingress_control = control;
-        self
+    /// Joins every worker within `budget`. Unjoined workers stay owned, so a
+    /// retried Stop finishes the join.
+    async fn join(&mut self, budget: Duration) -> LifecycleResult {
+        let Some(runtime) = &mut self.runtime else {
+            return Ok(());
+        };
+        let deadline = tokio::time::Instant::now() + budget;
+        while let Some(worker) = runtime.workers.last_mut() {
+            match tokio::time::timeout_at(deadline, worker).await {
+                Ok(_) => {
+                    runtime.workers.pop();
+                }
+                Err(_) => {
+                    return Err(LifecycleError::retryable(anyhow::anyhow!(
+                        "bridge workers did not finish before the stop deadline"
+                    )))
+                }
+            }
+        }
+        self.runtime = None;
+        Ok(())
     }
 }
 
 #[async_trait]
-impl ComputationComponent for BridgeSource {
-    fn description(&self) -> drasi_lib::computation::v1::ComponentDescription {
-        drasi_computation_bridge_common::config::receiver_description(
-            &self.descriptor,
-            self.config.profile,
-        )
-    }
+impl NativeComponent for BridgeSource {
     fn descriptor(&self) -> &ComponentDescriptor {
         &self.descriptor
     }
@@ -131,50 +127,32 @@ impl ComputationComponent for BridgeSource {
         Ok(serde_json::to_value(&self.config)?)
     }
 
-    fn recovery_contract(&self) -> ComponentRecovery {
-        self.admission.as_ref().map_or_else(
-            || ComponentRecovery::admitted(drasi_core::interface::StorageDurability::VOLATILE),
-            |admission| ComponentRecovery::admitted(admission.channel().durability()),
-        )
+    async fn initialize(&mut self, _ctx: &InitializeContext) -> LifecycleResult {
+        if let Some(recipe) = &self.config.tls {
+            recipe.validate()?;
+        }
+        Ok(())
     }
 
-    async fn start(
-        &mut self,
-        _context: &drasi_lib::computation::v1::StartContext,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            self.runtime.is_none(),
-            "previous bridge workers must be stopped and joined before restart"
-        );
-        if let Some(admission) = &self.admission {
-            // Idempotent verification of an already-enabled dedicated journal.
-            // max_producers=1 pins the contract fingerprint in its producer name.
-            admission
-                .channel()
-                .enable_admission(AdmissionOptions {
-                    construction_scope: self.config.receiver_instance.clone(),
-                    graph_id: self.graph_id.clone(),
-                    component_id: self.descriptor.id().clone(),
-                    failure_scope: self.config.failure_scope,
-                    max_producers: NonZeroUsize::MIN,
-                    receipts_per_producer: NonZeroUsize::MIN,
-                })
-                .await?;
+    async fn start(&mut self, ctx: &mut StartContext) -> LifecycleResult {
+        if self.runtime.is_some() {
+            return Err(LifecycleError::terminal(anyhow::anyhow!(
+                "previous bridge workers must be stopped and joined before restart"
+            )));
         }
-        let data = Listener::bind(
-            &self.config.transport,
-            false,
-            self.tls.clone(),
-            self.config.limits.timeout(),
-        )
-        .await?;
-        let control = Listener::bind(
-            &self.config.transport,
-            true,
-            self.tls.clone(),
-            self.config.limits.timeout(),
-        )
-        .await?;
+        let tls = self.tls()?;
+        let timeout = self.config.limits.timeout();
+        let bind = async {
+            let data = Listener::bind(&self.config.transport, false, tls.clone(), timeout).await?;
+            let control =
+                Listener::bind(&self.config.transport, true, tls.clone(), timeout).await?;
+            drasi_computation_bridge_common::Result::Ok((data, control))
+        };
+        let (data, control) = tokio::select! {
+            biased;
+            _ = ctx.cancellation().cancelled() => return Err(LifecycleError::cancelled()),
+            bound = bind => bound.map_err(anyhow::Error::from)?,
+        };
         let (send, receive) = if self.config.profile == Profile::Volatile {
             let (send, receive) = mpsc::channel(self.config.limits.queue_capacity);
             (Some(send), Some(receive))
@@ -190,14 +168,7 @@ impl ComputationComponent for BridgeSource {
         self.observations
             .unknown_sequence
             .store(0, Ordering::Release);
-        let accepted = if let Some(admission) = &self.admission {
-            admission.channel().progress().await?.accepted
-        } else {
-            0
-        };
-        self.observations
-            .accepted
-            .store(accepted, Ordering::Release);
+        self.observations.accepted.store(0, Ordering::Release);
         let receiver = Receiver::new(
             self.config.contract(true),
             &self.graph_id,
@@ -206,19 +177,12 @@ impl ComputationComponent for BridgeSource {
             self.observations.clone(),
         )?;
         let (failures, failure_receiver) = watch::channel(None);
-        self.runtime = Some(Runtime {
-            receiver: receiver.clone(),
-            queue: receive,
-            workers: [RwLock::new(None), RwLock::new(None)],
-            failures: failure_receiver,
-        });
-        let runtime = self.runtime.as_ref().expect("owned before spawning");
-        self.ingress_control.bind(&runtime.receiver)?;
+        let mut workers = Vec::with_capacity(2);
         for (index, listener) in [data, control].into_iter().enumerate() {
             let receiver = receiver.clone();
             let admission = self.admission.clone();
             let failures = failures.clone();
-            spawn_owned_component_worker(&runtime.workers[index], async move {
+            workers.push(tokio::spawn(async move {
                 let operation = async {
                     if index == 0 {
                         receiver.listen_data(listener).await
@@ -237,49 +201,27 @@ impl ComputationComponent for BridgeSource {
                     }
                     failures.send_replace(Some(failure));
                 }
-            })
-            .await?;
+            }));
         }
+        self.runtime = Some(Runtime {
+            receiver,
+            queue: receive,
+            workers,
+            failures: failure_receiver,
+        });
         Ok(())
     }
 
-    async fn stop(
-        &mut self,
-        _context: &drasi_lib::computation::v1::StopContext,
-    ) -> anyhow::Result<()> {
-        let Some(runtime) = &mut self.runtime else {
-            return Ok(());
-        };
-        self.observations.stopping.store(true, Ordering::Release);
-        runtime.receiver.cancel.cancel();
-        for worker in &runtime.workers {
-            let mut worker = worker.write().await;
-            match join_owned_worker_gracefully(&mut worker, self.config.limits.timeout()).await? {
-                WorkerCompletion::Absent | WorkerCompletion::Completed(()) => {}
-                WorkerCompletion::Cancelled => {
-                    anyhow::bail!("bridge worker was externally cancelled")
-                }
-            }
-        }
-        self.ingress_control.unbind(&runtime.receiver)?;
-        self.runtime = None;
-        Ok(())
-    }
-
-    drasi_lib::passive_component_lifecycle!(@hook initialize, InitializeContext);
     /// Refuses new data with a retryable `Busy` and waits for any admission
     /// in flight. Receipt and control requests stay live, and frames already
     /// admitted stay in the queue or journal for delivery after Resume.
-    async fn pause(
-        &mut self,
-        context: &drasi_lib::computation::v1::PauseContext,
-    ) -> anyhow::Result<()> {
+    async fn pause(&mut self, ctx: &PauseContext) -> LifecycleResult {
         let Some(runtime) = &self.runtime else {
             return Ok(());
         };
         let receiver = runtime.receiver.clone();
         let settled = async {
-            match context.deadline() {
+            match ctx.deadline() {
                 Some(deadline) => tokio::time::timeout_at(deadline, receiver.pause())
                     .await
                     .is_ok(),
@@ -291,7 +233,7 @@ impl ComputationComponent for BridgeSource {
         };
         let outcome = tokio::select! {
             biased;
-            _ = context.cancellation().cancelled() => Err(LifecycleError::cancelled()),
+            _ = ctx.cancellation().cancelled() => Err(LifecycleError::cancelled()),
             settled = settled => if settled {
                 Ok(())
             } else {
@@ -303,44 +245,55 @@ impl ComputationComponent for BridgeSource {
         if outcome.is_err() {
             runtime.receiver.resume();
         }
-        Ok(outcome?)
+        outcome
     }
 
-    async fn resume(
-        &mut self,
-        _context: &drasi_lib::computation::v1::ResumeContext,
-    ) -> anyhow::Result<()> {
+    async fn resume(&mut self, _ctx: &ResumeContext) -> LifecycleResult {
         if let Some(runtime) = &self.runtime {
             runtime.receiver.resume();
         }
         Ok(())
     }
 
-    async fn dispose(
-        &mut self,
-        context: &drasi_lib::computation::v1::DisposeContext,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            !context.erases_owned_state(),
-            "this component does not support permanent state removal"
-        );
+    /// Cancels the listeners and joins their workers within the hook's
+    /// deadline, bounded by the link timeout.
+    async fn stop(&mut self, ctx: &StopContext) -> LifecycleResult {
+        let Some(runtime) = &self.runtime else {
+            return Ok(());
+        };
+        self.observations.stopping.store(true, Ordering::Release);
+        runtime.receiver.cancel.cancel();
+        let mut budget = self.config.limits.timeout();
+        if let Some(remaining) = ctx.scope().remaining() {
+            budget = budget.min(remaining);
+        }
+        tokio::select! {
+            biased;
+            _ = ctx.cancellation().cancelled() => Err(LifecycleError::cancelled()),
+            joined = self.join(budget) => joined,
+        }
+    }
+
+    /// The source owns no state: the admission journal belongs to the Host.
+    async fn dispose(&mut self, ctx: &DisposeContext) -> LifecycleResult {
+        if ctx.erases_owned_state() {
+            return Err(LifecycleError::terminal(anyhow::anyhow!(
+                "this component does not support permanent state removal"
+            )));
+        }
         Ok(())
     }
 }
 
 #[async_trait]
-impl EnvelopeSource for BridgeSource {
-    fn admission(&self) -> Option<Arc<SourceAdmission>> {
-        self.admission.clone()
-    }
-
+impl NativeSource for BridgeSource {
     async fn next(&mut self) -> anyhow::Result<Option<OutputEnvelope>> {
         let runtime = self
             .runtime
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("bridge source is not started"))?;
         let queue = runtime.queue.as_mut().ok_or_else(|| {
-            anyhow::anyhow!("durable source must be driven through SourceAdmission")
+            anyhow::anyhow!("durable source must be driven through source admission")
         })?;
         loop {
             if let Some(failure) = runtime.failures.borrow().as_ref() {

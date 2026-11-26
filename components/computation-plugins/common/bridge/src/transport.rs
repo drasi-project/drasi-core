@@ -4,8 +4,12 @@
 use std::{sync::Arc, time::Duration};
 
 use rustls::{
-    pki_types::{CertificateDer, PrivateKeyDer, ServerName},
-    ClientConfig, RootCertStore, ServerConfig,
+    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    crypto::WebPkiSupportedAlgorithms,
+    pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
+    server::danger::{ClientCertVerified, ClientCertVerifier},
+    ClientConfig, DigitallySignedStruct, DistinguishedName, RootCertStore, ServerConfig,
+    SignatureScheme,
 };
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -26,6 +30,106 @@ pub struct TlsResource {
     client: Option<TlsConnector>,
     server: Option<TlsAcceptor>,
     peer_certificate_sha256: [u8; 32],
+    /// A receiver's own leaf certificate. A client presenting it is the
+    /// receiver's own host observing seal and drain, never a data sender.
+    own_certificate_sha256: Option<[u8; 32]>,
+}
+
+/// Accepts WebPKI-valid peers, and the receiver's own leaf certificate for
+/// local observation.
+#[derive(Debug)]
+struct ReceiverClientVerifier {
+    peers: Arc<dyn ClientCertVerifier>,
+    own: CertificateDer<'static>,
+}
+
+impl ClientCertVerifier for ReceiverClientVerifier {
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        self.peers.root_hint_subjects()
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        now: UnixTime,
+    ) -> std::result::Result<ClientCertVerified, rustls::Error> {
+        if end_entity.as_ref() == self.own.as_ref() {
+            return Ok(ClientCertVerified::assertion());
+        }
+        self.peers
+            .verify_client_cert(end_entity, intermediates, now)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        self.peers.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        self.peers.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.peers.supported_verify_schemes()
+    }
+}
+
+/// A local observer trusts exactly the receiver's own leaf certificate.
+#[derive(Debug)]
+struct OwnCertificate {
+    own: CertificateDer<'static>,
+    algorithms: WebPkiSupportedAlgorithms,
+}
+
+impl ServerCertVerifier for OwnCertificate {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
+        if end_entity.as_ref() == self.own.as_ref() {
+            Ok(ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::General(
+                "receiver certificate is not the observer's own".into(),
+            ))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.algorithms.supported_schemes()
+    }
 }
 
 impl TlsResource {
@@ -45,6 +149,35 @@ impl TlsResource {
             client: Some(TlsConnector::from(Arc::new(config))),
             server: None,
             peer_certificate_sha256,
+            own_certificate_sha256: None,
+        })
+    }
+
+    /// A client identity for the receiver's own host: it presents the
+    /// receiver's certificate and trusts only that certificate. The receiver
+    /// admits it to observing control (seal, sealed cut, drain) only.
+    pub fn local_observer(
+        certificate_chain: Vec<CertificateDer<'static>>,
+        private_key: PrivateKeyDer<'static>,
+    ) -> anyhow::Result<Self> {
+        let own = certificate_chain
+            .first()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("TLS identity has no certificate"))?;
+        let digest: [u8; 32] = Sha256::digest(own.as_ref()).into();
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let algorithms = provider.signature_verification_algorithms;
+        let mut config = ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()?
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(OwnCertificate { own, algorithms }))
+            .with_client_auth_cert(certificate_chain, private_key)?;
+        config.alpn_protocols = vec![ALPN.to_vec()];
+        Ok(Self {
+            client: Some(TlsConnector::from(Arc::new(config))),
+            server: None,
+            peer_certificate_sha256: digest,
+            own_certificate_sha256: None,
         })
     }
 
@@ -55,11 +188,19 @@ impl TlsResource {
         peer_certificate_sha256: [u8; 32],
     ) -> anyhow::Result<Self> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
-            Arc::new(client_roots),
-            provider.clone(),
-        )
-        .build()?;
+        let own = certificate_chain
+            .first()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("TLS identity has no certificate"))?;
+        let own_certificate_sha256 = Some(Sha256::digest(own.as_ref()).into());
+        let verifier = Arc::new(ReceiverClientVerifier {
+            peers: rustls::server::WebPkiClientVerifier::builder_with_provider(
+                Arc::new(client_roots),
+                provider.clone(),
+            )
+            .build()?,
+            own,
+        });
         let mut config = ServerConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()?
             .with_client_cert_verifier(verifier)
@@ -69,6 +210,7 @@ impl TlsResource {
             client: None,
             server: Some(TlsAcceptor::from(Arc::new(config))),
             peer_certificate_sha256,
+            own_certificate_sha256,
         })
     }
 
@@ -81,11 +223,13 @@ impl TlsResource {
         Ok(())
     }
 
+    /// Checks the peer pin and ALPN. Returns whether the peer is the
+    /// receiver's own host observing it.
     fn verify(
         &self,
         certificates: Option<&[CertificateDer<'_>]>,
         alpn: Option<&[u8]>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let certificate = certificates
             .and_then(|chain| chain.first())
             .ok_or_else(|| {
@@ -95,13 +239,14 @@ impl TlsResource {
                 )
             })?;
         let digest: [u8; 32] = Sha256::digest(certificate.as_ref()).into();
-        if digest != self.peer_certificate_sha256 || alpn != Some(ALPN) {
+        let local = self.own_certificate_sha256 == Some(digest);
+        if (digest != self.peer_certificate_sha256 && !local) || alpn != Some(ALPN) {
             return Err(BridgeError::new(
                 ErrorCode::Incompatible,
                 "TLS peer certificate pin or bridge ALPN mismatch",
             ));
         }
-        Ok(())
+        Ok(local)
     }
 }
 
@@ -280,7 +425,9 @@ impl Listener {
         }
     }
 
-    pub(crate) async fn accept(&mut self) -> Result<BoxIo> {
+    /// Accepts one connection. The flag marks the receiver's own host
+    /// observing over TLS; it may use observing control only.
+    pub(crate) async fn accept(&mut self) -> Result<(BoxIo, bool)> {
         match self {
             #[cfg(unix)]
             Self::Unix { listener, owner } => {
@@ -290,7 +437,7 @@ impl Listener {
                         "Unix bridge peers must use the socket owner's UID",
                     ));
                 }
-                Ok(Box::new(stream))
+                Ok((Box::new(stream), false))
             }
             #[cfg(windows)]
             Self::NamedPipe { next, path } => {
@@ -300,7 +447,7 @@ impl Listener {
                     .max_instances(3)
                     .create(path.as_str())
                     .map_err(BridgeError::unknown)?;
-                Ok(Box::new(std::mem::replace(next, replacement)))
+                Ok((Box::new(std::mem::replace(next, replacement)), false))
             }
             Self::Tls {
                 listener,
@@ -318,8 +465,9 @@ impl Listener {
                         .await
                         .map_err(BridgeError::unknown)?;
                     let (_, connection) = stream.get_ref();
-                    identity.verify(connection.peer_certificates(), connection.alpn_protocol())?;
-                    Ok(Box::new(stream) as BoxIo)
+                    let local = identity
+                        .verify(connection.peer_certificates(), connection.alpn_protocol())?;
+                    Ok((Box::new(stream) as BoxIo, local))
                 })
                 .await
             }

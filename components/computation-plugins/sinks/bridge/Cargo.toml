@@ -4,19 +4,29 @@ name = "drasi-computation-sink-bridge"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Statically hosted native inter-instance ComputationGraph bridge sink"
+description = "Inter-instance ComputationGraph bridge sink plugin"
 readme = "README.md"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+default = []
+dynamic-plugin = []
+
+[package.metadata.drasi-plugin]
+abi-family = "computation"
+abi-version = "0.2.0"
+kind = "sink-bridge"
 
 [dependencies]
 drasi-computation-bridge-common = { workspace = true }
-drasi-core = { workspace = true }
-drasi-lib = { workspace = true }
+drasi-computation-contracts = { workspace = true }
+drasi-computation-plugin-sdk = { workspace = true }
 anyhow = "1"
 async-trait = "0.1"
 serde_json = "1"
-sha2 = "0.10"
-tokio = { version = "1", features = ["time"] }
-uuid = { version = "1", features = ["v4"] }
+tokio = { version = "1", features = ["time", "macros"] }
 
 [lints]
 workspace = true

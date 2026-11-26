@@ -4,18 +4,30 @@ name = "drasi-computation-source-bridge"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Statically hosted native inter-instance ComputationGraph bridge source"
+description = "Inter-instance ComputationGraph bridge source plugin"
 readme = "README.md"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+default = []
+dynamic-plugin = []
+
+[package.metadata.drasi-plugin]
+abi-family = "computation"
+abi-version = "0.2.0"
+kind = "source-bridge"
 
 [dependencies]
 drasi-computation-bridge-common = { workspace = true }
-drasi-core = { workspace = true }
-drasi-lib = { workspace = true }
+drasi-computation-contracts = { workspace = true }
+drasi-computation-plugin-sdk = { workspace = true }
 anyhow = "1"
 async-trait = "0.1"
 futures-util = "0.3"
 serde_json = "1"
-tokio = { version = "1", features = ["sync", "rt"] }
+tokio = { version = "1", features = ["sync", "rt", "time", "macros"] }
 
 [lints]
 workspace = true

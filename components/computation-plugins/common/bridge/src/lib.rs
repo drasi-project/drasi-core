@@ -1,8 +1,8 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! Shared native bridge protocol, transport, controls and recovery state.
-//! Component implementations live in the individual source and sink crates.
+//! Shared bridge protocol, transport, controls and recovery state. The
+//! source and sink plugins live in their own crates.
 
 mod boundary;
 #[doc(hidden)]
@@ -11,10 +11,10 @@ pub mod client;
 pub mod codec;
 #[doc(hidden)]
 pub mod config;
+#[doc(hidden)]
+pub mod definition;
 mod endpoint_control;
 mod error;
-#[doc(hidden)]
-pub mod factory;
 mod payload;
 #[doc(hidden)]
 pub mod protocol;
@@ -25,9 +25,7 @@ pub mod state;
 mod tls_recipe;
 pub mod transport;
 
-pub use boundary::{
-    BridgeEgressControl, BridgeIngressControl, EgressStatus, IngressCut, IngressDrainStatus,
-};
+pub use boundary::{IngressCut, IngressDrainStatus};
 pub use client::BridgeControl;
 pub use codec::PortableEnvelopeCodec;
 pub use config::{BridgeConfig, Limits, Namespace, PortableDelivery, Profile, Transport};

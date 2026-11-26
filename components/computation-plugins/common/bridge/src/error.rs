@@ -1,7 +1,7 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-use drasi_lib::computation::v1::{AdmissionRejection, PipeError};
+use drasi_computation_plugin_sdk::{AdmissionError, AdmissionErrorKind};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,23 +62,21 @@ impl BridgeError {
     }
 }
 
-impl From<PipeError> for BridgeError {
-    fn from(error: PipeError) -> Self {
-        let code = match &error {
-            PipeError::CapacityExhausted => ErrorCode::Busy,
-            PipeError::Closed => ErrorCode::Closed,
-            PipeError::AcceptanceUnknown { .. } | PipeError::AcknowledgementUnknown { .. } => {
-                ErrorCode::AcceptanceUnknown
+impl From<AdmissionError> for BridgeError {
+    fn from(error: AdmissionError) -> Self {
+        use AdmissionErrorKind as Kind;
+        let code = match error.kind {
+            Kind::Busy | Kind::CapacityExhausted => ErrorCode::Busy,
+            Kind::Closed => ErrorCode::Closed,
+            Kind::AcceptanceUnknown | Kind::MetadataUnknown => ErrorCode::AcceptanceUnknown,
+            Kind::SessionExpired => ErrorCode::StateLost,
+            Kind::ReceiptExpired => ErrorCode::Expired,
+            Kind::Sequence => ErrorCode::Gap,
+            Kind::PayloadConflict => ErrorCode::Conflict,
+            Kind::NotEnabled | Kind::PendingObligations | Kind::IdentifierTooLong => {
+                ErrorCode::Storage
             }
-            PipeError::Backend(error) => match error.downcast_ref::<AdmissionRejection>() {
-                Some(AdmissionRejection::Busy) => ErrorCode::Busy,
-                Some(AdmissionRejection::SessionExpired) => ErrorCode::StateLost,
-                Some(AdmissionRejection::ReceiptExpired(_)) => ErrorCode::Expired,
-                Some(AdmissionRejection::Sequence { .. }) => ErrorCode::Gap,
-                Some(AdmissionRejection::PayloadConflict(_)) => ErrorCode::Conflict,
-                _ => ErrorCode::Storage,
-            },
-            _ => ErrorCode::Invalid,
+            Kind::Invalid => ErrorCode::Invalid,
         };
         Self::new(code, error.to_string())
     }

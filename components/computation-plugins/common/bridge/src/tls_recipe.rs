@@ -31,7 +31,7 @@ pub enum TlsRole {
 
 /// Shared by normal hosts and Server. Configuration contains paths, never
 /// inline private-key bytes. DER roots/chains and unencrypted PKCS8 DER keys only.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TlsResourceRecipe {
     pub kind: TlsRecipeKind,
@@ -83,9 +83,37 @@ impl TlsResourceRecipe {
         Ok(())
     }
 
+    /// The client identity a receiver's own host observes it with (see
+    /// [`TlsResource::local_observer`]); requires a server recipe.
+    pub fn resolve_local_observer(&self, base: &Path) -> anyhow::Result<Arc<TlsResource>> {
+        anyhow::ensure!(
+            self.role == TlsRole::Server,
+            "only a receiver's own server identity observes it locally"
+        );
+        let (_, chain, _, key) = self.material(base)?;
+        Ok(Arc::new(TlsResource::local_observer(chain, key)?))
+    }
+
     /// The owning host resolves this resource locally, never while merely
     /// inspecting a child manifest. Relative paths are relative to `base`.
     pub fn resolve(&self, base: &Path) -> anyhow::Result<Arc<TlsResource>> {
+        let (roots, chain, pin, key) = self.material(base)?;
+        Ok(Arc::new(match self.role {
+            TlsRole::Client => TlsResource::client(roots, chain, key, pin)?,
+            TlsRole::Server => TlsResource::server(roots, chain, key, pin)?,
+        }))
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn material(
+        &self,
+        base: &Path,
+    ) -> anyhow::Result<(
+        RootCertStore,
+        Vec<CertificateDer<'static>>,
+        [u8; 32],
+        PrivateKeyDer<'static>,
+    )> {
         self.validate()?;
         let mut total = 0usize;
         let path = |path: &Path| {
@@ -118,10 +146,7 @@ impl TlsResourceRecipe {
             true,
             &mut total,
         )?));
-        Ok(Arc::new(match self.role {
-            TlsRole::Client => TlsResource::client(roots, chain, key, pin)?,
-            TlsRole::Server => TlsResource::server(roots, chain, key, pin)?,
-        }))
+        Ok((roots, chain, pin, key))
     }
 }
 

@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use drasi_lib::computation::v1::{ProducerSession, ProducerStatus};
+use drasi_computation_contracts::{ProducerSession, ProducerStatus};
 use serde::Serialize;
 use tokio::sync::Mutex;
 

@@ -3,7 +3,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use drasi_lib::computation::v1::ComponentRole;
+use drasi_computation_contracts::ComponentRole;
 
 use crate::{
     protocol::{read_message, write_message, ControlRequest, ControlResponse, Lane, CONTROL_BYTES},
@@ -122,6 +122,15 @@ impl BridgeEndpointControl {
             }
         })
         .await
+    }
+
+    /// The cut a peer has already sealed on this receiver lifetime, if any.
+    /// Observing it never seals.
+    pub async fn sealed_cut(&mut self) -> Result<Option<IngressCut>> {
+        match self.request(ControlRequest::SealedCut).await? {
+            ControlResponse::SealedCut(cut) => Ok(cut),
+            _ => Err(BridgeError::invalid("unexpected sealed cut response")),
+        }
     }
 
     pub async fn drain_status(&mut self, cut: &IngressCut) -> Result<IngressDrainStatus> {

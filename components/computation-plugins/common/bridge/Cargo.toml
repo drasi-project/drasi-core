@@ -4,13 +4,13 @@ name = "drasi-computation-bridge-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Shared native bridge protocol, transport, controls and recovery state; no component factories"
+description = "Shared bridge protocol, transport, controls and recovery state for the bridge source and sink plugins"
 readme = "README.md"
 
 [dependencies]
-drasi-core = { workspace = true }
+drasi-computation-contracts = { workspace = true }
+drasi-computation-plugin-sdk = { workspace = true }
 drasi-core-types = { workspace = true }
-drasi-lib = { workspace = true }
 anyhow = "1"
 async-trait = "0.1"
 bytes = "1"

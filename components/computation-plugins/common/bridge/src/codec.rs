@@ -3,7 +3,7 @@
 
 use std::{borrow::Cow, num::NonZeroU64};
 
-use drasi_lib::computation::v1::{
+use drasi_computation_contracts::{
     BinaryEnvelopeCodec, ChangeEnvelope, ChangeOperation, ContextValue, EnvelopeCodec,
     QueryChangeCodec, Record, RecordImage, SourceTransactionCodec, SourceTransactionLimits,
     SystemMetadata,
@@ -174,7 +174,7 @@ impl PortableEnvelopeCodec {
                 "query snapshot and progress frames are recovery controls, not portable bridge data",
             ));
         }
-        let invalid = |error: drasi_lib::computation::v1::SourceTransactionError| {
+        let invalid = |error: drasi_computation_contracts::SourceTransactionError| {
             BridgeError::invalid(error.to_string())
         };
         match self.delivery {
@@ -236,7 +236,7 @@ fn annotation(key: &str, bytes: &[u8], limits: &Limits) -> Result<()> {
     if bytes.len() > 64 * 1024 {
         return Err(BridgeError::invalid("annotation bytes exceed 64 KiB"));
     }
-    if key.starts_with("drasi.") && key != drasi_lib::computation::v1::QUERY_PROJECTION {
+    if key.starts_with("drasi.") && key != drasi_computation_contracts::QUERY_PROJECTION {
         annotation_json(bytes, limits.max_depth)?;
     }
     Ok(())

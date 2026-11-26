@@ -1,10 +1,10 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-use drasi_core::interface::FailureMode;
-use drasi_lib::computation::v1::{
+use drasi_computation_contracts::{
     encode_bounded_messagepack, AdmissionReceipt, ProducerSession, ProducerStatus,
 };
+use drasi_core_types::interface::FailureMode;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -67,6 +67,8 @@ pub enum ControlRequest {
     DrainStatus {
         cut: IngressCut,
     },
+    /// The cut a peer has already sealed, if any. Never seals.
+    SealedCut,
     Hello {
         contract: LinkContract,
         expected_session: Option<ProducerSession>,
@@ -103,6 +105,7 @@ pub enum ControlResponse {
     Observed { receiver_epoch: uuid::Uuid },
     Sealed(IngressCut),
     DrainStatus(IngressDrainStatus),
+    SealedCut(Option<IngressCut>),
     Welcome(Welcome),
     Status(LinkStatus),
     ProducerStatus(ProducerStatus),

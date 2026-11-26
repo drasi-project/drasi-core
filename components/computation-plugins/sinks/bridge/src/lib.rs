@@ -1,84 +1,93 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+//! Bridge sink plugin (`drasi.bridge/sink`): the sending endpoint of an
+//! inter-instance bridge link. Each input is one admission at the receiver.
+//! A durable sender keeps its sender mapping in a synced file it owns under
+//! `mappingDirectory`, so a replayed input resolves to the same receiver
+//! sequence and is never admitted twice.
+
 mod component;
 
-use async_trait::async_trait;
-use drasi_computation_bridge_common::{
-    client, config,
-    factory::{optional, BridgeFactoryDefinition},
-    protocol, state,
+use drasi_computation_bridge_common::{config, definition};
+use drasi_computation_contracts::{ComponentRole, GraphChangeCodec};
+use drasi_computation_plugin_sdk::{
+    wire::DescribeRequest, Capabilities, Component, ComponentDescription, ConfigDetails,
+    ControlSender, CreateRequest, CreatedComponent, Factory, FactoryMetadata, PluginDefinition,
+    ServiceBindings,
 };
-use drasi_lib::computation::v1::{
-    ComponentCreationError, ComponentFactory, ComponentSpecification, ConstructedComponent,
-    ConstructionContext, FactoryDescriptor, QueryIndexProviderResource, ResourceHandle, ResourceId,
-    ResourceSpecification, Schema,
-};
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 pub use component::BridgeSink;
 pub use drasi_computation_bridge_common::{
-    AcceptanceBoundary, BridgeConfig, BridgeControl, BridgeEgressControl, BridgeError,
-    EgressStatus, ErrorCode, Limits, LinkStatus, Namespace, PortableDelivery,
-    PortableEnvelopeCodec, Profile, Receipt, TlsRecipeKind, TlsResource, TlsResourceRecipe,
-    TlsRole, Transport, SINK_FACTORY,
+    AcceptanceBoundary, BridgeConfig, BridgeControl, BridgeEndpointControl, BridgeError, ErrorCode,
+    IngressCut, Limits, LinkStatus, Namespace, PortableDelivery, PortableEnvelopeCodec, Profile,
+    Receipt, TlsRecipeKind, TlsResourceRecipe, TlsRole, Transport, SINK_FACTORY,
 };
 
-pub fn factory() -> Arc<dyn ComponentFactory> {
-    Arc::new(BridgeSinkFactory(BridgeFactoryDefinition::new(false)))
+pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
+
+/// Factory for `drasi.bridge/sink`.
+pub struct BridgeSinkFactory;
+
+/// The plugin definition, linked statically or exported by the library.
+pub fn plugin() -> anyhow::Result<PluginDefinition> {
+    PluginDefinition::new(
+        PLUGIN_ID,
+        env!("CARGO_PKG_VERSION"),
+        vec![Arc::new(BridgeSinkFactory)],
+        vec![GraphChangeCodec::schema()],
+    )
 }
 
-struct BridgeSinkFactory(BridgeFactoryDefinition);
+#[cfg(feature = "dynamic-plugin")]
+drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
 
-#[async_trait]
-impl ComponentFactory for BridgeSinkFactory {
-    fn describe(
+impl Factory for BridgeSinkFactory {
+    /// A durable sender keys its mapping on the producer's restart-stable
+    /// identity and requires exactly-once input; a volatile sender is
+    /// unkeyed.
+    fn describe(&self, request: &DescribeRequest) -> anyhow::Result<ComponentDescription> {
+        let config = definition::parse(&request.request, ComponentRole::Sink)?;
+        Ok(config::sender_description(&request.descriptor, &config))
+    }
+
+    fn configuration_details(&self) -> ConfigDetails {
+        definition::definition(ComponentRole::Sink).details()
+    }
+
+    fn metadata(&self) -> FactoryMetadata {
+        definition::metadata(
+            ComponentRole::Sink,
+            Capabilities {
+                // A durable sender removes its own mapping file.
+                erases_owned_state: true,
+                ..Capabilities::default()
+            },
+        )
+    }
+
+    fn create(
         &self,
-        context: &drasi_lib::computation::v1::ConstructionContext,
-    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
-        Ok(drasi_computation_bridge_common::config::sender_description(
-            &context.specification.descriptor,
-            &self.0.configuration(context)?,
-        ))
+        request: &CreateRequest,
+        _control: ControlSender,
+        _services: ServiceBindings,
+    ) -> anyhow::Result<CreatedComponent> {
+        let config = definition::parse(request, ComponentRole::Sink)?;
+        let scope = request
+            .scope
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("the bridge sink requires its graph scope"))?;
+        Ok(Component::Sink(Box::new(BridgeSink::new(config, scope.graph_id.clone())?)).into())
     }
-    fn descriptor(&self) -> &FactoryDescriptor {
-        self.0.descriptor()
-    }
+}
 
-    fn record_schemas(&self) -> Vec<Arc<Schema>> {
-        self.0.record_schemas()
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    fn validate(&self, specification: &ComponentSpecification) -> anyhow::Result<()> {
-        self.0.validate(specification)
-    }
-
-    fn validate_resources(
-        &self,
-        specification: &ComponentSpecification,
-        declarations: &BTreeMap<ResourceId, ResourceSpecification>,
-        resources: &BTreeMap<ResourceId, ResourceHandle>,
-    ) -> anyhow::Result<()> {
-        self.0
-            .validate_resources(specification, declarations, resources)
-    }
-
-    async fn create(
-        &self,
-        context: ConstructionContext,
-    ) -> Result<ConstructedComponent, ComponentCreationError> {
-        async {
-            let config = self.0.configuration(&context)?;
-            let tls = optional::<TlsResource>(&context, "tls")?;
-            let provider = optional::<QueryIndexProviderResource>(&context, "state")?
-                .map(|resource| resource.0.clone());
-            let mut sink = BridgeSink::new(config, context.graph_id.to_string(), provider, tls)?;
-            if let Some(control) = optional::<BridgeEgressControl>(&context, "control")? {
-                sink = sink.with_egress_control(control);
-            }
-            anyhow::Ok(ConstructedComponent::sink(Box::new(sink)))
-        }
-        .await
-        .map_err(ComponentCreationError::terminal)
+    #[test]
+    fn plugin_definition_is_valid() {
+        plugin().expect("valid bridge sink plugin");
     }
 }

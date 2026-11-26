@@ -1,18 +1,18 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc, time::Duration};
+use std::{num::NonZeroUsize, path::Component, sync::Arc, time::Duration};
 
-use drasi_core::interface::FailureMode;
-use drasi_lib::computation::v1::{
-    BinaryEnvelopeCodec, ComponentDescriptor, ComponentId, ComponentRole, ComponentSpecification,
-    ConfigurationValue, GraphChangeCodec, ImplementationIdentity, PipeCapability, PipeRequirements,
-    PortDescriptor, PortDirection, PortId, Schema, SchemaDescriptor, SinkCompletion, StreamId,
+use drasi_computation_contracts::{
+    BinaryEnvelopeCodec, ComponentDescriptor, ComponentId, ComponentRole, GraphChangeCodec,
+    PipeCapability, PipeRequirements, PortDescriptor, PortDirection, PortId, Schema,
+    SchemaDescriptor, SinkCompletion, StreamId,
 };
+use drasi_core_types::interface::FailureMode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{BridgeError, ErrorCode, Result, SINK_FACTORY, SOURCE_FACTORY};
+use crate::{BridgeError, ErrorCode, Result, TlsResourceRecipe, TlsRole};
 
 /// All bridge data is the standard graph schema. The delivery mode says whether
 /// every frame must additionally carry a current complete-source-transaction
@@ -233,8 +233,8 @@ impl Limits {
     }
 }
 
-fn is_stall(policy: &drasi_lib::computation::v1::PermanentFailurePolicy) -> bool {
-    *policy == drasi_lib::computation::v1::PermanentFailurePolicy::Stall
+fn is_stall(policy: &drasi_computation_contracts::PermanentFailurePolicy) -> bool {
+    *policy == drasi_computation_contracts::PermanentFailurePolicy::Stall
 }
 
 fn failure_scope() -> FailureMode {
@@ -264,7 +264,15 @@ pub struct BridgeConfig {
     /// same `onPermanentFailure` setting every sink has. Only senders publish
     /// it in their configuration schema.
     #[serde(default, skip_serializing_if = "is_stall")]
-    pub on_permanent_failure: drasi_lib::computation::v1::PermanentFailurePolicy,
+    pub on_permanent_failure: drasi_computation_contracts::PermanentFailurePolicy,
+    /// This endpoint's mutual-TLS identity; required exactly for the `tls`
+    /// transport. A local setting, not part of the link contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsResourceRecipe>,
+    /// Directory of a durable sender's mapping file; required exactly for a
+    /// durable sink. A local setting, not part of the link contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mapping_directory: Option<String>,
 }
 
 impl BridgeConfig {
@@ -284,14 +292,65 @@ impl BridgeConfig {
                 "the selected schema has no namespace authority",
             ));
         }
+        if let Some(tls) = &self.tls {
+            tls.validate()
+                .map_err(|error| BridgeError::invalid(error.to_string()))?;
+        }
+        if self.transport.is_tls() != self.tls.is_some() {
+            return Err(BridgeError::invalid(
+                "the TLS transport requires exactly its TLS identity",
+            ));
+        }
+        if let Some(directory) = &self.mapping_directory {
+            local_path(directory)?;
+        }
         Ok(())
     }
 
-    pub fn completion(&self) -> SinkCompletion {
-        match self.profile {
-            Profile::Volatile => SinkCompletion::Accepted,
-            Profile::Durable => SinkCompletion::Handled,
+    /// Validates the configuration for one endpoint role: the TLS identity
+    /// role must match it, and only a durable sender has a mapping directory.
+    pub fn validate_role(&self, role: ComponentRole) -> Result<()> {
+        self.validate()?;
+        let source = match role {
+            ComponentRole::Source => true,
+            ComponentRole::Sink => false,
+            _ => {
+                return Err(BridgeError::invalid(
+                    "a bridge endpoint must be a source or a sink",
+                ))
+            }
+        };
+        if let Some(tls) = &self.tls {
+            if tls.role
+                != if source {
+                    TlsRole::Server
+                } else {
+                    TlsRole::Client
+                }
+            {
+                return Err(BridgeError::invalid(
+                    "bridge TLS client/server role does not match its endpoint",
+                ));
+            }
         }
+        if source && self.mapping_directory.is_some() {
+            return Err(BridgeError::invalid(
+                "a bridge source has no sender mapping directory",
+            ));
+        }
+        if !source && (self.profile == Profile::Durable) != self.mapping_directory.is_some() {
+            return Err(BridgeError::invalid(
+                "a durable sender requires its mapping directory; a volatile sender forbids it",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Both profiles complete an input only once the receiver has admitted
+    /// it: into its bounded queue (volatile) or its admission journal
+    /// (durable). A volatile receiver can still lose admitted work.
+    pub fn completion(&self) -> SinkCompletion {
+        SinkCompletion::Handled
     }
 
     pub fn descriptor(&self, role: ComponentRole) -> anyhow::Result<ComponentDescriptor> {
@@ -301,11 +360,6 @@ impl BridgeConfig {
             ComponentRole::Sink => false,
             _ => anyhow::bail!("a bridge endpoint must be a source or a sink"),
         };
-        use PipeCapability::*;
-        let mut requirements = vec![FifoPerStream, Backpressure];
-        if self.profile == Profile::Durable {
-            requirements.extend([DurableAcceptance, ExplicitAcknowledgement, Replay]);
-        }
         Ok(ComponentDescriptor::try_new(
             if source {
                 self.receiver_endpoint.clone()
@@ -320,41 +374,9 @@ impl BridgeConfig {
                     PortDirection::Input
                 },
                 self.delivery.schema().descriptor().clone(),
-                PipeRequirements::new(requirements),
+                port_requirements(),
             )],
         )?)
-    }
-
-    /// Builds a normal graph specification. Add the actual resource dependencies
-    /// before submitting it; no socket or storage is opened here.
-    pub fn specification(&self, role: ComponentRole) -> anyhow::Result<ComponentSpecification> {
-        let value = serde_json::to_value(self)?;
-        Ok(ComponentSpecification {
-            descriptor: self.descriptor(role)?,
-            role,
-            completion: (role == ComponentRole::Sink).then(|| self.completion()),
-            implementation: ImplementationIdentity::try_new(
-                if role == ComponentRole::Source {
-                    SOURCE_FACTORY
-                } else {
-                    SINK_FACTORY
-                },
-                "1",
-            )?,
-            configuration_version: 1,
-            configuration: value
-                .as_object()
-                .expect("configuration object")
-                .iter()
-                .map(|(key, value)| {
-                    (
-                        Arc::from(key.as_str()),
-                        ConfigurationValue::Literal(value.clone()),
-                    )
-                })
-                .collect(),
-            dependencies: BTreeMap::new(),
-        })
     }
 
     pub fn contract(&self, source: bool) -> LinkContract {
@@ -386,6 +408,16 @@ impl BridgeConfig {
             limits: self.limits.clone(),
         }
     }
+}
+
+/// The pipe requirements of either endpoint's port. Plugin factory ports are
+/// fixed, so they do not vary by profile: a durable link is enforced by its
+/// admission journal (receiver) and exactly-once input (sender).
+pub fn port_requirements() -> PipeRequirements {
+    PipeRequirements::new(vec![
+        PipeCapability::FifoPerStream,
+        PipeCapability::Backpressure,
+    ])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -424,6 +456,24 @@ impl LinkContract {
     }
 }
 
+/// A bounded local path without parent traversal. Relative paths resolve
+/// against the process working directory.
+pub(crate) fn local_path(value: &str) -> Result<()> {
+    let path = std::path::Path::new(value);
+    if value.is_empty()
+        || value.len() > 4096
+        || value.chars().any(char::is_control)
+        || path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
+    {
+        return Err(BridgeError::invalid(
+            "local paths must be bounded and cannot contain parent traversal",
+        ));
+    }
+    Ok(())
+}
+
 pub fn identifier(value: &str) -> Result<()> {
     if value.is_empty()
         || value.len() > 256
@@ -442,10 +492,10 @@ pub fn identifier(value: &str) -> Result<()> {
 /// restart-stable producer identity; a volatile profile publishes under a new
 /// volatile identity on every construction.
 pub fn receiver_description(
-    descriptor: &drasi_lib::computation::v1::ComponentDescriptor,
+    descriptor: &drasi_computation_contracts::ComponentDescriptor,
     profile: Profile,
-) -> drasi_lib::computation::v1::ComponentDescription {
-    use drasi_lib::computation::v1::{
+) -> drasi_computation_contracts::ComponentDescription {
+    use drasi_computation_contracts::{
         ComponentDescription, DependencyRequirement, DurabilityRequirement, OutputDescription,
         ProgressPersistence,
     };
@@ -465,26 +515,18 @@ pub fn receiver_description(
 
 /// The description of a bridge sender (a sink). A durable sender keys its
 /// persisted sender mapping on the producer's restart-stable identity and
-/// sequence, so it requires exactly-once input from a durable producer and a
-/// durable mapping store; a volatile or unidentified producer is refused when
-/// the edge is bound. A volatile sender does not key on producer identity.
+/// sequence, so it requires exactly-once input from a durable producer; a
+/// volatile or unidentified producer is refused when the edge is bound. The
+/// mapping itself is the sender's own synced file. A volatile sender does not
+/// key on producer identity.
 pub fn sender_description(
-    descriptor: &drasi_lib::computation::v1::ComponentDescriptor,
+    descriptor: &drasi_computation_contracts::ComponentDescriptor,
     config: &BridgeConfig,
-) -> drasi_lib::computation::v1::ComponentDescription {
-    use drasi_lib::computation::v1::{
-        ComponentDescription, DependencyRequirement, DurabilityRequirement, InputDelivery,
-        ProgressPersistence,
-    };
+) -> drasi_computation_contracts::ComponentDescription {
+    use drasi_computation_contracts::{ComponentDescription, InputDelivery, ProgressPersistence};
     match config.profile {
         Profile::Durable => ComponentDescription::new(ProgressPersistence::Durable)
-            .with_inputs(descriptor, InputDelivery::ExactlyOnce)
-            .with_dependency(
-                "state",
-                DependencyRequirement {
-                    durability: DurabilityRequirement::Durable,
-                },
-            ),
+            .with_inputs(descriptor, InputDelivery::ExactlyOnce),
         Profile::Volatile => ComponentDescription::new(ProgressPersistence::Stateless)
             .with_inputs(descriptor, InputDelivery::Unkeyed),
     }

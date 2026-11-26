@@ -1,90 +1,105 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+//! Bridge source plugin (`drasi.bridge/source`): the receiving endpoint of an
+//! inter-instance bridge link. A volatile link admits frames into a bounded
+//! queue drained through `next`; a durable link admits them through the
+//! Host's source admission service into a dedicated admission journal.
+//!
+//! Seal and drain are served on the link's own control lane
+//! (`BridgeEndpointControl`), not through a Host resource.
+
 mod component;
 
-use async_trait::async_trait;
-use drasi_computation_bridge_common::{
-    config,
-    factory::{optional, BridgeFactoryDefinition},
-    receiver, transport,
+use drasi_computation_bridge_common::{config, definition};
+use drasi_computation_contracts::{ComponentRole, GraphChangeCodec};
+use drasi_computation_plugin_sdk::{
+    wire::DescribeRequest, Capabilities, Component, ComponentDescription, ConfigDetails,
+    ControlSender, CreateRequest, CreatedComponent, Factory, FactoryMetadata, HostServices,
+    PluginDefinition, ServiceBindings,
 };
-use drasi_lib::computation::v1::{
-    ComponentCreationError, ComponentFactory, ComponentSpecification, ConstructedComponent,
-    ConstructionContext, FactoryDescriptor, PortId, QosChannel, ResourceHandle, ResourceId,
-    ResourceSpecification, Schema, SourceAdmission,
-};
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 pub use component::BridgeSource;
 pub use drasi_computation_bridge_common::{
-    BridgeConfig, BridgeError, BridgeIngressControl, ErrorCode, IngressCut, IngressDrainStatus,
-    Limits, LinkStatus, Namespace, PortableDelivery, Profile, TlsRecipeKind, TlsResource,
-    TlsResourceRecipe, TlsRole, Transport, SOURCE_FACTORY,
+    BridgeConfig, BridgeEndpointControl, BridgeError, ErrorCode, IngressCut, IngressDrainStatus,
+    Limits, LinkStatus, Namespace, PortableDelivery, Profile, TlsRecipeKind, TlsResourceRecipe,
+    TlsRole, Transport, SOURCE_FACTORY,
 };
 
-pub fn factory() -> Arc<dyn ComponentFactory> {
-    Arc::new(BridgeSourceFactory(BridgeFactoryDefinition::new(true)))
+pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
+
+/// Factory for `drasi.bridge/source`.
+pub struct BridgeSourceFactory;
+
+/// The plugin definition, linked statically or exported by the library.
+pub fn plugin() -> anyhow::Result<PluginDefinition> {
+    PluginDefinition::new(
+        PLUGIN_ID,
+        env!("CARGO_PKG_VERSION"),
+        vec![Arc::new(BridgeSourceFactory)],
+        vec![GraphChangeCodec::schema()],
+    )
 }
 
-struct BridgeSourceFactory(BridgeFactoryDefinition);
+#[cfg(feature = "dynamic-plugin")]
+drasi_computation_plugin_sdk::export_computation_plugin!(plugin());
 
-#[async_trait]
-impl ComponentFactory for BridgeSourceFactory {
-    fn describe(
-        &self,
-        context: &drasi_lib::computation::v1::ConstructionContext,
-    ) -> anyhow::Result<drasi_lib::computation::v1::ComponentDescription> {
-        Ok(
-            drasi_computation_bridge_common::config::receiver_description(
-                &context.specification.descriptor,
-                self.0.configuration(context)?.profile,
-            ),
+impl Factory for BridgeSourceFactory {
+    /// A durable link publishes through its required durable admission
+    /// journal under a restart-stable producer identity; a volatile link
+    /// under a new volatile identity on every construction.
+    fn describe(&self, request: &DescribeRequest) -> anyhow::Result<ComponentDescription> {
+        let config = definition::parse(&request.request, ComponentRole::Source)?;
+        Ok(config::receiver_description(
+            &request.descriptor,
+            config.profile,
+        ))
+    }
+
+    fn configuration_details(&self) -> ConfigDetails {
+        definition::definition(ComponentRole::Source).details()
+    }
+
+    fn metadata(&self) -> FactoryMetadata {
+        definition::metadata(
+            ComponentRole::Source,
+            Capabilities {
+                services: HostServices {
+                    source_admission: true,
+                    ..Default::default()
+                },
+                ..Capabilities::default()
+            },
         )
     }
-    fn descriptor(&self) -> &FactoryDescriptor {
-        self.0.descriptor()
-    }
 
-    fn record_schemas(&self) -> Vec<Arc<Schema>> {
-        self.0.record_schemas()
-    }
-
-    fn validate(&self, specification: &ComponentSpecification) -> anyhow::Result<()> {
-        self.0.validate(specification)
-    }
-
-    fn validate_resources(
+    fn create(
         &self,
-        specification: &ComponentSpecification,
-        declarations: &BTreeMap<ResourceId, ResourceSpecification>,
-        resources: &BTreeMap<ResourceId, ResourceHandle>,
-    ) -> anyhow::Result<()> {
-        self.0
-            .validate_resources(specification, declarations, resources)
+        request: &CreateRequest,
+        _control: ControlSender,
+        services: ServiceBindings,
+    ) -> anyhow::Result<CreatedComponent> {
+        let config = definition::parse(request, ComponentRole::Source)?;
+        let scope = request
+            .scope
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("the bridge source requires its graph scope"))?;
+        Ok(Component::Source(Box::new(BridgeSource::new(
+            config,
+            scope.graph_id.clone(),
+            services.admission,
+        )?))
+        .into())
     }
+}
 
-    async fn create(
-        &self,
-        context: ConstructionContext,
-    ) -> Result<ConstructedComponent, ComponentCreationError> {
-        async {
-            let config = self.0.configuration(&context)?;
-            let tls = optional::<TlsResource>(&context, "tls")?;
-            let admission = match optional::<QosChannel>(&context, "admission")? {
-                Some(channel) => {
-                    Some(SourceAdmission::new(channel, PortId::try_new("out")?).await?)
-                }
-                None => None,
-            };
-            let mut source =
-                BridgeSource::new(config, context.graph_id.to_string(), admission, tls)?;
-            if let Some(control) = optional::<BridgeIngressControl>(&context, "control")? {
-                source = source.with_ingress_control(control);
-            }
-            anyhow::Ok(ConstructedComponent::source(Box::new(source)))
-        }
-        .await
-        .map_err(ComponentCreationError::terminal)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_definition_is_valid() {
+        plugin().expect("valid bridge source plugin");
     }
 }

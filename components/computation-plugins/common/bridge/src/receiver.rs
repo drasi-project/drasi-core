@@ -6,11 +6,12 @@ use std::sync::{
     Arc,
 };
 
-use drasi_lib::computation::v1::{
+use drasi_computation_contracts::{
     emission_id, AdmissionReceipt, ChangeEnvelope, ComponentId, ContextEntry, ContextValue,
     GraphProducerIdentity, GraphProducerProgress, OutputEnvelope, PortId, ProducerSession,
-    ProducerStatus, SourceAdmission, StreamId, SystemMetadata,
+    ProducerStatus, SystemMetadata,
 };
+use drasi_computation_plugin_sdk::{AdmissionErrorKind, NativeAdmission};
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch, Mutex};
@@ -93,7 +94,7 @@ pub struct Receiver {
     pub codec: PortableEnvelopeCodec,
     pub cancel: CancellationToken,
     pub observations: Arc<Observations>,
-    admission: Option<Arc<SourceAdmission>>,
+    admission: Option<NativeAdmission>,
     queue: Option<mpsc::Sender<OutputEnvelope>>,
     producer_identity: Option<GraphProducerIdentity>,
     volatile: Mutex<VolatileState>,
@@ -112,7 +113,7 @@ impl Receiver {
     pub fn new(
         contract: LinkContract,
         graph_id: &str,
-        admission: Option<Arc<SourceAdmission>>,
+        admission: Option<NativeAdmission>,
         queue: Option<mpsc::Sender<OutputEnvelope>>,
         observations: Arc<Observations>,
     ) -> anyhow::Result<Arc<Self>> {
@@ -185,7 +186,7 @@ impl Receiver {
         let (session, sequence, position, required_subscribers) =
             if let Some(service) = &self.admission {
                 let session = service
-                    .register_producer(self.producer())
+                    .register_producer(&self.producer())
                     .await
                     .map_err(BridgeError::from)?;
                 let status = service
@@ -205,23 +206,9 @@ impl Receiver {
                         })?
                         .position
                 };
-                let progress = service
-                    .channel()
-                    .progress()
-                    .await
-                    .map_err(BridgeError::from)?;
-                if progress.accepted != position {
-                    return Err(BridgeError::new(
-                        ErrorCode::Conflict,
-                        "journal includes another producer's history",
-                    ));
-                }
-                let required = progress
-                    .processed
-                    .keys()
-                    .filter(|id| !progress.retired.contains(id))
-                    .cloned()
-                    .collect();
+                // The journal's subscribers and other producers are known only
+                // to the graph that owns it; that owner checks them.
+                let required = Vec::new();
                 *self.session.lock().await = Some(session.clone());
                 (Some(session), sequence, position, required)
             } else {
@@ -268,32 +255,14 @@ impl Receiver {
             .queue
             .as_ref()
             .map_or(0, |queue| queue.max_capacity() - queue.capacity());
-        let drained = if let Some(service) = &self.admission {
-            let progress = service
-                .channel()
-                .progress()
-                .await
-                .map_err(BridgeError::from)?;
-            if progress.accepted != expected.position
-                || expected
-                    .required_subscribers
-                    .iter()
-                    .any(|id| progress.retired.contains(id))
-            {
-                return Err(BridgeError::new(
-                    ErrorCode::Conflict,
-                    "journal or required membership changed after seal",
-                ));
-            }
-            expected.required_subscribers.iter().all(|id| {
-                progress
-                    .processed
-                    .get(id)
-                    .is_some_and(|position| *position >= expected.position)
-            })
-        } else {
-            queued == 0 && dequeued == expected.client_sequence
-        };
+        if self.admission.is_some() {
+            return Err(BridgeError::new(
+                ErrorCode::Incompatible,
+                "a durable receiver's drain is its admission journal's subscriber progress, \
+                 observed by the graph that owns the journal",
+            ));
+        }
+        let drained = queued == 0 && dequeued == expected.client_sequence;
         Ok(IngressDrainStatus {
             cut: expected.clone(),
             drained,
@@ -359,23 +328,20 @@ impl Receiver {
             ));
         }
         let producer = self.producer();
-        let session =
-            match (&self.admission, expected.as_ref()) {
-                (_, Some(session)) if session.producer != producer => {
-                    return Err(BridgeError::new(
-                        ErrorCode::Incompatible,
-                        "saved session belongs to another link contract",
-                    ));
-                }
-                (Some(_), Some(session)) => session.clone(),
-                (Some(service), None) => service
-                    .register_producer(producer.clone())
+        let session = match (&self.admission, expected.as_ref()) {
+            (_, Some(session)) if session.producer != producer => {
+                return Err(BridgeError::new(
+                    ErrorCode::Incompatible,
+                    "saved session belongs to another link contract",
+                ));
+            }
+            (Some(_), Some(session)) => session.clone(),
+            (Some(service), None) => {
+                service
+                    .register_producer(&producer)
                     .await
                     .map_err(|error| {
-                        if matches!(
-                            error,
-                            drasi_lib::computation::v1::PipeError::CapacityExhausted
-                        ) {
+                        if error.kind == AdmissionErrorKind::CapacityExhausted {
                             BridgeError::new(
                                 ErrorCode::Incompatible,
                                 "receiver journal is already bound to another bridge contract",
@@ -383,17 +349,18 @@ impl Receiver {
                         } else {
                             error.into()
                         }
-                    })?,
-                (None, _) => ProducerSession {
-                    incarnation: self
-                        .producer_identity
-                        .as_ref()
-                        .expect("volatile identity")
-                        .incarnation(),
-                    producer,
-                    epoch: 1,
-                },
-            };
+                    })?
+            }
+            (None, _) => ProducerSession {
+                incarnation: self
+                    .producer_identity
+                    .as_ref()
+                    .expect("volatile identity")
+                    .incarnation(),
+                producer,
+                epoch: 1,
+            },
+        };
         if expected
             .as_ref()
             .is_some_and(|expected| expected != &session)
@@ -645,7 +612,8 @@ impl Receiver {
                 position: request.sequence,
             };
             permit.send(OutputEnvelope {
-                execution_context: drasi_lib::observability::ExecutionContext::current(),
+                execution_context:
+                    drasi_computation_plugin_sdk::telemetry::ExecutionContext::current(),
                 port: PortId::try_new("out").expect("constant port"),
                 envelope: output,
             });
@@ -662,12 +630,18 @@ impl Receiver {
         Ok(self.receipt(receipt))
     }
 
-    async fn control_connection(self: Arc<Self>, mut io: BoxIo) -> Result<()> {
+    async fn control_connection(self: Arc<Self>, mut io: BoxIo, local: bool) -> Result<()> {
         let timeout = self.contract.limits.timeout();
         let request =
             deadline(timeout, read_message(&mut io, Lane::Control, CONTROL_BYTES)).await?;
         if let ControlRequest::Observe { contract } = request {
             return self.observe_connection(io, contract).await;
+        }
+        if local {
+            return Err(BridgeError::new(
+                ErrorCode::Incompatible,
+                "the receiver's own identity may only observe the link",
+            ));
         }
         let ControlRequest::Hello {
             contract,
@@ -795,6 +769,9 @@ impl Receiver {
                 ControlRequest::DrainStatus { cut } => deadline(timeout, self.drain_status(&cut))
                     .await
                     .map(ControlResponse::DrainStatus),
+                ControlRequest::SealedCut => deadline(timeout, self.sealed_cut())
+                    .await
+                    .map(ControlResponse::SealedCut),
                 _ => Err(BridgeError::new(
                     ErrorCode::StaleGeneration,
                     "observer request has another receiver lifetime or authority",
@@ -902,7 +879,7 @@ impl Receiver {
                 Some(_) = connections.next(), if !connections.is_empty() => {}
                 connection = listener.accept(), if connections.len() < 2 => {
                     match connection {
-                        Ok(connection) => connections.push(self.clone().control_connection(connection)),
+                        Ok((connection, local)) => connections.push(self.clone().control_connection(connection, local)),
                         Err(_) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
                     }
                 }
@@ -917,7 +894,8 @@ impl Receiver {
                 _ = self.cancel.cancelled() => return Ok(()),
                 connection = listener.accept() => connection,
             };
-            let Ok(connection) = connection else {
+            // The receiver's own observing identity never sends data.
+            let Ok((connection, false)) = connection else {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 continue;
             };

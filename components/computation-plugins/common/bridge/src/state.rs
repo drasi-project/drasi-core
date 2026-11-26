@@ -2,14 +2,19 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! One sender mapping, not another general-purpose delivery runner. The upstream
-//! acknowledged pipe retains ownership until the remote receipt is saved.
+//! acknowledged pipe retains ownership until the remote receipt is saved. A
+//! durable sender keeps the mapping in a synced local file it owns.
 
-use drasi_core::computation::{ComputationIndexes, ComputationTransaction};
-use drasi_core_types::OutputPartition;
-use drasi_lib::computation::v1::{
+use std::{
+    io::{Read, Write},
+    path::{Path, PathBuf},
+};
+
+use drasi_computation_contracts::{
     decode_bounded_messagepack, encode_bounded_messagepack, DeliveryBatchIdentity, DeliveryScope,
     InputEnvelope, ProducerSession,
 };
+use drasi_core_types::interface::StorageDurability;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -19,8 +24,6 @@ use crate::{
     protocol::{AcceptanceBoundary, Receipt},
     BridgeError, ErrorCode, Profile, Result,
 };
-
-const KEY: &str = "drasi.bridge.sender-mapping.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -80,39 +83,166 @@ struct Ledger {
     last: Option<Mapping>,
 }
 
+/// The durable sender mapping file, `<directory>/<namespace>.mapping`, with an
+/// exclusive `<namespace>.lock` held while a sender owns it. The namespace is
+/// derived from the sender instance, graph and endpoint, so distinct senders
+/// sharing a directory never share a mapping.
+pub struct MappingFile {
+    path: PathBuf,
+    lock: PathBuf,
+    owner: Option<std::fs::File>,
+}
+
+impl MappingFile {
+    pub fn new(
+        directory: &Path,
+        sender_instance: &str,
+        graph_id: &str,
+        sender_endpoint: &str,
+    ) -> anyhow::Result<Self> {
+        let namespace = serde_json::to_vec(&(sender_instance, graph_id, sender_endpoint))?;
+        let name = format!("{:x}", Sha256::digest(namespace));
+        Ok(Self {
+            path: directory.join(format!("{name}.mapping")),
+            lock: directory.join(format!("{name}.lock")),
+            owner: None,
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Takes exclusive ownership of the mapping for this process lifetime.
+    fn acquire(&mut self) -> anyhow::Result<()> {
+        if self.owner.is_some() {
+            return Ok(());
+        }
+        let directory = self
+            .path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("sender mapping path has no directory"))?;
+        std::fs::create_dir_all(directory)?;
+        let lock = private_options().read(true).write(true).open(&self.lock)?;
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(BridgeError::new(
+                    ErrorCode::Busy,
+                    "another sender owns this bridge mapping",
+                )
+                .into())
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+        self.owner = Some(lock);
+        Ok(())
+    }
+
+    fn release(&mut self) {
+        self.owner = None;
+    }
+
+    fn read(&self, limit: usize) -> anyhow::Result<Option<Vec<u8>>> {
+        let file = match std::fs::File::open(&self.path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let mut bytes = Vec::new();
+        file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+        anyhow::ensure!(
+            !bytes.is_empty() && bytes.len() <= limit,
+            "sender mapping file is empty or exceeds its bound"
+        );
+        Ok(Some(bytes))
+    }
+
+    /// Replaces the mapping atomically: a crash leaves either the old or the
+    /// new record, synced to the device before the call returns. File I/O
+    /// blocks, so it runs off the async workers; an error or cancellation
+    /// leaves the previous record in place.
+    async fn write(&self, bytes: Vec<u8>) -> anyhow::Result<()> {
+        anyhow::ensure!(self.owner.is_some(), "sender mapping is not owned");
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            let directory = path
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("sender mapping path has no directory"))?;
+            let temporary = path.with_extension("mapping.tmp");
+            {
+                let mut file = private_options()
+                    .write(true)
+                    .truncate(true)
+                    .open(&temporary)?;
+                file.write_all(&bytes)?;
+                file.sync_all()?;
+            }
+            std::fs::rename(&temporary, &path)?;
+            sync_directory(directory)
+        })
+        .await?
+    }
+
+    /// Removes the mapping idempotently: an absent file is already erased.
+    pub fn erase(&self) -> anyhow::Result<()> {
+        for path in [&self.path, &self.path.with_extension("mapping.tmp")] {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if let Some(directory) = self.path.parent().filter(|path| path.is_dir()) {
+            sync_directory(directory)?;
+        }
+        Ok(())
+    }
+}
+
+fn private_options() -> std::fs::OpenOptions {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+}
+
+fn sync_directory(directory: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    std::fs::File::open(directory)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = directory;
+    Ok(())
+}
+
 pub struct SenderState {
     contract: LinkContract,
-    transaction: Option<ComputationTransaction>,
+    store: Option<MappingFile>,
     ledger: Ledger,
     loaded: bool,
 }
 
 impl SenderState {
-    pub fn new(
-        contract: LinkContract,
-        indexes: Option<ComputationIndexes>,
-    ) -> anyhow::Result<Self> {
-        let transaction = match indexes {
-            Some(indexes) => {
+    pub fn new(contract: LinkContract, store: Option<MappingFile>) -> anyhow::Result<Self> {
+        match &store {
+            Some(_) => {
                 anyhow::ensure!(
                     contract.profile == Profile::Durable,
                     "volatile mapping cannot own durable storage"
                 );
-                indexes.durability().require(contract.failure_scope)?;
-                anyhow::ensure!(
-                    indexes.cleanup().is_some(),
-                    "sender mapping requires an asynchronous cleanup owner"
-                );
-                Some(ComputationTransaction::try_new(indexes)?)
+                // A synced local file survives process restarts and power loss,
+                // never the loss of the machine's storage.
+                StorageDurability::LOCAL_POWER_LOSS.require(contract.failure_scope)?;
             }
-            None => {
-                anyhow::ensure!(
-                    contract.profile == Profile::Volatile,
-                    "durable mapping requires actual storage"
-                );
-                None
-            }
-        };
+            None => anyhow::ensure!(
+                contract.profile == Profile::Volatile,
+                "durable mapping requires actual storage"
+            ),
+        }
         Ok(Self {
             ledger: Ledger {
                 version: 1,
@@ -121,7 +251,7 @@ impl SenderState {
                 last: None,
             },
             contract,
-            transaction,
+            store,
             loaded: false,
         })
     }
@@ -134,33 +264,12 @@ impl SenderState {
         if self.loaded {
             return Ok(());
         }
-        if let Some(transaction) = &self.transaction {
-            let partition =
-                OutputPartition::Component(self.contract.sender_endpoint.clone()).metadata(KEY);
-            let outbox = transaction
-                .resources()
-                .outbox_writer()
-                .expect("validated transaction");
-            let (head, records) = transaction
-                .run(async {
-                    let head = outbox.read_latest_sequence(&partition).await?;
-                    let records = if head == Some(1) {
-                        outbox.read_from(&partition, 0).await?
-                    } else {
-                        Vec::new()
-                    };
-                    Ok((head, records))
-                })
-                .await?;
-            match (head, records.as_slice()) {
-                (None, []) => {}
-                (Some(1), [(1, bytes)]) => {
-                    preflight_messagepack(bytes, self.byte_limit(), 4096)?;
-                    self.ledger = decode_bounded_messagepack(bytes, self.byte_limit())?;
-                }
-                _ => anyhow::bail!(
-                    "sender mapping expects one bounded metadata record at sequence one"
-                ),
+        let limit = self.byte_limit();
+        if let Some(store) = &mut self.store {
+            store.acquire()?;
+            if let Some(bytes) = store.read(limit)? {
+                preflight_messagepack(&bytes, limit, 4096)?;
+                self.ledger = decode_bounded_messagepack(&bytes, limit)?;
             }
         }
         self.validate(&self.ledger)?;
@@ -217,22 +326,11 @@ impl SenderState {
     async fn save(&mut self, ledger: Ledger) -> anyhow::Result<()> {
         self.validate(&ledger)?;
         let bytes = encode_bounded_messagepack(&ledger, self.byte_limit())?;
-        if let Some(transaction) = &self.transaction {
-            let partition =
-                OutputPartition::Component(self.contract.sender_endpoint.clone()).metadata(KEY);
-            let outbox = transaction
-                .resources()
-                .outbox_writer()
-                .expect("validated transaction");
-            transaction
-                .run(async {
-                    outbox.append(&partition, 1, &bytes).await?;
-                    Ok(())
-                })
-                .await?;
+        if let Some(store) = &self.store {
+            store.write(bytes).await?;
         }
-        // Publication follows the actual commit. Cancellation/uncertainty fences
-        // ComputationTransaction; the old mapping is never re-used as fresh input.
+        // Publication follows the actual commit; the old mapping is never
+        // re-used as fresh input.
         self.ledger = ledger;
         Ok(())
     }
@@ -339,9 +437,10 @@ impl SenderState {
         self.save(ledger).await
     }
 
-    pub async fn shutdown(&self) -> anyhow::Result<()> {
-        if let Some(transaction) = &self.transaction {
-            transaction.shutdown().await?;
+    /// Releases ownership of the mapping; the saved record stays.
+    pub async fn shutdown(&mut self) -> anyhow::Result<()> {
+        if let Some(store) = &mut self.store {
+            store.release();
         }
         Ok(())
     }
