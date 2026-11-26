@@ -5,7 +5,7 @@
 //! the versions this SDK builds. A vendor following stale text would build a
 //! library the Host rejects.
 
-use drasi_computation_plugin_abi::{ABI_MAJOR, ABI_VERSION, WIRE_VERSION};
+use drasi_computation_plugin_abi::{ABI_MAJOR, ABI_MINOR, ABI_VERSION, WIRE_VERSION};
 use std::path::{Path, PathBuf};
 
 /// The ordinary Source/Reaction plugin ABI, which the native documents cite
@@ -54,7 +54,7 @@ fn documents() -> Vec<PathBuf> {
 fn versions_after<'a>(line: &'a str, marker: &str) -> Vec<&'a str> {
     line.match_indices(marker)
         .filter_map(|(index, _)| {
-            let rest = line[index + marker.len()..].trim_start_matches('*');
+            let rest = line[index + marker.len()..].trim_start_matches(['*', '`']);
             let length = rest
                 .find(|character: char| !(character.is_ascii_digit() || character == '.'))
                 .unwrap_or(rest.len());
@@ -67,6 +67,7 @@ fn versions_after<'a>(line: &'a str, marker: &str) -> Vec<&'a str> {
 #[test]
 fn documented_native_abi_and_wire_versions_match_the_sdk() {
     let major = ABI_MAJOR.to_string();
+    let current_minor = format!("{ABI_MAJOR}.{ABI_MINOR}");
     let mut stale = Vec::new();
     for file in documents() {
         let text = std::fs::read_to_string(&file).expect("readable document");
@@ -79,8 +80,11 @@ fn documented_native_abi_and_wire_versions_match_the_sdk() {
             }
             let abi = versions_after(line, "ABI ");
             for version in abi.into_iter().chain(versions_after(line, "ABI is ")) {
-                let native = version == major || version.starts_with(&format!("{major}."));
-                if !native && !version.starts_with(ORDINARY_ABI) {
+                let native = version == major || version == current_minor || version == ABI_VERSION;
+                if !native
+                    && version != ORDINARY_ABI
+                    && !version.starts_with(&format!("{ORDINARY_ABI}."))
+                {
                     stale.push(place());
                 }
             }

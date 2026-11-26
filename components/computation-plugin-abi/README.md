@@ -1,7 +1,7 @@
 # Native ComputationGraph ABI
 
 This dependency-free crate freezes the C layouts for native computation plugins.
-The ABI version is **0.1.0**, independent of crate releases and of the
+The ABI version is **0.2.0**, independent of crate releases and of the
 Source/Reaction/Bootstrap SDK ABI **0.19.0**.
 Its two symbols are
 `drasi_computation_plugin_metadata` and `drasi_computation_plugin_entry`.
@@ -19,7 +19,7 @@ notifications include a typed `BootstrapRequest` that addresses one bootstrap
 session to its consumer edge.
 
 Headers must match the family magic and major before reading any subsequent
-field. The ABI stays at 0.1.0 until it is released: before 1.0 every minor is
+field. The ABI stays at 0.2.0 until it is released: before 1.0 every minor is
 breaking, so a host accepts only its own major and minor, whose structure size
 must match that minor's layout, and rejects anything else before invoking any
 callback. From 1.0 a host accepts the same major with an older or equal minor,
@@ -240,7 +240,7 @@ the host's callback, so a loaded library's diagnostics reach the host's logger.
 The table carries the host's level at load time; it is host-owned and valid for
 the process lifetime.
 
-Both extensions leave base tables, strict metadata, ABI 0.1 and wire 1 unchanged.
+Both extensions leave base tables, strict metadata, ABI 0.2 and wire 1 unchanged.
 Only negotiated, bound factories may use them; missing services never imply
 recovery guarantees. See the SDK's authoring and lifecycle contracts.
 
@@ -248,7 +248,7 @@ recovery guarantees. See the SDK's authoring and lifecycle contracts.
 
 `drasi_computation_plugin_output_reads_v2` and
 `drasi_computation_plugin_output_follow_v2` are independent extensions; base ABI
-0.1, wire 1 and every other table are unchanged. A factory declares the output
+0.2, wire 1 and every other table are unchanged. A factory declares the output
 ports it serves in manifest `capabilities.output_snapshots`, `output_replays` and
 `output_follows` (empty lists are omitted); the Host requires the matching
 extension exactly then.

@@ -6,18 +6,18 @@
 //! A consumer asks one producer for a snapshot with a [`BootstrapRequest`]
 //! sent upstream over the control plane. The producer answers on the bootstrap
 //! edge to that consumer only: a `bootstrap/begin` marker, the snapshot records
-//! tagged `bootstrap/record`, then exactly one `bootstrap/complete` (with its
-//! handover watermarks and optional completion state) or `bootstrap/failed`
-//! (with a reason). Every marker and record carries the session identifier, so a
-//! consumer ignores data from sessions it no longer waits for.
+//! tagged `bootstrap/record`, then the provider's handover or the output
+//! reader's committed cut. On an output replay request the reply carries the
+//! original retained envelopes and their head, or a typed recovery failure.
+//! Every frame names its session so abandoned replies cannot satisfy a new read.
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     emission_id, BootstrapWatermark, ChangeEnvelope, ChangeSet, ChangeSetId, ComponentId,
-    ControlMessage, PortId, SchemaDescriptor, StreamId, SystemMetadata, MAX_BOOTSTRAP_STATE_BYTES,
-    MAX_CONTROL_PAYLOAD_BYTES,
+    ControlMessage, GraphProducerIdentity, OutputCursor, OutputReadError, PortId, SchemaDescriptor,
+    StreamId, SystemMetadata, MAX_BOOTSTRAP_STATE_BYTES, MAX_CONTROL_PAYLOAD_BYTES,
 };
 
 /// Control kind used where a bootstrap request crosses a boundary without a
@@ -26,6 +26,9 @@ pub const BOOTSTRAP_REQUEST: &str = "bootstrap/request";
 pub const BOOTSTRAP_BEGIN: &str = "bootstrap/begin";
 pub const BOOTSTRAP_RECORD: &str = "bootstrap/record";
 pub const BOOTSTRAP_STATE: &str = "bootstrap/state";
+const OUTPUT_REPLAY: &str = "bootstrap/output-replay";
+const OUTPUT_COMPLETE: &str = "bootstrap/output-complete";
+const REPLAY_FAILED: &str = "bootstrap/replay-failed";
 
 /// The conventional bootstrap input port of a source or bootstrapping
 /// transformer: where its upstream provider (or a source relay) connects.
@@ -113,6 +116,10 @@ pub struct BootstrapRequest {
     pub origin: Option<ComponentId>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub resume: bool,
+    /// Read retained output strictly after the consumer's committed logical
+    /// cursor. Distinct from restoring an opaque provider/connector handover.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_after: Option<Box<OutputCursor>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<BootstrapLabels>,
 }
@@ -123,6 +130,16 @@ impl BootstrapRequest {
             !self.resume || (self.persistent && self.state.is_some()),
             "a resumed bootstrap session requires a persistent consumer and its saved state"
         );
+        if let Some(after) = &self.replay_after {
+            after.producer().validate()?;
+            anyhow::ensure!(
+                self.persistent
+                    && after.producer().persistent()
+                    && !self.resume
+                    && self.state.is_none(),
+                "output replay requires a persistent cursor, not a provider handover"
+            );
+        }
         if let Some(labels) = &self.labels {
             labels.validate()?;
         }
@@ -220,6 +237,13 @@ fn validate_state(state: Option<&Bytes>) -> anyhow::Result<()> {
 pub enum BootstrapSessionEvent {
     Begin,
     Record,
+    /// An original retained envelope; restore its event-local control on receipt.
+    Replay {
+        control: Option<ControlMessage>,
+    },
+    /// The cut of an output snapshot, or the verified head of a replay.
+    OutputComplete(OutputCursor),
+    ReplayFailed(BootstrapReplayError),
     /// Provider state the consumer must retain durably before it continues,
     /// such as a handover a restarted session resumes or releases. The
     /// consumer returns the latest state with its next request.
@@ -233,6 +257,67 @@ pub enum BootstrapSessionEvent {
     Failed {
         reason: String,
     },
+}
+
+/// Only loss of history or a different epoch can authorize a recovery reset.
+/// Transport, provider and malformed-reply errors remain ordinary failures.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BootstrapReplayError {
+    Gap {
+        requested: u64,
+        oldest: Option<u64>,
+        latest: u64,
+    },
+    EpochChanged {
+        requested: Box<GraphProducerIdentity>,
+        current: Box<GraphProducerIdentity>,
+    },
+}
+
+impl BootstrapReplayError {
+    pub fn from_read(error: &OutputReadError, after: &OutputCursor) -> Option<Self> {
+        match error {
+            OutputReadError::Gap {
+                requested,
+                oldest,
+                latest,
+            } if *requested == after.sequence() => Some(Self::Gap {
+                requested: *requested,
+                oldest: *oldest,
+                latest: *latest,
+            }),
+            OutputReadError::EpochChanged { requested, current }
+                if requested.as_ref() == after.producer()
+                    && current.component_id() == requested.component_id()
+                    && current != requested =>
+            {
+                Some(Self::EpochChanged {
+                    requested: requested.clone(),
+                    current: current.clone(),
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+impl From<BootstrapReplayError> for OutputReadError {
+    fn from(error: BootstrapReplayError) -> Self {
+        match error {
+            BootstrapReplayError::Gap {
+                requested,
+                oldest,
+                latest,
+            } => Self::Gap {
+                requested,
+                oldest,
+                latest,
+            },
+            BootstrapReplayError::EpochChanged { requested, current } => {
+                Self::EpochChanged { requested, current }
+            }
+        }
+    }
 }
 
 /// A session event as attached to an envelope's event-local control.
@@ -272,6 +357,15 @@ impl BootstrapMarker {
     pub fn validate(&self) -> anyhow::Result<()> {
         match &self.event {
             BootstrapSessionEvent::Begin | BootstrapSessionEvent::Record => Ok(()),
+            BootstrapSessionEvent::OutputComplete(cursor) => cursor.producer().validate(),
+            BootstrapSessionEvent::ReplayFailed(BootstrapReplayError::EpochChanged {
+                requested,
+                current,
+            }) => {
+                requested.validate()?;
+                current.validate()
+            }
+            BootstrapSessionEvent::Replay { .. } | BootstrapSessionEvent::ReplayFailed(_) => Ok(()),
             BootstrapSessionEvent::State { state } => validate_state(Some(state)),
             BootstrapSessionEvent::Complete { watermarks, state } => {
                 anyhow::ensure!(
@@ -300,6 +394,21 @@ impl BootstrapMarker {
         let (kind, payload) = match &self.event {
             BootstrapSessionEvent::Begin => (BOOTSTRAP_BEGIN, session),
             BootstrapSessionEvent::Record => (BOOTSTRAP_RECORD, session),
+            BootstrapSessionEvent::Replay { control } => (
+                OUTPUT_REPLAY,
+                Bytes::from(rmp_serde::to_vec(&(
+                    self.session,
+                    control.as_ref().map(|c| (c.kind(), c.payload())),
+                ))?),
+            ),
+            BootstrapSessionEvent::OutputComplete(cursor) => (
+                OUTPUT_COMPLETE,
+                Bytes::from(rmp_serde::to_vec_named(&(self.session, cursor))?),
+            ),
+            BootstrapSessionEvent::ReplayFailed(error) => (
+                REPLAY_FAILED,
+                Bytes::from(rmp_serde::to_vec_named(&(self.session, error))?),
+            ),
             BootstrapSessionEvent::State { state } => (
                 BOOTSTRAP_STATE,
                 Bytes::from(rmp_serde::to_vec_named(&SessionState {
@@ -335,6 +444,22 @@ impl BootstrapMarker {
             BOOTSTRAP_BEGIN => Self::new(session(control.payload())?, BootstrapSessionEvent::Begin),
             BOOTSTRAP_RECORD => {
                 Self::new(session(control.payload())?, BootstrapSessionEvent::Record)
+            }
+            OUTPUT_REPLAY => {
+                let (session, original): (_, Option<(String, Bytes)>) =
+                    rmp_serde::from_slice(control.payload())?;
+                let control = original
+                    .map(|(kind, payload)| ControlMessage::try_new(kind, payload))
+                    .transpose()?;
+                Self::new(session, BootstrapSessionEvent::Replay { control })
+            }
+            OUTPUT_COMPLETE => {
+                let (session, cursor) = rmp_serde::from_slice(control.payload())?;
+                Self::new(session, BootstrapSessionEvent::OutputComplete(cursor))
+            }
+            REPLAY_FAILED => {
+                let (session, error) = rmp_serde::from_slice(control.payload())?;
+                Self::new(session, BootstrapSessionEvent::ReplayFailed(error))
             }
             BOOTSTRAP_STATE => {
                 anyhow::ensure!(
@@ -396,8 +521,11 @@ impl BootstrapMarker {
         schema: SchemaDescriptor,
     ) -> anyhow::Result<ChangeEnvelope> {
         anyhow::ensure!(
-            self.event != BootstrapSessionEvent::Record,
-            "a bootstrap record marker must tag a snapshot record"
+            !matches!(
+                self.event,
+                BootstrapSessionEvent::Record | BootstrapSessionEvent::Replay { .. }
+            ),
+            "a bootstrap record marker must tag an envelope"
         );
         let changes = ChangeSet::try_new(
             ChangeSetId::try_new(
@@ -441,6 +569,26 @@ impl BootstrapMarker {
             record.changes().clone(),
             record.system().as_ref().clone().without_control(),
         )
+    }
+
+    pub fn tag_replay(
+        session: BootstrapSessionId,
+        retained: &ChangeEnvelope,
+    ) -> anyhow::Result<ChangeEnvelope> {
+        let marker = Self::new(
+            session,
+            BootstrapSessionEvent::Replay {
+                control: retained.system().control().cloned(),
+            },
+        );
+        Ok(retained.with_event_control(Some(marker.to_control()?)))
+    }
+
+    pub fn untag_replay(
+        record: &ChangeEnvelope,
+        control: Option<ControlMessage>,
+    ) -> ChangeEnvelope {
+        record.with_event_control(control)
     }
 }
 
@@ -515,6 +663,49 @@ mod tests {
     }
 
     #[test]
+    fn replay_restores_the_original_event_including_control_and_provenance() -> anyhow::Result<()> {
+        let session = BootstrapSessionId::new();
+        let parent = BootstrapMarker::new(session, BootstrapSessionEvent::Begin).envelope(
+            stream(),
+            1,
+            schema(),
+        )?;
+        let output = StreamId::try_new("query/out")?;
+        let producer = GraphProducerIdentity::new(
+            "scope".into(),
+            "graph".into(),
+            ComponentId::try_new("00000000-0000-4000-8000-000000000001")?,
+            output.clone(),
+            true,
+        )?;
+        let mut retained = parent.derive(
+            emission_id(&output, 19)?,
+            parent.changes().clone(),
+            SystemMetadata::new(output, 19).with_control(ControlMessage::try_new(
+                "original",
+                Bytes::from_static(b"value"),
+            )?),
+        );
+        crate::GraphProducerProgress::annotate(&mut retained, &producer, 7)?;
+        let framed = BootstrapMarker::tag_replay(session, &retained)?;
+        let marker = BootstrapMarker::of(&framed)?.expect("replay marker");
+        assert_eq!(marker.session, session);
+        let BootstrapSessionEvent::Replay { control } = marker.event else {
+            panic!("not a replay");
+        };
+        let restored = BootstrapMarker::untag_replay(&framed, control);
+        assert_eq!(restored.id(), retained.id());
+        assert_eq!(restored.system(), retained.system());
+        assert_eq!(restored.lineage().unwrap().envelope_id(), parent.id());
+        assert_eq!(restored.context_identity(), retained.context_identity());
+        assert_eq!(
+            crate::GraphProducerProgress::from_envelope(&restored)?,
+            crate::GraphProducerProgress::from_envelope(&retained)?
+        );
+        Ok(())
+    }
+
+    #[test]
     fn limits_are_enforced() -> anyhow::Result<()> {
         let session = BootstrapSessionId::new();
         let oversized = BootstrapMarker::new(
@@ -541,6 +732,7 @@ mod tests {
             state: Some(Bytes::new()),
             origin: None,
             resume: false,
+            replay_after: None,
             labels: None,
         };
         assert!(request.validate().is_err());
@@ -562,6 +754,7 @@ mod tests {
                 "00000000-0000-4000-8000-000000000003",
             )?),
             resume: true,
+            replay_after: None,
             labels: Some(BootstrapLabels::new(["Person"], ["KNOWS"])?),
         };
         request.validate()?;

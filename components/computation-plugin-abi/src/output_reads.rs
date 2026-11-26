@@ -98,6 +98,7 @@ pub mod capability {
     pub const SNAPSHOT: u32 = 1;
     pub const REPLAY: u32 = 2;
     pub const QUERY: u32 = 3;
+    pub const PROJECTION: u32 = 4;
 }
 
 pub mod operation {
@@ -118,6 +119,9 @@ pub mod operation {
     pub const QUERY_RECOVERY_OBSERVATION: u32 = 9;
     /// Coherent recovery rows/history, transferred through the query-view pages.
     pub const QUERY_RECOVERY_VIEW: u32 = 10;
+    /// A bounded binary computation envelope in the selected input schema;
+    /// replies with an ordinary additions envelope in the output schema.
+    pub const PROJECT_BATCH: u32 = 11;
 }
 
 pub mod status {
@@ -138,7 +142,7 @@ mod tests {
         assert_eq!(size_of::<OutputReadVTable>(), 16 + 3 * pointer);
         assert_eq!(size_of::<ComponentVTable>(), 16 + 5 * pointer);
         assert_eq!(size_of::<OperationVTable>(), 16 + 3 * pointer);
-        assert_eq!(ABI_VERSION, "0.1.0");
+        assert_eq!(ABI_VERSION, "0.2.0");
         assert_eq!(WIRE_VERSION, 1);
     }
 }

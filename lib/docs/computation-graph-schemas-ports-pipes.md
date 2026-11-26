@@ -197,9 +197,15 @@ work. Retained and shared pipes also need their explicitly bound resources.
 Declarations are checked promises; they do not
 prove the implementation keeps those promises under every failure.
 
-A complete graph requires connected declared ports and a stream binding for each
-output. Incremental additions and explicitly incomplete topologies can retain
-unconnected declarations; being declared does not mean ready to run.
+Unused inputs and outputs do not block startup or configuration loading. A
+configured relationship to a missing peer is different: it remains visible and
+waits for binding. Connect a producer's stream before wiring its live output.
+One data connection also carries a subscriber's addressed initial-state lane;
+only a local bootstrap provider is attached separately. When two data ports
+have the same direction and schema, declare which one a state port serves with
+`PortDescriptor::for_data_port`. The graph never substitutes the other port's
+state. For a native transformer's bootstrap input, the SDK supplies this
+association from the input named in its capabilities.
 
 **One port does not necessarily mean one connection.** An output can feed several
 components, and an input can receive several producers. However, one producer

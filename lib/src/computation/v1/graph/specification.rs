@@ -652,9 +652,10 @@ pub trait ComponentFactory: Send + Sync {
             self.descriptor().implementation.name
         )
     }
-    /// Whether this registered factory rebuilds query-owned state during controlled
-    /// startup, without processing live inputs. Defaults to rejecting data resets.
-    fn supports_query_reconstruction(&self) -> bool {
+    /// Whether this registered factory rebuilds its components' own state
+    /// during controlled startup, without processing live inputs. Any stateful
+    /// component may; defaults to rejecting data resets.
+    fn supports_state_reconstruction(&self) -> bool {
         false
     }
     /// Validate the bounded data contract after author assessment and on recovery.
@@ -668,16 +669,14 @@ pub trait ComponentFactory: Send + Sync {
         use crate::computation::v1::{ComponentUpdateData, ComponentUpdateMode};
         if plan.data != ComponentUpdateData::Preserve {
             anyhow::ensure!(
-                self.supports_query_reconstruction()
-                    && current.descriptor.semantic_kind()
-                        == Some(super::super::ComponentSemanticKind::Query)
+                self.supports_state_reconstruction()
                     && plan.mode == ComponentUpdateMode::Recreate
                     && current.implementation == proposed.implementation
                     && current.descriptor == proposed.descriptor
                     && current.role == proposed.role
                     && current.completion == proposed.completion
                     && current.dependencies == proposed.dependencies,
-                "data reconstruction requires a qualified query factory, Recreate and stable bindings"
+                "data reconstruction requires a factory that rebuilds component state, Recreate and stable bindings"
             );
         }
         Ok(())
@@ -765,7 +764,8 @@ pub(super) fn snapshot_input_bindings(
     )
 }
 
-/// Producers connected to `component`'s bootstrap inputs in `snapshot`.
+/// A factory can be constructed before a producer registers its reader.
+/// Explicit per-binding intent does not depend on a producer state port.
 pub(super) fn snapshot_bootstrap_producers(
     snapshot: &super::GraphSnapshot,
     component: &ComponentId,
@@ -773,9 +773,14 @@ pub(super) fn snapshot_bootstrap_producers(
     let mut producers: Vec<_> = snapshot
         .edges
         .iter()
-        .map(|edge| &edge.definition)
-        .filter(|edge| &edge.to.component == component && snapshot.is_bootstrap_relationship(edge))
-        .map(|edge| edge.from.component.clone())
+        .filter(|edge| {
+            &edge.definition.to.component == component
+                && (snapshot.is_bootstrap_relationship(&edge.definition)
+                    || (!super::state_lane::StateLane::has_seed(snapshot, component)
+                        && (edge.policy.initial_state == Some(true)
+                            || super::state_lane::StateLane::for_edge(snapshot, edge).is_some())))
+        })
+        .map(|edge| edge.definition.from.component.clone())
         .collect();
     producers.sort();
     producers.dedup();

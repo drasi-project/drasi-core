@@ -334,6 +334,12 @@ impl ProcessingBinding {
         ))
     }
 
+    pub(super) fn bind_bootstrap_ports(&self, ports: &drasi_lib::computation::v1::BootstrapPorts) {
+        if let Some(progress) = &self.state.progress {
+            progress.bind_bootstrap_ports(ports.clone());
+        }
+    }
+
     pub(super) fn progress_owner(
         &self,
     ) -> Option<Arc<drasi_lib::computation::v1::QuerySourceProgress>> {
@@ -1161,7 +1167,7 @@ async fn drive_inner(
 ) -> drasi_core::computation::Result<Vec<u8>> {
     let operation = async {
         let mut scope = RequestScope::new(
-            request::GET_ELEMENT..=request::SCHEDULE_COMPLETE,
+            request::GET_ELEMENT..=request::REBUILD_EVALUATOR,
             abi::MAX_MESSAGE_BYTES,
         );
         let operation = {
@@ -1321,6 +1327,7 @@ impl RequestHandler for IndexRequests<'_> {
                 request::FUTURE_PUSH..=request::FUTURE_POP
                 | request::FUTURE_CLEAR
                 | request::ATOMIC_STATE_RESET
+                | request::REBUILD_EVALUATOR
             ),
             "scheduled processing owns its queue and checkpoint; use the typed scheduling operations"
         );
@@ -1535,6 +1542,23 @@ impl RequestHandler for IndexRequests<'_> {
                 }
                 wire::encode(&generation)
             }
+            request::REBUILD_EVALUATOR => {
+                wire::decode::<()>(input)?;
+                anyhow::ensure!(
+                    !volatile && !non_atomic,
+                    "rebuild requires atomic persistent processing"
+                );
+                self.resources.atomic_result_transaction()?;
+                self.progress
+                    .context("missing rebuild progress")?
+                    .ensure_resettable(false)?;
+                self.output
+                    .context("missing rebuild output owner")?
+                    .validate_rebuild(self.resources, self.component)
+                    .await?;
+                reset::clear_indexes(self.resources).await?;
+                wire::encode(&())
+            }
             request::ATOMIC_STATE_RESET => {
                 let preserve_bootstrap = wire::decode(input)?;
                 if let Some(output) = self.output {
@@ -1557,7 +1581,7 @@ impl RequestHandler for IndexRequests<'_> {
                 let sequence = wire::decode(input)?;
                 self.progress
                     .context("missing reset progress")?
-                    .ensure_resettable()?;
+                    .ensure_resettable(true)?;
                 self.output
                     .context("missing reset output owner")?
                     .initialize_reset_output(self.resources, self.component, sequence)

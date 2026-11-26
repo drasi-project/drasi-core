@@ -125,7 +125,8 @@ impl OutputReadError {
 }
 
 /// A committed logical position within one producer epoch.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OutputCursor {
     producer: GraphProducerIdentity,
     sequence: u64,
@@ -160,6 +161,39 @@ impl OutputCursor {
             producer: self.producer.clone(),
             sequence,
         }
+    }
+
+    /// Translate a cut only for a projector that emits one envelope per input
+    /// (including empty progress). Changing either producer changes the epoch;
+    /// the transformer's transport counter is not a logical output position.
+    pub fn projected_by(&self, owner: &GraphProducerIdentity) -> Result<Self, OutputReadError> {
+        use sha2::{Digest, Sha256};
+        if owner.persistent() {
+            return Err(OutputReadError::invalid(
+                "a projected cut is not durable replay",
+            ));
+        }
+        let mut hash = Sha256::new();
+        hash.update(b"drasi.projected-output-epoch.v1");
+        hash.update(
+            serde_json::to_vec(&(owner, self.producer()))
+                .map_err(|e| OutputReadError::Failed(e.into()))?,
+        );
+        let digest = hash.finalize();
+        let mut bytes = [0; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        bytes[6] = (bytes[6] & 0x0f) | 0x80;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        let producer = GraphProducerIdentity::for_epoch(
+            owner.construction_scope().to_owned(),
+            owner.graph_id().to_owned(),
+            owner.component_id().clone(),
+            owner.stream().clone(),
+            uuid::Uuid::from_bytes(bytes),
+            false,
+        )
+        .map_err(OutputReadError::Failed)?;
+        Self::try_new(producer, self.sequence)
     }
 
     /// Reject a cursor from another producer epoch, stream or scope.
@@ -321,6 +355,61 @@ pub trait SnapshotProvider: Send + Sync {
     async fn snapshot(&self) -> Result<OutputSnapshot, OutputReadError>;
 }
 
+/// One independent point-in-time scan. This capability never establishes a
+/// live subscription, creates replication resources, or borrows a consumer's
+/// checkpoint. A coherent external view need not have a replayable output cursor.
+pub type StateScan = std::pin::Pin<
+    Box<dyn futures_core::Stream<Item = Result<ChangeEnvelope, OutputReadError>> + Send>,
+>;
+
+#[async_trait]
+pub trait IndependentStateProvider: Send + Sync {
+    /// `represented` is the data output being read. The other ports are the
+    /// actual bound provider attachment, not a synthetic data subscription.
+    async fn open_state(
+        &self,
+        represented: &OutputEndpoint,
+        input_port: &PortId,
+        provider_port: &PortId,
+    ) -> Result<StateScan, OutputReadError>;
+}
+
+/// Read-only mapping of one input's state to one output. Implementations must
+/// not call the live component, advance its progress or publish to its subscribers.
+#[async_trait]
+pub trait StateProjector: Send + Sync {
+    /// Opt in only when the live instance emits exactly one envelope per input,
+    /// stamping its logical position with [`OutputCursor::projected_by`], and
+    /// projected images agree with applying its live changes. Otherwise the
+    /// operation is a one-shot read, never an implicit handoff.
+    fn cut_namespace(&self) -> Option<&GraphProducerIdentity> {
+        None
+    }
+
+    /// Both batches contain ordinary full-image additions. An empty output
+    /// batch filters the input; neither batch's sequence is a live cursor.
+    async fn project(&self, batch: ChangeEnvelope) -> Result<ChangeEnvelope, OutputReadError>;
+}
+
+/// Check a page before importing it or passing it to a read-only projector.
+pub fn validate_state_batch(
+    batch: &ChangeEnvelope,
+    schema: &SchemaDescriptor,
+) -> Result<(), OutputReadError> {
+    if batch.system().control().is_some()
+        || batch.changes().schema() != schema
+        || !batch.changes().operations().iter().all(|op| {
+            matches!(op, crate::ChangeOperation::Added { after, .. }
+                if after.image() == RecordImage::Full && after.schema() == schema)
+        })
+    {
+        return Err(OutputReadError::invalid(
+            "current state must contain full additions in the declared schema",
+        ));
+    }
+    Ok(())
+}
+
 /// Replays committed output envelopes from retained history. Independent of
 /// [`SnapshotProvider`]; retention and persistence are the provider's own.
 #[async_trait]
@@ -336,6 +425,9 @@ pub trait ReplayProvider: Send + Sync {
 /// Providers registered for one output port.
 #[derive(Clone, Default)]
 pub struct OutputPortReaders {
+    independent: Option<Arc<dyn IndependentStateProvider>>,
+    provider_input: Option<PortId>,
+    projection: Option<(PortId, Arc<dyn StateProjector>)>,
     snapshot: Option<Arc<dyn SnapshotProvider>>,
     replay: Option<Arc<dyn ReplayProvider>>,
     snapshot_follow: Option<Arc<dyn SnapshotFollowProvider>>,
@@ -343,6 +435,10 @@ pub struct OutputPortReaders {
 }
 
 impl OutputPortReaders {
+    pub fn projection(&self) -> Option<(&PortId, &Arc<dyn StateProjector>)> {
+        self.projection.as_ref().map(|(input, op)| (input, op))
+    }
+
     pub fn snapshot(&self) -> Option<&Arc<dyn SnapshotProvider>> {
         self.snapshot.as_ref()
     }
@@ -371,6 +467,34 @@ impl OutputReaders {
 
     pub fn with_snapshot(mut self, port: PortId, provider: Arc<dyn SnapshotProvider>) -> Self {
         self.ports.entry(port).or_default().snapshot = Some(provider);
+        self
+    }
+
+    /// Register a provider node's effect-free read separately from its
+    /// potentially stateful handover protocol.
+    pub fn with_independent_provider(
+        mut self,
+        port: PortId,
+        provider: Arc<dyn IndependentStateProvider>,
+    ) -> Self {
+        self.ports.entry(port).or_default().independent = Some(provider);
+        self
+    }
+
+    /// This output represents the external data supplied by the named input.
+    /// A startup seed on a query or reaction is not implicitly its output.
+    pub fn with_provider_input(mut self, output: PortId, input: PortId) -> Self {
+        self.ports.entry(output).or_default().provider_input = Some(input);
+        self
+    }
+
+    pub fn with_projection(
+        mut self,
+        output: PortId,
+        input: PortId,
+        projector: Arc<dyn StateProjector>,
+    ) -> Self {
+        self.ports.entry(output).or_default().projection = Some((input, projector));
         self
     }
 
@@ -403,15 +527,49 @@ impl OutputReaders {
 
     /// Every registration must name a declared output port.
     pub fn validate(&self, descriptor: &ComponentDescriptor) -> Result<(), OutputReadError> {
-        for port in self.ports.keys() {
-            let declared = descriptor.ports().iter().any(|declared| {
+        for (port, readers) in &self.ports {
+            let declared = descriptor.ports().iter().find(|declared| {
                 declared.id() == port && declared.direction() == PortDirection::Output
             });
-            if !declared {
+            let Some(declared) = declared else {
                 return Err(OutputReadError::invalid(format!(
                     "{} registers output readers for undeclared output port {port}",
                     descriptor.id()
                 )));
+            };
+            if readers.independent.is_some() && declared.kind() != crate::PortKind::Bootstrap {
+                return Err(OutputReadError::invalid(format!(
+                    "independent provider {port} is not a bootstrap output"
+                )));
+            }
+            if let Some((input, _)) = &readers.projection {
+                if declared.kind() != crate::PortKind::Data
+                    || readers.snapshot.is_some()
+                    || readers.provider_input.is_some()
+                    || !descriptor.ports().iter().any(|p| {
+                        p.id() == input
+                            && p.direction() == PortDirection::Input
+                            && p.kind() == crate::PortKind::Data
+                    })
+                {
+                    return Err(OutputReadError::invalid(format!(
+                        "invalid state projection from {input} to {port}"
+                    )));
+                }
+            }
+            if let Some(input) = &readers.provider_input {
+                if declared.kind() != crate::PortKind::Data
+                    || !descriptor.ports().iter().any(|p| {
+                        p.id() == input
+                            && p.direction() == PortDirection::Input
+                            && p.kind() == crate::PortKind::Bootstrap
+                            && p.schema() == declared.schema()
+                    })
+                {
+                    return Err(OutputReadError::invalid(format!(
+                        "invalid provider input {input} for data output {port}"
+                    )));
+                }
             }
         }
         Ok(())
@@ -427,6 +585,12 @@ impl OutputReaders {
                     (
                         port.clone(),
                         WeakOutputPortReaders {
+                            independent: readers.independent.as_ref().map(Arc::downgrade),
+                            provider_input: readers.provider_input.clone(),
+                            projection: readers
+                                .projection
+                                .as_ref()
+                                .map(|(input, op)| (input.clone(), Arc::downgrade(op))),
                             snapshot: readers.snapshot.as_ref().map(Arc::downgrade),
                             replay: readers.replay.as_ref().map(Arc::downgrade),
                             snapshot_follow: readers.snapshot_follow.as_ref().map(Arc::downgrade),
@@ -441,6 +605,9 @@ impl OutputReaders {
 
 #[derive(Clone)]
 pub struct WeakOutputPortReaders {
+    independent: Option<std::sync::Weak<dyn IndependentStateProvider>>,
+    provider_input: Option<PortId>,
+    projection: Option<(PortId, std::sync::Weak<dyn StateProjector>)>,
     snapshot: Option<std::sync::Weak<dyn SnapshotProvider>>,
     replay: Option<std::sync::Weak<dyn ReplayProvider>>,
     snapshot_follow: Option<std::sync::Weak<dyn SnapshotFollowProvider>>,
@@ -448,6 +615,16 @@ pub struct WeakOutputPortReaders {
 }
 
 impl WeakOutputPortReaders {
+    pub fn projection(&self) -> Option<(&PortId, &std::sync::Weak<dyn StateProjector>)> {
+        self.projection.as_ref().map(|(input, op)| (input, op))
+    }
+
+    pub fn independent_provider(&self) -> Option<&std::sync::Weak<dyn IndependentStateProvider>> {
+        self.independent.as_ref()
+    }
+    pub fn provider_input(&self) -> Option<&PortId> {
+        self.provider_input.as_ref()
+    }
     pub fn upgrade_query(
         &self,
     ) -> Result<Option<Arc<dyn crate::QueryViewProvider>>, OutputReadError> {
@@ -503,7 +680,15 @@ impl WeakOutputPortReaders {
                 _ => false,
             }
         }
-        same(&self.snapshot, &other.snapshot)
+        let same_projection = match (&self.projection, &other.projection) {
+            (None, None) => true,
+            (Some((a, left)), Some((b, right))) => a == b && left.ptr_eq(right),
+            _ => false,
+        };
+        same_projection
+            && self.provider_input == other.provider_input
+            && same(&self.independent, &other.independent)
+            && same(&self.snapshot, &other.snapshot)
             && same(&self.replay, &other.replay)
             && same(&self.snapshot_follow, &other.snapshot_follow)
             && same(&self.query, &other.query)

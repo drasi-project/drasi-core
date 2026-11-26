@@ -29,7 +29,21 @@ pub use drasi_computation_contracts::{
     MAX_BOOTSTRAP_STATE_BYTES,
 };
 
-pub(super) struct QueryBootstrapState<'a>(pub &'a ComputationQuery);
+pub(super) struct QueryBootstrapState(
+    std::sync::Weak<drasi_core::computation::ComputationTransaction>,
+);
+
+impl QueryBootstrapState {
+    pub(super) fn new(query: &ComputationQuery) -> Self {
+        Self(query.retirement_owner())
+    }
+
+    fn owner(&self) -> anyhow::Result<Arc<drasi_core::computation::ComputationTransaction>> {
+        self.0
+            .upgrade()
+            .ok_or_else(|| anyhow::anyhow!("bootstrap transaction owner retired"))
+    }
+}
 
 pub(super) fn validate_bootstrap_state(state: &Bytes) -> anyhow::Result<()> {
     anyhow::ensure!(
@@ -40,13 +54,18 @@ pub(super) fn validate_bootstrap_state(state: &Bytes) -> anyhow::Result<()> {
 }
 
 #[async_trait]
-impl BootstrapState for QueryBootstrapState<'_> {
+impl BootstrapState for QueryBootstrapState {
     fn durability(&self) -> StorageDurability {
-        self.0.resources().durability()
+        self.0
+            .upgrade()
+            .map_or(StorageDurability::UNKNOWN, |owner| {
+                owner.resources().durability()
+            })
     }
 
     async fn read(&self) -> anyhow::Result<Option<Bytes>> {
-        let Some(checkpoint) = self.0.resources().checkpoint_store() else {
+        let owner = self.owner()?;
+        let Some(checkpoint) = owner.resources().checkpoint_store() else {
             return Ok(None);
         };
         let Some(state) = checkpoint
@@ -70,21 +89,22 @@ impl BootstrapState for QueryBootstrapState<'_> {
 
     async fn write(&self, state: Bytes) -> anyhow::Result<()> {
         validate_bootstrap_state(&state)?;
-        self.0.resources().atomic_result_transaction()?;
-        let checkpoint = self
-            .0
+        let owner = self.owner()?;
+        owner.resources().atomic_result_transaction()?;
+        let checkpoint = owner
             .resources()
             .checkpoint_store()
             .ok_or(IndexError::NotSupported)?;
-        self.0
-            .resource_transaction(|| async {
+        owner
+            .run(async {
                 checkpoint
                     .stage_checkpoint(
                         &drasi_core::interface::CheckpointKey::Metadata(BOOTSTRAP_STATE.to_owned()),
                         1,
                         Some(&state),
                     )
-                    .await
+                    .await?;
+                Ok(())
             })
             .await?;
         Ok(())
@@ -150,6 +170,27 @@ pub trait ComputationBootstrapProvider: Send + Sync {
     ) -> anyhow::Result<BootstrapPreparation> {
         self.prepare().await
     }
+    /// Prepare a fresh, cut-bearing view after a retention gap without changing
+    /// the installed handover. Only an authoritative output for this exact
+    /// binding can offer this operation; custom seeds and paired readers cannot.
+    /// `None` or an error must leave no active preparation to clean up.
+    async fn prepare_gap_rebuild(
+        &self,
+        _state: &dyn BootstrapState,
+        _binding: &super::InputBinding,
+        _requested: u64,
+    ) -> anyhow::Result<Option<super::OutputCursor>> {
+        Ok(None)
+    }
+    /// Prepare the first read of a newly connected input for a consumer whose
+    /// completed view has never read any input. Same contract as a gap rebuild.
+    async fn prepare_first_input_rebuild(
+        &self,
+        _state: &dyn BootstrapState,
+        _binding: &super::InputBinding,
+    ) -> anyhow::Result<bool> {
+        Ok(false)
+    }
     /// Whether preparation supplied a new snapshot even after completed bootstrap.
     /// Initial bootstrap and explicit reset request a snapshot regardless.
     fn has_pending_snapshot(&self) -> anyhow::Result<bool> {
@@ -161,6 +202,15 @@ pub trait ComputationBootstrapProvider: Send + Sync {
         _state: &dyn BootstrapState,
     ) -> anyhow::Result<ComputationBootstrapSnapshot> {
         self.snapshot().await
+    }
+    /// Open a consumer's complete scan. Connectors borrow the checkpoint
+    /// service only while opening their own read. A graph distributor may
+    /// need the same service later, when it opens a second input.
+    async fn open_snapshot(
+        &self,
+        state: Arc<dyn BootstrapState>,
+    ) -> anyhow::Result<ComputationBootstrapSnapshot> {
+        self.snapshot_with_state(state.as_ref()).await
     }
     /// Boundaries that become available only after the snapshot stream closes.
     async fn complete_snapshot(&self) -> anyhow::Result<Vec<BootstrapWatermark>> {

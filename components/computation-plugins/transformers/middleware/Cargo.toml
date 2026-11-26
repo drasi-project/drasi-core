@@ -4,7 +4,7 @@ name = "drasi-computation-transformer-middleware"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Native ComputationGraph stateless middleware transformer"
+description = "Native ComputationGraph stateless and stateful middleware transformers"
 readme = "README.md"
 
 [lib]
@@ -16,7 +16,7 @@ dynamic-plugin = []
 
 [package.metadata.drasi-plugin]
 abi-family = "computation"
-abi-version = "0.1.0"
+abi-version = "0.2.0"
 kind = "transformer-middleware"
 
 [dependencies]

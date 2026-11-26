@@ -2,7 +2,7 @@
 
 `drasi-computation-source-postgres` streams a PostgreSQL logical-replication
 publication (pgoutput, protocol 1) into a ComputationGraph. It is a native
-plugin (ABI 0.1.0) with four factories, each at implementation and
+plugin (ABI 0.2.0) with four factories, each at implementation and
 configuration version `1`. Connection handling, SCRAM, TLS, pgoutput
 decoding, key mapping, bounded transaction assembly, slot management and the
 source binding live in `drasi-postgres-common`, shared with the PostgreSQL

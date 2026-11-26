@@ -345,6 +345,23 @@ pub struct ChangeEnvelope {
 pub type Envelope = ChangeEnvelope;
 
 impl ChangeEnvelope {
+    /// Frame/unframe a session reply without deriving a new event or dropping
+    /// the retained event's annotations, lineage or emission identity.
+    #[doc(hidden)]
+    pub fn with_event_control(&self, control: Option<ControlMessage>) -> Self {
+        let mut system = self.system().as_ref().clone();
+        system.control = control;
+        Self {
+            event: Arc::new(ChangeEvent {
+                id: self.id().clone(),
+                changes: self.changes().clone(),
+                system: Arc::new(system),
+                lineage: self.lineage().cloned(),
+            }),
+            context: self.context.clone(),
+        }
+    }
+
     /// Replay committed logical content without changing its provenance.
     /// Event metadata, including any control, is retained.
     pub fn reemit(&self, sequence: u64) -> Result<Self> {

@@ -1257,6 +1257,7 @@ fn query_config() -> QueryConfig {
         query_language: QueryLanguage::Cypher,
         middleware: vec![],
         inputs: vec![QueryInputConfig {
+            enable_bootstrap: None,
             component: crate::config::ComponentReference::by_id(source_component_id()),
             nodes: vec![],
             relations: vec![],

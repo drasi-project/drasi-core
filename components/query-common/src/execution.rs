@@ -119,6 +119,24 @@ impl<'a> QueryOperation<'a> {
         self
     }
 
+    /// Detach the operation from its input, keeping the timings already taken.
+    pub fn into_parts(self) -> (QueryInputOrigin, ProfilingMetadata) {
+        (self.input_origin, self.profiling)
+    }
+
+    /// Reattach parts from [`Self::into_parts`] to the same input.
+    pub fn from_parts(
+        input: &'a ChangeEnvelope,
+        input_origin: QueryInputOrigin,
+        profiling: ProfilingMetadata,
+    ) -> Self {
+        Self {
+            input,
+            input_origin,
+            profiling,
+        }
+    }
+
     pub fn project(
         &self,
         definition: &ContinuousQueryDefinition,

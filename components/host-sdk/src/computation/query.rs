@@ -83,12 +83,32 @@ fn add_execution(
 pub(super) fn configuration_for_update(
     specification: &ComponentSpecification,
     volatile: Option<bool>,
-    edge_bootstrap: bool,
+    bound_edge_bootstrap: Option<bool>,
 ) -> anyhow::Result<serde_json::Value> {
     let configuration = super::factory::literal_configuration(specification)?;
     let values = configuration
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("query configuration must be an object"))?;
+    // The factory planner can run without a live instance. An authored query's
+    // named seed or state-loading input still requires rebootstrap on replacement.
+    // Construction independently checks that the actual bindings support the plan.
+    let edge_bootstrap = match bound_edge_bootstrap {
+        Some(bound) => bound,
+        None => values
+            .get("query_config")
+            .map(|value| {
+                serde_json::from_value::<drasi_lib::config::AssignedQueryConfig>(value.clone())
+            })
+            .transpose()?
+            .is_some_and(|query| {
+                query.enable_bootstrap
+                    && (query.bootstrap_provider.is_some()
+                        || query
+                            .inputs
+                            .iter()
+                            .any(|input| input.loads_initial_state(query.enable_bootstrap)))
+            }),
+    };
     let mut configuration = serde_json::json!({
         "query": values.get("query").ok_or_else(|| anyhow::anyhow!("query text is missing"))?,
         "stream": values.get("stream").ok_or_else(|| anyhow::anyhow!("query stream is missing"))?,
@@ -189,7 +209,7 @@ impl NativeFactory {
 
 #[async_trait]
 impl QueryConstructor for NativeQueryConstructor {
-    fn supports_query_reconstruction(&self) -> bool {
+    fn supports_state_reconstruction(&self) -> bool {
         self.factory.supports_ordinary_queries()
     }
     fn plan_update(
@@ -215,7 +235,7 @@ impl QueryConstructor for NativeQueryConstructor {
                 id: specification.descriptor.id().clone(),
                 implementation: metadata.implementation.clone(),
                 configuration_version: metadata.configuration_version,
-                configuration: configuration_for_update(specification, None, false)?,
+                configuration: configuration_for_update(specification, None, None)?,
                 scope: None,
                 inputs: Vec::new(),
                 activation_credentials_bound: false,

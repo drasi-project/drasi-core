@@ -180,6 +180,7 @@ async fn main() -> Result<()> {
         query_language: QueryLanguage::Cypher,
         middleware: vec![],
         inputs: vec![QueryInputConfig {
+            enable_bootstrap: None,
             component: "stock-prices".to_string(),
             pipeline: vec![],
             port: None,

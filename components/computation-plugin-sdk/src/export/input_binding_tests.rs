@@ -11,6 +11,7 @@ use drasi_computation_contracts::{
 };
 
 struct TestFactory {
+    kind: Option<drasi_computation_contracts::ComponentSemanticKind>,
     advertised: bool,
     implemented: bool,
     seen: Arc<Mutex<Vec<Vec<InputBinding>>>>,
@@ -45,6 +46,7 @@ impl Factory for TestFactory {
                 .collect(),
             completion: None,
             capabilities: crate::Capabilities {
+                semantic_kind: self.kind,
                 input_binding_updates: self.advertised,
                 ..Default::default()
             },
@@ -214,6 +216,7 @@ const SECOND: &str = "8454c4a2-d342-4ab8-b2cc-ab381334ed22";
 async fn binding_updates_work_before_start_and_during_processing() -> anyhow::Result<()> {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let component = raw_component(TestFactory {
+        kind: None,
         advertised: true,
         implemented: true,
         seen: seen.clone(),
@@ -273,6 +276,7 @@ async fn binding_updates_work_before_start_and_during_processing() -> anyhow::Re
 fn input_binding_updates_require_matching_capability_and_supported_role() -> anyhow::Result<()> {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let component = raw_component(TestFactory {
+        kind: None,
         advertised: false,
         implemented: false,
         seen: seen.clone(),
@@ -290,6 +294,7 @@ fn input_binding_updates_require_matching_capability_and_supported_role() -> any
     );
     for (advertised, implemented) in [(true, false), (false, true)] {
         let error = raw_component(TestFactory {
+            kind: None,
             advertised,
             implemented,
             seen: seen.clone(),
@@ -301,6 +306,7 @@ fn input_binding_updates_require_matching_capability_and_supported_role() -> any
             .contains("input-binding handler does not match its declared capability"));
     }
     let mut metadata = TestFactory {
+        kind: None,
         advertised: true,
         implemented: true,
         seen,
@@ -319,5 +325,46 @@ fn input_binding_updates_require_matching_capability_and_supported_role() -> any
         .validate(&plugin, &[GraphChangeCodec::schema().descriptor().clone()])
         .expect_err("source input updates are invalid");
     assert!(error.to_string().contains("input-binding updates require"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn bidirectional_sources_and_reactions_receive_their_actual_bindings() -> anyhow::Result<()> {
+    use drasi_computation_contracts::ComponentSemanticKind::{Reaction, Source};
+    let inputs = vec![binding("in", FIRST, "first/out")];
+    for kind in [Source, Reaction] {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let factory = TestFactory {
+            kind: Some(kind),
+            advertised: true,
+            implemented: true,
+            seen: seen.clone(),
+        };
+        let descriptor = factory.metadata().descriptor(ComponentId::try_new(ID)?)?;
+        assert_eq!(descriptor.semantic_kind(), Some(kind));
+        let component = raw_component(factory)?;
+        component
+            .run(abi::operation::BIND_INPUTS, &wire::encode(&inputs)?)
+            .await?;
+        component
+            .run(
+                abi::operation::INITIALIZE,
+                &context(abi::operation::INITIALIZE),
+            )
+            .await?;
+        component
+            .run(abi::operation::START, &context(abi::operation::START))
+            .await?;
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            std::slice::from_ref(&inputs)
+        );
+        component
+            .run(abi::operation::STOP, &context(abi::operation::STOP))
+            .await?;
+        component
+            .run(abi::operation::DISPOSE, &context(abi::operation::DISPOSE))
+            .await?;
+    }
     Ok(())
 }

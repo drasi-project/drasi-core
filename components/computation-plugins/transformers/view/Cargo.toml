@@ -16,7 +16,7 @@ dynamic-plugin = []
 
 [package.metadata.drasi-plugin]
 abi-family = "computation"
-abi-version = "0.1.0"
+abi-version = "0.2.0"
 kind = "transformer-view"
 
 [dependencies]
@@ -28,9 +28,9 @@ anyhow = "1"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-im = { workspace = true }
 
 [dev-dependencies]
+drasi-computation-plugin-sdk = { workspace = true, features = ["test-support"] }
 chrono = "0.4"
 tokio = { version = "1", features = ["macros", "rt", "sync"] }
 

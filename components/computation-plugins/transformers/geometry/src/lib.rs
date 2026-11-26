@@ -3,27 +3,32 @@
 
 //! A native planar geometry transformer: reads geometries from graph-change
 //! records, groups them into configured sets and incrementally emits a record
-//! for every pair of members satisfying a configured spatial relation. See
-//! the crate README for configuration and semantics.
+//! for every pair of members satisfying a configured spatial relation. It is
+//! one implementation of the shared stateful-transformer runtime: its inputs,
+//! memberships and records are durable, and it bootstraps, follows, replays
+//! and rebuilds like any other stateful transformer. See the crate README for
+//! configuration and semantics.
 
 #![deny(unused, missing_docs)]
 
-mod component;
 mod config;
-mod output;
+mod logic;
 mod shape;
 mod state;
 
 #[cfg(test)]
 mod tests;
 
+use anyhow::Context;
 use drasi_computation_contracts::{
-    ComponentRole, ComponentUpdateMode, GraphChangeCodec, ImplementationIdentity, OutputProgress,
-    PipeRequirements, PortDescriptor, PortDirection, PortId,
+    ComponentRole, ComponentUpdateMode, GraphChangeCodec, ImplementationIdentity, PipeRequirements,
+    PortDescriptor, PortDirection, PortId,
 };
 use drasi_computation_plugin_sdk::{
-    lifecycle::Assessment, Capabilities, Component, ControlSender, CreateRequest, CreatedComponent,
-    Factory, FactoryMetadata, PluginDefinition, ServiceBindings, UpdatePlanner, UpdateRequest,
+    lifecycle::Assessment,
+    transformer::{self, StatefulTransformer},
+    Capabilities, Component, ControlSender, CreateRequest, CreatedComponent, Factory,
+    FactoryMetadata, PluginDefinition, ServiceBindings, UpdatePlanner, UpdateRequest,
 };
 use std::sync::Arc;
 
@@ -32,7 +37,7 @@ pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
 /// Configuration-only factory for the planar geometry transformer.
 pub const GEOMETRY: &str = "drasi.standard/geometry";
 
-/// Constructs independent, initially empty geometry transformers.
+/// Constructs geometry transformers.
 pub struct GeometryFactory;
 
 /// The plugin definition, suitable for static registration or native export.
@@ -52,12 +57,11 @@ mod native_exports {
 }
 
 impl Factory for GeometryFactory {
-    /// Outputs carry a new volatile producer identity on every construction.
     fn describe(
         &self,
         request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
     ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.volatile_transformer())
+        transformer::describe(request)
     }
 
     fn configuration_details(&self) -> drasi_computation_plugin_sdk::ConfigDetails {
@@ -75,25 +79,24 @@ impl Factory for GeometryFactory {
             role: ComponentRole::Transformer,
             configuration_version: 1,
             configuration: config::definition().schema(),
-            ports: [("in", PortDirection::Input), ("out", PortDirection::Output)]
-                .into_iter()
-                .map(|(id, direction)| {
-                    PortDescriptor::new(
-                        PortId::try_new(id).expect("constant port"),
-                        direction,
-                        GraphChangeCodec::schema().descriptor().clone(),
-                        PipeRequirements::default(),
-                    )
-                })
-                .collect(),
+            ports: [
+                (transformer::INPUT_PORT, PortDirection::Input),
+                (transformer::OUTPUT_PORT, PortDirection::Output),
+            ]
+            .into_iter()
+            .map(|(id, direction)| {
+                PortDescriptor::new(
+                    PortId::try_new(id).expect("constant port"),
+                    direction,
+                    GraphChangeCodec::schema().descriptor().clone(),
+                    PipeRequirements::default(),
+                )
+            })
+            .collect(),
             completion: None,
             capabilities: Capabilities {
-                output_snapshots: vec![PortId::try_new("out").expect("constant port")],
-                output_progress: Some(OutputProgress::Origin),
-                erases_owned_state: true,
-                management: true,
                 update_modes: vec![ComponentUpdateMode::InPlace, ComponentUpdateMode::Recreate],
-                ..Capabilities::default()
+                ..transformer::capabilities(true)
             },
         }
     }
@@ -102,21 +105,27 @@ impl Factory for GeometryFactory {
         &self,
         request: &CreateRequest,
         _control: ControlSender,
-        _services: ServiceBindings,
+        services: ServiceBindings,
     ) -> anyhow::Result<CreatedComponent> {
-        Ok(
-            Component::Transformer(Box::new(component::GeometryTransformer::new(
-                self.metadata().descriptor(request.id.clone())?,
-                request.configuration.clone(),
-                request.scope.as_ref(),
-            )?))
-            .into(),
-        )
+        transformer::validate_reconstruction(request)?;
+        let (logic, settings) = logic::GeometryLogic::create(request)?;
+        Ok(Component::Transformer(Box::new(StatefulTransformer::new(
+            request,
+            self.metadata().descriptor(request.id.clone())?,
+            services
+                .processing
+                .context("the geometry transformer requires host-owned processing")?,
+            logic,
+            settings,
+        )?))
+        .into())
     }
 }
 
+/// Configuration-only planning; a running transformer also checks that an
+/// in-place change fits what it retains.
 impl UpdatePlanner for GeometryFactory {
     fn assess(&self, request: &UpdateRequest) -> anyhow::Result<Assessment> {
-        component::assess(request)
+        Ok(logic::plan(None, request)?.into())
     }
 }

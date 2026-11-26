@@ -94,7 +94,7 @@ pub(super) async fn begin_non_atomic(
         progress.is_non_atomic(),
         "non-atomic reset was not negotiated"
     );
-    progress.ensure_resettable()?;
+    progress.ensure_resettable(preserve_bootstrap)?;
     let store = progress.checkpoint_store(resources)?;
     let previous = non_atomic_marker(resources, component).await?;
     let generation = QueryResetMarker::next_generation(
@@ -127,7 +127,7 @@ pub(super) async fn reset_non_atomic(
         progress.is_non_atomic(),
         "non-atomic reset was not negotiated"
     );
-    progress.ensure_resettable()?;
+    progress.ensure_resettable(preserve_bootstrap)?;
     let marker = non_atomic_marker(resources, component)
         .await?
         .context("non-atomic reset intent must commit before clearing state")?;
@@ -239,7 +239,7 @@ async fn metadata(
     Ok((generation, bootstrap))
 }
 
-async fn clear_indexes(resources: &ComputationIndexes) -> Result<()> {
+pub(super) async fn clear_indexes(resources: &ComputationIndexes) -> Result<()> {
     resources.indexes().element_index.clear().await?;
     resources.indexes().archive_index.clear().await?;
     resources.indexes().result_index.clear().await?;
@@ -287,7 +287,7 @@ pub(super) async fn reset_volatile(
         progress.is_volatile(),
         "volatile reset requires a volatile owner"
     );
-    progress.ensure_resettable()?;
+    progress.ensure_resettable(preserve_bootstrap)?;
     let store = progress.checkpoint_store(resources)?;
     anyhow::ensure!(
         !store.is_persistent(),
@@ -305,7 +305,7 @@ pub(super) async fn reset(
     progress: &Draft,
     preserve_bootstrap: bool,
 ) -> Result<u64> {
-    progress.ensure_resettable()?;
+    progress.ensure_resettable(preserve_bootstrap)?;
     resources.atomic_result_transaction()?;
     let store = resources
         .checkpoint_store()

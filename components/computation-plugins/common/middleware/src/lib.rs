@@ -87,7 +87,7 @@ impl Mode {
         let (stream, images) = match self {
             Self::Events => ("Nonempty output stream identifier.", ""),
             Self::Images => (
-                "Nonempty stream identifier for this view's own volatile output.",
+                "Nonempty stream identifier for this view's output.",
                 " Map declarations accept only insert rules that emit complete Insert or Replace images.",
             ),
         };

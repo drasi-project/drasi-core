@@ -223,10 +223,10 @@ middleware output; query storage cannot repair lost transformer state.
 
 The separate `drasi.standard/view` transformer maintains projected datasets
 from complete reconstructed inputs, retaining exact output associations for
-filter, child and key retractions. Its current profile is memory-backed with
-coherent output snapshots and volatile progress, not the durable middleware
-profile. Reconstruction starts empty; full initial input and lossless ordered
-delivery are required.
+filter, child and key retractions. It runs on the shared stateful
+transformer runtime: with a persistent processing provider its retained
+inputs, output associations and output are durable, and it can bootstrap from
+its input.
 
 Persistent indexes alone do not make query output durable. A reaction that saves
 progress needs both persistent reaction state and persistent output from its

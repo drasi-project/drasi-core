@@ -31,18 +31,6 @@ pub(super) fn bind_inputs(
     waiting
 }
 
-/// The output port on which a component serves bootstrap sessions, if any.
-fn bootstrap_output(descriptor: &ComponentDescriptor) -> Option<PortId> {
-    descriptor
-        .ports()
-        .iter()
-        .find(|port| {
-            port.kind() == drasi_computation_contracts::PortKind::Bootstrap
-                && port.direction() == PortDirection::Output
-        })
-        .map(|port| port.id().clone())
-}
-
 fn declaration_id(query: &ComponentId) -> anyhow::Result<ResourceId> {
     let encoded: String = query
         .as_str()
@@ -400,6 +388,11 @@ impl Runtime {
         members.retain(|id, _| !outlets.contains(id));
         let selected: BTreeSet<_> = members.keys().cloned().collect();
         let original = self.native_query_configuration_at(publication, id)?;
+        let seed = original
+            .bootstrap_provider
+            .as_ref()
+            .and_then(crate::config::ComponentReference::as_id)
+            .map(|provider| ComputationPipelineBuilder::seed_relationship(id, provider));
         let native_inputs: BTreeMap<_, _> = original
             .inputs
             .iter()
@@ -417,7 +410,11 @@ impl Runtime {
             .map(|(rank, input)| {
                 let explicit = input.port.clone();
                 let endpoint = publication.output_endpoint(input.id()?, explicit.as_ref())?;
-                Ok((endpoint, rank))
+                let policy = RelationshipPolicy::query_input(
+                    original.bootstrap_provider.is_none()
+                        && input.loads_initial_state(original.enable_bootstrap),
+                );
+                Ok((endpoint, (rank, policy)))
             })
             .collect::<anyhow::Result<_>>()?;
         let scheduled = QueryScheduledSourceFactory::default()
@@ -438,14 +435,6 @@ impl Runtime {
             }
             None
         });
-        let native_policy = RelationshipPolicy {
-            activation: if original.enable_bootstrap {
-                ActivationCoupling::RequiresRunning
-            } else {
-                ActivationCoupling::Independent
-            },
-            ..Default::default()
-        };
         anyhow::ensure!(
             publication
                 .desired
@@ -453,12 +442,12 @@ impl Runtime {
                 .iter()
                 .filter(|edge| edge.definition.to.component == query)
                 .all(|edge| selected.contains(&edge.definition.from.component)
-                    || native_inputs.contains_key(&edge.definition.from)
-                        && edge.policy == native_policy
+                    || seed.as_ref().is_some_and(|seed| seed.definition == edge.definition && seed.pipe == edge.pipe && seed.policy == edge.policy)
+                    || native_inputs.get(&edge.definition.from).is_some_and(|(rank, policy)| edge.policy == *policy
                         && matches!(&edge.pipe, DesiredPipe::Ranked(pipe)
                             if Some(&pipe.queue) == input_queue
-                                && pipe.source_rank == native_inputs[&edge.definition.from]
-                                && !pipe.drop_when_full && pipe.source_id.is_none() && pipe.source_dispatch.is_none())),
+                                && pipe.source_rank == *rank
+                                && !pipe.drop_when_full && pipe.source_id.is_none() && pipe.source_dispatch.is_none()))),
             "query '{id}' has custom input connections; use computation topology operations"
         );
         let mut batch = self.ordinary_query_batch(&config, catalog).await?;
@@ -723,11 +712,7 @@ impl Runtime {
                 self.config.global_priority_queue_capacity.unwrap_or(10_000),
                 self.config.global_dispatch_buffer_capacity.unwrap_or(1_000),
             )?
-            .query_factory(factory.clone())
-            .with_output_catalogue(
-                self.config.id.clone(),
-                OutputCatalogue::new(self.control()?),
-            );
+            .query_factory(factory.clone());
             if let Some(catalog) = catalog {
                 builder = builder.with_catalog(catalog);
             }
@@ -775,13 +760,7 @@ impl Runtime {
                             explicit.as_ref(),
                         )?;
                         let output = Endpoint::new(source.id()?.clone(), port);
-                        builder = match bootstrap_output(&component.descriptor) {
-                            Some(port) => builder.native_source_with_bootstrap(
-                                output,
-                                Endpoint::new(source.id()?.clone(), port),
-                            )?,
-                            None => builder.native_source(output)?,
-                        };
+                        builder = builder.native_source(output)?;
                         continue;
                     }
                 }
@@ -802,7 +781,7 @@ impl Runtime {
                     ))?;
                     continue;
                 }
-                if let Some(node) = publication.desired.nodes.iter().find(|node| {
+                if publication.desired.nodes.iter().any(|node| {
                     source.component.as_id() == Some(node.descriptor.id())
                         && node
                             .descriptor
@@ -813,11 +792,7 @@ impl Runtime {
                     let component = source.id()?.clone();
                     let explicit = source.port.clone();
                     let output = publication.output_endpoint(&component, explicit.as_ref())?;
-                    builder = match bootstrap_output(&node.descriptor) {
-                        Some(port) => builder
-                            .native_source_with_bootstrap(output, Endpoint::new(component, port))?,
-                        None => builder.native_source(output)?,
-                    };
+                    builder = builder.native_source(output)?;
                     continue;
                 }
                 anyhow::ensure!(

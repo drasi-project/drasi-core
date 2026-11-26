@@ -157,11 +157,10 @@ impl PipeCapabilities {
 
 /// What a port carries. Ports of different kinds never connect.
 ///
-/// Data ports carry the live change stream: every declared data port must be
-/// connected and outputs fan out to all of their edges. Bootstrap ports carry
-/// addressed bootstrap sessions: they may stay unconnected, and an output is
-/// delivered only on the edge of the consumer that requested the session. The
-/// schema of a bootstrap port is the schema of its snapshot records.
+/// Data outputs fan out live changes to their connected inputs. A connection
+/// can also carry an addressed current-state session for its own subscriber.
+/// Bootstrap ports describe those sessions and allow a local provider to be
+/// attached. Either kind of port may have no connections.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PortKind {
     #[default]
@@ -185,6 +184,8 @@ pub struct PortDescriptor {
     requirements: PipeRequirements,
     #[serde(default, skip_serializing_if = "PortKind::is_data")]
     kind: PortKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    state_for: Option<PortId>,
 }
 
 impl PortDescriptor {
@@ -200,6 +201,7 @@ impl PortDescriptor {
             schema,
             requirements,
             kind: PortKind::Data,
+            state_for: None,
         }
     }
 
@@ -234,14 +236,15 @@ impl PortDescriptor {
         self
     }
 
-    pub const fn kind(&self) -> PortKind {
-        self.kind
+    /// Associate this bootstrap port with a particular data port. A descriptor
+    /// with several inputs or outputs of the same schema must not guess.
+    pub fn for_data_port(mut self, data: PortId) -> Self {
+        self.state_for = Some(data);
+        self
     }
 
-    /// Whether the graph may leave this port unconnected. Only bootstrap ports
-    /// are optional; every data port must be connected.
-    pub const fn is_optional(&self) -> bool {
-        matches!(self.kind, PortKind::Bootstrap)
+    pub const fn kind(&self) -> PortKind {
+        self.kind
     }
 }
 
@@ -301,6 +304,25 @@ impl ComponentDescriptor {
                 });
             }
         }
+        let mut assigned = BTreeSet::new();
+        for state in &ports {
+            if let Some(data) = &state.state_for {
+                if state.kind != PortKind::Bootstrap
+                    || !assigned.insert(data)
+                    || !ports.iter().any(|port| {
+                        port.id() == data
+                            && port.kind == PortKind::Data
+                            && port.direction == state.direction
+                            && port.schema == state.schema
+                    })
+                {
+                    return Err(ContractError::InvalidStatePort {
+                        state: state.id.clone(),
+                        data: data.clone(),
+                    });
+                }
+            }
+        }
         Ok(Self {
             id,
             ports: ports.into(),
@@ -316,6 +338,30 @@ impl ComponentDescriptor {
 
     pub fn ports(&self) -> &[PortDescriptor] {
         &self.ports
+    }
+
+    /// The state lane for this data endpoint. The one-data/one-state shorthand
+    /// is unambiguous; outputs with registered readers need no bootstrap port.
+    pub fn state_port_for(&self, id: &PortId) -> Option<&PortDescriptor> {
+        let data = self.ports.iter().find(|p| p.id() == id)?;
+        if data.kind != PortKind::Data {
+            return None;
+        }
+        let matching = || {
+            self.ports
+                .iter()
+                .filter(|p| p.direction == data.direction && p.schema == data.schema)
+        };
+        if let Some(state) = matching().find(|p| p.state_for.as_ref() == Some(data.id())) {
+            return Some(state);
+        }
+        if matching().filter(|p| p.kind == PortKind::Data).count() != 1 {
+            return None;
+        }
+        let mut states =
+            matching().filter(|p| p.kind == PortKind::Bootstrap && p.state_for.is_none());
+        let state = states.next()?;
+        states.next().is_none().then_some(state)
     }
 
     /// Explicit semantic category, or none to use the native execution role.
@@ -444,7 +490,6 @@ mod port_kind_tests {
             serde_json::from_value::<PortDescriptor>(encoded)?,
             bootstrap
         );
-        assert!(bootstrap.is_optional() && !data.is_optional());
         Ok(())
     }
 
@@ -465,5 +510,35 @@ mod port_kind_tests {
             ),
             Err(ContractError::PortKindMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn same_schema_inputs_do_not_share_another_ports_state_lane() -> anyhow::Result<()> {
+        let id = ComponentId::try_new("30361edc-3edd-4da2-87a6-f229a3ac9baf")?;
+        let data = |id: PortId| {
+            PortDescriptor::new(
+                id,
+                PortDirection::Input,
+                crate::GraphChangeCodec::schema().descriptor().clone(),
+                PipeRequirements::default(),
+            )
+        };
+        let orders = PortId::try_new("orders")?;
+        let audit = PortId::try_new("audit")?;
+        let initial = port(PortDirection::Input, PortKind::Bootstrap).for_data_port(orders.clone());
+        let descriptor = ComponentDescriptor::try_new(
+            id.clone(),
+            vec![data(orders.clone()), data(audit.clone()), initial.clone()],
+        )?;
+        let stored: ComponentDescriptor =
+            serde_json::from_value(serde_json::to_value(&descriptor)?)?;
+        assert_eq!(stored.state_port_for(&orders), Some(&initial));
+        assert!(stored.state_port_for(&audit).is_none());
+        assert!(stored.state_port_for(&PortId::try_new("absent")?).is_none());
+        assert!(matches!(
+            ComponentDescriptor::try_new(id, vec![data(audit), initial]),
+            Err(ContractError::InvalidStatePort { .. })
+        ));
+        Ok(())
     }
 }

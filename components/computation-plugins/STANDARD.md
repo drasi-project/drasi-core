@@ -1,7 +1,7 @@
 # Counter, middleware, view, capture and arithmetic components
 
 These five [independent component crates](README.md) supply real graph components through native ABI
-**0.1.0**, independently of the Source/Reaction/Bootstrap ABI **0.19**.
+**0.2.0**, independently of the Source/Reaction/Bootstrap ABI **0.19**.
 Earlier layouts are rejected; rebuild the host and the required libraries together.
 The package uses the workspace version; that version is not its ABI version.
 Each plugin identity is its component's package name. Implementation versions
@@ -11,7 +11,8 @@ are `"1"` and configuration versions are `1`.
 |---|---|---|
 | `drasi.standard/volatile-counter` | `EnvelopeSource` | `stream` required; `count=10`, `start=0`, `step=1`, `intervalMs=0`, `paused=false` |
 | `drasi.standard/middleware` | `Transformer` | Required `stream`, `middleware`, `pipeline`; declared stateless kinds `decoder`, `map`, `parse_json`, `promote`, `relabel` (the schema rejects others at binding) |
-| `drasi.standard/view` | `Transformer` | Required `stream`, `middleware`, `pipeline`; same declared kinds and shared pipeline as `middleware`, over complete images (insert-only map rules); maintains projections and recorded output associations |
+| `drasi.standard/stateful-middleware` | `Transformer` | The same pipeline configuration and kinds, plus the stateful transformer options `bootstrap`, `volatile`, `publication`, `recovery`, `resetConfiguration`, `outboxCapacity`; maintains the transformed current state |
+| `drasi.standard/view` | `Transformer` | Required `stream`, `middleware`, `pipeline`; same declared kinds and shared pipeline as `middleware`, over complete images (insert-only map rules); maintains projections and recorded output associations as a stateful transformer |
 | `drasi.standard/capture` | `EnvelopeSink` | `path` required; `append=false` |
 | `drasi.standard/arithmetic` | `Transformer`, optional transaction participant | `stream` required; `field="value"`, `add=0`, `multiply=1`, `counterProperty="batch_count"` |
 
@@ -77,9 +78,10 @@ nonpersistent. No jq feature or bundled jq build is required.
 Choose the separate [view transformer](transformers/view/README.md) when the
 output must remain a projection of the current input dataset. It reconstructs
 patches, retracts filtered/removed children and replaces changed output keys.
-Its coherent snapshots and producer epoch are volatile; stop/start of the same
-object retains them, while reconstruction starts empty. It is not a durable,
-transactional, replay-capable or input-deduplicating middleware mode.
+It runs on the same stateful transformer runtime as the query: with a persistent
+processing provider its retained inputs, output associations and output
+survive restart, and it supports bootstrap, current-state, follow, replay and
+rebuild. With `volatile`, each initialization starts a new output epoch.
 
 The capture sink writes one complete `EnvelopeCodec` JSON frame per line to its
 configured file. `append=false` truncates on start; `append=true` preserves prior
@@ -113,7 +115,7 @@ When that host container uses `SharedStorageGroup` and participating QoS pipes,
 both steps' state and the outgoing journal entries share its actual commit.
 Journal acknowledgements still follow consumer handling separately. Existing
 participants need no additional shared-storage capability for this host-owned
-arrangement, but must be built for the host's native ABI 0.1. It does not make
+arrangement, but must be built for the host's native ABI 0.2. It does not make
 standalone arithmetic persistent.
 
 The component supports serialized state `get/put/remove`, element
@@ -159,5 +161,7 @@ its ignored helper is not a skipped recovery scenario.
 Native libraries are process-pinned; hot unloading is unsupported. Update,
 snapshot, recovery, resource, and transaction capabilities are explicit
 per-factory contracts, not properties of every plugin using this ABI. The
-counter, middleware, view, capture and arithmetic factories do not become
-durable simply because their host has durable configuration or storage.
+counter, stateless middleware, capture and arithmetic factories do not become
+durable simply because their host has durable configuration or storage; the
+view and stateful middleware are durable when bound to a persistent processing
+provider.

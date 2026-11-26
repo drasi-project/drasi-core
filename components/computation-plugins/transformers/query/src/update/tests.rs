@@ -2,7 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
-use drasi_computation_contracts::{ComponentId, OutputFollowLimits};
+use drasi_computation_contracts::{
+    ComponentId, ComponentUpdateData, InputEnvelope, OutputFollowLimits,
+};
 use drasi_core::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
 };
@@ -163,9 +165,9 @@ fn reconstruction_directive_cannot_replace_the_bootstrap_requirement() -> anyhow
             data: ComponentUpdateData::Rebootstrap,
         },
     });
-    assert!(validate_creation(&request).is_err());
+    assert!(transformer::validate_reconstruction(&request).is_err());
     request.configuration["bootstrap"] = json!(true);
-    validate_creation(&request)?;
+    transformer::validate_reconstruction(&request)?;
     assert!(request.configuration.get("resetConfiguration").is_none());
     Ok(())
 }

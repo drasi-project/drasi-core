@@ -777,14 +777,18 @@ async fn ordinary_factory_facades_retain_failures_retry_and_restore_the_same_con
     })
     .await?;
     let sink = declared_component(&core, receipt).await?;
+    // No edge has been declared yet. The reaction can be constructed now;
+    // the eventual edge, not its input declaration, depends on the source.
+    sink.wait_created().await?;
     let reaction_id = sink.id().clone();
     phase = "connecting the declared source and reaction";
     let mut configuration = core.desired_configuration()?;
+    let edge = EdgeDefinition::new(
+        Endpoint::new(source_id.clone(), port("out")),
+        Endpoint::new(reaction_id.clone(), port("in")),
+    );
     configuration.desired.topology.relationships.push(DesiredRelationship {
-        definition: EdgeDefinition::new(
-            Endpoint::new(source_id.clone(), port("out")),
-            Endpoint::new(reaction_id.clone(), port("in")),
-        ),
+        definition: edge.clone(),
         pipe: DesiredPipe::Bounded { capacity: 8 },
         policy: RelationshipPolicy::default(),
     });
@@ -812,7 +816,8 @@ async fn ordinary_factory_facades_retain_failures_retry_and_restore_the_same_con
         entry.name == drasi_lib::ComponentName::try_new("source").unwrap()
             && entry.status == drasi_lib::ComponentStatus::Error
     }));
-    assert_eq!(sink.observed()?.realization, RealizationState::Blocked);
+    assert_eq!(sink.observed()?.realization, RealizationState::Created);
+    assert_ne!(core.computation_control()?.observed().relationships[&edge].binding, BindingState::Bound);
     assert!(core
         .list_reactions()
         .await?

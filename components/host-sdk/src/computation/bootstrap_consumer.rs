@@ -3,7 +3,9 @@
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
-use drasi_computation_contracts::{BootstrapCompletion, BootstrapState, BootstrapStatus};
+use drasi_computation_contracts::{
+    BootstrapAcceptance, BootstrapCompletion, BootstrapState, BootstrapStatus,
+};
 use drasi_computation_plugin_abi::operation;
 use drasi_computation_plugin_sdk::{bootstrap::Completed, wire, Scope};
 use drasi_lib::computation::v1::{
@@ -24,13 +26,38 @@ pub(super) struct BootstrapBinding {
     input: PortId,
     cleanup_required: bool,
     stopping: tokio::sync::Mutex<Option<CleanupOperation>>,
-    state: Option<Arc<dyn BootstrapState>>,
+    mode: Mode,
+}
+
+enum Mode {
+    Quiescent,
+    Bounded,
+    Durable(Arc<dyn BootstrapState>),
+}
+
+/// The graph's state-aware session API needs to know this is a fresh read.
+/// There is deliberately no checkpoint to restore, update, or mistake for
+/// durable provider intent.
+struct FreshRead;
+
+#[async_trait::async_trait]
+impl BootstrapState for FreshRead {
+    fn durability(&self) -> drasi_core_types::interface::StorageDurability {
+        drasi_core_types::interface::StorageDurability::VOLATILE
+    }
+    async fn read(&self) -> anyhow::Result<Option<bytes::Bytes>> {
+        Ok(None)
+    }
+    async fn write(&self, _: bytes::Bytes) -> anyhow::Result<()> {
+        anyhow::bail!("volatile bootstrap cannot store provider handover state")
+    }
 }
 
 impl BootstrapBinding {
     pub(super) fn new(
         resource: Arc<NativeBootstrapResource>,
         input: PortId,
+        profile: BootstrapAcceptance,
         scope: &Scope,
         component: &ComponentId,
         processing: Option<&super::processing::ProcessingBinding>,
@@ -38,8 +65,11 @@ impl BootstrapBinding {
         resource
             .0
             .validate_query_scope(&scope.instance_id, &scope.graph_id, component)?;
-        let state = match processing {
-            Some(processing) => {
+        let mode = match profile {
+            BootstrapAcceptance::Durable => {
+                let processing = processing.ok_or_else(|| {
+                    anyhow::anyhow!("durable bootstrap requires indexed processing")
+                })?;
                 let owner = processing.progress_owner().ok_or_else(|| {
                     anyhow::anyhow!("durable bootstrap has no committed processing owner")
                 })?;
@@ -51,14 +81,18 @@ impl BootstrapBinding {
                         "bootstrap provider is not bound to this actual processing owner"
                     );
                 }
-                Some(processing.bootstrap_state())
+                Mode::Durable(processing.bootstrap_state())
             }
-            None => {
+            BootstrapAcceptance::Quiescent | BootstrapAcceptance::Bounded => {
                 anyhow::ensure!(
-                    resource.0.recovery_reader().is_none(),
-                    "quiescent bootstrap does not support progress-bound providers"
+                    processing.is_none() && resource.0.recovery_reader().is_none(),
+                    "volatile bootstrap does not support progress-bound providers"
                 );
-                None
+                if profile == BootstrapAcceptance::Bounded {
+                    Mode::Bounded
+                } else {
+                    Mode::Quiescent
+                }
             }
         };
         Ok(Self {
@@ -66,7 +100,7 @@ impl BootstrapBinding {
             input,
             cleanup_required: false,
             stopping: tokio::sync::Mutex::new(None),
-            state,
+            mode,
         })
     }
 
@@ -79,6 +113,10 @@ impl BootstrapBinding {
         component: &RemoteComponent,
         codec: &BinaryEnvelopeCodec,
         bindings: Option<&[InputBinding]>,
+        rebuild_destinations: Option<(
+            &mut super::processing::ProcessingBinding,
+            &drasi_lib::computation::v1::OutputBindings,
+        )>,
     ) -> anyhow::Result<Vec<InputEnvelope>> {
         anyhow::ensure!(
             !self.cleanup_required,
@@ -91,27 +129,86 @@ impl BootstrapBinding {
                 .unit(operation::BIND_INPUTS, &wire::encode(&bindings)?)
                 .await?;
         }
-        let mut snapshot = if let Some(state) = self.state.clone() {
+        let mut snapshot = if let Mode::Durable(state) = &self.mode {
+            let state = state.clone();
             let mut status: BootstrapStatus =
                 wire::decode(&component.call(operation::BOOTSTRAP_STATUS, &[]).await?)?;
             anyhow::ensure!(
                 status.configured,
                 "bootstrap provider bound to a transformer without configured initialization"
             );
-            let preparation =
-                match provider.prepare_with_state(state.as_ref()).await {
-                    Err(error)
-                        if status.reset_allowed
-                            && matches!(
-                    error.downcast_ref::<drasi_computation_contracts::OutputReadError>(),
-                    Some(drasi_computation_contracts::OutputReadError::Gap { .. }
-                        | drasi_computation_contracts::OutputReadError::EpochChanged { .. })) =>
+            let mut rebuild = false;
+            let preparation = match provider.prepare_with_state(state.as_ref()).await {
+                Err(error)
+                    if status.reset_allowed
+                        && matches!(
+                            error.downcast_ref::<drasi_computation_contracts::OutputReadError>(),
+                            Some(
+                                drasi_computation_contracts::OutputReadError::Gap { .. }
+                                    | drasi_computation_contracts::OutputReadError::EpochChanged { .. }
+                            )
+                        ) =>
+                {
+                    if let (
+                        Some([binding]),
+                        Some(drasi_computation_contracts::OutputReadError::Gap {
+                            requested,
+                            latest,
+                            ..
+                        }),
+                    ) = (bindings, error.downcast_ref())
                     {
-                        BootstrapPreparation::ResetRequired
+                        if status.complete && requested < latest {
+                            self.stop().await?;
+                            if let Some(after) = provider
+                                .prepare_gap_rebuild(state.as_ref(), binding, *requested)
+                                .await?
+                            {
+                                self.cleanup_required = true;
+                                rebuild = wire::decode(
+                                    &component
+                                        .call(
+                                            operation::BOOTSTRAP_REBUILD,
+                                            &wire::encode(&Some(after))?,
+                                        )
+                                        .await?,
+                                )?;
+                            }
+                        }
                     }
-                    result => result?,
-                };
-            if preparation != BootstrapPreparation::Ready
+                    BootstrapPreparation::ResetRequired
+                }
+                result => result?,
+            };
+            // A completed view that never read an input cannot resume one. When
+            // a dependent installed that view, its first input arrives as a change.
+            if !rebuild && status.complete && preparation == BootstrapPreparation::ResetRequired {
+                if let Some([binding]) = bindings {
+                    self.stop().await?;
+                    if provider
+                        .prepare_first_input_rebuild(state.as_ref(), binding)
+                        .await?
+                    {
+                        self.cleanup_required = true;
+                        rebuild = wire::decode(
+                            &component
+                                .call(
+                                    operation::BOOTSTRAP_REBUILD,
+                                    &wire::encode(
+                                        &None::<drasi_computation_contracts::OutputCursor>,
+                                    )?,
+                                )
+                                .await?,
+                        )?;
+                    }
+                }
+            }
+            if rebuild {
+                let (owner, destinations) = rebuild_destinations.ok_or_else(|| {
+                    anyhow::anyhow!("query rebuild requires verified output destinations")
+                })?;
+                owner.bind_outputs(destinations).await?;
+            } else if preparation != BootstrapPreparation::Ready
                 || status.complete && provider.has_pending_snapshot()?
             {
                 if !status.reset_allowed {
@@ -136,7 +233,7 @@ impl BootstrapBinding {
                     "transformer did not reset its initialization state"
                 );
             }
-            if status.complete {
+            if status.complete && !rebuild {
                 let replay = self.input_replay(provider.as_ref())?;
                 self.stop().await?;
                 component
@@ -147,15 +244,21 @@ impl BootstrapBinding {
                     .await?;
                 return Ok(replay);
             }
-            provider.snapshot_with_state(state.as_ref()).await?
+            provider.open_snapshot(state).await?
         } else {
+            let mut preparation = provider.prepare_with_state(&FreshRead).await?;
+            if preparation == BootstrapPreparation::RefreshVolatile {
+                self.stop().await?;
+                self.cleanup_required = true;
+                preparation = provider.prepare_with_state(&FreshRead).await?;
+            }
             anyhow::ensure!(
-                provider.prepare().await? == BootstrapPreparation::Ready,
-                "quiescent bootstrap requires ready preparation"
+                preparation == BootstrapPreparation::Ready,
+                "volatile bootstrap requires a fresh snapshot"
             );
-            let snapshot = provider.snapshot().await?;
+            let snapshot = provider.open_snapshot(Arc::new(FreshRead)).await?;
             anyhow::ensure!(
-                snapshot.watermarks.is_empty(),
+                !matches!(self.mode, Mode::Quiescent) || snapshot.watermarks.is_empty(),
                 "quiescent bootstrap does not support source watermarks"
             );
             snapshot
@@ -198,7 +301,13 @@ impl BootstrapBinding {
         watermarks.extend(provider.complete_snapshot().await?);
         let state = provider.completion_state()?;
         let replay = self.input_replay(provider.as_ref())?;
-        let completion = if self.state.is_some() {
+        let completion = if !matches!(self.mode, Mode::Quiescent) {
+            if matches!(self.mode, Mode::Bounded) {
+                anyhow::ensure!(
+                    state.is_none() && watermarks.iter().all(|w| w.producer.is_some()),
+                    "bounded bootstrap accepts only quiescent completion or output cuts"
+                );
+            }
             wire::encode(&Completed::from(BootstrapCompletion { watermarks, state }))?
         } else {
             anyhow::ensure!(
@@ -225,8 +334,8 @@ impl BootstrapBinding {
     ) -> anyhow::Result<Vec<InputEnvelope>> {
         let replay = provider.take_input_replay()?;
         anyhow::ensure!(
-            self.state.is_some() || replay.is_empty(),
-            "quiescent bootstrap does not support prepared input replay"
+            matches!(self.mode, Mode::Durable(_)) || replay.is_empty(),
+            "volatile bootstrap does not support prepared input replay"
         );
         Ok(replay
             .into_iter()

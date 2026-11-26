@@ -618,6 +618,7 @@ impl NativeFactory {
         let input = match self.metadata.role {
             ComponentRole::Source => BootstrapInputDescription::SOURCE_RELAY,
             _ if capabilities.quiescent_bootstrap.is_some() => BootstrapInputDescription::QUIESCENT,
+            _ if capabilities.bounded_bootstrap.is_some() => BootstrapInputDescription::BOUNDED,
             _ => BootstrapInputDescription::DURABLE,
         };
         let output = match self.metadata.role {
@@ -1380,6 +1381,16 @@ impl ComponentFactory for NativeFactory {
     }
     fn record_schemas(&self) -> Vec<Arc<Schema>> {
         self.schemas.clone()
+    }
+    /// A stateful transformer rebuilds its own state from its inputs or
+    /// provider when an update directive resets it.
+    fn supports_state_reconstruction(&self) -> bool {
+        let capabilities = &self.metadata.capabilities;
+        self.metadata.role == ComponentRole::Transformer
+            && capabilities.indexed_processing
+            && capabilities.durable_output
+            && capabilities.durable_bootstrap.is_some()
+            && capabilities.committed_input_progress.is_some()
     }
     fn plan_update(
         &self,

@@ -20,8 +20,9 @@ use std::{
     sync::Arc,
 };
 
-/// UUID component identities and required, separately editable component names.
-pub const DESIRED_TOPOLOGY_VERSION: u32 = 3;
+/// A data binding owns its initial-state session; only seed providers have a
+/// separate bootstrap relationship.
+pub const DESIRED_TOPOLOGY_VERSION: u32 = 4;
 
 /// Opaque reference to a process-local object, never a component ID or name.
 /// Serializing a token does not make its object reconstructible or grant access.
@@ -465,8 +466,14 @@ impl DesiredPipe {
 }
 
 impl DesiredTopology {
-    pub(crate) fn validate_query_reset_consumers(&self, query: &ComponentId) -> anyhow::Result<()> {
-        let mut downstream = BTreeSet::from([query.clone()]);
+    /// Reconstructing a component discards the history its output published.
+    /// Every downstream transformer maintains or projects state derived from
+    /// that history, so none may follow the reconstructed output.
+    pub(crate) fn validate_state_reset_consumers(
+        &self,
+        component: &ComponentId,
+    ) -> anyhow::Result<()> {
+        let mut downstream = BTreeSet::from([component.clone()]);
         loop {
             let before = downstream.len();
             for edge in self
@@ -491,11 +498,10 @@ impl DesiredTopology {
             !self
                 .components
                 .iter()
-                .any(|node| node.descriptor.id() != query
+                .any(|node| node.descriptor.id() != component
                     && downstream.contains(node.descriptor.id())
-                    && node.descriptor.semantic_kind()
-                        == Some(crate::computation::v1::ComponentSemanticKind::Query)),
-            "query reconstruction does not support downstream query state reset"
+                    && node.role == ComponentRole::Transformer),
+            "state reconstruction does not support resetting downstream transformer state"
         );
         Ok(())
     }

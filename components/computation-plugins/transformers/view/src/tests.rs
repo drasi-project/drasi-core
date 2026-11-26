@@ -1,32 +1,42 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-use super::*;
-use anyhow::Context;
+//! The view's dataset semantics, run over in-memory transformer state and
+//! published the way the shared runtime publishes a stateful transformer's
+//! output. Storage, recovery, readers and delivery are the runtime's, and are
+//! covered by its own tests and the Host SDK chain tests.
+
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, RwLock,
+    },
+};
+
+use anyhow::{Context, Result};
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use drasi_computation_contracts::{
     ChangeEnvelope, ChangeOperation, ChangeSet, ComponentId, ContextEntry, ContextValue,
-    ElementImage, OutputProgress, OutputReadError, OutputSnapshot, SnapshotProvider,
+    ElementImage, GraphChangeCodec, InputEnvelope, OutputEnvelope, PortId, StreamId,
 };
+use drasi_computation_middleware_common::{Mode, Pipeline};
 use drasi_computation_plugin_sdk::{
-    Component, ControlSender, CreateRequest, ExportedPlugin, Factory,
+    transformer::{self, MemoryState, Rows},
+    ControlSender, CreateRequest, ExportedPlugin, Factory, ServiceBindings,
 };
 use drasi_core_types::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementValue, SourceChange,
 };
 use serde_json::{json, Value};
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-};
 use tokio::sync::Notify;
 
-use crate::ViewFactory;
-
-const VIEW_ID: &str = "d71f7900-57c4-4625-b0fa-1f91cd78faf7";
+use crate::{
+    logic::{self, Configuration},
+    mapping::Mapper,
+    state, ViewFactory,
+};
 
 fn identity_configuration() -> Value {
     json!({"stream": "view/out", "middleware": [], "pipeline": []})
@@ -48,24 +58,94 @@ fn key_configuration() -> Value {
     }]))
 }
 
+/// The view's logic over committed in-memory state. Each input envelope runs
+/// as one operation that commits only if it succeeds; a non-empty output is
+/// published as the next output change and applied to the current rows.
+struct View {
+    state: MemoryState,
+    mapper: Box<dyn Mapper>,
+    stream: StreamId,
+    sequence: u64,
+    /// The input position of the last accepted envelope.
+    progress: u64,
+    published: Arc<RwLock<Snapshot>>,
+}
+
+#[derive(Clone, Default)]
+struct Snapshot {
+    sequence: u64,
+    rows: Rows,
+}
+
+impl Snapshot {
+    fn cursor(&self) -> u64 {
+        self.sequence
+    }
+
+    fn records(&self) -> &Rows {
+        &self.rows
+    }
+}
+
+struct Reader(Arc<RwLock<Snapshot>>);
+
+impl Reader {
+    async fn snapshot(&self) -> Result<Snapshot> {
+        Ok(self
+            .0
+            .read()
+            .map_err(|_| anyhow::anyhow!("snapshot poisoned"))?
+            .clone())
+    }
+}
+
+impl View {
+    async fn transform(&mut self, input: InputEnvelope) -> Result<Vec<OutputEnvelope>> {
+        // The runtime accepts only its input port.
+        anyhow::ensure!(
+            input.port.as_str() == transformer::INPUT_PORT,
+            "invalid transformer input"
+        );
+        let changes = GraphChangeCodec::decode_changes(&input.envelope)?;
+        let operation = self.state.transaction();
+        let output = state::transform(&operation, &changes, &*self.mapper).await?;
+        let next = self.sequence + 1;
+        let envelope = logic::project(&input.envelope, &output, &self.stream, next)?;
+        operation.commit();
+        self.progress = input.envelope.system().sequence();
+        let Some(envelope) = envelope else {
+            return Ok(Vec::new());
+        };
+        {
+            let mut published = self
+                .published
+                .write()
+                .map_err(|_| anyhow::anyhow!("snapshot poisoned"))?;
+            transformer::apply_operations(&mut published.rows, envelope.changes().operations())?;
+            published.sequence = next;
+        }
+        self.sequence = next;
+        Ok(vec![OutputEnvelope::new(
+            PortId::try_new(transformer::OUTPUT_PORT)?,
+            envelope,
+        )])
+    }
+}
+
 fn create(configuration: Value) -> Result<View> {
-    View::new(
-        ViewFactory
-            .metadata()
-            .descriptor(ComponentId::try_new(VIEW_ID)?)?,
-        configuration,
-        Some(&Scope {
-            instance_id: "instance".into(),
-            graph_id: "graph".into(),
-            generation: 1,
-        }),
-    )
+    let configuration = Configuration::parse(&configuration)?;
+    Ok(View {
+        state: MemoryState::default(),
+        mapper: Box::new(configuration.mapper()?),
+        stream: configuration.stream,
+        sequence: 0,
+        progress: 0,
+        published: Arc::default(),
+    })
 }
 
 async fn start(configuration: Value) -> Result<View> {
-    let mut view = create(configuration)?;
-    view.start(&mut lifecycle_ctx::start()).await?;
-    Ok(view)
+    create(configuration)
 }
 
 fn node(source: &str, id: &str, label: &str, time: u64, properties: Value) -> Element {
@@ -111,29 +191,22 @@ fn input(changes: &[SourceChange], sequence: u64) -> Result<InputEnvelope> {
 }
 
 async fn emit(view: &mut View, changes: &[SourceChange]) -> Result<Vec<SourceChange>> {
-    let input = input(changes, view.sequence + 1)?;
+    let input = input(changes, view.progress + 1)?;
     let mut outputs = view.transform(input).await?;
-    assert_eq!(outputs.len(), 1);
-    let output = outputs.pop().context("missing output")?;
+    assert!(outputs.len() <= 1);
+    let Some(output) = outputs.pop() else {
+        return Ok(Vec::new());
+    };
     assert_eq!(output.port.as_str(), "out");
-    let progress =
-        GraphProducerProgress::from_envelope(&output.envelope)?.context("missing view progress")?;
-    assert!(!progress.identity().persistent());
-    assert_eq!(progress.sequence(), output.envelope.system().sequence());
-    assert_eq!(progress.identity().component_id().as_str(), VIEW_ID);
+    assert_eq!(output.envelope.system().sequence(), view.sequence);
     GraphChangeCodec::decode_changes(&output.envelope).map_err(Into::into)
 }
 
-fn reader(view: &View) -> Result<Arc<dyn SnapshotProvider>> {
-    view.output_readers()
-        .ports()
-        .get(&PortId::try_new("out")?)
-        .and_then(|readers| readers.snapshot())
-        .cloned()
-        .context("missing snapshot reader")
+fn reader(view: &View) -> Result<Reader> {
+    Ok(Reader(view.published.clone()))
 }
 
-fn rows(snapshot: &OutputSnapshot) -> Result<HashMap<ElementReference, Element>> {
+fn rows(snapshot: &Snapshot) -> Result<HashMap<ElementReference, Element>> {
     snapshot
         .records()
         .values()
@@ -152,7 +225,9 @@ async fn assert_rows(view: &View, expected: &[Element]) -> Result<()> {
         .map(|element| (element.get_reference().clone(), element))
         .collect::<HashMap<_, _>>();
     assert_eq!(rows(&snapshot)?, expected);
-    assert_eq!(snapshot.cursor().sequence(), view.sequence);
+    assert_eq!(snapshot.cursor(), view.sequence);
+    // The view's durable record of its outputs matches what it published.
+    assert_eq!(state::committed_outputs(&view.state)?, expected);
     Ok(())
 }
 
@@ -935,7 +1010,9 @@ async fn batch_maps_final_images_once_and_empty_changes_still_advance_progress()
     assert_eq!(view.sequence, 1);
     assert!(emit(&mut view, &[]).await?.is_empty());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(view.sequence, 2);
+    // An unchanged view advances its input progress, not its output sequence.
+    assert_eq!(view.sequence, 1);
+    assert_eq!(view.progress, 2);
     assert_rows(
         &view,
         &[
@@ -947,67 +1024,8 @@ async fn batch_maps_final_images_once_and_empty_changes_still_advance_progress()
 }
 
 #[tokio::test]
-async fn lifecycle_retains_same_instance_state_but_never_claims_reconstruction_recovery(
-) -> Result<()> {
-    let mut view = create(identity_configuration())?;
-    let snapshot_reader = reader(&view)?;
-    assert!(matches!(
-        snapshot_reader.snapshot().await,
-        Err(OutputReadError::NotReady(_))
-    ));
-    assert!(view.transform(input(&[], 1)?).await.is_err());
-    view.start(&mut lifecycle_ctx::start()).await?;
-    let expected = row("input", 1, json!({"value": 7}));
-    emit(
-        &mut view,
-        &[SourceChange::Insert {
-            element: expected.clone(),
-        }],
-    )
-    .await?;
-    let before = snapshot_reader.snapshot().await?;
-    assert_eq!(before.cursor().producer().construction_scope(), "instance");
-    assert_eq!(before.cursor().producer().graph_id(), "graph");
-    assert!(!before.cursor().producer().persistent());
-    assert!(view.dispose(&lifecycle_ctx::erase()).await.is_err());
-    view.stop(&lifecycle_ctx::stop()).await?;
-    assert!(matches!(
-        snapshot_reader.snapshot().await,
-        Err(OutputReadError::NotReady(_))
-    ));
-    assert!(view.transform(input(&[], 2)?).await.is_err());
-    view.start(&mut lifecycle_ctx::start()).await?;
-    assert_eq!(before.cursor(), snapshot_reader.snapshot().await?.cursor());
-    assert_rows(&view, &[expected]).await?;
-    let fresh = start(identity_configuration()).await?;
-    assert_rows(&fresh, &[]).await?;
-    assert_ne!(
-        before.cursor().epoch(),
-        reader(&fresh)?.snapshot().await?.cursor().epoch()
-    );
-    view.stop(&lifecycle_ctx::stop()).await?;
-    view.dispose(&lifecycle_ctx::erase()).await?;
-    view.dispose(&lifecycle_ctx::erase()).await?;
-    assert!(view.start(&mut lifecycle_ctx::start()).await.is_err());
-    assert!(matches!(
-        snapshot_reader.snapshot().await,
-        Err(OutputReadError::Retired)
-    ));
-    let fresh_reader = reader(&fresh)?;
-    drop(fresh);
-    assert!(matches!(
-        fresh_reader.snapshot().await,
-        Err(OutputReadError::Retired)
-    ));
-    assert_eq!(rows(&before)?.len(), 1);
-    Ok(())
-}
-
-#[tokio::test]
-async fn provenance_and_configuration_remain_unchanged_while_output_owns_volatile_progress(
-) -> Result<()> {
-    let configuration = key_configuration();
-    let mut view = start(configuration.clone()).await?;
+async fn output_keeps_input_provenance_and_numbers_its_own_changes() -> Result<()> {
+    let mut view = start(key_configuration()).await?;
     let mut incoming = input(
         &[SourceChange::Insert {
             element: row("input", 1, json!({"key": "projected", "value": 3})),
@@ -1033,29 +1051,15 @@ async fn provenance_and_configuration_remain_unchanged_while_output_owns_volatil
         .annotations()
         .entries()
         .any(|entry| entry.key() == "test.provenance"));
-    assert_eq!(view.configuration()?, configuration);
     Ok(())
 }
 
 #[tokio::test]
-async fn unknown_ports_controls_and_excessive_lineage_do_not_publish_state() -> Result<()> {
+async fn unknown_ports_and_excessive_lineage_do_not_publish_state() -> Result<()> {
     let mut view = start(identity_configuration()).await?;
     let mut unknown = input(&[], 1)?;
     unknown.port = PortId::try_new("unknown")?;
     assert!(view.transform(unknown).await.is_err());
-    let control = GraphChangeCodec::encode_futures_due(
-        StreamId::try_new("source/out")?,
-        1,
-        DateTime::<Utc>::UNIX_EPOCH,
-    )?;
-    assert!(view
-        .transform(InputEnvelope {
-            execution_context: Default::default(),
-            port: PortId::try_new("in")?,
-            envelope: control
-        })
-        .await
-        .is_err());
     let changes = vec![SourceChange::Insert {
         element: row("input", 1, json!({})),
     }];
@@ -1074,26 +1078,22 @@ async fn unknown_ports_controls_and_excessive_lineage_do_not_publish_state() -> 
 }
 
 #[tokio::test]
-async fn metadata_and_factory_advertise_only_implemented_capabilities() -> Result<()> {
+async fn metadata_advertises_the_shared_stateful_transformer_runtime() -> Result<()> {
     let metadata = ViewFactory.metadata();
-    assert_eq!(
-        metadata.capabilities.output_progress,
-        Some(OutputProgress::Origin)
-    );
-    assert_eq!(
-        metadata.capabilities.output_snapshots,
-        vec![PortId::try_new("out")?]
-    );
+    let input = PortId::try_new("in")?;
+    let output = PortId::try_new("out")?;
+    assert!(metadata.capabilities.durable_output);
+    assert!(metadata.capabilities.indexed_processing);
     assert!(metadata.capabilities.erases_owned_state);
     assert!(!metadata.capabilities.transactional);
-    assert!(!metadata.capabilities.durable_output);
-    assert!(!metadata.capabilities.indexed_processing);
-    assert!(metadata.capabilities.output_replays.is_empty());
-    assert!(metadata.capabilities.output_follows.is_empty());
-    assert!(metadata.capabilities.snapshot_inputs.is_empty());
-    assert!(metadata.capabilities.quiescent_bootstrap.is_none());
-    assert!(metadata.capabilities.durable_bootstrap.is_none());
-    assert!(!metadata.capabilities.wakeups);
+    assert_eq!(metadata.capabilities.output_snapshots, vec![output.clone()]);
+    assert_eq!(metadata.capabilities.output_follows, vec![output.clone()]);
+    assert_eq!(metadata.capabilities.output_replays, vec![output]);
+    assert_eq!(
+        metadata.capabilities.committed_input_progress,
+        Some(input.clone())
+    );
+    assert_eq!(metadata.capabilities.durable_bootstrap, Some(input));
     let request = CreateRequest {
         id: ComponentId::try_new("7425fe17-d02b-47dc-9d8a-5de525b4b1f1")?,
         implementation: metadata.implementation.clone(),
@@ -1104,25 +1104,12 @@ async fn metadata_and_factory_advertise_only_implemented_capabilities() -> Resul
         activation_credentials_bound: false,
         update_directive: None,
     };
-    let created = ViewFactory.create(
-        &request,
-        ControlSender::default(),
-        drasi_computation_plugin_sdk::ServiceBindings::none(),
-    )?;
-    let Component::Transformer(mut transformer) = created.component else {
-        anyhow::bail!("view factory returned a different role")
+    let Err(error) =
+        ViewFactory.create(&request, ControlSender::default(), ServiceBindings::none())
+    else {
+        anyhow::bail!("a view without host-owned processing must not be created");
     };
-    assert_eq!(transformer.configuration()?, request.configuration);
-    let readers = transformer.output_readers();
-    readers.validate(transformer.descriptor())?;
-    assert!(readers.ports()[&PortId::try_new("out")?].replay().is_none());
-    assert!(
-        transformer.durable_output().is_none(),
-        "a view without durable output has no delivery handler"
-    );
-    transformer.start(&mut lifecycle_ctx::start()).await?;
-    transformer.stop(&lifecycle_ctx::stop()).await?;
-    transformer.dispose(&lifecycle_ctx::erase()).await?;
+    assert!(format!("{error:#}").contains("host-owned processing"));
     let exported = ExportedPlugin::new(crate::plugin()?)?;
     assert!(!exported.metadata().is_null());
     Ok(())
@@ -1301,43 +1288,4 @@ async fn mapping_failure_rolls_back_all_staged_inputs_and_output_associations() 
         .await
         .is_err());
     assert_rows(&view, &[]).await
-}
-
-#[allow(dead_code)]
-pub(crate) mod lifecycle_ctx {
-    use drasi_computation_plugin_sdk::lifecycle::{
-        ApplyContext, CancellationToken, DisposeContext, DisposeReason, InitializeContext,
-        OperationScope, PauseContext, ResumeContext, StartContext, StateIntent, StopContext,
-        StopMode, UpdateBoundary,
-    };
-
-    pub(crate) fn scope() -> OperationScope {
-        OperationScope::new("test", "component", 1, None, CancellationToken::new())
-    }
-    pub(crate) fn initialize() -> InitializeContext {
-        InitializeContext::new(scope())
-    }
-    pub(crate) fn start() -> StartContext {
-        StartContext::new(scope(), None)
-    }
-    pub(crate) fn pause() -> PauseContext {
-        PauseContext::new(scope())
-    }
-    pub(crate) fn resume() -> ResumeContext {
-        ResumeContext::new(scope())
-    }
-    pub(crate) fn stop() -> StopContext {
-        StopContext::new(scope(), StopMode::Drain)
-    }
-    pub(crate) fn dispose() -> DisposeContext {
-        DisposeContext::new(scope(), DisposeReason::Shutdown, StateIntent::Preserve, 1)
-            .expect("valid dispose context")
-    }
-    pub(crate) fn erase() -> DisposeContext {
-        DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
-            .expect("valid dispose context")
-    }
-    pub(crate) fn apply(boundary: UpdateBoundary) -> ApplyContext {
-        ApplyContext::new(scope(), boundary)
-    }
 }

@@ -363,6 +363,141 @@ fn port() -> Result<u16> {
     Ok(TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn standalone_source_reads_pin_the_sqlite_view_without_a_subscriber() -> Result<()> {
+    use drasi_core::models::{Element, ElementValue, SourceChange};
+
+    async fn ids(mut read: CurrentStateRead) -> Result<Vec<i64>> {
+        anyhow::ensure!(
+            read.cursor().is_none(),
+            "a datastore read has no live output cursor"
+        );
+        let mut ids = Vec::new();
+        while let Some(batch) = read.next_batch().await? {
+            anyhow::ensure!(
+                batch.changes().operations().len() <= 2 && batch.changes().is_append_only()
+            );
+            for change in GraphChangeCodec::decode_changes(&batch)? {
+                let SourceChange::Insert {
+                    element: Element::Node { properties, .. },
+                } = change
+                else {
+                    anyhow::bail!("expected a full SQLite row")
+                };
+                let Some(ElementValue::Integer(id)) = properties.get("id") else {
+                    anyhow::bail!("snapshot missed the row id")
+                };
+                ids.push(*id);
+            }
+        }
+        anyhow::ensure!(
+            read.into_follow().is_err(),
+            "a one-shot read cannot follow live changes"
+        );
+        ids.sort_unstable();
+        Ok(ids)
+    }
+
+    for dynamic in [false, true] {
+        let plugins = plugins(dynamic)?;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("independent.db");
+        rusqlite::Connection::open(&path)?.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE items(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO items VALUES (1,'one'),(2,'two'),(3,'three'),(4,'four'),(5,'five');",
+        )?;
+        let port = port()?;
+        let source = plugins
+            .source
+            .factories()
+            .iter()
+            .find(|f| {
+                f.metadata().implementation.name.as_ref()
+                    == drasi_computation_source_sqlite::SQLITE_CHANGES
+            })
+            .context("SQLite changes factory")?
+            .clone();
+        let factory = plugins
+            .bootstrap
+            .bootstrap_factories()
+            .iter()
+            .find(|f| f.metadata().implementation.name.as_ref() == "drasi.sqlite/file-bootstrap")
+            .context("SQLite file snapshot factory")?
+            .clone();
+        let provider = Arc::new(computation::NativeBootstrapNodeFactory::new(factory));
+        let seed_edge = EdgeDefinition::new(
+            endpoint("provider", "snapshot"),
+            endpoint("source", "bootstrap"),
+        );
+        let batch = ComponentBatch::builder()
+            .component(ComponentName::try_new("source")?, source.specification(id("source"), flat(&settings(&path), Some(port), false))?, source)
+            .component(ComponentName::try_new("provider")?, provider.specification_from_config(id("provider"), json!({"path":path,"tables":["items"],"outputCapacity":1,"maxDurationMs":10000}))?, provider)
+            .connect(seed_edge.clone(), Box::new(BoundedPipeConfig { capacity: 1 }))
+            .bind_stream(endpoint("source", "out"), StreamId::try_new("sqlite/out")?)
+            .build()?;
+        let core = DrasiLib::builder()
+            .with_id(INSTANCE)
+            .with_allow_external_component_ids(true)
+            .with_components(batch)
+            .build()
+            .await?;
+        let result = tokio::time::timeout(DEADLINE, async {
+            core.start().await?;
+            for component in ["source", "provider"] {
+                core.component_by_id(&id(component))?.wait_started().await?;
+            }
+            let catalogue = core.output_catalogue()?;
+            let output = OutputEndpoint::new(id("source"), PortId::try_new("out")?);
+            let handle = catalogue.resolve(&output)?;
+            anyhow::ensure!(catalogue.describe(&output)?.current_state == Provision::Provided);
+            let options = |transfer| CurrentStateOptions {
+                transfer,
+                batches: SnapshotBatchLimits {
+                    max_records: size(2),
+                    ..Default::default()
+                },
+            };
+            let stream = options(StateTransfer::Stream);
+            let file = options(StateTransfer::TemporaryFile {
+                max_file_bytes: millis(1 << 20),
+            });
+            let mut stalled = handle.current_state(stream).await?;
+            let before = handle.current_state(stream).await?;
+            let sealed = handle.current_state(file).await?;
+            let client = reqwest::Client::builder().timeout(DEADLINE).build()?;
+            client
+                .post(format!("http://127.0.0.1:{port}/api/tables/items"))
+                .json(&json!({"id":6,"value":"live"}))
+                .send()
+                .await?
+                .error_for_status()?;
+            assert_eq!(ids(before).await?, [1, 2, 3, 4, 5]);
+            assert_eq!(ids(sealed).await?, [1, 2, 3, 4, 5]);
+            assert_eq!(
+                ids(handle.current_state(stream).await?).await?,
+                [1, 2, 3, 4, 5, 6]
+            );
+            let observed = core.computation_control()?.observed();
+            assert_eq!(
+                observed.relationships.keys().collect::<Vec<_>>(),
+                [&seed_edge]
+            );
+            core.component_by_id(&id("provider"))?.stop().await?;
+            assert!(matches!(
+                stalled.next_batch().await,
+                Err(OutputReadError::Retired)
+            ));
+            Ok::<_, anyhow::Error>(())
+        })
+        .await;
+        let cleanup = core.shutdown().await;
+        result??;
+        cleanup?;
+    }
+    Ok(())
+}
+
 async fn memory_file_bootstrap_and_rest() -> Result<()> {
     for dynamic in [false, true] {
         let plugins = plugins(dynamic)?;
@@ -764,6 +899,7 @@ async fn transaction_graph(
     let mut results = Vec::new();
     let mut handled = Vec::new();
     for (name, owner) in names.iter().zip(&owners) {
+        let live = EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in"));
         let provider: Arc<dyn ComputationIndexProvider> =
             Arc::new(RocksDbComputationProvider::new(
                 indexes.join(name),
@@ -823,10 +959,8 @@ async fn transaction_graph(
                 endpoint(name, "out"),
                 StreamId::try_new(format!("{name}/out"))?,
             )
-            .connect(
-                EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in")),
-                Box::new(BoundedPipeConfig { capacity: 8 }),
-            )
+            .connect(live.clone(), Box::new(BoundedPipeConfig { capacity: 8 }))
+            .relationship_policy(live, RelationshipPolicy::live_only())
             .connect(
                 EdgeDefinition::new(endpoint(name, "out"), endpoint(&sink, "in")),
                 Box::new(BoundedPipeConfig { capacity: 8 }),

@@ -1,7 +1,7 @@
 # Native MySQL source: design
 
 `drasi-computation-source-mysql` streams MySQL row-based binary logs into a
-ComputationGraph. It is a native plugin (ABI 0.1) with seven factories, each at
+ComputationGraph. It is a native plugin (ABI 0.2) with seven factories, each at
 implementation and configuration version `1`. The replication engine lives in
 `drasi-mysql-common` (`native` feature): the owned MySQL protocol and
 authentication (`mysql_native_password`, `caching_sha2_password`), TLS

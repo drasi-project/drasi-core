@@ -21,12 +21,13 @@ mod crashes;
 mod shared;
 
 #[derive(Default)]
-struct CommitGate {
-    armed: AtomicBool,
-    entered: Notify,
-    release: Notify,
-    after: bool,
-    require_output: bool,
+pub(super) struct CommitGate {
+    pub(super) armed: AtomicBool,
+    pub(super) entered: Notify,
+    pub(super) release: Notify,
+    pub(super) after: bool,
+    pub(super) require_output: bool,
+    pub(super) checkpoint: Option<(drasi_core_types::CheckpointKey, u64)>,
 }
 
 struct HeldCommit {
@@ -44,10 +45,19 @@ impl SessionControl for HeldCommit {
         let output = !self.gate.require_output
             || self
                 .checkpoints
-                .read_checkpoint(&metadata_checkpoint("\0native-query:live-row-count:v1"))
+                .read_checkpoint(&metadata_checkpoint("\0transformer:live-row-count:v1"))
                 .await?
                 .is_some_and(|checkpoint| checkpoint.sequence > 0);
-        let hold = output && self.gate.armed.swap(false, Ordering::AcqRel);
+        let selected = match &self.gate.checkpoint {
+            Some((key, sequence)) if self.gate.armed.load(Ordering::Acquire) => self
+                .checkpoints
+                .read_checkpoint(key)
+                .await?
+                .is_some_and(|c| c.sequence == *sequence),
+            Some(_) => false,
+            None => true,
+        };
+        let hold = output && selected && self.gate.armed.swap(false, Ordering::AcqRel);
         if hold && !self.gate.after {
             self.gate.entered.notify_one();
             self.gate.release.notified().await;
@@ -71,13 +81,13 @@ struct Fixture {
     changed: [Arc<Notify>; 2],
 }
 
-fn codec() -> Result<EnvelopeCodec> {
+pub(super) fn codec() -> Result<EnvelopeCodec> {
     let mut codec = EnvelopeCodec::new(NonZeroUsize::new(1 << 20).expect("positive codec bound"));
     codec.register_schema(GraphChangeCodec::schema())?;
     Ok(codec)
 }
 
-fn held_indexes(
+pub(super) fn held_indexes(
     original: ComputationIndexes,
     gate: Option<Arc<CommitGate>>,
 ) -> Result<ComputationIndexes> {

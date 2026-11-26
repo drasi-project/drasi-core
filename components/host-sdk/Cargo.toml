@@ -111,6 +111,7 @@ prost = "0.14"
 prost-types = "0.14"
 tonic = "0.14"
 drasi-computation-transformer-query = { path = "../computation-plugins/transformers/query" }
+serde_yaml = "0.9"
 
 [[example]]
 name = "native_scheduling"

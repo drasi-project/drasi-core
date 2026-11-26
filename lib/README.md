@@ -91,7 +91,7 @@ Start with the guide for your task:
 | [Usage](docs/computation-graph-usage.md) | A runnable example, readiness, results and shutdown |
 | [Configuration](docs/computation-graph-configuration.md) | Exact settings, defaults, queue limits, source order and recovery choices |
 | [Middleware transformer](docs/computation-graph-middleware.md) | Reuse query middleware in graph-change pipelines without a query |
-| [Stateful view transformer](../components/computation-plugins/transformers/view/README.md) | Maintain memory-backed projected datasets, exact retractions and coherent output snapshots |
+| [Stateful view transformer](../components/computation-plugins/transformers/view/README.md) | Maintain projected datasets with exact retractions, on the shared stateful transformer runtime |
 | [Source-time merging](docs/computation-graph-time-merge.md) | Explicit ordering policies and versioned volatile/persistent reconstruction recipes |
 | [Native SDK services](../components/computation-plugin-sdk/README.md) | Borrowed transactional processing and optional persistent non-query scheduling |
 | [Transaction transformer](docs/computation-graph-transactions.md) | Run a linear transformer sequence with one commit and isolated per-step state |

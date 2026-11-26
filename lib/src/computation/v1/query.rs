@@ -245,6 +245,7 @@ pub struct ContinuousQueryTransformer {
     graph_bootstrap: bool,
     /// Provider supplied at construction for inputs without bootstrap edges.
     resource_bootstrap: Option<Arc<dyn ComputationBootstrapProvider>>,
+    local_seed: bool,
 }
 
 impl ContinuousQueryTransformer {
@@ -306,7 +307,10 @@ impl ContinuousQueryTransformer {
         let output_reader =
             super::query_output::QueryOutputProvider::new(&results, &definition.output_stream);
         let mut instance = Self {
-            snapshot_server: super::BootstrapSnapshotServer::new(output_reader.clone()),
+            snapshot_server: super::BootstrapSnapshotServer::new(
+                output_reader.clone(),
+                Some(output_reader.clone()),
+            ),
             output_reader,
             descriptor: definition.descriptor(),
             recovery_scope: Arc::from(definition.graph_id.as_str()),
@@ -359,6 +363,7 @@ impl ContinuousQueryTransformer {
             control: None,
             graph_bootstrap: false,
             resource_bootstrap: None,
+            local_seed: false,
         };
         if !defer_build {
             instance.build().await?;
@@ -512,6 +517,14 @@ impl ContinuousQueryTransformer {
                 self.definition.id
             )
         })?;
+        // Even a directly constructed persistent query (no external progress
+        // resource) must resume from its recovered, committed input positions.
+        if self.source_progress.is_none() && !self.provider.is_volatile() {
+            self.source_progress = Some(Arc::new(QuerySourceProgress::new(
+                self.definition.graph_id.as_str(),
+                self.definition.id.clone(),
+            )?));
+        }
         // Every producer is asked for only the labels this query reads.
         let edges = super::PipeBootstrapProvider::new_with_labels(
             self.definition.graph_id.as_str(),
@@ -541,7 +554,16 @@ impl ContinuousQueryTransformer {
         Ok(())
     }
 
+    /// Use one component-wide seed instead of asking the connected inputs for state.
     pub fn with_bootstrap(mut self, provider: Arc<dyn ComputationBootstrapProvider>) -> Self {
+        self.local_seed = true;
+        self.with_input_bootstrap_resource(provider)
+    }
+
+    fn with_input_bootstrap_resource(
+        mut self,
+        provider: Arc<dyn ComputationBootstrapProvider>,
+    ) -> Self {
         self.api_view.take();
         self.resource_bootstrap = Some(provider.clone());
         self.bootstrap = Some(provider);
@@ -1380,10 +1402,12 @@ impl ComputationComponent for ContinuousQueryTransformer {
 
     /// Outputs follow the durability its index provider declares.
     fn description(&self) -> crate::computation::v1::ComponentDescription {
-        indexed_description(
+        let mut description = indexed_description(
             self.descriptor(),
             index_provider_capabilities(self.provider.as_ref()).durability,
-        )
+        );
+        description.local_seed = self.local_seed;
+        description
     }
 
     #[cfg(feature = "test-support")]
@@ -2348,10 +2372,10 @@ impl ComponentFactory for ContinuousQueryFactory {
             durability,
         ))
     }
-    fn supports_query_reconstruction(&self) -> bool {
+    fn supports_state_reconstruction(&self) -> bool {
         self.constructor
             .as_ref()
-            .is_some_and(|constructor| constructor.supports_query_reconstruction())
+            .is_some_and(|constructor| constructor.supports_state_reconstruction())
     }
     fn descriptor(&self) -> &FactoryDescriptor {
         &self.descriptor
@@ -2575,7 +2599,9 @@ impl ComponentFactory for ContinuousQueryFactory {
         query.declaration = construction.declaration;
         query.scheduling = construction.scheduling;
         if let Some(bootstrap) = construction.bootstrap {
-            query = query.with_bootstrap(bootstrap);
+            // A compiled resource can supply only the legacy source inputs of
+            // a mixed query. Its native data edges retain their own policy.
+            query = query.with_input_bootstrap_resource(bootstrap);
         }
         if let Some(progress) = construction.source_progress {
             query = query

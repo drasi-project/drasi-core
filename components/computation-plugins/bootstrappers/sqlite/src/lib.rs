@@ -219,6 +219,7 @@ impl BootstrapFactory for FileBootstrapFactory {
             configuration_version: 1,
             configuration: file_definition().schema(),
             source_progress: false,
+            independent_state: true,
             pairing: None,
         }
     }

@@ -205,7 +205,7 @@ impl ContinuousQueryTransformer {
         self.publish_source_progress(false).await?;
         if let Some(provider) = self.bootstrap.clone() {
             let preparation = provider
-                .prepare_with_state(&QueryBootstrapState(self.query()?))
+                .prepare_with_state(&QueryBootstrapState::new(self.query()?))
                 .await;
             let preparation = match preparation {
                 Ok(preparation) => preparation,
@@ -288,7 +288,7 @@ impl ContinuousQueryTransformer {
         self.reset_for_bootstrap().await?;
         self.publish_source_progress(false).await?;
         if provider
-            .prepare_with_state(&QueryBootstrapState(self.query()?))
+            .prepare_with_state(&QueryBootstrapState::new(self.query()?))
             .await?
             != super::super::BootstrapPreparation::Ready
         {
@@ -313,6 +313,7 @@ impl ContinuousQueryTransformer {
         {
             return Err(super::super::OutputBindingError::ResetRequiresUnboundDestinations.into());
         }
+        self.bootstrap_ports.check_output_reset()?;
         if self.output_persistent {
             let expected = self.recovery_identity()?;
             let outbox = self
@@ -421,7 +422,7 @@ impl ContinuousQueryTransformer {
                 .await?;
         }
         let config = self.definition.configuration_bytes(&self.execution)?;
-        let bootstrap_state = QueryBootstrapState(query).read().await?;
+        let bootstrap_state = QueryBootstrapState::new(query).read().await?;
         query
             .resource_transaction(|| async {
                 crate::indexes::check_clear(
@@ -592,7 +593,7 @@ impl ContinuousQueryTransformer {
                         .await?;
                 }
                 let mut snapshot = provider
-                    .snapshot_with_state(&QueryBootstrapState(query))
+                    .open_snapshot(Arc::new(QueryBootstrapState::new(query)))
                     .await?;
                 validate_watermarks(&snapshot.watermarks, !self.provider.is_volatile())?;
                 let bootstrap_stream = StreamId::try_new(format!(

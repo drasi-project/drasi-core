@@ -112,16 +112,10 @@
 //!
 //! # Bootstrap on the graph
 //!
-//! Bootstrap data travels on dedicated bootstrap edges, between ports declared
-//! with [`PortKind::Bootstrap`], through ordinary point-to-point pipes. A
-//! bootstrap output connects only to a bootstrap input. [`ComponentRole::BootstrapProvider`]
-//! nodes declare only bootstrap outputs; a component consumes bootstrap data on
-//! at most one bootstrap input, and sinks serve no snapshots. A consumer's
-//! bootstrap input is connected either to the bootstrap outputs of producers
-//! whose data it consumes, or to exactly one local bootstrap provider, never
-//! both. A source has no data inputs, so its only bootstrap edge comes from a
-//! local provider. Bootstrap edges take part in dependency ordering and cycle
-//! checks and appear in snapshots and inspection like data edges.
+//! Connect data ports once. A binding that needs initial state owns a separate
+//! addressed reply lane for its subscriber; it is not a second desired edge.
+//! Only a component-local seed uses an explicit [`ComponentRole::BootstrapProvider`]
+//! attachment. A declared but unconnected port imposes no startup dependency.
 //!
 //! A consumer opens one session per bootstrap input edge by sending a
 //! [`BootstrapRequest`] upstream over the control plane
@@ -145,10 +139,10 @@
 //!   the consumer skips live changes its snapshot covers. Only a source's very
 //!   first start, with no saved position for any consumer, holds its live
 //!   stream until the first boundary ([`BootstrapRelay::hold_live`]).
-//! - [`BootstrapSnapshotServer`] serves a query's output snapshot on its
-//!   `snapshot` bootstrap output. Native transformers that publish output
-//!   snapshots expose the same port, so downstream queries bootstrap from an
-//!   upstream query over an edge.
+//! - The graph opens registered output readers on the actual data port and
+//!   distributes batches or retained changes independently of live processing.
+//!   Outside startup, [`OutputHandle::current_state`] reads a baseline without
+//!   subscribing; [`OutputHandle::current_state_and_follow`] also protects the suffix.
 //!
 //! # Routing and volatile boundaries
 //!
@@ -222,6 +216,7 @@ pub use super::instance::{ComputationCleanupError, ComputationInfo};
 pub use super::instance_ops::InstanceConfigurationSnapshot;
 
 mod bootstrap_ports;
+mod bootstrap_window;
 pub use bootstrap_ports::*;
 mod binary_codec;
 mod bounded_pipe;
@@ -308,6 +303,7 @@ pub use graph_bootstrap::*;
 mod output_bootstrap;
 pub use output_bootstrap::OutputBootstrapProvider;
 mod output_catalogue;
+mod state_transfer;
 pub use drasi_computation_contracts::{
     check_bootstrap_edge, relayed_completion, BootstrapAcceptance, BootstrapCompletionKind,
     BootstrapCoordination, BootstrapInputDescription, BootstrapOutputDescription,
@@ -321,13 +317,16 @@ pub use drasi_computation_contracts::{
     ProgressPersistence, ReplayAbility, ResourceCapabilities, ResourceDurability,
 };
 pub use drasi_computation_contracts::{
-    OutputCapability, OutputCursor, OutputEndpoint, OutputFollow, OutputFollowHub,
-    OutputFollowLimits, OutputPortReaders, OutputReadError, OutputReaders, OutputReplay,
-    OutputSnapshot, OutputSnapshotFollow, ReplayProvider, SnapshotFollowProvider, SnapshotProvider,
-    WeakOutputPortReaders, WeakOutputReaders,
+    IndependentStateProvider, OutputCapability, OutputCursor, OutputEndpoint, OutputFollow,
+    OutputFollowHub, OutputFollowLimits, OutputPortReaders, OutputReadError, OutputReaders,
+    OutputReplay, OutputSnapshot, OutputSnapshotFollow, ReplayProvider, SnapshotFollowProvider,
+    SnapshotProvider, StateProjector, StateScan, WeakOutputPortReaders, WeakOutputReaders,
 };
 use drasi_query_common::query_output;
 pub use output_catalogue::*;
+pub use state_transfer::{
+    CurrentStateOptions, SnapshotBatchLimits, SnapshotBatches, StateTransfer,
+};
 mod inspection;
 pub use inspection::*;
 mod inventory;

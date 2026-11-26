@@ -426,6 +426,12 @@ impl NativeProcessingContext {
             .await
     }
 
+    /// Start rebuilding evaluator indexes in this output transaction. Leave
+    /// committed rows, output history, delivery obligations and input cuts intact.
+    pub async fn rebuild_evaluator(&self) -> Result<(), IndexError> {
+        self.call(request::REBUILD_EVALUATOR, &()).await
+    }
+
     /// Keep the query's logical high-water mark while replacing its projection.
     /// Requires a successful bootstrap-preserving reset in this same operation.
     pub async fn initialize_reset_output(&self, sequence: u64) -> Result<(), IndexError> {

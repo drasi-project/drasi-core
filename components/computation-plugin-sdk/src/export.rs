@@ -1507,17 +1507,18 @@ unsafe extern "C" fn create_component(
                 "native input-binding handler does not match its declared capability"
             );
             if let Ok(transformer) = component.transformer_mut() {
-                let bootstrap = match transformer.bootstrap_input() {
-                    None => (false, false),
-                    Some(crate::BootstrapInput::Quiescent(_)) => (true, false),
-                    Some(crate::BootstrapInput::Durable(_)) => (false, true),
-                };
+                use drasi_computation_contracts::BootstrapAcceptance;
+                let bootstrap = transformer.bootstrap_input().map(|input| match input {
+                    crate::BootstrapInput::Quiescent(_) => BootstrapAcceptance::Quiescent,
+                    crate::BootstrapInput::Bounded(_) => BootstrapAcceptance::Bounded,
+                    crate::BootstrapInput::Durable(_) => BootstrapAcceptance::Durable,
+                });
                 anyhow::ensure!(
                     bootstrap
-                        == (
-                            metadata.capabilities.quiescent_bootstrap.is_some(),
-                            metadata.capabilities.durable_bootstrap.is_some()
-                        ),
+                        == metadata
+                            .capabilities
+                            .bootstrap_input()
+                            .map(|(profile, _)| profile),
                     "native bootstrap handler does not match its declared bootstrap input"
                 );
                 anyhow::ensure!(
@@ -1606,6 +1607,10 @@ unsafe extern "C" fn create_component(
                 metadata: InstanceMetadata {
                     descriptor: metadata.descriptor(request.id.clone())?,
                     capabilities: metadata.capabilities.clone(),
+                    state_reads: output_reads
+                        .as_ref()
+                        .map(|reads| reads.state_reads(metadata))
+                        .unwrap_or_default(),
                     queries: Default::default(),
                 },
                 component: tokio::sync::Mutex::new(component),
@@ -2016,11 +2021,9 @@ fn start_contextual_operation(
         TRANSACT => c.transactional,
         APPLY => c.management,
         BIND_INPUTS => c.input_binding_updates,
-        BOOTSTRAP_INPUT | BOOTSTRAP_COMPLETE => {
-            c.quiescent_bootstrap.is_some() || c.durable_bootstrap.is_some()
-        }
+        BOOTSTRAP_INPUT | BOOTSTRAP_COMPLETE => c.provider_bootstrap().is_some(),
         BOOTSTRAP_STATUS => c.durable_bootstrap.is_some() || c.bootstrap_optional,
-        BOOTSTRAP_RESET => c.durable_bootstrap.is_some(),
+        BOOTSTRAP_RESET | BOOTSTRAP_REBUILD => c.durable_bootstrap.is_some(),
         DELIVERY_RESUME => c.durable_output,
         _ => false,
     };
@@ -2075,7 +2078,10 @@ fn start_contextual_operation(
         if let Some(schema) = &instance.source_schema {
             schema.deactivate();
         }
-        if let Some(reads) = &instance.output_reads {
+        // A paused component keeps its committed output, so its snapshot and
+        // follow leases stay open across the pause; the graph keeps its read
+        // epoch too.
+        if let Some(reads) = instance.output_reads.as_ref().filter(|_| code != PAUSE) {
             if permanent {
                 reads.retire();
             } else {
@@ -2297,6 +2303,7 @@ async fn execute_payload(
             | BOOTSTRAP_COMPLETE
             | BOOTSTRAP_STATUS
             | BOOTSTRAP_RESET
+            | BOOTSTRAP_REBUILD
             | TRANSACT
     ) {
         anyhow::ensure!(
@@ -2347,7 +2354,11 @@ async fn execute_payload(
                 .as_ref()
                 .and_then(|context| context.fresh_start);
             let mut context = crate::lifecycle::StartContext::new(scope.clone(), credentials)
-                .with_fresh_start(fresh_start);
+                .with_fresh_start(fresh_start)
+                .with_unconnected_inputs(
+                    call.context.as_ref().is_some_and(|c| c.unconnected_inputs),
+                )
+                .with_state_subscribers(call.context.as_ref().is_some_and(|c| c.state_subscribers));
             // Workers of an earlier activation were joined by its STOP.
             instance.damaged.clear_worker_failure();
             let started = run_hook(&scope, component.base_mut().start(&mut context)).await;
@@ -2365,8 +2376,7 @@ async fn execute_payload(
             } else {
                 started?;
             }
-            let bootstrapping = instance.factory.capabilities.quiescent_bootstrap.is_some()
-                || instance.factory.capabilities.durable_bootstrap.is_some();
+            let bootstrapping = instance.factory.capabilities.provider_bootstrap().is_some();
             if let Some(progress) = &instance.progress {
                 anyhow::ensure!(
                     Some(source_recovery(&component, progress)?) == instance.recovery,
@@ -2470,7 +2480,7 @@ async fn execute_payload(
                 schema.activate()?;
             }
             if let Some(reads) = &instance.output_reads {
-                reads.activate()?;
+                reads.resume()?;
             }
             instance.administration.activate_independent()?;
             instance.administration.state()?.processing = Processing::Running;
@@ -2499,13 +2509,7 @@ async fn execute_payload(
             );
             let input = wire::decode::<wire::Envelope>(input)?.into_input(&instance.codec)?;
             anyhow::ensure!(
-                instance
-                    .factory
-                    .capabilities
-                    .quiescent_bootstrap
-                    .as_ref()
-                    .or(instance.factory.capabilities.durable_bootstrap.as_ref())
-                    == Some(&input.port),
+                instance.factory.capabilities.provider_bootstrap() == Some(&input.port),
                 "bootstrap envelope targets an undeclared initialization input"
             );
             wire::check_port(
@@ -2521,7 +2525,7 @@ async fn execute_payload(
                 instance.bootstrapping.load(Ordering::Acquire),
                 "native transformer is not awaiting bootstrap completion"
             );
-            let completion = if instance.factory.capabilities.durable_bootstrap.is_some() {
+            let completion = if instance.factory.capabilities.quiescent_bootstrap.is_none() {
                 drasi_computation_contracts::BootstrapCompletion::try_from(wire::decode::<
                     crate::bootstrap::Completed,
                 >(
@@ -2550,6 +2554,16 @@ async fn execute_payload(
             );
             return wire::encode(&bootstrap_input(&mut component)?.bootstrap_status()?);
         }
+        BOOTSTRAP_REBUILD => {
+            anyhow::ensure!(
+                instance.bootstrapping.load(Ordering::Acquire),
+                "native transformer is not initializing"
+            );
+            let crate::BootstrapInput::Durable(handler) = bootstrap_input(&mut component)? else {
+                anyhow::bail!("a rebuild requires a durable bootstrap input");
+            };
+            return wire::encode(&handler.begin_rebuild(wire::decode(input)?)?);
+        }
         BOOTSTRAP_RESET => {
             anyhow::ensure!(
                 input.is_empty() && instance.bootstrapping.load(Ordering::Acquire),
@@ -2557,8 +2571,8 @@ async fn execute_payload(
             );
             match bootstrap_input(&mut component)? {
                 crate::BootstrapInput::Durable(input) => input.reset_bootstrap().await?,
-                crate::BootstrapInput::Quiescent(_) => {
-                    anyhow::bail!("a quiescent bootstrap input cannot be reset")
+                crate::BootstrapInput::Quiescent(_) | crate::BootstrapInput::Bounded(_) => {
+                    anyhow::bail!("a volatile bootstrap input cannot be reset in-place")
                 }
             }
         }
@@ -2850,6 +2864,7 @@ mod definition_tests {
                 configuration_version: 1,
                 configuration: crate::ConfigSchema::default(),
                 source_progress: false,
+                independent_state: false,
                 pairing: None,
             }
         }

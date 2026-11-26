@@ -60,6 +60,7 @@ mod tests {
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
             inputs: vec![QueryInputConfig {
+                enable_bootstrap: None,
                 component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
                 nodes: vec!["A".into()],
                 relations: vec![],
@@ -227,6 +228,8 @@ mod tests {
         let mut b = base();
         b.enable_bootstrap = !b.enable_bootstrap;
         assert_eq!(compute_config_hash(&a), compute_config_hash(&b));
+        b.inputs[0].enable_bootstrap = Some(false);
+        assert_eq!(compute_config_hash(&a), compute_config_hash(&b));
     }
 
     #[test]
@@ -270,6 +273,7 @@ mod tests {
         let mut a = base();
         a.inputs = vec![
             QueryInputConfig {
+                enable_bootstrap: None,
                 component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
                 nodes: vec!["A".into()],
                 relations: vec![],
@@ -277,6 +281,7 @@ mod tests {
                 port: None,
             },
             QueryInputConfig {
+                enable_bootstrap: None,
                 component: ComponentReference::by_id(ComponentId::try_new(SOURCE_2).unwrap()),
                 nodes: vec!["B".into()],
                 relations: vec![],
@@ -288,6 +293,7 @@ mod tests {
         let mut b = base();
         b.inputs = vec![
             QueryInputConfig {
+                enable_bootstrap: None,
                 component: ComponentReference::by_id(ComponentId::try_new(SOURCE_2).unwrap()),
                 nodes: vec!["B".into()],
                 relations: vec![],
@@ -295,6 +301,7 @@ mod tests {
                 port: None,
             },
             QueryInputConfig {
+                enable_bootstrap: None,
                 component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
                 nodes: vec!["A".into()],
                 relations: vec![],

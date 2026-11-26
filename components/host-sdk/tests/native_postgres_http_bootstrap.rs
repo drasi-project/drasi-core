@@ -39,6 +39,7 @@ fn id(value: &str) -> ComponentId {
         "output" => 2,
         "price-feed" => 3,
         "stocks" => 4,
+        "snapshot" => 5,
         other => panic!("missing fixture component ID for {other}"),
     };
     ComponentId::try_new(format!("00000000-0000-0000-0000-{number:012x}")).expect("test ID")
@@ -114,6 +115,30 @@ impl Database {
             .parse()?;
         Ok(database)
     }
+    async fn wait_ready(&self) -> Result<()> {
+        tokio::time::timeout(TIMEOUT, async {
+            while !Command::new("podman")
+                .args([
+                    "exec",
+                    &self.container,
+                    "pg_isready",
+                    "-h",
+                    "127.0.0.1",
+                    "-U",
+                    "postgres",
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()?
+                .success()
+            {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Result::<()>::Ok(())
+        })
+        .await?
+    }
+
     fn sql(&self, sql: &str) -> Result<String> {
         let mut child = Command::new("podman")
             .args([
@@ -241,6 +266,18 @@ fn plugins(dynamic: bool) -> Result<Vec<Arc<NativePlugin>>> {
         .map(NativePlugin::from_definition)
         .collect();
     }
+    [
+        "source_postgres",
+        "bootstrap_postgres",
+        "source_http",
+        "bootstrap_http",
+    ]
+    .into_iter()
+    .map(load_plugin)
+    .collect()
+}
+
+fn load_plugin(name: &str) -> Result<Arc<NativePlugin>> {
     let directory = match std::env::var_os("DRASI_NATIVE_PLUGIN_DIR") {
         Some(path) => PathBuf::from(path),
         None => std::env::current_exe()?
@@ -250,46 +287,16 @@ fn plugins(dynamic: bool) -> Result<Vec<Arc<NativePlugin>>> {
             .context("native library directory")?
             .join("plugins"),
     };
-    [
-        "source_postgres",
-        "bootstrap_postgres",
-        "source_http",
-        "bootstrap_http",
-    ]
-    .into_iter()
-    .map(|name| {
-        computation::load(directory.join(format!(
-            "{}drasi_computation_{name}{}",
-            std::env::consts::DLL_PREFIX,
-            std::env::consts::DLL_SUFFIX,
-        )))
-    })
-    .collect()
+    computation::load(directory.join(format!(
+        "{}drasi_computation_{name}{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX,
+    )))
 }
 
 async fn exercise(dynamic: bool) -> Result<()> {
     let mut database = Database::new()?;
-    tokio::time::timeout(TIMEOUT, async {
-        while !Command::new("podman")
-            .args([
-                "exec",
-                &database.container,
-                "pg_isready",
-                "-h",
-                "127.0.0.1",
-                "-U",
-                "postgres",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?
-            .success()
-        {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        Result::<()>::Ok(())
-    })
-    .await??;
+    database.wait_ready().await?;
     database.sql(
         "CREATE TABLE stocks(id INTEGER PRIMARY KEY,symbol TEXT,name TEXT);
         INSERT INTO stocks VALUES(1,'AAPL','before'); ALTER TABLE stocks REPLICA IDENTITY FULL;
@@ -533,4 +540,197 @@ async fn postgres_http_composition_multi_thread_static_and_dynamic() -> Result<(
         exercise(dynamic).await?;
     }
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Podman and the rebuilt native PostgreSQL bootstrap library"]
+async fn standalone_postgres_reads_pin_rows_without_replication_or_a_subscriber() -> Result<()> {
+    // No live driver or progress owner: the only way to read this port is
+    // through its explicitly attached PostgreSQL provider.
+    struct TablePort(ComponentDescriptor);
+    #[async_trait]
+    impl ComputationComponent for TablePort {
+        fn descriptor(&self) -> &ComponentDescriptor {
+            &self.0
+        }
+        fn description(&self) -> ComponentDescription {
+            ComponentDescription::undeclared().with_bootstrap_ports(
+                &self.0,
+                BootstrapInputDescription::SOURCE_RELAY,
+                BootstrapOutputDescription::RELAYED,
+            )
+        }
+        drasi_lib::passive_component_lifecycle!();
+    }
+    #[async_trait]
+    impl EnvelopeSource for TablePort {
+        async fn next(&mut self) -> Result<Option<OutputEnvelope>> {
+            std::future::pending().await
+        }
+    }
+    async fn values(mut read: CurrentStateRead) -> Result<BTreeMap<i64, i64>> {
+        use drasi_core::models::{ElementValue, SourceChange};
+        assert!(read.cursor().is_none());
+        let mut rows = BTreeMap::new();
+        while let Some(batch) = read.next_batch().await? {
+            for change in GraphChangeCodec::decode_changes(&batch)? {
+                let SourceChange::Insert { element } = change else {
+                    anyhow::bail!("expected an ordinary row addition");
+                };
+                assert_eq!(
+                    element.get_reference().namespace.as_ref(),
+                    id("stocks").as_str()
+                );
+                let properties = element.get_properties();
+                let (Some(ElementValue::Integer(key)), Some(ElementValue::Integer(value))) =
+                    (properties.get("id"), properties.get("value"))
+                else {
+                    anyhow::bail!("expected integer PostgreSQL columns");
+                };
+                assert!(rows.insert(*key, *value).is_none(), "duplicate row {key}");
+            }
+        }
+        Ok(rows)
+    }
+
+    let mut database = Database::new()?;
+    database.wait_ready().await?;
+    let password = uuid::Uuid::new_v4().simple().to_string();
+    database.sql(&format!(
+        "CREATE TABLE stocks(id integer PRIMARY KEY, value integer NOT NULL);
+         CREATE ROLE snapshot_reader LOGIN NOSUPERUSER NOREPLICATION PASSWORD '{password}';
+         GRANT SELECT ON stocks TO snapshot_reader;
+         ALTER ROLE snapshot_reader SET default_transaction_read_only = on;"
+    ))?;
+    for dynamic in [false, true] {
+        database.sql(
+            "TRUNCATE stocks; INSERT INTO stocks SELECT n, 10*n FROM generate_series(1,5) n;",
+        )?;
+        let plugin = if dynamic {
+            load_plugin("bootstrap_postgres")?
+        } else {
+            NativePlugin::from_definition(drasi_computation_bootstrap_postgres::plugin()?)?
+        };
+        let factory = plugin
+            .bootstrap_factories()
+            .iter()
+            .find(|f| {
+                f.metadata().implementation.name.as_ref()
+                    == drasi_computation_bootstrap_postgres::POSTGRES_SNAPSHOT
+            })
+            .context("standalone PostgreSQL bootstrap")?
+            .clone();
+        let provider = Arc::new(computation::NativeBootstrapNodeFactory::new(factory));
+        let mut spec = provider.specification_from_config(id("snapshot"), json!({
+            "host":"127.0.0.1", "port": database.port, "database":"postgres", "user":"snapshot_reader",
+            "sslMode":"disable", "tables":["stocks"], "maxDurationMs":20000
+        }))?;
+        let secret = resource("reader-settings");
+        spec.configuration.insert(
+            "password".into(),
+            ConfigurationValue::Reference {
+                resource: secret.clone(),
+                key: "postgres".into(),
+                secret: true,
+            },
+        );
+        let out = PortId::try_new("out")?;
+        let schema = GraphChangeCodec::schema().descriptor().clone();
+        let port = TablePort(ComponentDescriptor::try_new(
+            id("stocks"),
+            vec![
+                PortDescriptor::new(
+                    out.clone(),
+                    PortDirection::Output,
+                    schema.clone(),
+                    Default::default(),
+                ),
+                PortDescriptor::bootstrap(
+                    PortId::try_new("bootstrap")?,
+                    PortDirection::Input,
+                    schema.clone(),
+                    Default::default(),
+                ),
+                PortDescriptor::bootstrap(
+                    PortId::try_new("snapshot")?,
+                    PortDirection::Output,
+                    schema,
+                    Default::default(),
+                )
+                .for_data_port(out.clone()),
+            ],
+        )?);
+        let edge = EdgeDefinition::new(
+            endpoint("snapshot", "snapshot"),
+            endpoint("stocks", "bootstrap"),
+        );
+        let components = ComponentBatch::builder()
+            .declare_resource(ResourceSpecification {
+                id: secret.clone(),
+                role: ResourceRole::SecretStore,
+                ownership: ResourceOwnership::Borrowed,
+                binding: "reader-settings".into(),
+            })?
+            .provide_resource(
+                secret,
+                ResourceHandle::new(
+                    ResourceRole::SecretStore,
+                    Arc::new(ConfigurationResolverResource(Arc::new(Settings(json!(
+                        password
+                    ))))),
+                ),
+            )?
+            .source(ComponentName::try_new("stocks")?, Box::new(port))
+            .component(ComponentName::try_new("snapshot")?, spec, provider)
+            .bind_stream(endpoint("stocks", "out"), stream("stocks"))
+            .connect(edge.clone(), Box::new(BoundedPipeConfig { capacity: 1 }))
+            .build()?;
+        let core = DrasiLib::builder()
+            .with_id(INSTANCE)
+            .with_allow_external_component_ids(true)
+            .with_components(components)
+            .build()
+            .await?;
+        let observed = tokio::time::timeout(TIMEOUT, async {
+            core.start().await?;
+            for name in ["stocks", "snapshot"] {
+                core.component_by_id(&id(name))?.wait_started().await?;
+            }
+            let handle = core
+                .output_catalogue()?
+                .resolve(&OutputEndpoint::new(id("stocks"), out))?;
+            let stream = handle.current_state(Default::default()).await?;
+            let file = handle
+                .current_state(CurrentStateOptions {
+                    transfer: StateTransfer::TemporaryFile {
+                        max_file_bytes: 65536_u64.try_into()?,
+                    },
+                    ..Default::default()
+                })
+                .await?;
+            database.sql(
+                "BEGIN; UPDATE stocks SET value=41 WHERE id=4; DELETE FROM stocks WHERE id=5;
+                          INSERT INTO stocks VALUES(6,60); COMMIT;",
+            )?;
+            let before = BTreeMap::from([(1, 10), (2, 20), (3, 30), (4, 40), (5, 50)]);
+            assert_eq!(values(stream).await?, before);
+            assert_eq!(values(file).await?, before);
+            assert_eq!(
+                values(handle.current_state(Default::default()).await?).await?,
+                BTreeMap::from([(1, 10), (2, 20), (3, 30), (4, 41), (6, 60)])
+            );
+            assert_eq!(
+                database.sql("SELECT count(*) FROM pg_replication_slots;")?,
+                "0"
+            );
+            let graph = core.computation_control()?.observed();
+            assert_eq!(graph.relationships.keys().collect::<Vec<_>>(), [&edge]);
+            Ok::<_, anyhow::Error>(())
+        })
+        .await;
+        let stopped = core.shutdown().await;
+        observed??;
+        stopped?;
+    }
+    database.remove()
 }

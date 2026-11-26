@@ -2196,10 +2196,9 @@ Its `drasi.standard/view` factory reconstructs complete images, applies a
 pipeline of declared stateless middleware (decoder, map, parse_json, promote,
 relabel) and remembers the exact outputs to retract. Configure
 map insert rules that produce complete projected images, rather than event
-update/delete rules. The initial profile provides memory-backed snapshots and
-volatile progress, not durable replay, input deduplication or bootstrap input.
-Supply complete initial records and ordered lossless changes; a fresh instance
-starts empty, whereas stop/start of the same object retains its view.
+update/delete rules. It runs on the same stateful transformer runtime as the
+query, so it can bootstrap from its input and, with a persistent processing
+provider, keeps its view across restarts.
 
 Unwind illustrates why apparently simple transformation can be stateful.
 When a bin disappears from a warehouse's array, the old child must be deleted.
@@ -7460,11 +7459,12 @@ to the source it pairs with
 | Transformer | Factory | Use | Recovery |
 |---|---|---|---|
 | [Query](../../../components/computation-plugins/transformers/query/README.md) | `drasi.query/indexed` | Cypher and GQL continuous queries, selected as in [Load trusted code at the host](#load-trusted-code-at-the-host) | Volatile with an in-memory index. With a persistent index, it commits indexes, results and retained output together by default, and replays unconfirmed output after a restart |
-| [Middleware](../../../components/computation-plugins/transformers/middleware/README.md) | `drasi.standard/middleware` | `decoder`, `map`, `parse_json`, `promote` and `relabel` steps | Volatile; optional quiescent bootstrap with `bootstrap: true` |
-| [View](../../../components/computation-plugins/transformers/view/README.md) | `drasi.standard/view` | A maintained projection that retracts outputs that stop matching | Volatile, with memory-backed snapshots |
+| [Middleware](../../../components/computation-plugins/transformers/middleware/README.md) | `drasi.standard/middleware` | `decoder`, `map`, `parse_json`, `promote` and `relabel` steps | Stateless; its current state is its input's, transformed on read |
+| [Stateful middleware](../../../components/computation-plugins/transformers/middleware/README.md#stateful-middleware) | `drasi.standard/stateful-middleware` | The same steps, maintaining the transformed current state | The query's recovery: volatile in memory, or with a persistent index it commits state and retained output together and replays unconfirmed output after a restart |
+| [View](../../../components/computation-plugins/transformers/view/README.md) | `drasi.standard/view` | A maintained projection that retracts outputs that stop matching | The query's recovery: volatile in memory, or with a persistent index it commits its inputs, output associations and retained output together and replays unconfirmed output after a restart |
 | [Policy](../../../components/computation-plugins/transformers/policy/README.md) | `drasi.standard/policy` | One Rego decision record per input element | Volatile, with memory-backed snapshots |
 | [Optimization](../../../components/computation-plugins/transformers/optimization/README.md) | `drasi.standard/optimization` | A mixed-integer or linear model, re-solved in the background as inputs change | Volatile |
-| [Geometry](../../../components/computation-plugins/transformers/geometry/README.md) | `drasi.standard/geometry` | Planar spatial relations between record sets | Volatile, with memory-backed snapshots |
+| [Geometry](../../../components/computation-plugins/transformers/geometry/README.md) | `drasi.standard/geometry` | Planar spatial relations between record sets | The query's recovery: volatile in memory, or with a persistent index it commits its inputs, memberships, records and retained output together and replays unconfirmed output after a restart |
 | [Arithmetic](../../../components/computation-plugins/transformers/arithmetic/README.md) | `drasi.standard/arithmetic` | An example numeric transformation | Volatile; can join the host's transaction |
 
 **Sinks**

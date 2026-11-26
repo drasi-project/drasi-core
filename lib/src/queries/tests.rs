@@ -45,6 +45,7 @@ mod manager_tests {
             inputs: sources
                 .into_iter()
                 .map(|source_id| QueryInputConfig {
+                    enable_bootstrap: None,
                     nodes: vec![],
                     relations: vec![],
                     component: crate::config::ComponentReference::by_name(source_id),
@@ -81,6 +82,7 @@ mod manager_tests {
             inputs: sources
                 .into_iter()
                 .map(|source_id| QueryInputConfig {
+                    enable_bootstrap: None,
                     nodes: vec![],
                     relations: vec![],
                     component: crate::config::ComponentReference::by_name(source_id),
@@ -1191,6 +1193,7 @@ mod output_state_integration_tests {
             inputs: sources
                 .iter()
                 .map(|s| QueryInputConfig {
+                    enable_bootstrap: None,
                     nodes: vec![],
                     relations: vec![],
                     component: crate::config::ComponentReference::by_name(s.clone()),
@@ -1485,6 +1488,7 @@ mod output_state_integration_tests {
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
             inputs: vec![QueryInputConfig {
+                enable_bootstrap: None,
                 nodes: vec![],
                 relations: vec![],
                 component: crate::config::ComponentReference::by_name(
@@ -1783,6 +1787,7 @@ mod output_state_integration_tests {
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
             inputs: vec![QueryInputConfig {
+                enable_bootstrap: None,
                 nodes: vec![],
                 relations: vec![],
                 component: crate::config::ComponentReference::by_name(

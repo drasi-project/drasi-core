@@ -1,7 +1,7 @@
 # SQL Server stored-procedure sink: design
 
 `drasi.mssql/storedproc` (crate `drasi-computation-sink-storedproc-mssql`,
-computation ABI 0.1.0) calls a SQL Server stored procedure, or any
+computation ABI 0.2.0) calls a SQL Server stored procedure, or any
 parameterized T-SQL batch, for each graph change it receives.
 
 > **Live qualification is deferred (CW-78).** Everything below is verified by

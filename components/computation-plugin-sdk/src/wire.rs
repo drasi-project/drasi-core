@@ -278,11 +278,22 @@ pub struct ApplyUpdateRequest {
 pub struct InstanceMetadata {
     pub descriptor: ComponentDescriptor,
     pub capabilities: Capabilities,
+    /// Selection for configurable state outputs only. Omitted means no view.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub state_reads: std::collections::BTreeMap<PortId, StateReadMode>,
     /// Descriptions captured at construction or the last successfully validated
     /// APPLY_UPDATE. Re-inspect after update success; an earlier decoded metadata
     /// value is a snapshot and never updates itself. Reader identities stay fixed.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub queries: std::collections::BTreeMap<PortId, drasi_computation_contracts::QueryDescription>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StateReadMode {
+    Materialized,
+    Projected {
+        cut_namespace: Option<drasi_computation_contracts::GraphProducerIdentity>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -515,6 +526,14 @@ pub struct LifecycleRequest {
     /// know yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fresh_start: Option<bool>,
+    /// START of a graph-owned bootstrap consumer with no configured inputs and
+    /// no local seed. Not a completed snapshot of an unavailable producer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unconnected_inputs: bool,
+    /// START only: a bound state connection has installed this output's
+    /// current view, so replacing that view must publish its difference.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub state_subscribers: bool,
     /// STOP only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_mode: Option<crate::lifecycle::StopMode>,
@@ -567,6 +586,8 @@ impl LifecycleRequest {
             required: Vec::new(),
             credentials: None,
             fresh_start: None,
+            unconnected_inputs: false,
+            state_subscribers: false,
             stop_mode: None,
             dispose: None,
             update: None,

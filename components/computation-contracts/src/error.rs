@@ -59,6 +59,8 @@ pub enum ContractError {
     },
     #[error("port {port:?} occurs more than once")]
     DuplicatePort { port: PortId },
+    #[error("bootstrap port {state} must name a unique data port of the same direction and schema, got {data}")]
+    InvalidStatePort { state: PortId, data: PortId },
     #[error("port {port:?} must be {expected:?}, got {actual:?}")]
     WrongPortDirection {
         port: PortId,

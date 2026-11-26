@@ -398,6 +398,10 @@ async fn instance_snapshots_and_routes(statically_linked: bool) -> Result<()> {
                         PortId::try_new(port)?,
                     ))
                 };
+                let live = EdgeDefinition::new(
+                    endpoint(source_id.as_str(), "out")?,
+                    endpoint(query_id.as_str(), "in")?,
+                );
                 let mut builder = ComputationGraph::builder(graph_id.as_str());
                 for (id, role, handle) in [
                     (
@@ -452,13 +456,8 @@ async fn instance_snapshots_and_routes(statically_linked: bool) -> Result<()> {
                         sink_spec,
                         sink,
                     )
-                    .connect(
-                        EdgeDefinition::new(
-                            endpoint(source_id.as_str(), "out")?,
-                            endpoint(query_id.as_str(), "in")?,
-                        ),
-                        Box::new(BoundedPipeConfig { capacity: 16 }),
-                    )
+                    .connect(live.clone(), Box::new(BoundedPipeConfig { capacity: 16 }))
+                    .relationship_policy(live, RelationshipPolicy::live_only())
                     .connect(
                         EdgeDefinition::new(
                             endpoint(query_id.as_str(), "out")?,

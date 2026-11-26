@@ -2,7 +2,7 @@
 
 `drasi-computation-bootstrap-postgres` is a bootstrap-only library. Its factories
 use implementation/configuration version `1` through the native bootstrap
-extension of ComputationGraph ABI `0.1.0`. It does
+extension of ComputationGraph ABI `0.2.0`. It does
 not register a dummy processing component or start a separate graph or service.
 
 | Factory | Use case | Progress and state |

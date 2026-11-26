@@ -1,97 +1,150 @@
-# ComponentGraph and ComputationGraph
+# Component Graph and Computation Graph
 
-This document compares the [ComponentGraph-based implementation][old-core] of
-Drasi Core, pinned at one commit, with the current ComputationGraph-based Core
-and Drasi Server. It explains what the computation graph improves for
-applications, hosts and operators, and where its limits are. Improvements link
-to their code, tests or design notes; open defects and missing qualification
-are tracked in the [remaining-work list][remaining].
+Drasi watches data for changes and acts when the answer to a question you care
+about changes. **DrasiLib** is the form of Drasi that you build into your own
+program. **Drasi Server** is a ready-made program that runs DrasiLib and that
+you manage through settings files and a web interface.
+
+A Drasi application is made of **components**, its working parts. **Sources**
+bring changes in from outside systems, such as a database. **Continuous
+Queries** (queries for short) are questions, written in the Cypher or GQL query
+languages, that Drasi keeps answering as the data changes. **Reactions** act
+when a query's answer changes, for example by sending a notification.
+
+The **Component Graph** is the earlier design inside DrasiLib. It kept a record
+of an application's components and the links between them, while separate
+managers ran Sources, queries and Reactions, each in its own way. The
+**Computation Graph** is the current design. It runs every component itself,
+together with the connections between them, the storage they use, and their
+starting and stopping.
+
+This document compares the [Component Graph version of DrasiLib][old-core] with
+the current DrasiLib and Drasi Server. It covers the benefits and improvements,
+what works differently, what was removed, which problems are fixed, and the
+limits that remain. Open work is tracked in the [remaining-work
+list][remaining].
+
+Some things stay the same. The same query engine answers queries written in
+Cypher or GQL. Queries could already save their state so that it survives a
+restart (that is, be **persistent**), and each change was already processed all
+or nothing. Several queries could already share one Source, and each query
+already ran on its own. Plugins written for the older plugin interfaces
+(**ordinary plugins**) still work.
 
 ## Summary
 
-**ComponentGraph is a registry.** A DrasiLib instance (the embeddable Drasi
-library) runs **sources**, which bring in changes from external systems,
-**continuous queries**, which keep the result of a Cypher or GQL query up to
-date as those changes arrive, and **reactions**, which act on changes to the
-results. ComponentGraph records these components, plus bootstrap providers
-(initial data) and identity providers (credentials), with their relationships
-and status. Separate source, query and reaction managers create and run the
-components and connect their specialized processing paths. Applications have
-the shape **source → query → reaction**.
+The Computation Graph replaces separate managers for Sources, queries and
+Reactions with one system that runs any mix of steps, checks every connection
+before data flows, and treats starting data, delivery failures, saving and
+recovery the same way everywhere. Running applications can be changed safely,
+saved and rebuilt, and watched with standard monitoring tools. Moving from the
+Component Graph needs a few changes, listed in
+[What changes when you move](#what-changes-when-you-move-from-the-component-graph),
+and some gaps remain, listed in [Current limits](#current-limits).
 
-**ComputationGraph is the runtime.** It owns the running components, the
-connections that carry their data, the resources they use and their whole
-lifecycle. A continuous query is one kind of processing step, beside sources,
-other **transformers** (steps with inputs and outputs), **sinks** (steps that
-deliver data to a destination), **services** (background work without data
-ports) and bootstrap providers. The ordinary source, query and reaction
-interfaces still work; they run as graph components through graph-owned
-adapters.
+### At a glance
 
-The main improvements and what they give you:
+| What changed | What it means for you |
+|---|---|
+| **Queries feed other steps.** A query's results come out in the same form as a Source's changes. | Work out a figure once, such as each room's comfort, then reuse it for floor averages, alerts and a dashboard. |
+| **Steps that are not queries.** **Transformers** work on changes as they pass through. **Sinks** deliver changes to destinations; a Reaction is one kind of Sink. **Services** do background work. | Cleaning, checking and calculating become reusable steps instead of being squeezed into a query or a Reaction. |
+| **Connections are checked before data flows.** Each component states what it promises and what it needs. | A wrong connection is reported at once, naming both sides, instead of losing or repeating data later. Other components keep running. |
+| **One way to handle delivery failures.** Every native Sink retries short outages and follows a chosen rule for a change that can never be delivered. | An outage at a destination heals by itself without losing or reordering changes, and you can see that the Sink is retrying. |
+| **Loading existing data is part of the application.** **Bootstrap** (loading the data that already exists, then switching to live changes) runs over its own connections, and **Bootstrap Providers** (which supply that data) are components in their own right. | A query added later, or restarted, starts from a consistent copy of the data while live changes keep flowing to everyone else. A query can start from another query's results. |
+| **Clear lines between accepted, processed and delivered.** Ready-made building blocks handle each line. | You choose the guarantee you need at each step, and recovery after a crash restarts at the first unfinished step. |
+| **A safer component lifecycle.** Components can pause, every step has a time limit, and Drasi keeps track of unfinished cleanup. | A stop that cannot finish is reported, not hidden, and can be retried. A component that crashes is set aside until it is rebuilt. |
+| **Planned changes that are safe to retry.** Changes are planned before they run, and requests can carry a revision number and a request ID. | You can repeat a request after losing its answer without applying it twice, and an edit based on out-of-date settings is refused. |
+| **Saved, rebuildable definitions.** The whole application can be described, saved and rebuilt. | A restart, or a new copy of the application, rebuilds the same components, and a failing component does not erase its saved definition. |
+| **Native plugins for every role.** **Native plugins** (plugins built for the Computation Graph) can supply any kind of component and are checked when they load. | Plugins can ship separately, and an incompatible plugin is refused when it loads instead of failing while it runs. |
+| **Monitoring built in.** Standard measurements, a record of the path each change took, logs for every component, and a history of the application's state. | Operators can follow one change from its Source to its destination, and can tell a quiet application from a stuck one. |
+| **Many defects fixed.** | Wrong totals, wiped saved state, silently skipped changes and hidden cleanup failures no longer occur. |
 
-| Improvement | Practical benefit |
-| --- | --- |
-| **One data format on every data port.** Sources, queries and transformers all publish graph changes: node and relationship changes in one standard schema. | A query feeds another query, a transformer or any graph sink directly, so one calculation can serve many consumers. |
-| **Processing that is not a query.** Transformers and services are graph steps, and packaged native transformers cover policy, optimization, geometry, arithmetic and maintained views. | Normalization, enrichment, policy checks and solvers run as components instead of being disguised as queries or reactions. |
-| **Declared compatibility, checked before data flows.** Components describe their progress persistence, output identity and input delivery guarantee, and the graph checks each connection when it binds it. | A wrong connection fails when it is made, on the consumer, with a reason that names both ends, instead of losing or duplicating data later. Unrelated components keep running. |
-| **One delivery-failure model for every sink.** Transient failures are retried in place with bounded backoff; permanent failures follow a declared stall or skip policy. | A destination outage heals without losing or reordering input while the sink shows as degraded. An input that can never be delivered either stops delivery visibly or is skipped and counted. |
-| **Bootstrap as part of the graph.** Bootstrap providers are graph components, and each consumer gets its own snapshot session and a precise handover to the live stream. | A consumer that is added later or restarted starts from a consistent snapshot while live changes continue for everyone else. A query can initialize from another query's results. |
-| **An explicit lifecycle with live updates.** Six awaited hooks carry deadlines and cancellation, and configuration changes apply in place, across a restart or by replacement. | Cleanup is awaited and stays owned after a timeout, many changes apply without rebuilding the component, and a component that panics is isolated. |
-| **Revision-checked, retry-safe management.** Additions, updates and removals go through one configuration owner, with request IDs and expected revisions. | A request can be retried after a lost response without being applied twice, and an edit based on stale state is rejected. |
-| **Reusable recovery building blocks.** Durable admission, transactional processing, shared journals and a delivery runner separate acceptance from completed work. | An application chooses the guarantee per connection and component, and recovery resumes at the first unfinished step. |
-| **Observability throughout.** OpenTelemetry-compatible traces and metrics, a trace context that travels with each change, consistent inspection snapshots with history, and per-component logs for every role. | An operator can follow one change from ingress to destination and can tell a quiet stream from a stalled one. |
-| **A versioned native plugin interface.** Plugins can supply every component role; the ABI version must match exactly, capabilities are declared, and a shared conformance kit tests them. | Plugins ship independently, and an incompatible library is refused when it loads instead of failing while it runs. |
+## Words used in this document
 
-Continuous queries, Cypher/GQL, initial snapshots, persistent query state,
-saved-output replay, supported query transactions, source sharing and
-independently running queries all exist in ComponentGraph. The computation
-graph changes how they compose and makes their boundaries consistent; it is not
-a new query language or a second evaluator. Ordinary queries use an explicitly
-registered native query factory built on the same Core evaluator and shared
-query implementation. `ContinuousQueryTransformer` remains an explicit linked
-reference constructor, never an automatic fallback.
+- **Drasi, DrasiLib, Drasi Server**: Drasi watches data for changes. DrasiLib
+  is the form you build into your own program. Drasi Server is a ready-made
+  program that runs DrasiLib.
+- **Instance**: one running copy of DrasiLib, with its own components and
+  settings. Drasi Server can run several instances.
+- **Component**: a working part of an application, such as a Source, a query
+  or a Reaction.
+- **Component Graph, Computation Graph**: the earlier and the current design of
+  DrasiLib, described above.
+- **Source, Source Change**: a Source brings changes in from an outside system.
+  Each change it reports is a Source Change: something was added, changed or
+  deleted.
+- **Element, node, relation, label, property**: Drasi sees data as **nodes**
+  (things, such as a product or a room) and **relations** (links between them,
+  such as "this room is on that floor"). Both are **elements**. A **label**
+  names an element's type, such as Product. **Properties** are its named values,
+  such as a quantity.
+- **Query, result**: a query is a question that Drasi keeps answering as data
+  changes. Each row of its answer is a **result**.
+- **Cypher, GQL**: the two languages that queries are written in.
+- **Reaction**: a component that acts when a query's results change.
+- **Transformer**: a component that receives changes, works on them and passes
+  changes on. Every query is a Transformer.
+- **Middleware**: small ready-made steps that reshape incoming data, such as
+  renaming a label or decoding a value.
+- **Sink**: a component that delivers changes to a destination outside Drasi.
+  A Reaction is a Sink.
+- **Service**: a component that does background work and has no data inputs or
+  outputs.
+- **Bootstrap, Bootstrap Provider**: bootstrap means loading the data that
+  already exists, then switching to live changes without missing or repeating
+  any. A Bootstrap Provider is a component that supplies that existing data.
+- **Snapshot**: a copy of data as it stood at one moment.
+- **Replay**: sending saved changes again, for example after a restart.
+- **Checkpoint**: a saved note of how far a component has got, so that it can
+  continue from there after a restart.
+- **Persistent, in memory only**: persistent data is saved so that it survives
+  a restart. Data kept in memory only is lost when the program stops.
+- **Transaction**: a group of changes that are saved together, all or nothing.
+- **Port, Pipe**: a Port is a named connection point on a component, where
+  changes go in or come out. A Pipe is the connection that carries changes from
+  one Port to another.
+- **Recovery policy (Strict, AutoReset)**: what a persistent query does when its
+  saved data cannot be used as it is. Strict stops and reports the problem.
+  AutoReset rebuilds the query from its starting data when that is safe.
+- **At least once, exactly once**: delivery guarantees. At least once means a
+  change is never lost but may arrive more than once. Exactly once means it
+  arrives once.
+- **Native plugin, ordinary plugin**: a native plugin is built for the
+  Computation Graph; it can be built into your program or loaded from a separate
+  file. An ordinary plugin is built for the older Source, Reaction and Bootstrap
+  Provider interfaces. It still runs, through a compatibility layer that is
+  planned for removal.
+- **Identity Provider**: a component that supplies credentials, such as a
+  password or a sign-in token, for connecting to other systems.
+- **Inspection**: Drasi's built-in view of a running application: its
+  components, connections, status and what each component is waiting for.
+- **Producer, consumer**: along a connection, the producer is the component
+  that sends changes and the consumer is the component that receives them.
+- **Revision number, request ID**: an instance's settings carry a revision
+  number that goes up with every change. A request ID is a name you give a
+  request so that sending it again is safe: Drasi recognizes it and returns
+  the first answer instead of acting twice.
 
-### Terms
+## Building applications
 
-- A **component** is one node of the runtime graph, with one of the roles
-  above. A continuous query is a transformer whose semantic kind is Query.
-- A **port** is a named connection point on a component. Data ports carry
-  changes; bootstrap ports carry initial snapshots.
-- A **pipe** carries data from an output port to an input port. Its provider
-  decides buffering, retention and acknowledgement. A **QoS channel** (pipe
-  quality of service) is a shared journal that stores each message once and
-  keeps a position for each reader; a persistent one survives restarts and
-  can replay.
-- A **graph change** is a record in the standard `drasi.graph-change` schema: a
-  node or relationship with its identity and images. An **envelope** carries
-  one ordered batch of changes with its stream, sequence, context and lineage.
-- **Bootstrap** is initial loading: a consumer receives a snapshot of existing
-  data, then continues from the live stream without gaps or duplicates.
-- A **native component** implements the computation graph's interfaces
-  directly. **Ordinary** sources, queries and reactions keep the older
-  configuration and plugin interfaces and run through graph-owned adapters.
+### Queries can feed other queries and any other step
 
-The runtime graph describes the processing application. It is separate from the
-graph of rooms, products or other business entities that a query evaluates.
+**Before:** A query could read only from Sources. Its results came out in a
+separate format that only Reactions could read. To feed one query's results
+into another query, you had to convert them or write your own Source.
 
-<a id="new-built-in-capabilities"></a>
+**Now:** A query's results come out as node changes, the same form that Sources
+use. Each result row is a node, and the values the query returns become its
+properties. Adding, changing or removing a result is a change to that node. The
+node's label is Result unless you choose another, such as RoomComfort. Two rows
+with equal values are still two separate results. A query can read from a
+Source, another query or a Transformer.
 
-## Building and connecting applications
+**What this means for you:** Work out a figure once and reuse it. Queries that
+build on it do not repeat its formula or the way it combines data.
 
-### Queries reuse other queries' results
-
-**ComponentGraph:** sources emit source changes, while queries emit a separate
-result-notification format (`QueryResult`) that reactions consume. Feeding one
-query's results into another needs a conversion or a custom source.
-
-**ComputationGraph:** a query emits graph changes, as a source does. Each
-result row is a node whose properties are the returned columns. Adding,
-changing or removing a result is a graph operation on that node, and updates
-carry full replacement images.
-
-**Example — Building Comfort:** calculate each room's comfort once, then
-connect the maintained results:
+**Example (Building Comfort tutorial):** calculate each room's comfort once,
+then build on it:
 
 ```mermaid
 flowchart LR
@@ -103,809 +156,960 @@ flowchart LR
     B --> BA["Building alerts"]
 ```
 
-A dashboard can subscribe to all six outputs while a log subscribes only to the
-alerts. The floor and building queries do not repeat the room formula or its
-joins. A corrected room score updates the averages, and a room that becomes
-comfortable removes its alert. The building deliberately averages floor
-averages rather than all rooms; chaining expresses that rule once.
-
-Result labels such as `RoomComfort` and `FloorComfort` make the next query
-readable without changing the shared schema. The default label is `Result`,
-and `result.label` selects another. Row identities are opaque and scoped to the
-producing output, so rows with equal values stay distinct.
-
-Connecting a live pipe does not load existing state. A query that reads another
-query through the query builder (`from_input_by_name`) initializes from the
-upstream query's committed snapshot over a
-[bootstrap edge](#bootstrap-is-part-of-the-graph), then follows its live
-output. Disabling bootstrap makes the input future-only. Persistent chains have
-a [recovery limit](#performance-and-qualification-boundaries).
-
-### Non-query processing is a graph step
-
-**ComponentGraph:** middleware runs inside each query's input path, so several
-queries that apply the same normalization repeat it. Work that is neither a
-query nor a reaction has no place in the graph.
-
-**ComputationGraph:** a transformer can sit anywhere in a pipeline. A path such
-as **source → normalizer → capture sink** needs no query, and one normalized
-stream can feed several queries. Query-local middleware remains available when
-a rule belongs to one query. Packaged native transformers cover common steps:
-
-| Factory | What it does |
-| --- | --- |
-| [`drasi.standard/middleware`][middleware-transform] | Runs the stateless middleware pipeline (`decoder`, `map`, `parse_json`, `promote`, `relabel`) as a reusable step |
-| [`drasi.standard/view`][view-transform] | Maintains a transformed dataset and retracts outputs that stop matching |
-| [`drasi.standard/policy`][policy-transform] | Evaluates user-supplied Rego (Open Policy Agent) policies with the embedded regorus engine and maintains one decision record per input element |
-| [`drasi.standard/optimization`][optimization-transform] | Re-solves a declarative mixed-integer/linear model over the current inputs in the background and maintains its solution rows |
-| [`drasi.standard/geometry`][geometry-transform] | Maintains relation records between planar geometries that satisfy configured spatial predicates |
-| [`drasi.standard/arithmetic`][arithmetic-transform] | Computes `(value + add) * multiply` with checked overflow, and can join a host-owned transaction |
-| [`drasi.query/indexed`][query-transform] | Runs ordinary Cypher/GQL continuous queries as a loadable plugin; the Host SDK registers it for ordinary queries as `drasi.query/continuous` |
-
-An event mapper is not a maintained view. `map` and `jq` rules look at one event
-at a time, so ignoring an update that no longer matches does not delete a row
-emitted earlier. The view transformer reconstructs complete input images, runs
-the same stateless pipeline and records the outputs it emitted, so it can
-retract a filtered-out product, a removed child or an old key. Its current
-profile is memory-backed with coherent snapshots and volatile progress; it does
-not offer durable recovery, replay, transaction participation or
-snapshot-input initialization.
-
-**Example — Obstacle Impact (Move-a-Wall):** scene changes feed the native
-geometry transformer, which maintains `Obstruction` records between cart paths
-and barriers; a continuous query joins them to the affected carts and tasks.
-Moving the barrier away retracts the impact. **Example — GPU Cluster Lab:**
-simulator, optimization and policy transformers, continuous queries and a
-native SSE sink form one placement application over a simulated GPU fleet; it
-needs no physical GPUs.
-
-### Connections are explicit and checked before data flows
-
-**ComponentGraph:** data formats, queue behavior and subscription rules are
-built into the source, query and reaction paths. Its compatibility checks are
-specific to those paths and run when a component starts: a persistent query
-refuses a source that cannot replay, and a durable reaction refuses a volatile
-state store or a volatile query.
-
-**ComputationGraph:** each port declares its schema and pipe requirements. A
-component can have several inputs and outputs, an output can have several
-subscribers, and a consumer names the port it reads. Shorthand resolves to the
-single port or a declared primary, never to a guessed name. A format override
-can select only an alternative the factory implements, and a pipe never
-invents a conversion.
-
-Beyond schemas, every component declares a **description**
-(`ComponentDescription`):
-
-- whether its own progress survives a restart;
-- for each output, the producer identity it carries (untracked, volatile or
-  durable) and whether it can replay from a committed position;
-- for each input, the delivery it requires: unkeyed, or at-least-once or
-  exactly-once keyed on producer identity;
-- the durability it requires of each bound resource, and bootstrap facts such
-  as a pairing protocol and element identity.
-
-A constructed component returns its description from
-`ComputationComponent::description`. A factory returns it from a pure
-`ComponentFactory::describe`, which sees bound resources only through their
-declared capabilities. The graph compares declarations and never infers a
-missing fact; an undeclared fact satisfies no requirement.
-
-| Check | When | Result of a mismatch |
-| --- | --- | --- |
-| Producer output, pipe and consumer input | When the edge binds, before any data flows | The edge is `Failed`, and the consumer is `Blocked` with a terminal Binding failure (`GraphError::Incompatible`) that names both ends |
-| Bootstrap provider and consumer: completion, pairing, served namespace and element identity | When the bootstrap edge binds | The same |
-| Declared resource requirements and the bound resources' capabilities | Before a factory constructs the component | A terminal Binding failure; the component is `Blocked` |
-| Factory declaration and constructed instance | After `create`, and after an update that keeps the object | A terminal Creation failure (`InstanceDescription`) |
-
-A mismatch never rejects the configuration change. The producer and unrelated
-components continue, and the failure clears when either side changes or the
-edge is removed. For example, an exactly-once consumer connected to a query
-with an in-memory index fails with the reason "input requires ExactlyOnce
-delivery keyed on producer identity, but the producer's output identity is
-Volatile", while an at-least-once consumer of the same query binds. The
-[description tests][description-tests] cover these cases.
-
-Schema compatibility does not mean that every consumer handles every special
-event. The native HTTP, gRPC and SSE sinks accept ordinary source, transformer
-and query changes; the ordinary Reaction adapter remains query-specific; and
-scheduling controls and snapshot or progress frames have their own handling
-rules. The common schema preserves typed values, full images, patches,
-explicit property removals and before-images, so setting a property to null,
-leaving it unchanged and removing it stay different operations.
-
-### Independent work and component control have a common model
-
-Queries run independently in ComponentGraph too. In the computation graph every
-top-level node, including native sources, transformers, sinks and services,
-runs in its own independently scheduled, graph-owned task. A blocked branch
-does not stop unrelated work, although branches that share a required producer
-or a capacity limit still affect each other.
-
-Control messages travel separately from data queues, so a component can
-receive a supported control request while its data path is busy. Handles are
-bound to one constructed object, a **generation**, so a handle to a replaced
-object cannot act on its successor.
-
-### Non-query work can be scheduled with its state
-
-A native transformer can request, replace or cancel delayed work through its
-borrowed processing context. Requests commit with its state and retained
-output; only committed deadlines wake the graph. Completion is explicit, and a
-stale token cannot complete a replacement request.
-
-**Example:** retain a delayed notification in a non-query component, restart
-the process before it is due, and emit it later without another source event.
-The standalone profile is qualified with atomic persistent RocksDB on both
-Tokio runtimes. It reuses the query timer's shared wakeup policy rather than
-another scheduler, and memory or non-atomic bundles reject the capability. It
-does not make external delivery exactly once; the mixed query and non-query
-application proof is [CW-82](computation-graph-remaining-work.md#cw-82).
-
-## Bootstrap is part of the graph
-
-**ComponentGraph:** a bootstrap provider is attached to a source object. Each
-query subscription asks its source for initial data through the subscription
-path, and the source combines that data with live changes.
-
-**ComputationGraph:** bootstrap uses graph components and edges.
-
-- A bootstrap provider is a component with the `BootstrapProvider` role and
-  only bootstrap outputs, normally one named `snapshot`. Bootstrap ports are
-  optional; bootstrap edges appear in inspection and take part in ordering and
-  cycle checks.
-- A consumer opens one session per bootstrap edge with a request over the
-  control plane. The producer answers only on that edge: `begin`, the records,
-  then `complete` with watermarks or `failed` with a reason.
-- A source relays each session from its own provider and completes it with its
-  live handover boundary. Every consumer, including one added later, gets its
-  own snapshot while the live stream continues, and skips the live changes its
-  snapshot covers. Only a source's first start, with no saved position, holds
-  live data until the first boundary.
-- A query serves its committed results on its `snapshot` output, so a
-  downstream query initializes from an upstream query over an edge.
-- Paired families, such as the SQLite source and its file snapshot, declare a
-  coordination protocol and element identity, and the graph checks the pairing
-  when the edge binds. See the [bootstrap provider standard][bootstrap-guide].
-- On restart, a volatile consumer rebuilds its view from a fresh snapshot. A
-  persistent consumer resumes from the state its providers saved at
-  completion, where they supply one.
-
-Query-scoped providers remain available. Several initialization providers can
-be composed under one query's loading and handover rules, for example a
-PostgreSQL snapshot combined with an HTTP-provided snapshot, while their
-snapshots, progress owners and completion records stay distinct. Standalone
-SQLite file loading is a separate mode and requires quiescent writers. The
-[graph bootstrap tests][bootstrap-tests] cover per-consumer sessions, late
-consumers, first-start holds and replies on the requesting edge only.
-
-## Delivering to destinations
-
-### One delivery-failure model for every sink
-
-**ComponentGraph:** each reaction implements its own retry and error handling,
-or none, and reports failures through its own status.
-
-**ComputationGraph:** every sink node applies the same model to a failed
-`handle` call. The sink classifies the failure with `DeliveryFailure`, and the
-graph owns the retries.
-
-| Failure | Graph behavior | What inspection shows |
-| --- | --- | --- |
-| Transient: `DeliveryFailure::transient`, `transient_after` or any unclassified error | Retries the same input in place. The delay starts at 200 ms and doubles to 30 s, with jitter, and is never shorter than the destination's retry-after hint (honored up to 10 minutes). Attempts are unlimited. Pause and Stop end the wait without acknowledging the input, and a resumed sink retries the same input. | Lifecycle stays `Running`, health is `Degraded`, and the failure is a retryable Processing failure. Both clear when the input is delivered, and the graph does not restart the sink meanwhile. |
-| Permanent (`DeliveryFailure::permanent`) under `stall`, the default | Logs the failure and delivers nothing more until an operator acts | A terminal Processing failure with the destination's reason |
-| Permanent under `skip` | Acknowledges and logs the input, then continues | `ObservedComponent::skipped_inputs` counts it; no failure is recorded |
-
-A multi-input batch that fails permanently is retried one input at a time, so
-only the undeliverable input stalls or is skipped. Panics, interruptions and
-terminal lifecycle errors still fail the sink. Sinks that keep their own
-destination progress, such as the stored-procedure sinks and the
-`drasi.network/http-delivery` consumer, record a skip atomically with that
-progress (`DeliveryFailure::skipped`), so a replay does not repeat it.
-
-The native HTTP sink maps onto this model. `maxRetries` and `retryBudgetMs`
-bound its own fast retries of one request, and what remains is returned
-classified: connection, request and timeout errors and 5xx, 408, 409, 425 and
-429 responses are transient, with the `Retry-After` delay of a 429 or 503
-response; other responses are permanent. `onPermanentFailure` selects `stall`
-or `skip`, and the policy is part of the sink's description. See the
-[sink standard][sink-guide] and the [delivery-failure tests][sink-tests].
-
-**Example:** stop a webhook receiver, and the sink becomes `Degraded` while it
-retries. Restart the receiver, and the held change is delivered in order and
-the sink returns to `Healthy`. A receiver that answers 400 under `stall` fails
-the sink with "HTTP destination returned status 400 Bad Request" and the start
-of the response body.
-
-### Live subscribers are observers, not delivery obligations
-
-Live query-result subscriptions, including those that ordinary reactions read,
-are observers of the query's results outlet. In the default channel dispatch
-mode each subscriber has a bounded buffer that backpressures the query while it
-runs. When the outlet is asked to stop, the graph releases its observers, so
-the stop never waits for a subscriber that is not reading. A released
-subscriber that falls behind receives its buffered changes and then a typed
-`RecvError::Lagged` gap, rather than silently missing changes. Broadcast
-dispatch and the catalogue-wide `QueryResultsCatalog::subscribe` stream (256
-envelopes) never backpressure; a slow reader lags instead. Consumers that must
-not miss output recover from the query's retained output (its outbox) or a QoS
-channel.
-
-## Saving work and recovering it
-
-### Current state and live changes come without a second result store
-
-**ComponentGraph:** current-result reads, initial loading and replay belong to
-source- and query-specific interfaces.
-
-**ComputationGraph:** an output catalogue discovers the snapshot, replay and
-live-follow capabilities that each producer supplies. Queries expose their
-maintained result state; other producers can supply their own. The catalogue is
-not another evaluator or a mandatory duplicate row store.
-
-**Example:** a viewer reads the current floor scores and follows later changes
-with one snapshot-and-follow operation. The operation fixes the boundary
-between the two, so a change that arrives between the read and the
-subscription is not lost.
-
-The follow lease is bounded and volatile. If history is lost or the lease
-expires, the viewer receives an explicit gap and rebuilds. A point snapshot
-does not imply replay, and a live lease does not record durable completion.
-Snapshot replacement is an optional per-input sink capability, not something
-every sink may treat as ordinary additions.
-
-### Slow subscribers stay part of the recovery obligation
-
-**ComponentGraph:** source and query histories support subscribers, but their
-coordination is specialized. When an ordinary source restarts from its input
-write-ahead log (WAL), cleanup can consider a fast subscriber before a slower
-one has reattached.
-
-**ComputationGraph:** shared queues such as QoS channels keep one copy of each
-message and a separate position for each reader. Required membership is
-explicit: a disconnected subscriber still counts until it is deliberately
-retired. Sources can use the committed progress of their required query owners
-rather than matching names. The ordinary HTTP and gRPC sources also hold WAL
-pruning until every initial subscription has restored its cursor, and protect
-requested history while a subscription is registered.
-
-**Example:** two queries share a source. One is caught up; the other restarts
-from an earlier checkpoint. The fast query cannot release the slower query's
-history by reconnecting first, and missing history is reported rather than
-returned as an empty replay.
-
-### Reusable services separate acceptance from completed work
-
-"The queue accepted it", "the query committed it" and "the destination
-finished it" are different claims. The computation graph supplies reusable
-mechanisms for each boundary rather than requiring every path to reinvent them.
-
-| Boundary | Mechanism | Example |
-| --- | --- | --- |
-| Input acceptance | An optional admission service stores an input and its retry identity together before confirming acceptance. | A client loses the response and retries the same request without appending a second input. |
-| Query processing | Supported transactions retain input progress, query state and produced output together. Output replay does not rerun committed evaluation. | After a crash, an aggregate resumes from its saved state and resends its pending result. |
-| Producer-to-queue handoff | Supported receiving queues recognize previously accepted logical output; selected queues can share the producer's transaction. | Queue A accepted a batch but B failed. Recovery respects A's receipt rather than treating all branches as new work. |
-| Destination work | A reusable delivery runner records completed operations and resumes the remainder. Local effects and completion can share a transaction. | A saved application view updates its row, enumeration index and completion record atomically. |
-| Volatile processing | Transformers and handled sinks can publish graph-owned in-memory handled-input progress. | A non-query branch reports what it finished without claiming to survive process loss. |
-
-`SourceAdmission::admit` returns `Busy` when the journal is full, and
-`admit_wait` waits for capacity without another queue or worker.
-`admit_message` and `admit_message_wait` take a caller-supplied execution
-context, for example one built from an incoming request's trace headers. A
-graph whose own processing callbacks submit feedback to an admitted source can
-opt into [feedback shutdown][feedback]: whole-graph stop fences external
-submissions first, then drains same-graph feedback through `FeedbackAdmission`
-up to a bounded, finite boundary.
-
-A remote effect still needs its destination's cooperation. If a remote service
-performed an action but its response was lost, a local completion log alone
-cannot prove whether repeating the action is safe. None of these mechanisms
-grants universal exactly-once behavior.
-
-### Transaction boundaries follow the application's work
-
-ComponentGraph already supports atomic query processing. The computation graph
-lets supported source and processing boundaries be expressed and connected
-explicitly.
-
-**Example:** a database transaction updates two balances. A source configured
-for complete transactions supplies both changes as one marked input, so the
-query publishes the final answer instead of an intermediate half-transfer. The
-transaction contains ordinary graph operations plus completeness metadata; it
-is not a separate data schema.
-
-Selected linear processing steps can share one transaction owner and commit
-their state, input progress and final output together. With suitable storage,
-outgoing journals can join the producer's commit. Two stores declared with the
-same path or name are not evidence of a shared transaction.
-
-These are specific local boundaries, not a transaction across every query,
-database, browser and external effect. A query's committed-input position can
-advance before downstream handling; pipe acknowledgement and destination
-completion remain separate.
-
-### Ordering separates business time from producer revisions
-
-Ordering distinguishes **when a business fact took effect** from **which
-revision a producer emitted**. A validated newer query revision can correct a
-derived answer even when its contributing business event has an older
-timestamp. This does not let an arbitrary timestamp or untrusted marker bypass
-staleness checks.
-
-For applications that must wait for out-of-order events, a dedicated
-source-time merger provides explicit buffer, waiting and late-event policies.
-A sensor aggregator can allow a bounded delay rather than assume that an
-ordinary queue has seen every earlier event. The merger cannot prove that no
-unseen event will arrive, and downstream backpressure can still delay
-delivery.
-
-## Lifecycle, updates and removal
-
-### Components have an explicit, awaited lifecycle
-
-**ComponentGraph:** sources and reactions implement `initialize`, which cannot
-fail, `start`, `stop`, `status` and an optional `deprovision` for removal.
-There is no pause hook, the hooks carry no deadline or cancellation, and an
-update replaces the object.
-
-**ComputationGraph:** every component implements six hooks. Each receives a
-typed context with the operation identity, a deadline and a cancellation
-token.
-
-| Hook | Purpose |
-| --- | --- |
-| `initialize` | Runs once per object, after its mandatory bindings and before its first start. A failure disposes the object with `InitializationFailure`. |
-| `start` | Begins an activation. A failed start is settled by `stop`. |
-| `pause`, `resume` | Hold and release processing without ending the activation. A component that cannot pause returns `unsupported`. |
-| `stop` | Ends the activation in `Drain` or `Abort` mode. The object stays restartable. |
-| `dispose` | Final retirement, with a reason (shutdown, removal, replacement or initialization failure) and an intent (`Preserve` or `Erase`). Only removal and replacement can erase. |
-
-- The graph owns cleanup. A failed or interrupted stop or dispose keeps the
-  object and its unfinished work, and a retried dispose receives the same
-  reason and intent.
-- A component that runs its own workers reports their failures through
-  `ComputationComponent::worker_failures`. The graph then fails the component
-  promptly as a retryable processing failure, even when no operation is in
-  flight.
-- A panic inside an operation quarantines that generation. Its later stop uses
-  `Abort`, and only a newly constructed object can run again.
-- Native plugins use the SDK's `ActivationScope` and the shared pause gate
-  (`PauseControl` and `PauseGate`), so a successful pause means that no worker
-  is reading, writing or emitting.
-- Startup, stop and shutdown have whole-operation budgets: by default ten
-  minutes for startup and one minute for stop and shutdown, configurable in
-  Core and Server. `DrasiLib::shutdown_with_outcome` reports whether cleanup
-  completed separately from whether errors remain.
-
-### Configuration changes are assessed, then applied at a boundary
-
-**ComponentGraph:** `update_source`, `update_query` and `update_reaction`
-replace the running component.
-
-**ComputationGraph:** a change is assessed first, by the live object's optional
-`ComponentManagement::assess` or else by the factory's pure `plan_update`, and
-then applied at the boundary the plan names:
-
-| Plan | Boundary | Same object? |
-| --- | --- | --- |
-| `InPlace` | `pause`, `apply`, `resume` | Yes |
-| `Restart` | `stop`, `apply`, `start` | Yes |
-| `Recreate` | `stop`, `dispose` with `Replacement`, then a new object | No: a new generation with the same ID |
-
-The accepted plan, its operation ID and the current and proposed recipes are
-stored before any effect, so an update interrupted by a crash resumes under the
-same operation ID. The object is assessed again before `apply`, and a change
-that now needs a stronger boundary is refused. `Refused` and `Failed` leave the
-object unchanged; `Damaged` quarantines it.
-
-### Stop and replacement keep ownership of unfinished work
-
-The graph keeps the work, resources and join handles needed to finish cleanup.
-Cancelling a caller that waits for stop does not discard the accepted stop, and
-failed cleanup stays visible and owned.
-
-**Example:** a user stops a query and then closes the request. The query's
-worker does not become an untracked task because that waiter disappeared. A
-replacement cannot reuse a resource while its previous owner is still cleaning
-up.
-
-Live changes check the expected definition version and coordinate the affected
-components and resources. Protected recovery state requires verified
-retirement or an explicit, narrowly scoped loss authorization. Neither rolls
-back external effects, deletes processing data or resets a whole database.
-
-### Removal is a revision-checked configuration change
-
-**ComponentGraph:** `remove_source`, `remove_query` and `remove_reaction`
-refuse a component that others depend on, tear its runtime down and then
-deregister it. A removal cannot be made conditional on a configuration
-revision, and a retry after a lost response cannot tell whether the first
-attempt succeeded.
-
-**ComputationGraph:** `DrasiLib::remove_component(id, ComponentRemoval)`
-removes a source, query or reaction through the configuration owner:
-
-- It is refused while other components depend on the target.
-- `expected_revision` rejects the removal if the configuration has changed.
-- A retry with the same `request_id` returns the original receipt, even after
-  the component is gone.
-- It returns once the component has stopped and, when requested, its data is
-  erased. `erase_data` reaches the component's `dispose` as
-  `StateIntent::Erase`; removing a query always erases its state.
-
-The `remove_*_by_name` and `remove_*_by_id` calls use the same path without an
-idempotency key or revision check; for sources and reactions, their `cleanup`
-flag requests erasure. For ordinary source and reaction plugins, DrasiLib
-erases the component's state-store partition after the plugin's
-`delete_owned_resources` hook.
-
-## Managing, hosting and using applications
-
-### Dependencies and failures stay visible
-
-**ComponentGraph:** each manager coordinates its own component type, and
-status changes reach the graph separately.
-
-**ComputationGraph:** the runtime publishes one consistent view of
-definitions, component states, connections and dependencies. An accepted
-definition can wait for a missing resource, factory, producer or connection;
-an invalid definition or a processing error remains a failure, not a
-dependency wait. An ordinary reaction started against an explicitly stopped
-query fails at once with `DependencyStoppedError` instead of waiting for its
-startup deadline.
-
-**Example:** declare a floor query before its room producer exists. Inspection
-names what it is waiting for, and adding the producer lets initialization
-continue without another runtime and without overriding an explicit stop.
-
-Created, started, readable and caught up remain different states. A ready HTTP
-endpoint is not proof that an initial snapshot or every downstream effect has
-finished.
-
-### Saved definitions describe the whole application
-
-A rebuildable definition can include native components, explicit connections
-and resource recipes. Configuration acceptance and its request receipt can be
-saved before construction begins, so a failing component does not erase the
-definition the user asked the system to run.
-
-**Example:** after a response is lost, retry the same configuration request
-and inspect whether it was accepted. Do not create a new request merely
-because the new component is not running yet: acceptance, reconstruction and
-readiness are observed separately.
-
-The configuration store also supports encrypted definitions, version-checked
-administration, receipt cleanup and key rotation. These operations manage
-configuration; they do not delete or rewind processing data.
-
-Drasi Server uses explicit instances; an empty configuration starts an empty
-Server. Its source, query and reaction configuration and its native graph
-definitions enter the same runtime. Query inputs can name other producers, and
-secrets can stay references. Native `add_source_from_factory` and
-`add_reaction_from_factory` declarations keep a failed construction for
-inspection and retry; the older object-based APIs remain supported.
-`reconstructible_topology()` exports explicit component, resource and pipe
-recipes with their secret references, not settings guessed from live objects.
-The source-time merger has a versioned factory and a shared
-`sourceTimeMergeStorage` resource recipe, so a clean instance can reconstruct
-it with its storage.
-
-Component names can change at runtime; IDs cannot. Ordinary reactions receive
-a `ComponentDirectory` from the runtime to translate route names into the
-permanent IDs carried by delivered results.
-
-### Native plugins share the processing contracts through a versioned ABI
-
-**ComponentGraph:** dynamic plugins provide sources, reactions, bootstrap
-providers, secret stores and identity providers through the ordinary plugin
-interface.
-
-**ComputationGraph:** native plugins provide sources, transformers, sinks,
-services and bootstrap providers through a separate C ABI and the
-[native SDK][plugin-sdk]. They exchange the shared data contracts without
-linking the query evaluator. The host drives their operations, and loading a
-plugin does not create another executor.
-
-- **Exact version match.** The [ABI][abi] is 0.1.0 with wire version 1. Before
-  1.0 every minor version is breaking, so a host accepts only its own major and
-  minor version and rejects anything else before calling the plugin.
-- **Refusal at load time.** Loading returns an error for partial entry points,
-  bad headers, missing metadata, incompatible versions, targets or schemas and
-  unsupported capabilities, and never falls back to ordinary registration.
-- **Declared host services.** A factory declares once which host services its
-  components use: source or consumer progress, admission, output snapshot
-  reads, host-owned delivery, sink batching, bootstrap coordination and
-  activation credentials. The SDK refuses an undeclared binding and a missing
-  required one ([host services][host-services]).
-- **A shared conformance kit.** `SourceConformance` and `SinkConformance`
-  drive a plugin through start, stop and restart, real pause, drain and abort
-  stops, retried delivery, idempotent erase, configuration round trips and the
-  update matrix, against the linked factory or a built library loaded through
-  the C ABI.
-
-A native source can also expose an asynchronous reader for its data schema, and
-supported factories resolve credentials at activation rather than keeping a
-constructor-time value.
-
-**Example:** ship a normalization plugin independently, load it into a Server
-instance, and connect its standard output to several queries.
-
-The [instance host][instance-host] runs parent, child and grandchild DrasiLib
-processes and connects their outputs through bridge sources and sinks,
-including mutually authenticated TLS links and selected retained-delivery
-modes. A process boundary is not a security sandbox or an automatic durability
-guarantee.
-
-## Observability
-
-**ComponentGraph:** components publish lifecycle events on a broadcast channel,
-per-component logs for sources, queries and reactions, snapshot counters for
-query output, reaction checkpoints and recovery, and an optional profiler.
-
-**ComputationGraph** keeps these and adds:
-
-- **Traces and metrics.** The graph instruments its own operation boundaries:
-  source publication, transformer and query processing, sink handling,
-  bootstrap, lifecycle operations and control requests. `TelemetryProfile`
-  selects `Off`, `Basic`, `Debug` or `Persistence` detail, with sampling and
-  metric exclusions. The host installs exporters; Drasi Server exports traces
-  over the OpenTelemetry Protocol (OTLP) and metrics over OTLP or Prometheus.
-  See [telemetry foundations][telemetry] and the
-  [observability demonstration][observability-demo].
-- **Context that travels with each change.** Every envelope carries a
-  transient `execution_context` beside its data. With a host-supplied trace
-  context adapter, an incoming W3C trace continues through transformers and
-  queries, including native plugins, to the sink that handles the change. The
-  context is never persisted and does not change event codecs, query results
-  or receipt digests; work restored from storage has none.
-- **Logs for every role.** Every graph component, including transformers,
-  sinks, services and bootstrap providers, has its own log stream
-  (`subscribe_computation_logs_by_id` and `_by_name`). Native plugin logs keep
-  their timestamps and trace context, and hosts compose log capture into their
-  own `tracing` subscriber.
-- **Consistent inspection with history.** The inspector publishes complete
-  snapshots of desired and observed state and keeps the last 256
-  publications, so a monitor can see a failure that was followed by cleanup
-  instead of missing it between two reads. A status-only publication shares
-  unchanged data and refreshes only changed entries; full exports remain
-  proportional to the graph. The [maintainers guide][inspection-guide] lists
-  the measurement diagnostics.
-
-### Inspection distinguishes no output from no progress
-
-Query input and output progress, with the relevant producer and lifecycle
-identity, are available through inspection and the graph's metrics.
-
-**Example:** a temperature update leaves a room inside the comfortable band.
-The alert query emits no result change, but its committed-input position still
-advances. Monitoring can tell that from a stalled query instead of treating a
-quiet output stream as proof of success or failure.
-
-Query output progress is not evidence that a destination completed its work.
-
-## Defects that the computation graph resolves
-
-These are concrete fixes in the runtime, evaluator and plugin hosting, not
-benefits of renaming a graph class. The ComponentGraph links point to the
-compared code.
-
-| ComponentGraph behavior | ComputationGraph behavior |
-| --- | --- |
-| A failure to read a persistent query's saved configuration hash clears its persistent state and rebuilds it. | The read failure is reported and never authorizes discarding state, so a temporarily unreadable store does not become an empty application. |
-| Timestamp-first input ordering can process a later producer sequence before an earlier one and advance the checkpoint past unprocessed input. | Query input merging keeps each producer's admitted order while choosing among available heads. |
-| Repeating an insert for an existing identity can add a second aggregate contribution. | A full insert is an upsert that replaces the prior contribution, so replaying a product cannot raise a count from one to two. |
-| An older change can overwrite a newer fact or resurrect a deleted element. | Event-time admission and retained deletion information reject stale mutations, also across restarts with persistent storage. Producer-sequenced revisions of derived data follow their own admission rule. |
-| A node and a relationship can collide on one identity. | The incompatible change is rejected before the existing element changes. |
-| A cancelled query-stop waiter can lose the worker handle, and a stop that times out is still reported as Stopped without completed cleanup. | Accepted work and joins stay owned, and interrupted cleanup is never reported as a graceful stop. |
-| A failed instance stop still marks the instance stopped, so a retry is refused, and shutdown logs stop failures but returns success. | Unfinished ownership and per-member causes remain available for retry and reporting. |
-| An undecodable plugin source event is skipped while later events continue. | The host reports the decoding error and ends that stream, without confirming progress past the lost change. |
-
-Evidence: [ComponentGraph saved-state recovery][old-hash-error] and
-[current query recovery][query-code];
-[ComponentGraph ordering][old-ordering] and [current input queue][ranked-input];
-[ComponentGraph mutation handling][old-mutations] and
-[mutation regressions][mutation-tests];
-[ComponentGraph query stop][old-query-stop],
-[ComponentGraph instance stop and shutdown][old-instance-stop] and
-[current task ownership][execution];
-[ComponentGraph event decoding][old-decoder] and
-[current event decoding][current-decoder].
-
-## What the completed recovery check proves
-
-The [versioned Building Comfort recovery evidence][completed-recovery] records
-one end-to-end run with the real Server, ordinary gRPC source and reaction
-libraries hosted by the computation graph, and the external test service. It
-does not qualify every native gRPC mode or the current tutorial's six-query
-dashboard.
-
-| Check | Recorded result |
-| --- | --- |
-| Uninterrupted reference | Both queries committed 100,000 inputs, and the receivers finalized complete output |
-| Pending-input SIGKILL and restart | The aggregate query restored input 88,748 and replayed the remaining 11,252 |
-| Exact delivery comparison | All 99,981 room and 49,860 aggregate outputs matched, with no missing, extra, duplicate, conflicting or reordered records |
-| Independent final-state check | 12 room rows and three floor rows matched the captured source data |
-
-The run used current-process OpenTelemetry positions, complete producer batches
-and awaited logger finalization, not a quiet period or a record count. It used
-Rust 1.95 debug builds on macOS and a 100,000-entry outbox per query. It is not
-a benchmark or a universal exactly-once claim. The
-[strict workflow][completed-workflow] requires a fresh matching-build reference
-and recovery run; the workflow's existence does not show that a Linux CI run
-succeeded.
-
-The pending-native-input boundary has its own
-[28-case SIGKILL matrix][crash-matrix]: admission QoS, retained input and a
-shared journal, each with eager and paged RocksDB storage on both Tokio
-runtimes. It checks exact accepted frames and retry identities across the
-query-commit and lost-admission-reply boundaries. It does not qualify every
-connector or power loss.
-
-Focused tests cover the newer contracts: [component descriptions][description-tests],
-[sink delivery failures][sink-tests] and [graph bootstrap][bootstrap-tests]. The
-[maintainers guide][qualification-evidence] lists the broader local runs and the
-builds they apply to; a recorded run does not certify a later build.
-
-<a id="performance-and-qualification-boundaries"></a>
+A dashboard can show all six outputs while a log shows only the alerts. A
+corrected room score updates the floor and building averages, and a room that
+becomes comfortable removes its alert. When one query reads another, it first
+loads the other query's current results and then follows its changes; see
+[Starting from existing data](#starting-from-existing-data). If you turn
+bootstrap off for the query, it skips that first load and works only on the
+changes that arrive after it connects.
+
+### Steps that are not queries
+
+**Before:** The Component Graph knew Sources, queries, Reactions, Bootstrap
+Providers and Identity Providers. Middleware ran inside each query, so three
+queries that needed the same cleanup each did it separately. Work that was
+neither a query nor a Reaction had no place.
+
+**Now:** Every component has one of five roles: Source, Transformer, Sink,
+Service or Bootstrap Provider. A query is one kind of Transformer, and a
+Reaction is one kind of Sink. A Transformer can sit anywhere: between a Source
+and several queries, or between a Source and a Sink with no query at all.
+Middleware still works inside a query, and it is also available as a
+Transformer that many queries can share. Ready-made native Transformers include:
+
+| Transformer | What it does |
+|---|---|
+| Middleware | Runs the decode, map, parse, promote and relabel Middleware steps once, for every reader |
+| View | Keeps a reshaped copy of its input and takes back outputs that stop matching |
+| Policy | Checks each input against rules written in Rego, a language for policy rules, and keeps one decision for each input |
+| Optimization | Keeps the best answer to a planning problem you describe, such as which machine should run each job, up to date as inputs change |
+| Geometry | Keeps a record for each pair of flat shapes that meet a rule you set, such as a cart's path crossing a barrier |
+| Arithmetic | Adds to and multiplies a number in each change |
+| Query | Runs Cypher and GQL queries; ordinary queries run on it too |
+
+A Middleware step looks at one change at a time, so it cannot take back a row
+it sent earlier when a later change no longer matches. The View Transformer
+remembers its output, so it can.
+
+**What this means for you:** Cleanup, enrichment, rule checks and calculations
+become reusable steps with their own logs, status and settings.
+
+**Example (Stockroom):** the developer guide's Stockroom application keeps a
+live list of products that need restocking. It adds an audit step between its
+inventory Source and its low-stock query. The step marks each change as checked
+and passes it on; the query and its alerts do not change.
+
+### Connection points and data formats
+
+**Before:** The kinds of connection were fixed: Sources fed queries, and queries
+fed Reactions.
+
+**Now:** A component can have several named Ports for input and output, and one
+output can feed many readers through separate Pipes. A connection that names
+only a component uses its only output, or the output it marks as its main one;
+Drasi never guesses. A component can offer more than one data format on a Port,
+and its settings can choose one of them. Drasi never converts between formats by
+itself.
+
+**What this means for you:** Connections are explicit, and one that cannot work
+is refused instead of quietly receiving the wrong data.
+
+### Changes say exactly what changed
+
+**Before:** A Source Change could add, update or delete an element. An update
+could add or overwrite properties, but a property left out kept its old value,
+so there was no way to remove one property or to replace a whole element.
+
+**Now:** A Source can set some properties, remove named ones, or replace the
+whole element. Setting a property to an empty value, leaving it unchanged and
+removing it are three different changes.
+
+**What this means for you:** When a product's seasonal note is removed in the
+database, Drasi removes it too.
+
+### Connections are checked before data flows
+
+**Before:** A few checks ran when a component started: a persistent query
+refused a Source that could not send its changes again after a restart, and a
+Reaction that needed saved checkpoints refused storage kept in memory only.
+
+**Now:** Every component describes what it promises and what it needs: whether
+its progress survives a restart, whether its outputs can be replayed, which
+delivery guarantee each input needs, and what storage it needs. Drasi compares
+these descriptions when it connects two components, including bootstrap
+connections, before any data flows. On a mismatch, Drasi blocks the receiving
+component with a reason that names both sides. The settings change is still
+accepted, other components keep running, and the problem clears when either
+side changes or the connection is removed.
+
+**What this means for you:** A wrong connection shows up at once, with a clear
+reason, instead of losing or repeating data later.
+
+**Example:** a Sink that needs exactly-once delivery is connected to a query
+kept in memory only. That query's results get new identities each time it
+restarts, so the Sink could not tell a repeated result from a new one. Drasi
+blocks the Sink and says why. An at-least-once Sink on the same query works.
+
+### Stating the guarantees you need
+
+**Before:** Nothing similar.
+
+**Now:** An application can state, for one destination, the guarantees it needs
+after a chosen failure, such as a program restart: accepted input is kept, it
+can be sent again, processing and progress are saved together, and results are
+saved before they are released. Drasi checks the components and storage along
+that path when it builds the application. Storage states which failures it
+survives: a program restart, a power cut or the loss of its disk.
+
+**What this means for you:** A missing guarantee is found before data is lost.
+For example, a persistent query followed by a connection kept in memory only
+cannot promise that its results survive a restart, and Drasi says so.
+
+### Independent work and control
+
+**Before:** Each query ran on its own; other components were run by their
+managers.
+
+**Now:** Every component runs on its own, under Drasi's control, so a blocked
+branch does not stop unrelated work. Branches still affect each other when they
+share a producer (a component that sends them changes) or a shared limit on how
+much they can hold. Control requests, such as stop, travel separately from
+data, so a busy component still receives them. Each control link your program
+holds belongs to one copy of a component, so a link to a replaced copy cannot
+control its replacement.
+
+**What this means for you:** One stuck destination does not freeze unrelated
+parts of the application, and you can still stop it.
+
+### Order and timing
+
+**Before:** A query took the change with the earliest timestamp from all its
+Sources together, so a change could jump ahead of one that its own Source had
+sent earlier.
+
+**Now:**
+
+- A query keeps each producer's changes in the order they were sent, and
+  chooses between producers by comparing only the next change from each.
+- Native components take changes in arrival order unless you ask them to compare
+  times across inputs.
+- Drasi keeps two facts apart: when an event happened, and which version of a
+  result its producer sent. A newer version of a query's result can therefore
+  correct an answer even when the event behind it happened earlier.
+- A merging step that puts changes in the order they happened can wait for late
+  events, by rules you set: how many to hold, how long to wait, and what to do
+  with one that arrives too late. Its
+  settings and storage can be saved and rebuilt like any other component.
+
+**What this means for you:** Saved progress cannot skip an earlier change just
+because two Sources' clocks differ, and a sensor application can allow a short
+delay for late readings. A change marked with an older time than the one Drasi
+already holds for that element is still ignored, and no merging step can know
+about an event that has not arrived.
+
+### Scheduled work outside queries
+
+**Before:** Only queries could schedule work for later, for the time-based
+conditions in their query text.
+
+**Now:** A native Transformer can also ask for work to happen later, and change
+or cancel that request. The request is saved with the Transformer's state, so
+after a restart the work still happens on time without another incoming change.
+This needs persistent storage that saves all or nothing.
+
+**What this means for you:** Delayed notifications and reminders can live in an
+ordinary processing step. This does not make delivery to an outside system
+exactly once.
+
+## Starting from existing data
+
+**Before:** A Bootstrap Provider ran inside the one Source it belonged to, and
+the Component Graph only recorded the link. Each query got existing data
+through its subscription to its Sources, and only Sources could supply it.
+
+**Now:** A Bootstrap Provider is a component with its own role and its own
+bootstrap connections. These connections carry only existing data, never live
+changes, and they appear in inspection (Drasi's view of the running application)
+like any other connection. Each consumer, that is, each component that receives
+the data, runs its own bootstrap session: it asks, the producer sends a start
+marker and the records, then either a completion that says exactly which changes
+the snapshot covers, or a failure with a reason. A Source passes each request on
+to its own Bootstrap Provider and completes it with the point in its live
+changes where the snapshot ends.
+
+```mermaid
+sequenceDiagram
+    participant P as Bootstrap Provider
+    participant S as Source
+    participant Q as Query
+    Q->>S: Ask for existing data
+    S->>P: Ask for the same data
+    P-->>S: Start, records, completion
+    S-->>Q: Start and records
+    S-->>Q: Completion with the switch-over point
+    S-->>Q: Live changes after that point
+```
+
+This makes several things possible:
+
+- **Late arrivals.** A query added while its Source is running gets its own
+  snapshot and switch-over point. Other consumers keep receiving live changes,
+  and the new query skips the live changes its snapshot already includes.
+- **Queries as starting points.** Every query offers its current results as a
+  snapshot, so another query can start from its answer.
+- **Providers for one query, or for several.** A Bootstrap Provider can be
+  connected directly to a query, and one provider can serve several queries.
+- **Combined providers.** Several providers can supply one query, for example a
+  PostgreSQL database snapshot and a snapshot fetched over the web. Each keeps
+  its own progress and completion.
+- **Checked pairs.** A Source and Bootstrap Provider that work as a pair, such
+  as SQLite's, state how they cooperate, and Drasi checks the pair when it
+  connects them.
+- **Restarts.** A persistent query that finished its bootstrap resumes from the
+  state it saved; it does not take a new snapshot. A query kept in memory only
+  rebuilds from a new snapshot, including deletions made while it was stopped.
+- **Live changes keep flowing.** Only a Source that passes snapshots on and is
+  tied to its consumers' saved progress holds back live changes, and only on its
+  very first start, until its first snapshot completes.
+
+**What this means for you:** You can add or restart a query at any time without
+stopping changes to other queries. When its snapshot marks a switch-over point,
+no change is missed or repeated.
+
+**Example (Stockroom):** if ten products are already listed as low on stock
+when a low-stock-count query is added to read the low-stock query, the new query
+starts with a count of ten and then follows later changes.
+
+Some Sources limit late arrivals. A paired SQLite Source and provider accept a
+new consumer only across a stop, and a shared PostgreSQL Source pauses while a
+newly added query takes its snapshot. Some snapshots carry no switch-over point
+at all, for example one fetched over the web or read from a SQLite file. A
+change made while such a snapshot is read can arrive twice, so keep writers
+quiet until the load finishes.
+
+## Delivering results
+
+### One way to handle delivery failures
+
+**Before:** Each Reaction had its own retry and error handling, and some had
+none. Each reported failures in its own way.
+
+**Now:** Every native Sink follows the same rules when it fails to deliver a
+change. The Sink says whether a failure is temporary or permanent, and Drasi
+handles what happens next:
+
+| Failure | What Drasi does | What you see |
+|---|---|---|
+| Temporary, or not stated | Tries the same change again. The first wait is a random time between 0.1 and 0.2 seconds; after each failure both limits double, until waits are between 15 and 30 seconds. If the destination asks for a longer wait, Drasi waits as asked, up to 10 minutes. There is no limit on attempts. Pausing or stopping the Sink ends the wait without marking the change delivered; when it resumes, it tries the same change again. | The Sink is still running, its health is Degraded, and its latest error is shown. Both clear once the change is delivered. |
+| Permanent, with the stall choice (the default) | Stops at that change and delivers nothing after it. | The Sink has failed, with the destination's reason. |
+| Permanent, with the skip choice | Logs the change, marks it handled without delivering it, and carries on. | A count of skipped changes. |
+
+If a group of inputs fails permanently, Drasi retries each input on its own, so
+only the input that cannot be delivered is stalled or skipped. One input can
+hold several changes that arrived together; those are kept together. A Sink that
+saves its own progress records a skip together with that progress, so a replay
+does not send the skipped change again. A crash inside a Sink still fails it.
+Ordinary Reactions keep their own retry and failure handling.
+
+**What this means for you:** A destination outage heals by itself, without
+losing or reordering changes. A change that can never be delivered either stops
+delivery where you can see it, or is skipped and counted. Choose skip only when
+losing that change is acceptable and someone watches the count.
+
+**Example (Stockroom):** Stockroom sends low-stock alerts to a web address that
+receives notifications. Stop the receiver, and the Sink shows Degraded while it
+retries. Start the receiver again, and the waiting alert arrives in order and
+the Sink returns to Healthy. If the receiver rejects an alert as invalid, the
+Sink stops with the receiver's reason.
+
+The native HTTP Sink, which sends changes to a web address, follows these rules.
+It retries a request a few times on its own, within limits you set, and then
+reports the failure. Connection failures, timeouts, server errors and answers
+that ask the sender to try again later are temporary. When an overloaded or
+unavailable destination says how long to wait, the Sink waits that long. Other
+rejections are permanent. A setting chooses stall or skip.
+
+### Health is separate from running
+
+**Before:** A component had only a lifecycle state, such as Running or Error.
+
+**Now:** A component also has a health: Healthy, Degraded, Unavailable or
+Unknown. A Sink that is retrying is Running and Degraded.
+
+**What this means for you:** Monitoring can tell a component that is working
+through a problem from one that has stopped. Retries never give up on their
+own, so decide when a long Degraded period counts as an incident.
+
+### Live readers no longer hold up a stop
+
+**Before:** A reader that stopped reading, such as a stuck Reaction, could block
+a query. Stopping the query then waited five seconds and cut its work off. A
+reader that fell behind in the faster broadcast mode, where all readers share one
+stream of changes, missed changes, with only a warning in the log.
+
+**Now:** In the default mode, each live reader has a limited holding area that
+slows the query down when full, so nothing is lost while the query runs. When
+the query stops, Drasi releases its readers, so the stop never waits for one
+that is not reading. A released reader that falls behind gets the changes
+waiting for it and then a clear signal that it missed some. In broadcast mode,
+and when reading every query at once, a slow reader gets the same signal instead
+of slowing the query down.
+
+**What this means for you:** A stuck dashboard cannot stop a query from
+stopping. A reader that must never miss a change reads the query's saved results
+or a shared saved queue.
+
+### Read the current results, then follow them
+
+**Before:** Code could read a query's current results, but with no position to
+continue from. Only Reactions could read results with a position and then replay
+saved results after it.
+
+**Now:** An output can offer a snapshot of its current state, a replay of its
+saved output, and a combined read-then-follow that fixes the boundary between
+the two. Queries offer this for their results, and other components can too. A
+reader may follow for a limited time (five minutes for a query) and a limited
+amount of data, and Drasi keeps track of that in memory only. If the reader
+falls too far behind or the time runs out, it gets a clear gap signal and starts
+again from a new snapshot.
+
+**What this means for you:** A viewer can show the current floor scores and keep
+them up to date without losing a change made between the read and the follow.
+
+### Native Sinks read any changes
+
+**Before:** Reactions could read only query results.
+
+**Now:** Native Sinks, such as the HTTP Sink, the gRPC Sink (which sends changes
+to other programs) and the SSE Sink (which sends live updates to web browsers),
+accept changes from Sources, Transformers and queries alike. Ordinary Reactions
+still read query results only.
+
+**What this means for you:** You can send a Source's changes, or a
+Transformer's output, straight to a destination without writing a query.
+
+## Saving work and recovering after a stop
+
+### Separate promises for accepted, processed and delivered
+
+"The queue accepted it", "the query saved it" and "the destination finished it"
+are different promises. The Computation Graph has a ready-made building block
+for each, so an application does not have to build its own.
+
+| Boundary | Building block | Example |
+|---|---|---|
+| Accepting input | A Source can save each input together with its request ID before confirming it. When its storage is full it answers "busy", or waits for room. | A client loses the answer and sends the same request again; the input is not added twice. |
+| Processing in a query | Query state, input progress and results are saved together. Saved results can be sent again without running the query again. | After a crash, a total resumes from its saved state and resends its unsent result. |
+| Handing results to a queue | A receiving queue recognizes results it already accepted. Some queues can save as part of the producer's transaction. | Queue A accepted a batch but queue B did not. Recovery respects A's record of what it accepted instead of treating everything as new. |
+| Finishing work at a destination | A delivery helper records each finished operation and resumes with the ones left. Local changes and the record of completion can be saved together. | A saved application view updates its row, its lookup list and its record of completion all or nothing. |
+| Work kept in memory only | Transformers and Sinks can report what they finished without saving it. | A step reports its progress without promising that it survives a crash. |
+
+None of these makes every outside effect exactly once. If a remote system
+carried out an action but its answer was lost, a local record cannot show
+whether repeating the action is safe. Make destination writes safe to repeat.
+
+### Shared saved queues keep every reader's place
+
+**Before:** Nothing similar for general use.
+
+**Now:** A shared saved queue keeps one copy of each change and a separate
+position for each reader. A reader that disconnects keeps its place, and its
+backlog, until you deliberately retire it.
+
+**What this means for you:** A fast reader cannot release changes that a slow or
+restarting reader still needs. For example, if an alerts reader has handled
+change 42 and an audit reader is at 39, the queue keeps changes 40 to 42 for the
+audit reader.
+
+### Transactions that follow your work
+
+**Before:** A query already saved its state and results together for each
+change.
+
+**Now:**
+
+- A Source can deliver one database transaction as one complete group. A stock
+  transfer that takes 5 from one bin and adds 5 to another reaches the query as
+  one group, so the query publishes the final totals, never a half-finished
+  transfer.
+- A straight line of Transformer steps can run as one transaction. Each step
+  keeps its own separate state.
+- A producer and its outgoing saved queues can save together, so a result cannot
+  be saved by the producer but lost on its way to the queue.
+
+**What this means for you:** You choose where all-or-nothing saving matters.
+These are local boundaries, not one transaction across every query, database
+and outside system. Two stores that share a name or a folder are not one
+transaction.
+
+### Persistent queries recover more safely
+
+**Before:** When a persistent query started with a changed configuration,
+DrasiLib cleared all of its saved state and rebuilt it, whatever its recovery
+policy. It did the same when the saved record of the configuration could not be
+read.
+
+**Now:** Only a recognized problem with a query's own saved state can lead to an
+automatic rebuild; storage errors and state owned by another component never do.
+Under Strict, a changed configuration, an incomplete bootstrap, missing history
+or inconsistent saved state stops the query and reports why. AutoReset, or an
+explicit reset request, rebuilds the query from its starting data, and only
+when the query has a way to load that data.
+
+**What this means for you:** A temporary storage problem cannot turn into an
+empty application. Plan configuration changes to persistent queries: choose
+AutoReset, or rebuild deliberately.
+
+### How recovery is tested
+
+Drasi's tests stop the program abruptly while accepted input is still waiting,
+reopen the saved data in a new program, and check that every accepted input is
+processed exactly once. In a recorded crash test of the Building Comfort
+tutorial, 100,000 changes went through Drasi Server and the program was killed
+part-way. After the restart, one query resumed at change 88,748 and replayed the
+remaining 11,252, and all of the roughly 150,000 results arrived with nothing
+missing, repeated or out of order. Such tests show specific setups working, not
+every combination of plugins, storage and failures.
+
+## Changing a running application
+
+### Six lifecycle steps, each with a deadline
+
+**Before:** Source and Reaction plugins had a prepare step, which could not
+report failure, plus start, stop, status and an optional clean-up step on
+removal. There was no pause, and no step had a deadline or a way to cancel it.
+
+**Now:** Every component goes through these steps:
+
+| Step | Purpose |
+|---|---|
+| Prepare | Runs once before the first start. If it fails, the component is retired. |
+| Start | Begins work. A failed start is followed by a stop. |
+| Pause and resume | Hold work and continue it, without ending it. A component that cannot pause says so. |
+| Stop | Ends work, either finishing what is in progress or abandoning it. The component can start again. |
+| Retire | Releases the component for good, with a reason (shutdown, removal, replacement or failed preparation) and a choice to keep or erase its saved data. Only removal and replacement can erase. |
+
+Each step gets a deadline and a way to cancel it. Native plugins use shared
+pause tools, so a finished pause means that nothing in the plugin is reading,
+writing or sending. You can also hold selected components still: Drasi parks them
+at a safe point, and they keep everything they own.
+
+**What this means for you:** You can pause a component to change it, and a step
+that runs past its time limit is reported instead of hanging unnoticed. A native
+plugin that never hands control back to Drasi can still hold a step up; see
+[Current limits](#current-limits).
+
+### Drasi owns cleanup
+
+**Before:** A query stop that timed out was still reported as Stopped, and a
+cancelled stop could lose track of the query's work.
+
+**Now:**
+
+- A failed or interrupted stop or retirement keeps the component and its
+  unfinished work, and a retry receives the same reason and choice.
+- If whoever waits for a stop gives up, the stop still finishes, and a
+  replacement cannot use a resource until the previous owner has cleaned up.
+- Work that a component runs in the background reports its failures, and Drasi
+  fails the component promptly, as a failure it can retry.
+- A crash inside a lifecycle step sets that copy of the component aside; only
+  a newly built copy can run again.
+
+**What this means for you:** Cleanup problems stay visible until they are fixed.
+If you stop a query and close the request that asked for it, the query is still
+stopped and tracked.
+
+### Configuration changes are planned, then applied at a safe point
+
+**Before:** Updating a Source, query or Reaction replaced the running component
+with a new copy.
+
+**Now:** Drasi first asks the component, or the plugin or code that creates it,
+how a change can be made, without changing anything. The plan names one of three
+ways:
+
+| Plan | How it is applied | Same copy? |
+|---|---|---|
+| In place | Pause, apply, resume | Yes |
+| Restart | Stop, apply, start | Yes |
+| Recreate | Stop, retire for replacement, build a new copy | No: a new copy with the same ID |
+
+The accepted plan is saved before anything changes, so an update interrupted by
+a crash resumes as the same operation. Drasi checks the plan again just before
+applying it and refuses a change that now needs a bigger step. A change refused
+before it is applied leaves the component as it was. A failure while restarting
+or replacing a component can leave it stopped or failed instead of bringing back
+the old copy, and a damaged copy is set aside. You can preview a change first.
+If the application changes between the preview and the request to apply it,
+Drasi refuses the request, and you preview again.
+
+**What this means for you:** Many changes apply without rebuilding the
+component, and an update interrupted by a crash resumes as the same operation.
+
+**Example:** updating a running query to keep more saved results applies in
+place. Changing its query text builds a new copy, which reloads existing data
+when bootstrap is on and otherwise starts empty. Changing its inputs, storage or
+recovery policy this way is refused.
+
+### Removal is safe to retry
+
+**Before:** Removing a component was refused while others depended on it. A
+removal could not depend on the current settings, and a retry after a lost
+answer could not tell whether the first attempt had worked.
+
+**Now:** You can remove a component by its ID with two optional checks: an
+expected revision number refuses the removal if the settings have changed, and a
+request ID makes the request safe to repeat, returning the original answer even
+after the component is gone. The removal finishes once the component has stopped
+and, when you ask, its saved data is erased. Removing a query always erases its
+saved state. Stopping, pausing and shutting down never delete saved data. A
+reset, AutoReset recovery, or an update that rebuilds a query can clear that
+query's saved state.
+
+**What this means for you:** Scripts and tools can retry a removal and know
+exactly what happened.
+
+### Names can change; IDs cannot
+
+Each component has a permanent ID and a name. You can rename a running
+component without affecting its connections or progress. A connection made by
+name is tied to the component's ID when it is made, so a later rename, or reuse
+of the old name, does not redirect it.
+
+## Running, managing and hosting
+
+### One consistent view of the whole application
+
+**Before:** Each manager handled its own kind of component and reported status
+changes separately; the Component Graph applied them a moment later.
+
+**Now:** Drasi publishes one consistent picture of the application: its
+definitions, each component's state, the connections and the dependencies.
+Status and lifecycle events come from that picture, so they always agree.
+
+### Components can wait for what they need
+
+**Before:** Adding a query that named a missing Source was refused, and a query
+whose Source was missing when it started failed.
+
+**Now:** You can declare a component before the Source, query, storage or
+plugin it needs exists. It waits, and inspection names what it is waiting for.
+When the missing part arrives, it continues, without overriding an explicit
+stop. An invalid definition, or a processing error, is still a failure, not a
+wait. An ordinary Reaction started against a query that was explicitly stopped
+fails at once with a clear error, instead of waiting until its start deadline.
+
+**Example (Building Comfort):** declare the floor query before the room query
+exists. Inspection shows that the floor query is waiting for the room query, and
+adding the room query lets it continue.
+
+### Time limits for whole operations
+
+**Before:** Starting or stopping the whole application had no time limit.
+
+**Now:** By default, starting an instance may take 10 minutes, and stopping or
+shutting it down 1 minute. Each component's start may take 5 minutes, building a
+component 5 seconds, creating a shared resource 30 seconds, and each owner's
+cleanup 5 seconds. You can change all of these in DrasiLib, and per instance in
+Drasi Server. When a limit runs out, the unfinished work stays tracked: a failed
+stop leaves the unfinished components for a retry, and shutdown reports
+separately whether cleanup finished and whether errors remain.
+
+**What this means for you:** A start or stop that runs past its limit is
+reported instead of waiting forever, and a timeout never hides unfinished
+cleanup. A native plugin that never hands control back to Drasi can still hold
+an operation up.
+
+### Saved, rebuildable definitions
+
+**Before:** DrasiLib's saved configuration covered only queries. A separate
+snapshot also recorded the settings of Sources and Reactions, but your program
+had to supply the plugins and recreate those components itself.
+
+**Now:**
+
+- An application can be described completely: native components, their
+  connections, and instructions for creating the storage and other shared
+  resources they use. When the description is exported, references to
+  secrets stay references, but a password typed directly into a component's
+  settings is exported as it is, so keep exports private.
+- Drasi creates components from saved definitions, using the plugin or code
+  registered for each kind. A component that fails to build stays visible, so
+  you can fix it and retry.
+- A definition, and a record of the request that changed it, can be saved
+  before anything is built, so a component that fails to build does not erase
+  the definition you asked for.
+- Requests can carry an expected revision number and a request ID, so a repeated
+  request is not applied twice and an edit based on out-of-date settings is
+  refused.
+- An optional store keeps definitions encrypted with a key your program
+  supplies, can change that key, and can clean up old request records. It stores
+  settings only; it never deletes or rewinds processed data.
+- Shared resources, such as storage, Bootstrap Providers and saved queues, are
+  declared with their owners and the order in which they depend on each other,
+  and cleanup follows that order. Two components share a resource only when
+  they are given the same owner, not because they use the same name or folder.
+
+**What this means for you:** A restart, or a new copy of the application,
+rebuilds exactly what was accepted. After losing an answer, repeat the same
+request and check whether it was accepted, rather than sending a new one because
+a component is not running yet: accepted, built and ready are separate facts.
+
+### Instances in separate programs
+
+**Before:** Nothing similar.
+
+**Now:** A hosting tool can run DrasiLib instances as separate programs, in a
+parent, child and grandchild arrangement. Bridge Sources and Sinks carry data
+between them, including over encrypted connections where both sides prove who
+they are, and with saved delivery where you choose it.
+
+**What this means for you:** You can split an application across separate
+programs, and bridges can also join instances on different machines. A separate
+program is not a security barrier, and it does not save anything on its own.
+
+### Drasi Server
+
+**Before:** Drasi Server managed Sources, queries and Reactions, and could save
+changes back to its settings file.
+
+**Now:** Drasi Server runs the same Computation Graph:
+
+- Configured Sources, queries and Reactions run alongside native components,
+  and a query's inputs can name other queries and native components.
+- Drasi Server shows each instance's live components, connections and status.
+  It lets you add, start, stop and remove native components, read and replace an
+  instance's whole desired configuration, look up earlier requests, and check
+  an instance's live state.
+- An optional per-instance store keeps accepted definitions encrypted, and
+  create, update and delete requests can carry a request ID and an expected
+  revision number.
+- All six time limits can be set per instance.
+- Drasi Server can send measurements and the record of each change's path to
+  monitoring tools; see [Monitoring and diagnosis](#monitoring-and-diagnosis).
+
+## Plugins
+
+### Native plugins
+
+**Before:** Separately built plugins could supply Sources, Reactions, Bootstrap
+Providers, secret stores and Identity Providers. Each plugin started its own
+private engine for background work.
+
+**Now:**
+
+- Native plugins can supply Sources, Transformers, Sinks, Services and
+  Bootstrap Providers. They can use Drasi's data formats without including its
+  query engine (the native query plugin does include it), and their work runs
+  under Drasi's own scheduling: loading a plugin does not start a second engine
+  for background work.
+- Each native plugin carries a compatibility version. Until that version
+  reaches 1.0, its first two numbers must match Drasi's, and Drasi checks this
+  before it uses the plugin.
+- Drasi refuses, at load time, a plugin that is incomplete, damaged, built for a
+  different version or system, or that asks for a feature Drasi does not offer.
+  It never falls back to loading it as an ordinary plugin.
+- A native plugin states once which Drasi-provided services it uses, such as
+  saved progress or snapshot reads. Drasi refuses a service the plugin did not
+  state, and a required one that is missing.
+- Shared standard tests check native Sources and Sinks: start, stop and restart,
+  a real pause, finishing and abandoning stops, retried delivery, a repeated erase,
+  settings that survive saving, and updates. They can test a plugin built into
+  the program or one loaded from a separate file.
+- A native component can receive fresh credentials from an Identity Provider at
+  every start, instead of keeping the ones it was built with.
+- A loaded native plugin stays loaded until the program ends.
+
+**What this means for you:** Plugins can ship on their own schedule, and an
+incompatible plugin fails clearly when it loads, not while it runs. For example,
+you can ship a cleanup plugin on its own, load it into Drasi Server, and connect
+its output to several queries.
+
+Ready-made native plugins include:
+
+- **Sources:** for PostgreSQL, MySQL, SQL Server and SQLite databases; the
+  HTTP Source and the gRPC Source, which receive changes from other programs;
+  an OpenTelemetry Source for monitoring data; and bridge and counter Sources.
+- **Bootstrap Providers:** for the same four databases, and for data fetched
+  from a web address.
+- **Sinks:** the HTTP Sink, the gRPC Sink, the SSE Sink for live browser
+  updates, and Sinks for logs, captured test output, timing measurements,
+  saved database routines in PostgreSQL, MySQL and SQL Server, and bridges.
+- **Transformers:** those listed in
+  [Steps that are not queries](#steps-that-are-not-queries).
+
+### Ordinary plugins
+
+Ordinary Sources, queries and Reactions still run on the Computation Graph
+through a compatibility layer. That layer is planned for removal once every
+needed plugin has a native version.
+
+## Monitoring and diagnosis
+
+**Before:** Components sent lifecycle events, with a history. Sources, queries
+and Reactions had their own logs. Counters for query results, Reaction
+checkpoints and recovery were kept in memory, and an optional timing tool measured
+the time between stages. Nothing was sent to outside monitoring tools.
+
+**Now:**
+
+- **Measurements and path records.** Drasi records measurements, and a record of
+  the path each change took, in the format of OpenTelemetry, a common standard
+  for monitoring data. It records each step: publishing from a Source,
+  processing in a Transformer or query, handling in a Sink, bootstrap,
+  lifecycle steps and control requests. The levels are off (the default),
+  basic, debug and persistence. Your program chooses where the data goes, and
+  Drasi Server can send it to monitoring tools.
+- **A path record that travels with each change.** When a change arrives with a
+  standard path record from an outside system, that record continues through
+  Transformers and queries, including native plugins, to the Sink that handles
+  the change. It is never saved with the data, so changes replayed after a
+  restart start a new record.
+- **Logs for every component.** Transformers, Sinks, Services and Bootstrap
+  Providers have their own logs too, and native plugin logs keep their original
+  times. Your program can combine Drasi's logs with its own logging. A logging
+  setup that conflicts with your program's is reported as an error, not ignored.
+- **Query progress.** Each query reports how far it has processed its input and
+  how far it has produced output. Reading this is cheap, and Drasi Server can
+  export it.
+- **Queue measurements.** Queues report how full they are, their highest level,
+  how often adding to them had to wait, and how many changes they dropped.
+- **Health and history.** Each component has a health value, and inspection
+  keeps the last 256 published pictures of the application, so a monitor can
+  see a failure that was followed by cleanup instead of missing it between two
+  reads.
+- **Detailed errors.** Errors keep their original causes, and failures from
+  several components during one cleanup are kept together.
+
+**What this means for you:** An operator can follow one change from its Source
+to its destination and can tell "no output" from "no progress".
+
+**Example (Building Comfort):** a temperature change leaves a room inside the
+comfortable range. The alert query produces no new result, but its processed
+input position still moves forward, so monitoring can tell it from a stuck
+query.
+Query progress does not show that a destination finished its work.
+
+## What changes when you move from the Component Graph
+
+These changes need action, or behave differently in ways you will notice.
+
+- **Register a query implementation.** Queries run on the native query plugin,
+  which a DrasiLib application must register; an application without queries
+  does not need it. Drasi Server registers the single suitable query plugin it
+  has loaded. With none, creating a query fails with a clear error; Drasi never
+  quietly picks another implementation.
+- **Use IDs and names.** DrasiLib gives each component a permanent unique ID;
+  its name is separate and can change. Each management action can find a
+  component either by its name or by its ID. A name that looks like an ID is
+  still a name. To supply your own IDs, or components already created with their
+  own IDs, turn on the setting that allows it when you create the instance.
+- **Update query definitions.** A query's inputs are listed under inputs; the
+  old sources list and its source ID fields are refused. Each input names a
+  component and, if needed, a Port, labels and Middleware steps. In DrasiLib
+  settings a query needs a name. The setting for the holding area used during
+  bootstrap is gone and refused; the query's input queue size covers it.
+- **Update Sources and Reactions through definitions.** Updating a Source or
+  Reaction takes a definition that Drasi can rebuild it from. A Source or
+  Reaction that your program created and handed to Drasi directly cannot be
+  updated in place: remove it and add the replacement.
+- **Wait for readiness.** Adding a component returns once it is declared, not
+  once it is running; wait for the component to report that it has started.
+  Starting an instance can report that some components failed while others
+  already run; stop the instance before trying again.
+- **Expect safer recovery.** A persistent query that starts with a changed
+  configuration no longer wipes its saved state silently. Under Strict it stops
+  and reports the change; choose AutoReset, or reset it deliberately.
+- **Saved state is not carried over.** Query state, saved positions and saved
+  results written by the Component Graph are not reused. Plan for persistent
+  queries to load their starting data again.
+- **Rebuild plugins.** An ordinary plugin's compatibility version must match
+  Drasi's in its first two numbers. It was 0.14 for the Component Graph and is
+  0.19 now, so ordinary plugins must be rebuilt. Build native plugins from the
+  same Drasi sources as the program that loads them.
+- **Variable-length relation patterns are refused.** A query pattern that allows
+  a variable number of hops, such as one to three hops between two nodes, now
+  fails with a clear "unsupported" error. The Component Graph accepted such a
+  pattern but ignored the number of hops, which could give wrong answers.
+- **The Source that watched Drasi itself is gone.** The Component Graph added a
+  Source to every instance that let queries watch Drasi's own components. Use
+  inspection instead; Drasi Server shows each instance's live components.
+- **The editable Component Graph record is gone.** Programs could change it
+  directly; now they get a view that can only be read. Asking about something
+  that is missing or cannot be read now returns an error, not an empty answer.
+- **Drasi Server starts empty.** Drasi Server no longer creates a default
+  instance. If its configuration lists no instances, it starts with none; create
+  one before adding components.
+- **Turn on monitoring.** Measurements and path records are off until you choose
+  a level.
+
+## Problems the Computation Graph fixes
+
+| In the Component Graph | Now |
+|---|---|
+| If a persistent query's saved record of its configuration could not be read, all its saved state was cleared and rebuilt. | The failure is reported, and saved state is kept. |
+| Changes were taken by earliest timestamp across all Sources, so a later change from one Source could be processed first and the saved position could skip a change. | Each producer's order is kept, so the saved position never skips a change. |
+| Adding an element that already existed counted it twice in totals. | Adding an existing element replaces it, so replaying a product cannot raise a count from one to two. |
+| An older change could overwrite a newer one or bring back a deleted element. | Older changes are ignored and deletions are remembered, also across restarts with persistent storage. |
+| A change that gave a node and a relation the same identity could crash the query. | The change is refused before anything is changed. |
+| A cancelled query stop could lose track of the query's work, and a stop that timed out still reported Stopped. | Unfinished work stays tracked, and an interrupted cleanup is never reported as a clean stop. |
+| A failed instance stop still marked the instance stopped, so it could not be retried, and shutdown reported success despite failures. | Unfinished components stay available for a retry, and each component's error is reported. |
+| An unreadable live change from an ordinary plugin was skipped, and later changes carried on. | Drasi reports the error and stops taking live changes from that plugin, without counting the lost change as processed. An unreadable record during bootstrap is still skipped. |
+| After a restart, ordinary web and gRPC Sources could release saved input that a slower query still needed. | They keep it until every query that reads them has reconnected. |
+| A reader that stopped reading could hold up a query's stop, and a lagging broadcast reader missed changes silently. | Stopping releases readers, and a lagging reader is told that it missed changes. |
+| A query that returned a whole node, such as RETURN n, sent Reactions a block of internal text. | Reactions receive the node's properties and details. |
+| A variable-length relation pattern was accepted but treated as a single hop. | It is refused with a clear error. |
+
+<a id="current-limits"></a>
 
 ## Current limits
 
-- **Recovery is opt-in and capability-specific.** A common data format does
-  not imply a state store, snapshot provider or durable journal. Persistent
-  inputs, long disconnections, bootstrap and crash combinations must be
-  qualified for the providers in use. The [qualification ledger][qualification]
-  records the evidence and gaps for each requirement.
-- **There is no graph-wide transaction or completion counter.** Separate
-  queries and remote effects do not commit together. Data connections must
-  form an acyclic graph; same-graph feedback goes through an admitted source,
-  and [feedback shutdown][feedback] is a bounded, finite drain, not a promise
-  to finish an arbitrary loop.
-- **Persistent query chains do not replay over a bootstrap edge** ([CW-109][cw-109]). When a
-  persistent query reads another persistent query's output (for example with
-  `from_input_by_name`) with bootstrap enabled, the default, it initializes over
-  the upstream query's `snapshot` bootstrap edge. That edge saves no resume
-  state and replays no upstream output after the downstream's last commit,
-  while the upstream confirms its output as soon as the edge accepts it. After
-  an abrupt stop, output that the downstream received but had not committed is
-  lost. The downstream then fails on the next upstream output with "graph input
-  logical progress has a gap", and again after every restart. `AutoReset` does
-  not apply, because the gap is a processing error rather than a startup
-  recovery error. Volatile downstream queries rebuild from a fresh snapshot and
-  are not affected. An explicitly attached `OutputBootstrapProvider`, as in the
-  Host SDK's durable-chain test, does replay; no test covers a persistent chain
-  over the edge.
-- **Declared descriptions cover a first set of facts** ([CW-106][cw-106]). QoS
-  replay pipes are not checked against the producer's description; progress
-  persistence is declared but not compared along an edge; a native plugin's
-  instance description is its factory's answer; and outside the graph, for
-  example in the Host's ordinary query adapter, a resource handle created
-  without declared capabilities satisfies no requirement. In addition:
-  - `CheckpointedSink` declares nothing, so the graph does not see a wrapped
-    sink's `skip` policy or keyed inputs. It applies `stall` and treats the
-    input as unkeyed.
-  - The in-process graph does not refuse a consumer that keys delivery on
-    producer identity without declaring a keyed input; the Host SDK refuses
-    such native consumers. An incompatible producer is then detected only when
-    the delivery runner rejects a delivery, and the graph treats that
-    unclassified error as transient and keeps retrying.
-  - Dependency requirements, description validation and the factory comparison
-    apply to factory-created components. An already-constructed component's
-    description is used only for edge checks and its sink policy.
-  - DrasiLib's `ComponentBatchBuilder` has no method for an already-constructed
-    bootstrap provider ([CW-116][cw-116]), so within DrasiLib a provider node comes from a
-    factory specification (`component`). The standalone `ComputationGraph`
-    builder accepts constructed providers.
-- **Sink retries interact with instance-wide start and shutdown** ([CW-115][cw-115]). If a sink is
-  already retrying when `DrasiLib::start()` checks that managed components are
-  ready, start returns `PartialStartError` ("managed components did not all
-  become ready … failed during Processing") although the sink is running and
-  will recover; the instance stays running. `DrasiLib::shutdown()` during a
-  retry returns an error that carries the sink's last transient failure, while
-  stopping only that sink with `GraphControl::stop_components` reports
-  `Stopped`. Retry attempts are unlimited, so monitoring decides when
-  `Degraded` becomes an incident.
-- **Native conversion is not universal.** Kafka, Kubernetes and several other
-  sources and initial-data providers exist only as ordinary plugins
-  ([CW-44][cw-44]), and the ordinary plugin stack stays until they move
-  ([CW-63][cw-63]). Not every native plugin runs the conformance kit both
-  linked and loaded yet ([Source X-02][source-x-02]). Only an ordinary query can
-  rebuild its state during a managed update; there is no graph-wide reset
-  protocol ([CW-92][cw-92]). Live SQL Server qualification is deferred
-  ([MS-30][ms-30]).
-- **Database modes are not interchangeable.** MySQL positional modes do not
-  gain the stronger modes' coordinated-snapshot or whole-transaction
-  guarantees. Standalone SQLite file loading adds no public DrasiLib SQL API. A
-  parameterized stored-procedure call does not by itself make an external
-  effect exactly once.
-- **Some query and transformer capabilities are unfinished.** Variable-length
-  relationship patterns are rejected with an unsupported-feature error.
-  Stateless event mappers do not maintain filtered datasets; the view
-  transformer does, but it needs complete initial images and ordered lossless
-  input and is not a durable or input-deduplicating materializer. A native
-  query processes items up to 64 MiB but cannot return a single record or
-  envelope larger than 16 MiB ([CW-76][cw-76]). Garnet is not a qualified
-  native-query storage profile.
-- **Lifecycle, security and scale have boundaries.** Cleanup can still fail,
-  and configuration acceptance must retain uncertain commits. Each component's
-  stop has its own cleanup deadline, which very large graphs can exceed
-  ([CW-107][cw-107]), and a late consumer-progress binding delays startup by up
-  to the cleanup timeout ([CW-104][cw-104]). Full graph exports stay
-  proportional to the graph. The process host is not qualified on Windows and
-  is not a security sandbox, and non-yielding native code cannot always be
-  stopped safely in-process. Network ingress still lacks explicit nesting-depth
-  limits for some formats ([NET-10][net-10]) and a total in-flight byte budget
-  ([NET-11][net-11]).
-- **Dependency mitigation is not a zero-finding scan.** Patched dependency
-  families and targeted safeguards address the reviewed paths, and retained
-  findings have documented mitigations or unaffected usage ([CW-66][cw-66]).
-  Raw audits remain nonzero; these results do not justify blanket ignores.
-- **Builds must match.** The native ABI is unreleased (0.1.0, wire version 1)
-  and requires an exact version match, so rebuild the host and native
-  libraries together. Custom formats must be implemented by both peers.
-- **No universal speedup or production-readiness claim is made.** Sharing a
-  calculation removes duplicated work in that application; it is not a
-  measured throughput guarantee. Local tests and demonstrations are not CI on
-  every connector, every failure combination or long-duration production
-  qualification.
+- **Recovery is a choice, not a default.** Saving and recovering depend on the
+  storage and plugins you choose. Test the combination you use; one working
+  setup does not prove another.
+- **No transaction across the whole application.** Separate queries and outside
+  systems do not save together. Data connections cannot form a loop: results fed
+  back in must go through a Source, and stopping such an application finishes
+  only a limited amount of that returning work.
+- **Query chains after an abrupt stop** ([CW-109][cw-109]). A persistent query
+  that starts from another query's results over a bootstrap connection saves
+  nothing to resume that connection from. From the code, after an abrupt stop
+  it would lose changes it had received but not saved, and then fail on the
+  next change from the query it reads, after every restart. AutoReset does not
+  repair this. No test reproduces it yet. Queries kept in memory only are not
+  affected.
+- **Bootstrap through Transformers and into Sinks** ([CW-110][cw-110]). A query
+  that reads a Source through a Transformer can load existing data only if that
+  Transformer offers a snapshot of its own, and many do not. A query cannot
+  pass starting data to a Middleware Transformer, the Arithmetic Transformer
+  takes no starting data, and native Sinks get starting rows only by reading a
+  snapshot, not as changes.
+- **Component descriptions are not complete** ([CW-106][cw-106]). Shared saved
+  queues that replay are not yet checked against the producer's promises, and
+  saved progress is not compared along a connection. A persistent query that
+  starts from a query kept in memory only is accepted when connected and fails
+  only when its bootstrap runs. A Sink wrapped by the saved-progress helper
+  declares nothing, so Drasi does not see its skip choice and applies stall.
+- **Label choices on some query inputs** ([CW-114][cw-114]). Choosing node or
+  relation labels on a query input that comes from another query, a
+  Transformer or a native Source is accepted, but the query then fails when it
+  is built, so Drasi Server reports success for a query that can never start.
+- **Retrying Sinks at start and shutdown** ([CW-115][cw-115]). If a Sink is
+  retrying while an instance starts, start reports a partial failure although
+  the Sink is running and will recover. Shutting down during a retry reports the
+  Sink's last temporary error, although cleanup completes. Stopping only that
+  Sink reports a clean stop.
+- **Ready-made Bootstrap Providers in batches** ([CW-116][cw-116]). A DrasiLib
+  batch of components cannot add a Bootstrap Provider that your program has
+  already created; Drasi must create the provider from its definition.
+- **Not every connector is native yet** ([CW-44][cw-44], [CW-63][cw-63]). Kafka
+  (a messaging system), Kubernetes (a platform for running programs) and several
+  other Sources and Bootstrap Providers exist only as ordinary plugins, so the
+  compatibility layer stays until they move.
+- **Standard plugin tests** ([Source X-02][source-x-02]). Not every native
+  plugin runs the standard tests yet, and few run them loaded from a separate
+  file.
+- **Rebuilding state during an update** ([CW-92][cw-92]). Only an ordinary query
+  can rebuild its own state during a managed update. There is no
+  application-wide reset that brings the components that read from it back in
+  step.
+- **SQL Server** ([MS-30][ms-30]). The native SQL Server Source has not been
+  tested against a real SQL Server.
+- **Very large single results** ([CW-76][cw-76]). The native query plugin can
+  process an item up to 64 megabytes, but cannot read back a single result
+  record larger than 16 megabytes.
+- **Whole-node results** ([CW-108][cw-108]). The fix that returns a whole node's
+  properties is in place; its full test run and a check through Drasi Server are
+  still open.
+- **Startup and stop timing** ([CW-104][cw-104], [CW-107][cw-107]). When a
+  Source is linked to a query's saved progress late during startup, startup can
+  take up to 5 seconds longer than needed. Stopping thousands of components at
+  once can miss each component's 5-second cleanup limit; raise the limit if that
+  happens.
+- **Network input** ([NET-10][net-10], [NET-11][net-11]). The native HTTP Source
+  and gRPC Source limit message size but not, for every format, how deeply data
+  is nested, and they have no single limit on the memory held by waiting
+  requests.
+- **Separate programs and native code.** The hosting tool for separate programs
+  does not run on Windows and is not a security barrier. Native code that never
+  lets Drasi check on it cannot always be stopped safely inside the same
+  program, and a loaded native plugin cannot be unloaded.
+- **Matching builds.** The native plugin compatibility version is not yet
+  final, and a plugin's first two version numbers must match Drasi's, so build
+  Drasi and its native plugins from the same sources.
+- **Snapshots without a switch-over point.** Some snapshots, such as one read
+  from a SQLite file or fetched over the web, do not mark where live changes
+  begin; keep writers quiet while they load.
+- **Scheduled work in mixed applications** ([CW-82][cw-82]). Scheduled work in a
+  query and in a non-query step has been tested separately, but not together in
+  one persistent application.
+- **Dependencies with security advisories** ([CW-66][cw-66]). A few outside
+  libraries with published security warnings remain, used in ways the warnings
+  do not affect, with safeguards where needed.
+- **No general speed or production-readiness claim.** Sharing a calculation
+  removes repeated work in that application; it does not promise a level of
+  speed. Each native plugin also has its own open items, listed in the
+  [remaining-work list][remaining].
 
-For engineering detail, use the [maintainers guide][maintainers] to map
-ComponentGraph ownership and debugging paths to the new runtime, the
-[developer guide][developer] to build an application, and the
-[data design][data-design] for the data and recovery contracts.
+## Where to learn more
+
+- [Developer guide][developer]: builds the Stockroom application step by step,
+  including [composing a processing pipeline][dg-compose],
+  [the component lifecycle][dg-lifecycle],
+  [monitoring and diagnosis][dg-observe],
+  [loading existing data][dg-bootstrap],
+  [saving and replaying results][dg-replay],
+  [finishing work at destinations][dg-complete],
+  [transactions][dg-transactions],
+  [saving and restoring an application][dg-save],
+  [changing a running application][dg-change] and
+  [plugins and separate programs][dg-plugins].
+- [Maintainers guide][maintainers]: how the Computation Graph is built, with a
+  [map from the Component Graph design][mg-map],
+  [component descriptions][mg-descriptions],
+  [Sink delivery failures][mg-sinks],
+  [the query chain limit][mg-chain],
+  [recovery boundaries][mg-recovery] and
+  [inspecting a running system][mg-inspection].
+- [Remaining-work list][remaining]: every open item, with its evidence.
 
 [old-core]: https://github.com/drasi-project/drasi-core/tree/261b8d40d35ce203a7f4aaae0028956d76a8def4
-[old-hash-error]: https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/lib/src/queries/manager.rs#L1969-L2017
-[query-code]: ../src/computation/v1/query.rs
-[old-ordering]: https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/lib/src/queries/priority_queue.rs#L58-L64
-[ranked-input]: ../src/computation/v1/ranked_pipe.rs
-[old-mutations]: https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/core/src/query/continuous_query.rs#L298-L390
-[mutation-tests]: ../../core/src/query/tests/mutation_integrity.rs
-[old-query-stop]: https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/lib/src/queries/base.rs#L215-L244
-[old-instance-stop]: https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/lib/src/lib_core.rs#L537-L630
-[execution]: ../src/computation/v1/graph/execution.rs
-[old-decoder]: https://github.com/drasi-project/drasi-core/blob/261b8d40d35ce203a7f4aaae0028956d76a8def4/components/host-sdk/src/proxies/change_receiver.rs#L100-L103
-[current-decoder]: ../../components/host-sdk/src/proxies/change_receiver.rs
-[completed-recovery]: https://github.com/drasi-project/test-infra/tree/13c24c57f5c0f4bd4fb56ae493d0bd9359e9cd57/e2e-test-framework/examples/recovery_comparison/goldens/building-comfort-small-v2
-[completed-workflow]: https://github.com/drasi-project/test-infra/blob/13c24c57f5c0f4bd4fb56ae493d0bd9359e9cd57/.github/workflows/e2e-building-comfort-completion.yml
-[crash-matrix]: ../../lib-integration-tests/tests/native_input_crash_recovery.rs
-[description-tests]: ../tests/computation_component_description.rs
-[sink-tests]: ../tests/computation_sink_delivery_failures.rs
-[bootstrap-tests]: ../tests/computation_graph_bootstrap.rs
-[middleware-transform]: ../../components/computation-plugins/transformers/middleware/README.md
-[view-transform]: ../../components/computation-plugins/transformers/view/README.md
-[policy-transform]: ../../components/computation-plugins/transformers/policy/README.md
-[optimization-transform]: ../../components/computation-plugins/transformers/optimization/README.md
-[geometry-transform]: ../../components/computation-plugins/transformers/geometry/README.md
-[arithmetic-transform]: ../../components/computation-plugins/transformers/arithmetic/README.md
-[query-transform]: ../../components/computation-plugins/transformers/query/README.md
-[bootstrap-guide]: ../../components/computation-plugins/bootstrappers/NATIVE-BOOTSTRAP-PROVIDER-GUIDE.md
-[sink-guide]: ../../components/computation-plugins/sinks/NATIVE-SINK-GUIDE.md#delivery-failures
-[plugin-sdk]: ../../components/computation-plugin-sdk/README.md
-[host-services]: ../../components/computation-plugin-sdk/README.md#host-services
-[abi]: ../../components/computation-plugin-abi/README.md
-[instance-host]: ../../components/instance-host/README.md
-[feedback]: computation-graph-qos.md#coordinated-feedback-shutdown
-[telemetry]: ../README.md#telemetry-foundations
-[observability-demo]: ../examples/observability/README.md
-[inspection-guide]: computation-graph-maintainers-guide.md#inspection-and-diagnosing-a-running-system
-[qualification-evidence]: computation-graph-maintainers-guide.md#current-qualification-is-evidence-for-named-scopes
-[qualification]: computation-graph-remaining-work.md#priorities-and-work-ownership
-[cw-106]: computation-graph-remaining-work.md#cw-106
-[cw-109]: computation-graph-remaining-work.md#cw-109
-[cw-115]: computation-graph-remaining-work.md#cw-115
-[cw-116]: computation-graph-remaining-work.md#cw-116
+[remaining]: computation-graph-remaining-work.md
+[developer]: developer-guide/README.md
+[maintainers]: computation-graph-maintainers-guide.md
+[dg-compose]: developer-guide/README.md#5-compose-a-processing-pipeline
+[dg-lifecycle]: developer-guide/README.md#7-own-the-runtime-lifecycle
+[dg-observe]: developer-guide/README.md#8-observe-and-diagnose-the-application
+[dg-bootstrap]: developer-guide/README.md#10-join-snapshots-to-live-input
+[dg-replay]: developer-guide/README.md#11-retain-input-and-replay-output
+[dg-complete]: developer-guide/README.md#12-complete-business-work
+[dg-transactions]: developer-guide/README.md#13-preserve-transactions
+[dg-save]: developer-guide/README.md#16-save-and-restore-an-application
+[dg-change]: developer-guide/README.md#17-change-a-running-application
+[dg-plugins]: developer-guide/README.md#18-package-and-isolate-extensions
+[mg-map]: computation-graph-maintainers-guide.md#appendix-map-from-the-componentgraph-based-design
+[mg-descriptions]: computation-graph-maintainers-guide.md#component-descriptions-and-connection-checks
+[mg-sinks]: computation-graph-maintainers-guide.md#sink-delivery-failures
+[mg-chain]: computation-graph-maintainers-guide.md#known-limitation-chained-persistent-queries-do-not-replay-after-a-restart
+[mg-recovery]: computation-graph-maintainers-guide.md#recovery-is-a-chain-of-completion-boundaries
+[mg-inspection]: computation-graph-maintainers-guide.md#inspection-and-diagnosing-a-running-system
 [cw-44]: computation-graph-remaining-work.md#cw-44
 [cw-63]: computation-graph-remaining-work.md#cw-63
-[source-x-02]: computation-graph-remaining-work.md#source-x-02
-[cw-92]: computation-graph-remaining-work.md#cw-92
-[ms-30]: computation-graph-remaining-work.md#ms-30
+[cw-66]: computation-graph-remaining-work.md#cw-66
 [cw-76]: computation-graph-remaining-work.md#cw-76
-[cw-107]: computation-graph-remaining-work.md#cw-107
+[cw-82]: computation-graph-remaining-work.md#cw-82
+[cw-92]: computation-graph-remaining-work.md#cw-92
 [cw-104]: computation-graph-remaining-work.md#cw-104
+[cw-106]: computation-graph-remaining-work.md#cw-106
+[cw-107]: computation-graph-remaining-work.md#cw-107
+[cw-108]: computation-graph-remaining-work.md#cw-108
+[cw-109]: computation-graph-remaining-work.md#cw-109
+[cw-110]: computation-graph-remaining-work.md#cw-110
+[cw-114]: computation-graph-remaining-work.md#cw-114
+[cw-115]: computation-graph-remaining-work.md#cw-115
+[cw-116]: computation-graph-remaining-work.md#cw-116
+[ms-30]: computation-graph-remaining-work.md#ms-30
 [net-10]: computation-graph-remaining-work.md#net-10
 [net-11]: computation-graph-remaining-work.md#net-11
-[cw-66]: computation-graph-remaining-work.md#cw-66
-[remaining]: computation-graph-remaining-work.md
-[maintainers]: computation-graph-maintainers-guide.md
-[developer]: developer-guide/README.md
-[data-design]: computation-graph-data-design.md
+[source-x-02]: computation-graph-remaining-work.md#source-x-02

@@ -570,6 +570,9 @@ impl std::fmt::Display for DependencyWait {
 pub struct ObservedComponent {
     pub generation: ComponentGeneration,
     pub operation: OperationEpoch,
+    /// Last operation that changed the lifetime of the component's readers.
+    /// Resuming processing after binding an additional subscriber does not.
+    pub read_epoch: OperationEpoch,
     pub revision: GraphRevision,
     pub realization: RealizationState,
     pub lifecycle: ComponentLifecycle,
@@ -883,8 +886,37 @@ pub enum RemovalPolicy {
     Drain,
 }
 
+/// Maximum transient suffix retained by one joining volatile subscriber.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapWindowLimits {
+    pub max_envelopes: std::num::NonZeroUsize,
+    pub max_bytes: std::num::NonZeroUsize,
+}
+
+impl Default for BootstrapWindowLimits {
+    fn default() -> Self {
+        Self {
+            max_envelopes: const { std::num::NonZeroUsize::new(1024).expect("nonzero envelope limit") },
+            max_bytes: const {
+                std::num::NonZeroUsize::new(16 * 1024 * 1024).expect("nonzero byte limit")
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RelationshipPolicy {
+    /// Request current state before live delivery. If omitted, the receiving
+    /// component's configured initialization policy applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_state: Option<bool>,
+    /// Transport for a materialized baseline. Never changes the live pipe or
+    /// the consumer's completion boundary.
+    #[serde(default)]
+    pub state_transfer: super::StateTransfer,
+    #[serde(default)]
+    pub bootstrap_window: BootstrapWindowLimits,
     pub required_for_creation: bool,
     pub required_for_binding: bool,
     pub dynamically_replaceable: bool,
@@ -902,6 +934,9 @@ pub struct RelationshipPolicy {
 impl Default for RelationshipPolicy {
     fn default() -> Self {
         Self {
+            initial_state: None,
+            state_transfer: super::StateTransfer::Stream,
+            bootstrap_window: BootstrapWindowLimits::default(),
             required_for_creation: false,
             required_for_binding: true,
             dynamically_replaceable: true,
@@ -910,6 +945,28 @@ impl Default for RelationshipPolicy {
             propagate_failure: false,
             fence_producer_on_failure: false,
             orphan_permitted: false,
+        }
+    }
+}
+
+impl RelationshipPolicy {
+    /// Follow future changes without requesting the producer's current state.
+    pub fn live_only() -> Self {
+        Self {
+            initial_state: Some(false),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn query_input(initial_state: bool) -> Self {
+        Self {
+            initial_state: Some(initial_state),
+            activation: if initial_state {
+                ActivationCoupling::RequiresRunning
+            } else {
+                ActivationCoupling::Independent
+            },
+            ..Self::default()
         }
     }
 }
@@ -1230,6 +1287,7 @@ mod tests {
         ObservedComponent {
             generation: ComponentGeneration(1),
             operation: OperationEpoch(1),
+            read_epoch: OperationEpoch(1),
             revision: GraphRevision(1),
             realization,
             lifecycle,

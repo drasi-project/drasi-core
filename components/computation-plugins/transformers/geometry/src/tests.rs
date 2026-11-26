@@ -1,54 +1,71 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
+//! Geometry semantics over in-memory transformer state, run the way the
+//! shared runtime runs a stateful transformer: each input envelope is one
+//! operation that commits only if it succeeds, and a non-empty output is
+//! published as the next output change. Storage, recovery, readers and
+//! delivery are the runtime's, and are covered by its own tests and the Host
+//! SDK chain tests.
+
 use super::*;
-use crate::component::GeometryTransformer;
+use crate::{logic::GeometryLogic, state::State};
 use anyhow::{Context, Result};
 use drasi_computation_contracts::{
-    ComponentId, GraphProducerProgress, InputEnvelope, OutputReadError, SnapshotProvider, StreamId,
+    ChangeEnvelope, ComponentId, ComponentUpdateData, InputEnvelope, StreamId,
 };
-use drasi_computation_plugin_sdk::UpdatePlanner;
 use drasi_computation_plugin_sdk::{
-    lifecycle::{DisposeReason, StateIntent, StopMode, UpdateBoundary},
-    testing::{contexts, update_request},
-    ApplyUpdateRequest, ExportedPlugin, NativeComponent, NativeTransformer,
+    lifecycle::UpdateBoundary,
+    testing::{self, update_request},
+    transformer::{MemoryState, Phase, Rows, TransformerLogic},
+    ApplyUpdateRequest, ExportedPlugin,
 };
 use drasi_core_types::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
 use serde_json::{json, Map, Value};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Mutex};
 
 const ID: &str = "5b0f0c2e-4f0a-4a55-9b6e-0d6f1f2b9a10";
 
 // ------------------------------------------------------------------ harness
 
-fn create(configuration: Value) -> Result<GeometryTransformer> {
-    GeometryTransformer::new(
-        GeometryFactory
-            .metadata()
-            .descriptor(ComponentId::try_new(ID)?)?,
-        configuration,
-        None,
-    )
+fn create(configuration: Value) -> Result<Harness> {
+    let (logic, state) = open(configuration)?;
+    Ok(Harness {
+        logic,
+        store: MemoryState::default(),
+        state,
+        sequence: 0,
+        time: 0,
+        published: 0,
+        rows: Rows::new(),
+    })
+}
+
+fn open(configuration: Value) -> Result<(GeometryLogic, Mutex<State>)> {
+    let request =
+        testing::create_request(&GeometryFactory, &ComponentId::try_new(ID)?, configuration);
+    let (logic, _) = GeometryLogic::create(&request)?;
+    let sets = logic.engine()?.config.sets.len();
+    Ok((logic, Mutex::new(State::new(sets))))
 }
 
 struct Harness {
-    transformer: GeometryTransformer,
+    logic: GeometryLogic,
+    /// The transformer's stored state.
+    store: MemoryState,
+    state: Mutex<State>,
     sequence: u64,
     time: u64,
+    /// The output position of the last published change.
+    published: u64,
+    rows: Rows,
 }
 
 impl Harness {
     async fn new(configuration: Value) -> Result<Self> {
-        let mut transformer = create(configuration)?;
-        transformer.initialize(&contexts::initialize()).await?;
-        transformer.start(&mut contexts::start()).await?;
-        Ok(Self {
-            transformer,
-            sequence: 0,
-            time: 0,
-        })
+        create(configuration)
     }
 
     fn input(&mut self, changes: &[SourceChange]) -> Result<InputEnvelope> {
@@ -68,15 +85,44 @@ impl Harness {
     /// Sends one batch and returns the emitted changes.
     async fn send(&mut self, changes: Vec<SourceChange>) -> Result<Vec<SourceChange>> {
         let input = self.input(&changes)?;
-        let mut outputs = self.transformer.transform(input).await?;
-        assert_eq!(outputs.len(), 1);
-        let output = outputs.pop().context("missing output")?;
-        assert_eq!(output.port.as_str(), "out");
-        let progress = GraphProducerProgress::from_envelope(&output.envelope)?
-            .context("missing geometry progress")?;
-        assert!(!progress.identity().persistent());
-        assert_eq!(progress.identity().component_id().as_str(), ID);
-        Ok(GraphChangeCodec::decode_changes(&output.envelope)?)
+        let result = self.operation(&input.envelope).await;
+        if result.is_err() {
+            // A failed operation fences the transformer until the runtime
+            // reopens its stored state.
+            self.reopen().await?;
+        }
+        result
+    }
+
+    async fn operation(&mut self, input: &ChangeEnvelope) -> Result<Vec<SourceChange>> {
+        let prepared = self.logic.prepare(input, None, None, Phase::Steady)?;
+        let operation = self.store.transaction();
+        let engine = self.logic.engine()?;
+        let output = state::transform(&operation, &self.state, &engine, &prepared).await?;
+        let next = self.published + 1;
+        let envelope = self.logic.project(input, prepared, output, next)?;
+        operation.commit();
+        let Some(envelope) = envelope else {
+            return Ok(Vec::new());
+        };
+        transformer::apply_operations(&mut self.rows, envelope.changes().operations())?;
+        self.published = next;
+        Ok(GraphChangeCodec::decode_changes(&envelope)?)
+    }
+
+    async fn reopen(&mut self) -> Result<()> {
+        let engine = self.logic.engine()?;
+        self.state = Mutex::new(State::open(&self.store.transaction(), &engine).await?);
+        Ok(())
+    }
+
+    /// A new transformer object over the stored state, as after a restart.
+    async fn restart(&mut self, configuration: Value) -> Result<()> {
+        let (logic, _) = open(configuration)?;
+        let state = State::open(&self.store.transaction(), &*logic.engine()?).await?;
+        self.logic = logic;
+        self.state = Mutex::new(state);
+        Ok(())
     }
 
     async fn upsert(&mut self, elements: Vec<Element>) -> Result<Vec<SourceChange>> {
@@ -118,15 +164,42 @@ impl Harness {
         }
     }
 
-    /// The published snapshot as `label:element id` → properties.
+    /// The published current state as `label:element id` → properties,
+    /// after checking that the stored state reopens to exactly the live one
+    /// and that its records are what was published.
     async fn snapshot(&self) -> Result<BTreeMap<String, Map<String, Value>>> {
-        let snapshot = reader(&self.transformer)?.snapshot().await?;
-        assert_eq!(snapshot.cursor().sequence(), self.sequence);
-        snapshot
-            .records()
+        let engine = self.logic.engine()?;
+        let reopened = State::open(&self.store.transaction(), &engine).await?;
+        let live = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("state poisoned"))?;
+        assert!(
+            reopened == *live,
+            "the stored state reopens to the live state"
+        );
+        let published = self
+            .rows
             .values()
             .map(|record| {
-                let element = Element::try_from(GraphChangeCodec::decode_element(record)?)?;
+                Ok(Element::try_from(GraphChangeCodec::decode_element(
+                    record,
+                )?)?)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut records: Vec<_> = live
+            .outputs()
+            .values()
+            .map(|record| record.element(engine.namespace()))
+            .collect();
+        let key = |element: &Element| element.get_reference().element_id.clone();
+        records.sort_by_key(key);
+        let mut sorted = published.clone();
+        sorted.sort_by_key(key);
+        assert_eq!(records, sorted, "the stored records are the published rows");
+        published
+            .into_iter()
+            .map(|element| {
                 let metadata = element.get_metadata();
                 Ok((
                     format!("{}:{}", metadata.labels[0], metadata.reference.element_id),
@@ -146,16 +219,6 @@ impl Harness {
             .map(|(_, properties)| properties["id"].as_str().unwrap_or_default().to_string())
             .collect())
     }
-}
-
-fn reader(transformer: &GeometryTransformer) -> Result<Arc<dyn SnapshotProvider>> {
-    transformer
-        .output_readers()
-        .ports()
-        .get(&PortId::try_new("out")?)
-        .and_then(|readers| readers.snapshot())
-        .cloned()
-        .context("missing snapshot reader")
 }
 
 /// (operation, id property or element id) of each change, in emitted order.
@@ -894,11 +957,25 @@ fn metadata_is_valid() -> Result<()> {
     Ok(())
 }
 
+/// The configuration a transformer evaluates with, defaults included.
+fn normalized(configuration: &Value) -> Result<Value> {
+    Ok(serde_json::to_value(config::GeometryConfig::parse(
+        configuration,
+    )?)?)
+}
+
 #[test]
 fn configuration_round_trips_through_create() -> Result<()> {
     let metadata = GeometryFactory.metadata();
     let details = GeometryFactory.configuration_details();
     details.validate_schema(&metadata.configuration)?;
+    // The runtime's shared options are accepted and are not geometry settings.
+    let shared = with(
+        move_a_wall(),
+        json!({"bootstrap": true, "recovery": "auto_reset", "outboxCapacity": 3}),
+    );
+    metadata.configuration.validate(&shared)?;
+    assert_eq!(normalized(&shared)?, normalized(&move_a_wall())?);
     for configuration in [
         move_a_wall(),
         with(
@@ -909,12 +986,12 @@ fn configuration_round_trips_through_create() -> Result<()> {
         zones(json!([{"name": "n", "left": "assets", "right": "zones",
                       "predicate": "intersects", "label": "N"}])),
     ] {
-        let exposed = create(configuration.clone())?.configuration()?;
+        let exposed = normalized(&configuration)?;
         assert!(
             details.equivalent_with_defaults(&metadata.configuration, &configuration, &exposed)?,
             "{configuration} vs {exposed}"
         );
-        assert_eq!(create(exposed.clone())?.configuration()?, exposed);
+        assert_eq!(normalized(&exposed)?, exposed);
     }
     Ok(())
 }
@@ -973,72 +1050,51 @@ fn invalid_configurations_are_rejected() {
     }
 }
 
-// ------------------------------------------------------------ lifecycle
+// ------------------------------------------------------------- restart
 
 #[tokio::test]
-async fn lifecycle_pause_restart_and_erase() -> Result<()> {
-    let mut h = Harness::new(move_a_wall()).await?;
+async fn a_restart_reopens_the_stored_memberships_and_records_exactly() -> Result<()> {
+    let config = with(move_a_wall(), json!({"invalidGeometry": "report"}));
+    let mut h = Harness::new(config.clone()).await?;
     let (journeys, _) = fixture();
-    let rows = vec![h.journey(&journeys[0]), h.obstacle(&("block", wall(4.5)))];
+    // `row-z` owns the key `block`; the later `row-a` is its duplicate, even
+    // though it sorts first.
+    let rows = vec![
+        h.journey(&journeys[0]),
+        h.node(
+            "ObstacleFootprint",
+            "row-z",
+            json!({"obstacle_id": "block", "vertices": wall(4.5)}),
+        ),
+    ];
     h.upsert(rows).await?;
+    let twin = h.node(
+        "ObstacleFootprint",
+        "row-a",
+        json!({"obstacle_id": "block", "vertices": wall(4.5)}),
+    );
+    h.upsert(vec![twin]).await?;
+    let before = h.snapshot().await?;
 
-    h.transformer.pause(&contexts::pause()).await?;
-    let row = h.obstacle(&("other", wall(4.5)));
-    assert!(h.upsert(vec![row]).await.is_err(), "paused");
-    h.sequence -= 1;
-    h.transformer.resume(&contexts::resume()).await?;
-
-    let reader = reader(&h.transformer)?;
-    h.transformer.stop(&contexts::stop(StopMode::Drain)).await?;
-    assert!(matches!(
-        reader.snapshot().await,
-        Err(OutputReadError::NotReady(_))
-    ));
-    h.transformer
-        .dispose(&contexts::dispose(
-            DisposeReason::Shutdown,
-            StateIntent::Preserve,
-            1,
-        )?)
-        .await?;
-    h.transformer.start(&mut contexts::start()).await?;
+    h.restart(config.clone()).await?;
+    assert_eq!(h.snapshot().await?, before);
+    let changes = h.delete(&["row-a"]).await?;
     assert_eq!(
-        h.ids("Obstruction").await?,
-        ["journey-ada/block"],
-        "retained"
+        summary(&changes),
+        [(
+            "delete",
+            json!(["error", "obstacles", "scene", "row-a"]).to_string()
+        )],
+        "the original owner keeps the key"
     );
-    assert!(h.transformer.start(&mut contexts::start()).await.is_err());
+    assert_eq!(h.ids("Obstruction").await?, ["journey-ada/block"]);
 
-    assert!(
-        h.transformer
-            .dispose(&contexts::dispose(
-                DisposeReason::Removal,
-                StateIntent::Erase,
-                1
-            )?)
-            .await
-            .is_err(),
-        "must stop first"
-    );
-    h.transformer.stop(&contexts::stop(StopMode::Drain)).await?;
-    h.transformer
-        .dispose(&contexts::dispose(
-            DisposeReason::Removal,
-            StateIntent::Erase,
-            1,
-        )?)
-        .await?;
-    assert!(matches!(
-        reader.snapshot().await,
-        Err(OutputReadError::Retired)
-    ));
-    assert!(h.transformer.start(&mut contexts::start()).await.is_err());
-
-    let mut cancelled = create(move_a_wall())?;
-    assert!(cancelled
-        .start(&mut contexts::cancelled_start())
+    // Retained state must fit the configuration it reopens with.
+    let error = h
+        .restart(with(config, json!({"limits": {"maxElements": 1}})))
         .await
-        .is_err());
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("maxElements"), "{error:#}");
     Ok(())
 }
 
@@ -1086,6 +1142,11 @@ fn assessment_matrix() -> Result<()> {
         (renamed, Some(UpdateBoundary::Replace)),
         (with(current.clone(), json!({"stream": "other"})), None),
         (with(current.clone(), json!({"bogus": true})), None),
+        (with(current.clone(), json!({"volatile": true})), None),
+        (
+            with(current.clone(), json!({"outboxCapacity": 2})),
+            Some(UpdateBoundary::Pause),
+        ),
     ] {
         assert_eq!(
             boundary(GeometryFactory.assess(&request(current.clone(), proposed.clone())?)),
@@ -1093,17 +1154,30 @@ fn assessment_matrix() -> Result<()> {
             "{proposed}"
         );
     }
-    let parsed = config::GeometryConfig::parse(current)?;
-    assert_eq!(
-        boundary(Ok(config::plan(&parsed, &parsed, true))),
-        Some(UpdateBoundary::Replace),
+    let parsed = config::GeometryConfig::parse(&current)?;
+    assert!(
+        !config::in_place(&parsed, &parsed, true)?,
         "changed input bindings"
     );
+
+    // A reconstruction initializes from upstream again when bootstrap is configured.
+    for (bootstrap, data) in [
+        (false, ComponentUpdateData::Reset),
+        (true, ComponentUpdateData::Rebootstrap),
+    ] {
+        let current = with(move_a_wall(), json!({"bootstrap": bootstrap}));
+        let proposed = with(current.clone(), json!({"epsilon": 0.01}));
+        let plan = GeometryFactory
+            .assess(&request(current, proposed)?)?
+            .plan()
+            .context("plan")?;
+        assert_eq!(plan.data, data);
+    }
     Ok(())
 }
 
 #[tokio::test]
-async fn in_place_update_applies_at_a_pause_and_respects_retained_state() -> Result<()> {
+async fn in_place_update_respects_retained_state() -> Result<()> {
     let mut h = Harness::new(move_a_wall()).await?;
     let (journeys, _) = fixture();
     let rows = vec![
@@ -1115,33 +1189,30 @@ async fn in_place_update_applies_at_a_pause_and_respects_retained_state() -> Res
 
     // Tighter limits than the retained state need a rebuild.
     let tight = with(move_a_wall(), json!({"limits": {"maxOutputs": 1}}));
-    let assessment =
-        NativeManagement::assess(&h.transformer, &request(move_a_wall(), tight.clone())?)?;
-    assert_eq!(boundary(Ok(assessment)), Some(UpdateBoundary::Replace));
+    let plan = h
+        .logic
+        .plan_update(Some(&h.state), &request(move_a_wall(), tight)?)
+        .context("geometry plans updates")??;
+    assert_eq!(UpdateBoundary::from(plan.mode), UpdateBoundary::Replace);
 
     let proposed = with(
         move_a_wall(),
         json!({"limits": {"maxOutputs": 2}, "invalidGeometry": "skip"}),
     );
-    let request = request(move_a_wall(), proposed.clone())?;
-    let assessment = NativeManagement::assess(&h.transformer, &request)?;
+    let request = request(move_a_wall(), proposed)?;
+    let plan = h
+        .logic
+        .plan_update(Some(&h.state), &request)
+        .context("geometry plans updates")??;
+    assert_eq!(UpdateBoundary::from(plan.mode), UpdateBoundary::Pause);
     let update = ApplyUpdateRequest {
         operation_id: "op".into(),
-        request: request.clone(),
-        plan: assessment.plan().context("plan")?,
+        request,
+        plan,
         fingerprint: None,
     };
-    let ctx = contexts::apply(UpdateBoundary::Pause);
-    let management = h.transformer.management().context("management")?;
-    assert!(management.apply(&ctx, &update).await.is_err(), "not paused");
-    h.transformer.pause(&contexts::pause()).await?;
-    let mut stale = update.clone();
-    stale.request.current.configuration = tight;
-    let management = h.transformer.management().context("management")?;
-    assert!(management.apply(&ctx, &stale).await.is_err(), "stale");
-    management.apply(&ctx, &update).await?;
-    h.transformer.resume(&contexts::resume()).await?;
-    assert_eq!(h.transformer.configuration()?["limits"]["maxOutputs"], 2);
+    h.logic.apply_update(&update)?;
+    assert_eq!(h.logic.engine()?.config.limits.max_outputs, 2);
 
     // The new limit applies to later input; retained records are kept.
     let row = h.obstacle(&("c", wall(4.7)));
@@ -1150,5 +1221,3 @@ async fn in_place_update_applies_at_a_pause_and_respects_retained_state() -> Res
     assert_eq!(h.ids("Obstruction").await?.len(), 2);
     Ok(())
 }
-
-use drasi_computation_plugin_sdk::NativeManagement;

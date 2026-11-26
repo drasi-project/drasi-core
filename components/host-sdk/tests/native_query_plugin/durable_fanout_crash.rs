@@ -5,6 +5,20 @@ use super::*;
 
 const CRASH_ROOT: &str = "DRASI_QUERY_PLUGIN_FANOUT_ROOT";
 
+#[derive(Default)]
+struct FreshSeed(AtomicBool);
+
+#[async_trait]
+impl ComputationBootstrapProvider for FreshSeed {
+    async fn snapshot(&self) -> Result<ComputationBootstrapSnapshot> {
+        self.0.store(true, Ordering::Release);
+        Ok(ComputationBootstrapSnapshot {
+            changes: Box::pin(futures_util::stream::empty()),
+            watermarks: Vec::new(),
+        })
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "process-exit fixture launched by the partial fanout cases"]
 async fn indexed_fanout_exit_child() -> Result<()> {
@@ -87,6 +101,38 @@ async fn partial_fanout() -> Result<()> {
     assert_eq!(bindings.destinations().len(), 2);
     owner.shutdown().await?;
     drop(owner);
+
+    // At this point the first journal has committed, the second has not,
+    // and the producer died without acknowledging the fan-out. A replacement
+    // seed cannot recover the missing output or substitute a new destination.
+    let seed = Arc::new(FreshSeed::default());
+    let mut rebuild = factory()?.create_component_with_processing(
+        component_id()?,
+        json!({
+            "query": "MATCH (n:Item) RETURN sum(n.value * 2) AS total",
+            "stream": format!("{COMPONENT}/out"), "bootstrap": true, "recovery": "auto_reset"
+        }),
+        scope(2),
+        provider(&root.join("query"))?,
+    )?;
+    rebuild
+        .bind_bootstrap_provider(Arc::new(computation::NativeBootstrapResource(seed.clone())))?;
+    rebuild.initialize(&crate::hooks::initialize_ctx()).await?;
+    let refusal = rebuild
+        .start(&crate::hooks::start_ctx())
+        .await
+        .expect_err("a rebuild must not discard partially delivered output");
+    anyhow::ensure!(
+        format!("{refusal:#}").contains("unconfirmed output"),
+        "{refusal:#}"
+    );
+    assert!(
+        !seed.0.load(Ordering::Acquire),
+        "the refused rebuild opened the replacement seed"
+    );
+    rebuild.stop(&crate::hooks::stop_ctx()).await?;
+    drop(rebuild);
+
     let mut pending = create(&root.join("query"), QUERY, 2)?;
     pending.initialize(&crate::hooks::initialize_ctx()).await?;
     pending.start(&crate::hooks::start_ctx()).await?;
@@ -121,13 +167,16 @@ async fn partial_fanout() -> Result<()> {
             );
             assert_eq!(channel.progress().await?.processed["target"], 1);
         }
-        assert_eq!(
-            recovered.seen[1]
-                .lock()
-                .expect("result capture poisoned")
-                .len(),
-            1
-        );
+        let seen = recovered.seen[1].lock().expect("result capture poisoned");
+        let [owed] = seen.as_slice() else {
+            anyhow::bail!("the second destination did not receive exactly the original output");
+        };
+        aggregate(
+            &[OutputEnvelope::new(PortId::try_new("out")?, owed.clone())],
+            Some(0.0),
+            10.0,
+            1,
+        )?;
     }
     let stopped = recovered.graph.shutdown().await;
     run??;

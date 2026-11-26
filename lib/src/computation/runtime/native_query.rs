@@ -524,11 +524,7 @@ impl Runtime {
             self.config.global_dispatch_buffer_capacity.unwrap_or(1_000),
         )?
         .query_factory(factory)
-        .with_catalog(catalog.as_ref().clone())
-        .with_output_catalogue(
-            self.config.id.clone(),
-            OutputCatalogue::new(self.control()?),
-        );
+        .with_catalog(catalog.as_ref().clone());
         let reader = SourcePluginAdapterFactory::default()
             .descriptor()
             .implementation
@@ -543,6 +539,24 @@ impl Runtime {
             .clone();
         let mut sources = BTreeMap::new();
         let mut native_sources = BTreeMap::new();
+        let seed_edge = original_config
+            .bootstrap_provider
+            .as_ref()
+            .and_then(crate::config::ComponentReference::as_id)
+            .map(|provider| ComputationPipelineBuilder::seed_relationship(id, provider));
+        // Subscription-derived bootstrap resources cover only their source
+        // inputs. A directly supplied resource is instead the query's seed.
+        let supplied_seed = original
+            .dependencies
+            .get("bootstrap")
+            .and_then(|ids| ids.first())
+            .filter(|id| {
+                publication
+                    .desired
+                    .resource_dependencies
+                    .get(*id)
+                    .is_none_or(BTreeMap::is_empty)
+            });
         let input_queue = publication.desired.edges.iter().find_map(|edge| {
             let specification = publication
                 .desired
@@ -572,6 +586,11 @@ impl Runtime {
             )
             .filter(|(edge, _, _)| edge.to.component == query_id)
         {
+            if seed_edge.as_ref().is_some_and(|seed| {
+                &seed.definition == edge && &seed.pipe == pipe && &seed.policy == policy
+            }) {
+                continue;
+            }
             let spec = publication.desired.specifications.get(&edge.from.component);
             if spec.is_some_and(|spec| spec.implementation == timer) {
                 continue;
@@ -579,28 +598,33 @@ impl Runtime {
             let mut native_input = None;
             for (rank, input) in original_config.inputs.iter().enumerate() {
                 let pending = ComputationPipelineBuilder::pending_native_endpoint(id, input.id()?)?;
-                if input.component.as_id() == Some(&edge.from.component) || edge.from == pending {
-                    native_input = Some((rank, input.id()?, edge.from != pending));
+                if edge.from == pending
+                    || (input.component.as_id() == Some(&edge.from.component)
+                        && input
+                            .port
+                            .as_ref()
+                            .is_none_or(|port| port == &edge.from.port))
+                {
+                    native_input = Some((rank, input, edge.from != pending));
                     break;
                 }
             }
-            if let (Some((rank, component, resolved)), DesiredPipe::Ranked(pipe)) =
-                (native_input, pipe)
+            if let (Some((rank, input, resolved)), DesiredPipe::Ranked(pipe)) = (native_input, pipe)
             {
-                if pipe.source_id.is_none()
+                let expected = RelationshipPolicy::query_input(
+                    original_config.bootstrap_provider.is_none()
+                        && supplied_seed.is_none()
+                        && input.loads_initial_state(original_config.enable_bootstrap),
+                );
+                if edge.to.port.as_str() == "in"
+                    && pipe.source_id.is_none()
                     && pipe.source_dispatch.is_none()
                     && !pipe.drop_when_full
                     && pipe.source_rank == rank
                     && input_queue.as_ref() == Some(&pipe.queue)
-                    && (*policy == RelationshipPolicy::default()
-                        || *policy
-                            == RelationshipPolicy {
-                                activation: ActivationCoupling::RequiresRunning,
-                                ..Default::default()
-                            })
+                    && *policy == expected
                 {
-                    native_sources
-                        .insert(component.to_owned(), resolved.then(|| edge.from.clone()));
+                    native_sources.insert(input.id()?.clone(), resolved.then(|| edge.from.clone()));
                     continue;
                 }
             }
@@ -691,12 +715,8 @@ impl Runtime {
             }
             builder = builder.source(host, options)?;
         }
-        if native_only && config.enable_bootstrap {
-            if let Some(bootstrap) = original
-                .dependencies
-                .get("bootstrap")
-                .and_then(|ids| ids.first())
-            {
+        if native_only && config.enable_bootstrap && config.bootstrap_provider.is_none() {
+            if let Some(bootstrap) = supplied_seed {
                 let bootstrap = publication
                     .resource(bootstrap)?
                     .get::<QueryBootstrapResource>()?;

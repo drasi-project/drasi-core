@@ -1,22 +1,18 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-use std::{
-    future::Future,
-    pin::Pin,
-    sync::{Arc, Mutex},
-    task::{Context, Poll},
-};
+//! Observation of the query engine's own evaluation. Everything else a query
+//! observes is shared transformer telemetry.
 
-use anyhow::Result;
-use drasi_computation_contracts::{
-    telemetry::{
-        ExecutionScope, QueryObservationEvent, QueryObservationKind, QueryObservationOutcome,
-        QueryObservationPhase,
-    },
-    ChangeEnvelope, ChangeOperation,
+use std::sync::Arc;
+
+use drasi_computation_contracts::telemetry::{
+    QueryObservationKind, QueryObservationOutcome, QueryObservationPhase,
 };
-use drasi_computation_plugin_sdk::query_telemetry::{QueryObservationGuard, QueryTelemetry};
+use drasi_computation_plugin_sdk::{
+    query_telemetry::{QueryObservationGuard, QueryTelemetry},
+    transformer::Observations,
+};
 use drasi_core::{
     computation::{QueryInputBatch, QueryObservation, QueryObserver, QueryOperation},
     evaluation::context::QueryPartEvaluationContext,
@@ -24,130 +20,39 @@ use drasi_core::{
     query::QueryEvaluator,
 };
 
-#[derive(Clone)]
-pub(super) struct QueryObservations(QueryTelemetry);
-
-impl QueryObservations {
-    pub(super) fn capture() -> Result<Self> {
-        Ok(Self(QueryTelemetry::capture()?))
-    }
-
-    pub(super) fn enabled(&self) -> bool {
-        self.0.enabled()
-    }
-
-    pub(super) async fn phase<T>(
-        &self,
-        kind: QueryObservationKind,
-        phase: QueryObservationPhase,
-        future: impl Future<Output = Result<T>>,
-    ) -> Result<T> {
-        let Some(mut observation) = self.0.begin(kind, phase, None)? else {
-            return future.await;
-        };
-        let result = observation.scope(future).await;
-        let finished = observation.finish(
-            if result.is_ok() {
-                QueryObservationOutcome::Success
-            } else {
-                QueryObservationOutcome::Error
-            },
-            None,
-        );
-        match (result, finished) {
-            (Err(error), Err(telemetry)) => Err(error.context(telemetry)),
-            (Err(error), Ok(())) => Err(error),
-            (Ok(_), Err(error)) => Err(error.into()),
-            (Ok(value), Ok(())) => Ok(value),
-        }
-    }
-
-    pub(super) async fn transaction<T>(
-        &self,
-        phase: QueryObservationPhase,
-        future: impl Future<Output = Result<T>>,
-    ) -> Result<T> {
-        self.phase(QueryObservationKind::Transaction, phase, future)
-            .await
-    }
-
-    fn observer(&self, phase: QueryObservationPhase) -> Option<Arc<dyn QueryObserver>> {
-        self.0.enabled().then(|| {
-            Arc::new(EvaluatorObserver {
-                telemetry: self.0.clone(),
-                phase,
-            }) as Arc<dyn QueryObserver>
-        })
-    }
-
-    pub(super) async fn evaluate<const SOURCE_TRANSACTION: bool>(
-        &self,
-        evaluator: &QueryEvaluator,
-        input: QueryInputBatch,
-        phase: QueryObservationPhase,
-    ) -> drasi_core::computation::Result<Vec<QueryPartEvaluationContext>> {
-        let observer = self.observer(phase);
-        evaluator
-            .evaluate_input_batch_observed::<SOURCE_TRANSACTION>(input, observer.as_ref())
-            .await
-    }
-
-    pub(super) async fn future(
-        &self,
-        evaluator: &QueryEvaluator,
-    ) -> drasi_core::computation::Result<
-        Option<Arc<drasi_core::computation::ComputationFutureResult>>,
-    > {
-        let observer = self.observer(QueryObservationPhase::Steady);
-        evaluator
-            .evaluate_next_future_observed(observer.as_ref())
-            .await
-    }
-
-    pub(super) fn input(&self, phase: QueryObservationPhase) -> Result<()> {
-        if !self.enabled() {
-            return Ok(());
-        }
-        Ok(self.0.event(QueryObservationEvent::Input { phase })?)
-    }
-
-    pub(super) fn results(&self, output: &ChangeEnvelope) -> Result<()> {
-        if !self.enabled() {
-            return Ok(());
-        }
-        let mut counts = [0; 3];
-        for operation in output.changes().operations() {
-            counts[match operation {
-                ChangeOperation::Added { .. } => 0,
-                ChangeOperation::Updated { .. } => 1,
-                ChangeOperation::Deleted { .. } => 2,
-            }] += 1;
-        }
-        Ok(self.0.event(QueryObservationEvent::Results {
-            added: counts[0],
-            updated: counts[1],
-            deleted: counts[2],
-        })?)
-    }
-
-    pub(super) fn state(&self, outbox: usize, live: usize) -> Result<()> {
-        if !self.enabled() {
-            return Ok(());
-        }
-        Ok(self.0.event(QueryObservationEvent::State {
-            outbox: u64::try_from(outbox)?,
-            live: u64::try_from(live)?,
-        })?)
-    }
-
-    pub(super) fn run(&self, phase: QueryObservationPhase) -> QueryRun {
-        QueryRun {
-            telemetry: self.0.clone(),
+fn observer(
+    observations: &Observations,
+    phase: QueryObservationPhase,
+) -> Option<Arc<dyn QueryObserver>> {
+    observations.enabled().then(|| {
+        Arc::new(EvaluatorObserver {
+            telemetry: observations.telemetry().clone(),
             phase,
-            initiator: self.enabled().then(ExecutionScope::capture),
-            observation: self.enabled().then(|| Arc::new(Mutex::new(None))),
-        }
-    }
+        }) as Arc<dyn QueryObserver>
+    })
+}
+
+pub(super) async fn evaluate<const SOURCE_TRANSACTION: bool>(
+    observations: &Observations,
+    evaluator: &QueryEvaluator,
+    input: QueryInputBatch,
+    phase: QueryObservationPhase,
+) -> drasi_core::computation::Result<Vec<QueryPartEvaluationContext>> {
+    let observer = observer(observations, phase);
+    evaluator
+        .evaluate_input_batch_observed::<SOURCE_TRANSACTION>(input, observer.as_ref())
+        .await
+}
+
+pub(super) async fn future(
+    observations: &Observations,
+    evaluator: &QueryEvaluator,
+) -> drasi_core::computation::Result<Option<Arc<drasi_core::computation::ComputationFutureResult>>>
+{
+    let observer = observer(observations, QueryObservationPhase::Steady);
+    evaluator
+        .evaluate_next_future_observed(observer.as_ref())
+        .await
 }
 
 struct EvaluatorObserver {
@@ -212,147 +117,5 @@ impl QueryObservation for EvaluationObservation {
                 log::error!("Cannot finish native query evaluation observation: {error}");
             }
         }
-    }
-}
-
-/// Selected only after actual work is known, but retained through host commit.
-#[derive(Clone)]
-pub(super) struct QueryRun {
-    telemetry: QueryTelemetry,
-    phase: QueryObservationPhase,
-    initiator: Option<ExecutionScope>,
-    observation: Option<Arc<Mutex<Option<Arc<QueryObservationGuard>>>>>,
-}
-
-impl QueryRun {
-    pub(super) fn start(&self, kind: QueryObservationKind) -> Result<()> {
-        let Some(observation) = &self.observation else {
-            return Ok(());
-        };
-        let mut current = observation
-            .lock()
-            .map_err(|_| anyhow::anyhow!("query observation ownership poisoned"))?;
-        if current.is_none() {
-            *current = self
-                .initiator
-                .as_ref()
-                .expect("enabled query scope")
-                .in_scope(|| self.telemetry.begin(kind, self.phase, None))?
-                .map(Arc::new);
-        }
-        Ok(())
-    }
-
-    pub(super) async fn scope<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
-        if self.observation.is_none() {
-            return future.await;
-        }
-        QueryRunFuture {
-            run: self,
-            future: Some(Box::pin(future)),
-        }
-        .await
-    }
-}
-
-struct QueryRunFuture<'a, F> {
-    run: &'a QueryRun,
-    future: Option<Pin<Box<F>>>,
-}
-
-impl<F, T> Future for QueryRunFuture<'_, F>
-where
-    F: Future<Output = Result<T>>,
-{
-    type Output = Result<T>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        let observation = match this
-            .run
-            .observation
-            .as_ref()
-            .expect("enabled query run")
-            .lock()
-        {
-            Ok(observation) => observation.clone(),
-            Err(_) => {
-                return Poll::Ready(Err(anyhow::anyhow!("query observation ownership poisoned")))
-            }
-        };
-        let future = this
-            .future
-            .as_mut()
-            .expect("query work is retained until drop");
-        match observation {
-            Some(observation) => {
-                let mut result = None;
-                match observation.in_scope(&mut || result = Some(future.as_mut().poll(cx))) {
-                    Ok(()) => result.unwrap_or_else(|| {
-                        Poll::Ready(Err(anyhow::anyhow!("query scope did not poll its work")))
-                    }),
-                    Err(error) => Poll::Ready(Err(error.into())),
-                }
-            }
-            None => future.as_mut().poll(cx),
-        }
-    }
-}
-
-impl<F> Drop for QueryRunFuture<'_, F> {
-    fn drop(&mut self) {
-        let mut future = self.future.take();
-        let observation = self
-            .run
-            .observation
-            .as_ref()
-            .expect("enabled query run")
-            .lock()
-            .map(|observation| observation.clone());
-        match observation {
-            Ok(Some(observation)) => {
-                if let Err(error) = observation.in_scope(&mut || drop(future.take())) {
-                    log::error!("Cannot restore native query context during cleanup: {error}");
-                }
-            }
-            Ok(None) => {}
-            Err(error) => log::error!("Cannot read native query cleanup context: {error}"),
-        }
-        drop(future);
-    }
-}
-
-impl QueryRun {
-    pub(super) fn finish(
-        &self,
-        outcome: QueryObservationOutcome,
-        outputs: Option<u64>,
-    ) -> Result<()> {
-        let Some(observations) = &self.observation else {
-            return Ok(());
-        };
-        let observation = observations
-            .lock()
-            .map_err(|_| anyhow::anyhow!("query observation ownership poisoned"))?
-            .take();
-        if let Some(observation) = observation {
-            let mut observation = Arc::try_unwrap(observation)
-                .map_err(|_| anyhow::anyhow!("query observation still has active scoped work"))?;
-            observation.finish(outcome, outputs)?;
-        }
-        Ok(())
-    }
-
-    pub(super) fn context(
-        &self,
-    ) -> Result<Option<drasi_computation_contracts::telemetry::ExecutionContext>> {
-        let Some(observations) = &self.observation else {
-            return Ok(None);
-        };
-        Ok(observations
-            .lock()
-            .map_err(|_| anyhow::anyhow!("query observation ownership poisoned"))?
-            .as_ref()
-            .map(|observation| observation.context()))
     }
 }

@@ -528,10 +528,10 @@ impl Driver {
                 if plan.data != ComponentUpdateData::Preserve {
                     proposed_batch
                         .definition
-                        .validate_query_reset_consumers(&proposed.id)?;
+                        .validate_state_reset_consumers(&proposed.id)?;
                     anyhow::ensure!(
                         current.references()? == proposed.references()?,
-                        "initialized query reconstruction cannot change live inputs"
+                        "initialized state reconstruction cannot change live inputs"
                     );
                 }
                 retained_interface(&old, &new, plan)?;
@@ -621,7 +621,7 @@ impl Driver {
                 );
             }
             if plan.data != ComponentUpdateData::Preserve {
-                desired.topology.validate_query_reset_consumers(id)?;
+                desired.topology.validate_state_reset_consumers(id)?;
             }
             retained_interface(current, proposed, plan)?;
             self.validate_live_update(&publication, id, plan)?;

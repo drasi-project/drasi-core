@@ -19,7 +19,7 @@ use drasi_core::{
 };
 use drasi_core_types::CheckpointKey;
 use drasi_lib::computation::v1::{
-    CommittedProgressPublication, GraphInputProgress, QuerySourceProgress,
+    BootstrapPorts, CommittedProgressPublication, GraphInputProgress, QuerySourceProgress,
 };
 use tokio::sync::watch;
 
@@ -74,6 +74,7 @@ pub(super) struct Progress {
     volatile_store: Option<Arc<dyn CheckpointStore>>,
     non_atomic: bool,
     deferred: Mutex<Option<Box<DeferredProgress>>>,
+    bootstrap_ports: Mutex<Option<BootstrapPorts>>,
     transport: std::sync::OnceLock<Arc<std::sync::atomic::AtomicU64>>,
 }
 
@@ -254,6 +255,7 @@ impl Progress {
             transport: std::sync::OnceLock::new(),
             non_atomic,
             deferred: Mutex::new(None),
+            bootstrap_ports: Mutex::default(),
             volatile_store: volatile.then(|| Arc::new(
                 drasi_core::in_memory_index::in_memory_checkpoint_store::InMemoryCheckpointStore::new(),
             ) as Arc<dyn CheckpointStore>),
@@ -262,6 +264,25 @@ impl Progress {
 
     pub(super) fn bind_owner(&self, owner: &Arc<ComputationTransaction>) -> Result<()> {
         self.publication.bind_owner(owner)
+    }
+
+    pub(super) fn bind_bootstrap_ports(&self, ports: BootstrapPorts) {
+        *self
+            .bootstrap_ports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ports);
+    }
+
+    fn check_output_reset(&self) -> Result<()> {
+        if let Some(ports) = self
+            .bootstrap_ports
+            .lock()
+            .map_err(|_| anyhow::anyhow!("bootstrap output bindings poisoned"))?
+            .as_ref()
+        {
+            ports.check_output_reset()?;
+        }
+        Ok(())
     }
 
     pub(super) fn is_volatile(&self) -> bool {
@@ -964,12 +985,18 @@ impl Draft {
             !snapshot.ready && snapshot.failure.is_none(),
             "bootstrap completion can change only before readiness"
         );
-        self.checkpoint_store(resources)?
-            .stage_checkpoint(
-                &CheckpointKey::Metadata(BOOTSTRAP_COMPLETE_CHECKPOINT.into()),
-                u64::from(complete),
-                None,
-            )
+        let store = self.checkpoint_store(resources)?;
+        let key = CheckpointKey::Metadata(BOOTSTRAP_COMPLETE_CHECKPOINT.into());
+        if !complete
+            && store
+                .read_checkpoint(&key)
+                .await?
+                .is_some_and(|c| c.sequence == 1)
+        {
+            self.progress.check_output_reset()?;
+        }
+        store
+            .stage_checkpoint(&key, u64::from(complete), None)
             .await?;
         *self
             .bootstrap
@@ -985,12 +1012,15 @@ impl Draft {
         Ok(())
     }
 
-    pub(super) fn ensure_resettable(&self) -> Result<()> {
+    pub(super) fn ensure_resettable(&self, preserve_bootstrap: bool) -> Result<()> {
         let snapshot = self.snapshot()?;
         anyhow::ensure!(
             !snapshot.ready && !snapshot.admitting && snapshot.failure.is_none(),
             "processing reset requires a healthy owner before readiness"
         );
+        if preserve_bootstrap {
+            self.progress.check_output_reset()?;
+        }
         Ok(())
     }
 

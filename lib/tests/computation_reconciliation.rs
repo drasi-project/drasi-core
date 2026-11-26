@@ -1062,9 +1062,14 @@ async fn permissible_orphan_is_visible_exportable_and_can_be_rebound() {
                 .binding,
             BindingState::Declared
         );
+        let producer = control.component_handle_by_id(&component(77)).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), producer.wait_started())
+            .await
+            .expect("optional orphan does not block the producer")
+            .unwrap();
         assert_eq!(
-            control.observed().components[&component(77)].lifecycle,
-            ComponentLifecycle::Quiesced
+            producer.observed().unwrap().lifecycle,
+            ComponentLifecycle::Running
         );
         let desired = control
             .desired_snapshot()
@@ -4344,7 +4349,7 @@ async fn binding_factory_gets_declared_inputs_and_is_replaced_when_they_change()
     }
 }
 
-async fn binding_factory_waits_for_its_input_declaration() {
+async fn binding_factory_starts_with_empty_inputs_then_acquires_its_binding() {
     let calls = Arc::new(Calls::default());
     let (received, _output_rx) = mpsc::channel(8);
     let factory = Arc::new(Factory::new(calls.clone(), received).binding());
@@ -4378,15 +4383,13 @@ async fn binding_factory_waits_for_its_input_declaration() {
             .expect("deployment observation");
         let observed = control.observed();
         let sink = &observed.components[&component(101)];
-        assert_eq!(calls.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.creates.load(Ordering::SeqCst), 1);
         assert!(sink.failure.is_none());
-        assert!(sink.waiting_for.contains(&DependencyWait::Connection {
-            endpoint: endpoint(
-                &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-000000000065")
-                    .expect("fixture UUID"),
-                "in"
-            ),
-        }));
+        assert!(sink.waiting_for.is_empty());
+        assert_eq!(
+            *calls.bound.lock().unwrap(),
+            vec![Vec::<InputBinding>::new()]
+        );
         control
             .connect(
                 edge(
@@ -4407,10 +4410,10 @@ async fn binding_factory_waits_for_its_input_declaration() {
             .await
             .expect("activate the connected graph");
         assert_eq!(report.summary, OperationSummary::Completed);
-        assert_eq!(calls.creates.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.creates.load(Ordering::SeqCst), 2);
         assert_eq!(
             *calls.bound.lock().unwrap(),
-            vec![vec![declared_input(&component(77), "source")]]
+            vec![vec![], vec![declared_input(&component(77), "source")]]
         );
         control.cancel();
     });
@@ -4419,5 +4422,5 @@ async fn binding_factory_waits_for_its_input_declaration() {
 
 both_tokio_flavors!(
     binding_factory_missing_input,
-    binding_factory_waits_for_its_input_declaration
+    binding_factory_starts_with_empty_inputs_then_acquires_its_binding
 );

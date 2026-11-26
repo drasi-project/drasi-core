@@ -1,7 +1,7 @@
 # Native source standard
 
 This guide states what a production native source (`NativeComponent` +
-`NativeSource`) must do beyond compiling against the ABI 0.1 SDK. It applies to
+`NativeSource`) must do beyond compiling against the ABI 0.2 SDK. It applies to
 every crate in this directory. The HTTP and gRPC sources are the reference
 implementations. For the SDK contracts themselves, see the
 [native SDK guide](../../computation-plugin-sdk/README.md).

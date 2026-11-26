@@ -22,7 +22,7 @@
 //! remain the embedding host's responsibility. The ordinary plugin ABI is 0.19;
 //! binaries built for another major.minor are not supported. Rebuild plugins
 //! against the matching SDK when upgrading. Native computation plugins use the
-//! separate ABI 0.1.0 contract and envelope wire version 1.
+//! separate ABI 0.2.0 contract and envelope wire version 1.
 
 pub(crate) mod components;
 pub(crate) mod instance;

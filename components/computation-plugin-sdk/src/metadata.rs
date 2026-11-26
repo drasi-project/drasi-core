@@ -9,10 +9,10 @@ use std::{
 };
 
 use drasi_computation_contracts::{
-    ComponentDescriptor, ComponentId, ComponentName, ComponentRole, ComponentSemanticKind,
-    ComponentUpdateMode, ImplementationIdentity, OutputProgress, PluginIdentity, PortDescriptor,
-    PortDirection, PortFormatAlternative, PortId, PortKind, PortPrimaries, SchemaDescriptor,
-    SinkCompletion, BOOTSTRAP_INPUT_PORT, BOOTSTRAP_OUTPUT_PORT,
+    BootstrapAcceptance, ComponentDescriptor, ComponentId, ComponentName, ComponentRole,
+    ComponentSemanticKind, ComponentUpdateMode, ImplementationIdentity, OutputProgress,
+    PluginIdentity, PortDescriptor, PortDirection, PortFormatAlternative, PortId, PortKind,
+    PortPrimaries, SchemaDescriptor, SinkCompletion, BOOTSTRAP_INPUT_PORT, BOOTSTRAP_OUTPUT_PORT,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -190,6 +190,11 @@ pub struct Capabilities {
     pub snapshot_inputs: Vec<PortId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub output_snapshots: Vec<PortId>,
+    /// Configurable one-input views (output -> input). A constructed instance
+    /// may project, serve a declared materialized snapshot instead, or offer
+    /// neither for an event-only configuration. Inspection names the selection.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub output_projections: BTreeMap<PortId, PortId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub output_replays: Vec<PortId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -256,7 +261,11 @@ pub struct Capabilities {
     /// Only quiescent, non-progress-bound providers are supported by this profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quiescent_bootstrap: Option<PortId>,
-    /// The quiescent consumer reports whether its configuration requests a
+    /// Volatile initialization from quiescent records or producer-scoped
+    /// output cuts. Rebuilds on start; provides no recoverable input progress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bounded_bootstrap: Option<PortId>,
+    /// The non-indexed consumer reports whether its configuration requests a
     /// provider; ordinary instances can start without allocating bootstrap state.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bootstrap_optional: bool,
@@ -385,13 +394,29 @@ impl HostServices {
 impl Capabilities {
     /// The data input that receives provider bootstrap records, if any.
     pub fn provider_bootstrap(&self) -> Option<&PortId> {
+        self.bootstrap_input().map(|(_, port)| port)
+    }
+
+    /// The declared bootstrap handler profile and its data input.
+    pub fn bootstrap_input(&self) -> Option<(BootstrapAcceptance, &PortId)> {
         self.quiescent_bootstrap
             .as_ref()
-            .or(self.durable_bootstrap.as_ref())
+            .map(|port| (BootstrapAcceptance::Quiescent, port))
+            .or_else(|| {
+                self.bounded_bootstrap
+                    .as_ref()
+                    .map(|port| (BootstrapAcceptance::Bounded, port))
+            })
+            .or_else(|| {
+                self.durable_bootstrap
+                    .as_ref()
+                    .map(|port| (BootstrapAcceptance::Durable, port))
+            })
     }
 
     pub fn declares_output_reads(&self) -> bool {
         !self.output_snapshots.is_empty()
+            || !self.output_projections.is_empty()
             || !self.output_replays.is_empty()
             || !self.output_queries.is_empty()
     }
@@ -470,10 +495,30 @@ impl FactoryMetadata {
             ],
             ComponentRole::Transformer => {
                 let mut ports = Vec::new();
-                if self.capabilities.provider_bootstrap().is_some() {
-                    ports.push(port(BOOTSTRAP_INPUT_PORT, PortDirection::Input)?);
+                if let Some(input) = self.capabilities.provider_bootstrap() {
+                    let data = self
+                        .ports
+                        .iter()
+                        .find(|p| p.id() == input && p.direction() == PortDirection::Input)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("bootstrap input {input} is not a data input")
+                        })?;
+                    ports.push(
+                        PortDescriptor::bootstrap(
+                            PortId::try_new(BOOTSTRAP_INPUT_PORT)?,
+                            PortDirection::Input,
+                            data.schema().clone(),
+                            drasi_computation_contracts::PipeRequirements::default(),
+                        )
+                        .for_data_port(input.clone()),
+                    );
                 }
-                if !self.capabilities.output_snapshots.is_empty() {
+                if self
+                    .capabilities
+                    .output_snapshots
+                    .iter()
+                    .any(|port| !self.capabilities.output_projections.contains_key(port))
+                {
                     ports.push(port(BOOTSTRAP_OUTPUT_PORT, PortDirection::Output)?);
                 }
                 ports
@@ -536,7 +581,13 @@ impl FactoryMetadata {
             anyhow::ensure!(
                 matches!(
                     (self.role, kind),
-                    (ComponentRole::Transformer, ComponentSemanticKind::Query)
+                    (
+                        ComponentRole::Transformer,
+                        ComponentSemanticKind::Query
+                            | ComponentSemanticKind::Source
+                            | ComponentSemanticKind::Reaction
+                            | ComponentSemanticKind::Sink
+                    ) | (ComponentRole::Sink, ComponentSemanticKind::Reaction)
                 ) || kind == ComponentSemanticKind::from(self.role),
                 "native factory declares semantic kind {kind:?} that its {:?} role cannot carry",
                 self.role
@@ -634,7 +685,23 @@ impl FactoryMetadata {
             !c.non_atomic_publication || c.durable_output,
             "non-atomic publication requires indexed progress and durable output"
         );
-        if let Some(input) = &c.quiescent_bootstrap {
+        anyhow::ensure!(
+            [
+                &c.quiescent_bootstrap,
+                &c.bounded_bootstrap,
+                &c.durable_bootstrap
+            ]
+            .into_iter()
+            .filter(|port| port.is_some())
+            .count()
+                <= 1,
+            "a native transformer declares at most one bootstrap input profile"
+        );
+        if let Some(input) = c
+            .quiescent_bootstrap
+            .as_ref()
+            .or(c.bounded_bootstrap.as_ref())
+        {
             anyhow::ensure!(
                 self.role == ComponentRole::Transformer
                     && !c.transactional
@@ -642,20 +709,20 @@ impl FactoryMetadata {
                     && self.ports.iter().any(|port| {
                         port.direction() == PortDirection::Input && port.id() == input
                     }),
-                "quiescent bootstrap requires a non-indexed, non-participant transformer input"
+                "volatile bootstrap requires a non-indexed, non-participant transformer input"
             );
         }
         if let Some(input) = &c.durable_bootstrap {
             anyhow::ensure!(
-                c.quiescent_bootstrap.is_none()
-                    && c.indexed_processing
-                    && c.committed_input_progress.as_ref() == Some(input),
+                c.indexed_processing && c.committed_input_progress.as_ref() == Some(input),
                 "durable bootstrap requires the indexed input's committed progress"
             );
         }
         anyhow::ensure!(
-            !c.bootstrap_optional || c.quiescent_bootstrap.is_some(),
-            "optional bootstrap requires a quiescent bootstrap input"
+            !c.bootstrap_optional
+                || c.quiescent_bootstrap.is_some()
+                || c.bounded_bootstrap.is_some(),
+            "optional bootstrap requires a quiescent or bounded bootstrap input"
         );
         anyhow::ensure!(
             c.snapshot_inputs.is_empty() || self.role == ComponentRole::Sink,
@@ -672,6 +739,13 @@ impl FactoryMetadata {
                     .iter()
                     .any(|p| p.id() == port && p.direction() == PortDirection::Input),
                 "native snapshot input {port} is not a declared input port"
+            );
+        }
+        for (output, input) in &c.output_projections {
+            anyhow::ensure!(
+                self.ports.iter().any(|p| p.id() == output && p.direction() == PortDirection::Output)
+                    && self.ports.iter().any(|p| p.id() == input && p.direction() == PortDirection::Input),
+                "native state projection {output} must name a data output and a data input ({input})"
             );
         }
         for (kind, ports) in [
@@ -920,9 +994,10 @@ mod abi_version_tests {
     #[test]
     fn accepts_only_this_pre_release_version() {
         assert!(super::accepts_abi_version(super::abi::ABI_VERSION));
-        assert!(super::accepts_abi_version("0.1.7"));
+        assert!(super::accepts_abi_version("0.2.7"));
         assert!(!super::accepts_abi_version("0.0.1"));
-        assert!(!super::accepts_abi_version("0.2.0"));
+        assert!(!super::accepts_abi_version("0.1.0"));
+        assert!(!super::accepts_abi_version("0.3.0"));
         assert!(!super::accepts_abi_version("0.1"));
         assert!(!super::accepts_abi_version("5.0.0"));
     }

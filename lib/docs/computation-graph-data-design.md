@@ -2367,10 +2367,11 @@ The [maintained view transformer](../../components/computation-plugins/transform
 retains full input images and actual output associations to retract filtered
 rows, delete one-to-many children and remove old mapped identities. It applies
 its declared stateless middleware to reconstructed complete images, not historical events. It is not
-a `map`/`jq` mode. Its current memory-backed profile exposes coherent snapshots
-and volatile producer progress, but no replay, durable storage, transactional
-processing, bootstrap input or input deduplication. Whole-envelope staging
-protects its state on failure; reconstruction still needs full initial input.
+a `map`/`jq` mode. It runs on the shared stateful transformer runtime: with a
+persistent processing provider its retained inputs, output associations and
+output are durable, and it bootstraps, follows, replays and rebuilds like any
+stateful transformer. It does not participate in transactions. A rejected
+envelope leaves its state unchanged.
 
 Query-local middleware runs inside the evaluator input pipeline. The runtime
 selects its scope from the actual connected `(input port, stream)` binding:
@@ -2389,7 +2390,7 @@ query's local preprocessing.
 ### 16.6 Native wire and port format selection
 
 The native plugin boundary carries binary envelope frames with native wire
-version 1 and ABI layout 0.1. There is no reader for another native wire version
+version 1 and ABI layout 0.2. There is no reader for another native wire version
 or earlier query-row records: build the host and native libraries from matching
 sources. These are deployment compatibility constraints, not another record schema.
 

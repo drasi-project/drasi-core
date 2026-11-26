@@ -13,6 +13,12 @@ Load the resulting native library through the Host SDK, or use `plugin()` /
 `ViewFactory` for native SDK registration. It has no dependency on the query
 evaluator, graph runtime or legacy plugin SDK.
 
+The view is a stateful transformer. It runs on the same runtime as the
+[query transformer](../query) and the
+[stateful middleware](../middleware/README.md#stateful-middleware), described
+in the [native transformer guide](../NATIVE-TRANSFORMER-GUIDE.md#stateful-transformers),
+and requires host-owned processing.
+
 ## Configuration
 
 The required fields are `stream`, `middleware` and `pipeline`, with the same
@@ -95,6 +101,19 @@ The view and the stateless middleware transformer share one pipeline; the view
 only adds the complete-image restriction above. `jq` (system libjq) and
 `unwind` (stored images) are not declared by this factory.
 
+The view also accepts the runtime's shared options:
+
+| Option | Effect |
+| --- | --- |
+| `bootstrap` | Initialize from the bound bootstrap provider or the connected input's current state |
+| `volatile` | Keep state in memory; every initialization publishes a new output epoch |
+| `publication` | `atomic` (default) or `non_atomic` |
+| `recovery` | `strict` (default) or `auto_reset` |
+| `resetConfiguration` | Reset retained state when the configuration changed |
+| `outboxCapacity` | Committed outputs retained for replay and restart delivery (default 1) |
+
+Retained state is reused only with the same `middleware` and `pipeline`.
+
 ## Dataset semantics
 
 - **Add and replace:** retain the complete input, dropping omitted old
@@ -128,41 +147,40 @@ sequence. Cancellation before publication also discards the staged batch.
 Old images are never re-evaluated to discover their historical output, including
 if a future mapping implementation is nondeterministic.
 
-Outputs preserve input provenance and lineage through the shared codec, but
-have their own **volatile** producer identity and sequence. One output envelope
-is produced per accepted input envelope, including an empty progress-only
-envelope when the view did not change. Retractions use the recorded output
-identity and labels, with the triggering input's effective time.
+Outputs preserve input provenance and lineage through the shared codec, under
+the view's own producer identity, epoch and sequence. An input envelope that
+leaves the view unchanged advances its committed input progress but publishes
+nothing and does not advance the output sequence. Retractions use the recorded
+output identity and labels, with the triggering input's effective time.
 
-## Storage, snapshots and lifecycle
+## Storage, bootstrap and recovery
 
-Storage is **memory-backed only**. It retains current full inputs, current
-outputs and their associations, not an ever-growing event log. Filtered inputs
-still consume memory; deleting them releases their retained state. Memory usage
-depends on the current dataset and projection fan-out, with no configured
-byte/count limit.
+The view retains each current full input in the host element index, the
+outputs each input produced in a private table, and its output rows and
+history through the runtime. It does not keep an event log. Filtered inputs are
+still retained; deleting an input releases its state. Storage grows with the
+current dataset and projection fan-out, with no configured byte or count limit.
 
-`out` exposes a coherent full-image snapshot and its matching producer epoch
-and logical sequence while the component is running. Readers can capture the
-previous committed snapshot during a pending transform. Captured snapshots
-remain immutable across later updates. A snapshot is the view of inputs
-observed by this instance; it does not fetch or certify an upstream dataset.
-There is no snapshot-input/bootstrap capability. Seed the instance with complete
-input images before sending patches for them.
+With a persistent processing provider this state survives restart and
+reconstruction. The view replays unconfirmed output and continues from its
+committed input position. It does not re-run mappings to recover outputs it
+already emitted, because each input's outputs are recorded. With `volatile`
+or an in-memory provider, state is held in memory and each initialization
+publishes a new output epoch.
 
-Stopping and restarting the **same component object** preserves its state and
-epoch, without re-running mappings. Reconstruction creates an empty view and a
-fresh volatile epoch; rebuild it from full inputs. Snapshot reads before start
-or while stopped return `NotReady`; readers of a removed/dropped instance return
-`Retired`. Explicit `delete_owned_resources` after stop (or before first start) clears retained
-inputs and outputs and permanently fences the instance. It is idempotent and owns no
-background work or external resources.
+With `bootstrap`, the view initializes from its bound bootstrap provider or
+from the connected input's current state, so later patches apply to the
+bootstrapped images. Without it, seed the view with complete input images
+before sending patches for them.
 
-The advertised capabilities are output snapshots, an originating output
-progress boundary and explicit owned-resource deletion. There is **no durable storage,
-replay, snapshot-follow, transaction participation, input deduplication,
-scheduled processing, durable bootstrap, or atomic state/output/delivery
-recovery**. In-memory staging is not a storage transaction or a delivery
-acknowledgement. A downstream delivery/transport failure cannot be recovered
-from an outbox here. Use ordered, lossless input delivery for a faithful view;
-this component cannot reconstruct missing changes.
+`out` supports current-state, snapshot-and-follow and replay reads. A current
+state is the view of the inputs this instance observed; it does not fetch or
+certify an upstream dataset. After a gap in its input's retained history,
+`auto_reset` with a connected input rebuilds the view from that input's
+current state and publishes only the keyed difference, so a running dependent
+follows the correction without a reset. A dependent that installed the empty
+view before the first input connected receives the first input's rows the same
+way. A rebuild that would strand a running dependent is refused. A crash during
+a rebuild either keeps the old view and retries, or completes the installed
+rebuild and publishes the owed difference. Deleting the component's owned
+resources erases its retained state.

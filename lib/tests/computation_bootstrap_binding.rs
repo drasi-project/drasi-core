@@ -185,10 +185,80 @@ fn provider_to_source() -> EdgeDefinition {
 }
 
 fn source_to_consumer() -> EdgeDefinition {
-    EdgeDefinition::new(
-        endpoint(SOURCE, "snapshot"),
-        endpoint(CONSUMER, "bootstrap"),
-    )
+    EdgeDefinition::new(endpoint(SOURCE, "out"), endpoint(CONSUMER, "in"))
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn shared_cut_refuses_independent_reads_but_not_an_unused_or_live_only_input() {
+    let first = source_to_consumer();
+    let second = EdgeDefinition::new(endpoint(SOURCE + 10, "out"), endpoint(CONSUMER, "other"));
+    for (connect_second, live_only) in [(true, false), (true, true), (false, false)] {
+        let desc = ComponentDescriptor::try_new(
+            id(CONSUMER),
+            vec![
+                graph_port("in", PortDirection::Input, false),
+                graph_port("bootstrap", PortDirection::Input, true).for_data_port(port("in")),
+                graph_port("other", PortDirection::Input, false),
+                graph_port("other-state", PortDirection::Input, true).for_data_port(port("other")),
+            ],
+        )
+        .unwrap();
+        let mut builder =
+            ComputationGraph::builder("shared-cut").fixture_sink(Box::new(Consumer {
+                description: ComponentDescription::undeclared()
+                    .with_bootstrap_ports(
+                        &desc,
+                        BootstrapInputDescription::BOUNDED,
+                        BootstrapOutputDescription::UNDECLARED,
+                    )
+                    .with_upstream_initial_state(true)
+                    .with_shared_input_cut(),
+                descriptor: desc,
+            }));
+        for (number, name) in [(SOURCE, "a"), (SOURCE + 10, "b")] {
+            let desc = ComponentDescriptor::try_new(
+                id(number),
+                vec![
+                    graph_port("out", PortDirection::Output, false),
+                    graph_port("snapshot", PortDirection::Output, true).for_data_port(port("out")),
+                ],
+            )
+            .unwrap();
+            builder = builder
+                .fixture_source(Box::new(Source {
+                    description: ComponentDescription::undeclared().with_bootstrap_ports(
+                        &desc,
+                        BootstrapInputDescription::SOURCE_RELAY,
+                        BootstrapOutputDescription::OUTPUT_SNAPSHOT,
+                    ),
+                    descriptor: desc,
+                }))
+                .bind_stream(endpoint(number, "out"), StreamId::try_new(name).unwrap());
+        }
+        builder = builder.connect(first.clone(), pipe());
+        if connect_second {
+            builder = builder.connect(second.clone(), pipe());
+            if live_only {
+                builder =
+                    builder.relationship_policy(second.clone(), RelationshipPolicy::live_only());
+            }
+        }
+        observe(builder.build().unwrap(), |observed| {
+            if connect_second && !live_only {
+                for edge in [&first, &second] {
+                    assert_refused(observed, edge, |error| {
+                        matches!(error, Incompatibility::SharedInputCutUnavailable)
+                    });
+                }
+            } else {
+                assert_bound(observed, &first);
+                if connect_second {
+                    assert_bound(observed, &second);
+                }
+            }
+        })
+        .await;
+    }
 }
 
 fn provider_to_consumer() -> EdgeDefinition {
@@ -588,10 +658,6 @@ async fn a_source_relaying_a_durable_provider_to_a_quiescent_input_is_refused() 
             StreamId::try_new("source/out").expect("stream"),
         )
         .connect(provider_to_source(), pipe())
-        .connect(
-            EdgeDefinition::new(endpoint(SOURCE, "out"), endpoint(CONSUMER, "in")),
-            pipe(),
-        )
         .connect(source_to_consumer(), pipe())
         .build()
         .expect("a mismatch never rejects the graph");

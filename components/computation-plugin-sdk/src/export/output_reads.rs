@@ -14,6 +14,7 @@ use crate::output_reads::{
     Outcome, OutputReadLimit, WireCursor, WireFrame, WireQueryHead, WireQueryReplay,
     WireQuerySnapshot, WireQueryView, WireRecord, WireReplay, WireSnapshot,
 };
+use crate::wire::StateReadMode;
 use drasi_computation_contracts::{
     encode_bounded_messagepack, BinaryEnvelopeCodecError, ComponentDescriptor, OutputCursor,
     OutputPortReaders, OutputReadError, OutputReaders, OutputReplay, OutputSnapshot, PortId,
@@ -163,11 +164,23 @@ fn validate_registrations(
             "declared query recovery views have no implementation"
         );
     }
+    let snapshots = actual(readers, |port| port.snapshot().is_some());
+    let expected = declared(&capabilities.output_snapshots);
     anyhow::ensure!(
-        declared(&capabilities.output_snapshots)
-            == actual(readers, |port| port.snapshot().is_some()),
+        snapshots.is_subset(&expected)
+            && expected
+                .difference(&snapshots)
+                .all(|port| capabilities.output_projections.contains_key(port)),
         "native output snapshot providers do not match the declared output_snapshots"
     );
+    for (port, reader) in readers.ports() {
+        if let Some((input, _)) = reader.projection() {
+            anyhow::ensure!(
+                capabilities.output_projections.get(port) == Some(input),
+                "native state projection {port} from {input} was not declared"
+            );
+        }
+    }
     anyhow::ensure!(
         declared(&capabilities.output_replays) == actual(readers, |port| port.replay().is_some()),
         "native output replay providers do not match the declared output_replays"
@@ -182,6 +195,32 @@ fn validate_registrations(
         "native query readers do not match the declared output_queries"
     );
     Ok(())
+}
+
+impl ReadBinding {
+    pub(super) fn state_reads(
+        &self,
+        metadata: &FactoryMetadata,
+    ) -> BTreeMap<PortId, StateReadMode> {
+        metadata
+            .capabilities
+            .output_projections
+            .keys()
+            .filter_map(|port| {
+                let reader = self.readers.ports().get(port)?;
+                let mode = if let Some((_, op)) = reader.projection() {
+                    StateReadMode::Projected {
+                        cut_namespace: op.cut_namespace().cloned(),
+                    }
+                } else if reader.snapshot().is_some() {
+                    StateReadMode::Materialized
+                } else {
+                    return None;
+                };
+                Some((port.clone(), mode))
+            })
+            .collect()
+    }
 }
 
 fn describe_queries(readers: &OutputReaders) -> BTreeMap<PortId, QueryDescription> {
@@ -232,7 +271,13 @@ pub(super) fn updated_queries(
             same(before.snapshot(), after.snapshot())
                 && same(before.replay(), after.replay())
                 && same(before.snapshot_follow(), after.snapshot_follow())
-                && same(before.query(), after.query()),
+                && same(before.query(), after.query())
+                && before.projection().map(|(input, _)| input)
+                    == after.projection().map(|(input, _)| input)
+                && same(
+                    before.projection().map(|(_, op)| op),
+                    after.projection().map(|(_, op)| op)
+                ),
             "native retained update replaced the registered output reader for {port}"
         );
     }
@@ -293,6 +338,21 @@ impl ReadBinding {
         lifecycle.phase = Phase::Active;
         self.changed.send_modify(|_| ());
         Ok(())
+    }
+
+    /// Called on RESUME. A plain pause left reads open, and their leases stay
+    /// valid; reads an update closed during the pause open again.
+    pub(super) fn resume(&self) -> anyhow::Result<()> {
+        let active = self
+            .lifecycle
+            .lock()
+            .map_err(|_| anyhow::anyhow!("native output read lifecycle lock is poisoned"))?
+            .phase
+            == Phase::Active;
+        if active {
+            return Ok(());
+        }
+        self.activate()
     }
 
     /// Called when STOP begins: in-flight reads are cancelled and new reads fail.
@@ -464,6 +524,18 @@ impl ReadBinding {
             )
         })?;
         let provider = match capability {
+            abi::output_reads::capability::PROJECTION => {
+                let (input, op) = registered.projection().ok_or_else(|| {
+                    Failure::new(abi::status::UNSUPPORTED, "native output has no projection")
+                })?;
+                let declared = self
+                    .descriptor
+                    .ports()
+                    .iter()
+                    .find(|p| p.id() == input)
+                    .ok_or_else(|| Failure::protocol("missing state projection input"))?;
+                Provider::Projection(op.clone(), declared.schema().clone())
+            }
             abi::output_reads::capability::SNAPSHOT => {
                 Provider::Snapshot(registered.snapshot().cloned().ok_or_else(|| {
                     Failure::new(
@@ -646,6 +718,10 @@ fn snapshot_wire(snapshot: &OutputSnapshot) -> Result<WireSnapshot<'_>, String> 
 
 enum Provider {
     Snapshot(Arc<dyn SnapshotProvider>),
+    Projection(
+        Arc<dyn drasi_computation_contracts::StateProjector>,
+        SchemaDescriptor,
+    ),
     Replay(Arc<dyn ReplayProvider>),
     Query(Arc<dyn QueryViewProvider>),
 }
@@ -727,6 +803,7 @@ impl HandleState {
             ));
         }
         match (&self.provider, code) {
+            (Provider::Projection(_, _), PROJECT_BATCH) => Ok(None),
             (Provider::Snapshot(_), SNAPSHOT)
             | (Provider::Replay(_), COMMITTED_HEAD)
             | (
@@ -840,6 +917,32 @@ impl HandleState {
             }
         }
         Ok(captured)
+    }
+
+    async fn project(&self, bytes: &[u8]) -> Result<Vec<u8>, Failure> {
+        let Provider::Projection(op, input) = &self.provider else {
+            return Err(Failure::protocol("state projection on another provider"));
+        };
+        let batch = self
+            .binding
+            .codec
+            .decode(bytes)
+            .map_err(|error| Failure::new(abi::status::INVALID_ARGUMENT, error.to_string()))?;
+        let result = async {
+            drasi_computation_contracts::validate_state_batch(&batch, input)?;
+            let output = op.project(batch).await?;
+            drasi_computation_contracts::validate_state_batch(&output, &self.schema)?;
+            let envelope = self
+                .binding
+                .codec
+                .encode(&output)
+                .map_err(|error| OutputReadError::invalid(error.to_string()))?;
+            Ok(WireFrame {
+                envelope: Cow::Owned(envelope),
+            })
+        }
+        .await;
+        finish(Outcome::from_result(result))
     }
 
     async fn serve(&self, code: u32, cursor: Option<&OutputCursor>) -> Result<Vec<u8>, Failure> {
@@ -1087,9 +1190,13 @@ unsafe extern "C" fn request(
         if handle.binding.damaged.is_damaged() {
             return Err(Failure::panicked());
         }
-        let input =
-            unsafe { transport::borrowed_bytes(input, abi::output_reads::MAX_REQUEST_BYTES)? }
-                .to_vec();
+        let project = code == abi::output_reads::operation::PROJECT_BATCH;
+        let max_bytes = if project {
+            abi::output_reads::MAX_READ_BYTES
+        } else {
+            abi::output_reads::MAX_REQUEST_BYTES
+        };
+        let input = unsafe { transport::borrowed_bytes(input, max_bytes)? }.to_vec();
         let cursor = handle.request_cursor(code, &input)?;
         let (guard, mut changed) = handle.binding.claim_read(code)?;
         let runtime = io_runtime()?;
@@ -1107,7 +1214,13 @@ unsafe extern "C" fn request(
                     _ = changed.changed() => return Err(retired()),
                     result = tokio::time::timeout(
                         READ_TIMEOUT,
-                        handle.serve(code, cursor.as_ref()),
+                        async {
+                            if project {
+                                handle.project(&input).await
+                            } else {
+                                handle.serve(code, cursor.as_ref()).await
+                            }
+                        },
                     ) => match result {
                         Ok(result) => result?,
                         Err(_) => return Err(Failure::failed("native output read timed out")),

@@ -65,7 +65,7 @@ pub struct QueryConstruction {
 #[async_trait::async_trait]
 pub trait QueryConstructor: Send + Sync {
     /// Whether startup completes accepted query-owned reset/bootstrap before live processing.
-    fn supports_query_reconstruction(&self) -> bool {
+    fn supports_state_reconstruction(&self) -> bool {
         false
     }
     /// Assess a proposed change without constructing a query or touching its state.

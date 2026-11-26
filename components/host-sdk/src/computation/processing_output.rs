@@ -400,6 +400,19 @@ impl Draft {
         Ok(())
     }
 
+    pub(super) async fn validate_rebuild(
+        &self,
+        resources: &ComputationIndexes,
+        component: &ComponentId,
+    ) -> Result<()> {
+        let state = self.load(resources, component).await?;
+        anyhow::ensure!(
+            self.emits && state.head.is_some() && state.head == state.delivered,
+            "rebuild requires an output transaction with no unconfirmed result"
+        );
+        Ok(())
+    }
+
     pub(super) fn reset(&self, preserve_bootstrap: bool) -> Result<()> {
         *self
             .state

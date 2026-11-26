@@ -382,6 +382,7 @@ mod runtime_tests {
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
             inputs: vec![crate::config::QueryInputConfig {
+                enable_bootstrap: None,
                 nodes: vec![],
                 relations: vec![],
                 component: crate::config::ComponentReference::by_name(
@@ -423,6 +424,7 @@ mod runtime_tests {
             query_language: QueryLanguage::Cypher,
             middleware: vec![],
             inputs: vec![crate::config::QueryInputConfig {
+                enable_bootstrap: None,
                 nodes: vec![],
                 relations: vec![],
                 component: crate::config::ComponentReference::by_name(
@@ -1146,6 +1148,7 @@ mod query_input_tests {
 
     fn expanded() -> QueryInputConfig {
         QueryInputConfig {
+            enable_bootstrap: None,
             component: crate::config::ComponentReference::by_name(
                 drasi_core_types::ComponentName::try_new("floor-comfort")
                     .expect("fixture component name"),

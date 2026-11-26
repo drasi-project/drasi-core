@@ -16,7 +16,7 @@ dynamic-plugin = []
 
 [package.metadata.drasi-plugin]
 abi-family = "computation"
-abi-version = "0.1.0"
+abi-version = "0.2.0"
 kind = "transformer-geometry"
 
 [dependencies]

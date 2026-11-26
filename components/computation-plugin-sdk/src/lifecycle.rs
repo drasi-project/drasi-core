@@ -54,6 +54,8 @@ pub struct StartContext {
     scope: OperationScope,
     credentials: Option<ActivationCredentials>,
     fresh_start: Option<bool>,
+    unconnected_inputs: bool,
+    state_subscribers: bool,
 }
 
 /// Context for [`crate::NativeComponent::pause`].
@@ -117,6 +119,8 @@ impl StartContext {
             scope,
             credentials,
             fresh_start: None,
+            unconnected_inputs: false,
+            state_subscribers: false,
         }
     }
 
@@ -133,6 +137,28 @@ impl StartContext {
     /// changes continue. `None` when the host does not know.
     pub fn fresh_start(&self) -> Option<bool> {
         self.fresh_start
+    }
+
+    pub(crate) fn with_unconnected_inputs(mut self, unconnected: bool) -> Self {
+        self.unconnected_inputs = unconnected;
+        self
+    }
+
+    /// The Host verified that this consumer has no configured input or seed.
+    /// No producer has been read and no producer position may be advanced.
+    pub fn unconnected_inputs(&self) -> bool {
+        self.unconnected_inputs
+    }
+
+    pub(crate) fn with_state_subscribers(mut self, subscribed: bool) -> Self {
+        self.state_subscribers = subscribed;
+        self
+    }
+
+    /// A downstream component has installed this output's current view. A
+    /// component that replaces that view must publish the change, not a new epoch.
+    pub fn state_subscribers(&self) -> bool {
+        self.state_subscribers
     }
 
     /// Resolved activation credentials, present only when the factory declares

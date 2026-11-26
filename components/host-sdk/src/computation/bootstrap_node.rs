@@ -284,6 +284,16 @@ impl ComponentFactory for NativeBootstrapNodeFactory {
         )
         .map_err(ComponentCreationError::terminal)?
         .with_description(description);
+        let component = if self.factory.metadata().independent_state {
+            component
+                .with_independent_read(
+                    PortId::try_new(BOOTSTRAP_PROVIDER_OUTPUT_PORT)
+                        .map_err(ComponentCreationError::terminal)?,
+                )
+                .map_err(ComponentCreationError::terminal)?
+        } else {
+            component
+        };
         Ok(ConstructedComponent::bootstrap_provider(Box::new(
             component,
         )))

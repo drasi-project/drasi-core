@@ -64,6 +64,10 @@ pub struct BootstrapFactoryMetadata {
     pub configuration_version: u32,
     pub configuration: ConfigSchema,
     pub source_progress: bool,
+    /// Opening a fresh provider is an independent, read-only point-in-time
+    /// operation. It does not initialize the source or a subscriber.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub independent_state: bool,
     /// The coordination protocol a paired factory requires of the source it
     /// serves. A paired factory's providers are created by that source
     /// library's coordinator through [`BootstrapFactory::create_with_source_bootstrap`].
@@ -87,6 +91,10 @@ impl BootstrapFactoryMetadata {
         anyhow::ensure!(
             self.pairing.is_none() || self.source_progress,
             "a paired bootstrap factory requires the query's actual source progress"
+        );
+        anyhow::ensure!(
+            !self.independent_state || (!self.source_progress && self.pairing.is_none()),
+            "independent state reads cannot bind a consumer's progress or paired handover"
         );
         Ok(())
     }
@@ -112,6 +120,10 @@ impl BootstrapFactoryMetadata {
         anyhow::ensure!(
             !self.source_progress || description.completion == BootstrapCompletionKind::Durable,
             "a progress-bound bootstrap provider must complete durably"
+        );
+        anyhow::ensure!(
+            !self.independent_state || description.completion == BootstrapCompletionKind::Quiescent,
+            "an independent state read requires a read-only quiescent provider"
         );
         anyhow::ensure!(
             self.pairing.is_none() || description.namespace == ElementNamespace::ServedSource,
@@ -377,6 +389,7 @@ impl BootstrapFactory for PairedBootstrapFactory {
             configuration_version: 1,
             configuration: ConfigSchema::from_fields(std::iter::empty()),
             source_progress: true,
+            independent_state: false,
             pairing: Some(self.protocol.clone()),
         }
     }

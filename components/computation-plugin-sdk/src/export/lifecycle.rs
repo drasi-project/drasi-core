@@ -324,7 +324,7 @@ impl StateAdministration {
                     ));
                 }
             }
-            BOOTSTRAP_INPUT | BOOTSTRAP_COMPLETE | BOOTSTRAP_RESET => {
+            BOOTSTRAP_INPUT | BOOTSTRAP_COMPLETE | BOOTSTRAP_RESET | BOOTSTRAP_REBUILD => {
                 if state.activation != Activation::Started {
                     return Err(Failure::failed(
                         "native bootstrap requires successful activation",

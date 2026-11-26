@@ -584,6 +584,7 @@ async fn managed_graph_constructs_the_existing_query_engine_from_persisted_recip
             edge("counter", "query"),
             Box::new(BoundedPipeConfig { capacity: 4 }),
         )
+        .relationship_policy(edge("counter", "query"), RelationshipPolicy::live_only())
         .connect(
             edge("query", "sink"),
             Box::new(BoundedPipeConfig { capacity: 4 }),
@@ -708,7 +709,10 @@ async fn shared_family_loader_and_registry_execute_native_factories() -> Result<
     let summary = scan_plugin_metadata(&path).context("native metadata-only scan")?;
     assert_eq!(summary.plugin_id, qualified_id);
     assert_eq!(summary.abi_family.as_deref(), Some("computation"));
-    assert_eq!(summary.abi_version.as_deref(), Some("0.1.0"));
+    assert_eq!(
+        summary.abi_version.as_deref(),
+        Some(drasi_computation_plugin_abi::ABI_VERSION)
+    );
     assert_eq!(summary.version, shared.metadata().plugin.version.as_ref());
 
     // Restrict discovery to the existing build artifact: copying a process-pinned
@@ -917,7 +921,7 @@ async fn separately_loaded_pipeline_exact_outputs_configuration_and_topology_rou
     );
     assert!(plugin
         .iter()
-        .all(|plugin| plugin.metadata().abi_version == "0.1.0"));
+        .all(|plugin| plugin.metadata().abi_version == drasi_computation_plugin_abi::ABI_VERSION));
     assert_eq!(drasi_plugin_sdk::ffi::FFI_SDK_VERSION, "0.19.0");
     assert_eq!(plugin.len(), 4);
     assert!(plugin.iter().all(|plugin| plugin.factories().len() == 1));

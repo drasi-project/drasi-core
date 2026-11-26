@@ -17,7 +17,7 @@
 //! The catalogue owns nothing. It resolves the providers that components
 //! registered per output port (see [`ComputationComponent::output_readers`]),
 //! as captured from the graph's coherent registry publication. Handles carry
-//! the component generation and operation they resolved; every read re-checks
+//! the graph run, component generation and reader epoch they resolved; every read re-checks
 //! them against the current publication, so a stopped, restarted or replaced
 //! component yields [`OutputReadError::Retired`] rather than a replacement's
 //! data or an empty default.
@@ -26,11 +26,36 @@
 //! and retention gaps ([`OutputHandle::catch_up`]). That is not a gap-free live
 //! handover. [`OutputHandle::snapshot_and_follow`] requires an actual registered
 //! provider that captures the snapshot and its bounded live lease together.
+//! [`OutputHandle::current_state`] and [`OutputHandle::current_state_and_follow`]
+//! deliver those views as bounded batches of ordinary added records.
 
 use super::*;
+use futures::{stream, stream::BoxStream, StreamExt};
 use std::{future::Future, sync::Arc};
+use tokio::time::Instant;
+
+mod projection;
+use projection::ProjectionRoute;
 
 type ReadResult<T> = std::result::Result<T, OutputReadError>;
+
+pub(super) fn transfer_schema(
+    declared: &SchemaDescriptor,
+    factory: Option<&dyn ComponentFactory>,
+) -> Option<Arc<Schema>> {
+    [
+        GraphChangeCodec::schema(),
+        QueryChangeCodec::schema(),
+        SourceTransactionCodec::schema(),
+    ]
+    .into_iter()
+    .chain(
+        factory
+            .into_iter()
+            .flat_map(|factory| factory.record_schemas()),
+    )
+    .find(|schema| schema.descriptor() == declared)
+}
 
 /// Whether an output actually registered a provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +73,9 @@ pub struct OutputDescription {
     pub endpoint: OutputEndpoint,
     /// The output port's declared schema; snapshots must use it.
     pub schema: SchemaDescriptor,
+    /// One-shot current state, including independent provider-backed reads.
+    pub current_state: Provision,
+    /// A materialized view with a committed producer cursor.
     pub snapshot: Provision,
     pub replay: Provision,
     pub snapshot_follow: Provision,
@@ -60,12 +88,94 @@ pub struct OutputCatalogue {
     state: tokio::sync::watch::Receiver<GraphState>,
 }
 
+#[derive(Clone)]
 struct Resolved {
     description: OutputDescription,
     stream: Option<StreamId>,
     generation: ComponentGeneration,
-    operation: OperationEpoch,
+    run_epoch: u64,
+    read_epoch: OperationEpoch,
     readers: Option<WeakOutputPortReaders>,
+    independent: Option<ProviderAttachment>,
+    projection: Option<Arc<ProjectionRoute>>,
+}
+
+#[derive(Clone)]
+struct ProviderAttachment {
+    edge: EdgeDefinition,
+    binding_generation: u64,
+    generation: ComponentGeneration,
+    read_epoch: OperationEpoch,
+    reader: std::sync::Weak<dyn IndependentStateProvider>,
+}
+
+impl ProviderAttachment {
+    fn resolve(
+        graph: &GraphRegistrySnapshot,
+        represented: &OutputEndpoint,
+        input: &PortId,
+    ) -> ReadResult<(Provision, Option<Self>)> {
+        let target = Endpoint::new(represented.component.clone(), input.clone());
+        let mut edges = graph
+            .observed
+            .relationships
+            .iter()
+            .filter(|(edge, _)| edge.to == target);
+        let Some((edge, binding)) = edges.next() else {
+            return Ok((Provision::Absent, None));
+        };
+        if edges.next().is_some() {
+            return Err(OutputReadError::invalid(format!(
+                "ambiguous provider attachment for {represented}"
+            )));
+        }
+        if binding.binding != BindingState::Bound {
+            return Ok((Provision::NotConstructed, None));
+        }
+        let Some(provider) = graph.observed.components.get(&edge.from.component) else {
+            return Ok((Provision::NotConstructed, None));
+        };
+        let reader = graph
+            .output_readers(&edge.from.component)
+            .and_then(|ports| ports.port(&edge.from.port))
+            .and_then(WeakOutputPortReaders::independent_provider);
+        Ok(match reader {
+            None => (Provision::Absent, None),
+            Some(reader) => (
+                Provision::Provided,
+                Some(Self {
+                    edge: edge.clone(),
+                    binding_generation: binding.generation,
+                    generation: provider.generation,
+                    read_epoch: provider.read_epoch,
+                    reader: reader.clone(),
+                }),
+            ),
+        })
+    }
+
+    fn is_current(&self, graph: &GraphRegistrySnapshot) -> bool {
+        graph
+            .observed
+            .relationships
+            .get(&self.edge)
+            .is_some_and(|binding| {
+                binding.binding == BindingState::Bound
+                    && binding.generation == self.binding_generation
+            })
+            && graph
+                .observed
+                .components
+                .get(&self.edge.from.component)
+                .is_some_and(|provider| {
+                    provider.generation == self.generation && provider.read_epoch == self.read_epoch
+                })
+            && graph
+                .output_readers(&self.edge.from.component)
+                .and_then(|ports| ports.port(&self.edge.from.port))
+                .and_then(WeakOutputPortReaders::independent_provider)
+                .is_some_and(|reader| reader.ptr_eq(&self.reader))
+    }
 }
 
 impl OutputCatalogue {
@@ -136,7 +246,7 @@ impl OutputCatalogue {
     ) -> ReadResult<OutputHandle> {
         let publication = self.registry_snapshot();
         let endpoint = Self::endpoint_at(&publication, component, port)?;
-        let resolved = Self::resolve_at(&publication, &endpoint)?;
+        let resolved = self.resolve_at(&publication, &endpoint)?;
         self.handle(endpoint, resolved)
     }
 
@@ -156,20 +266,21 @@ impl OutputCatalogue {
                 port.direction() == PortDirection::Output && port.kind() == PortKind::Data
             }) {
                 let endpoint = OutputEndpoint::new(node.descriptor.id().clone(), port.id().clone());
-                descriptions.push(Self::resolve_at(&publication, &endpoint)?.description);
+                descriptions.push(self.resolve_at(&publication, &endpoint)?.description);
             }
         }
         Ok(descriptions)
     }
 
     pub fn describe(&self, endpoint: &OutputEndpoint) -> ReadResult<OutputDescription> {
-        Self::resolve_at(&self.registry_snapshot(), endpoint).map(|resolved| resolved.description)
+        self.resolve_at(&self.registry_snapshot(), endpoint)
+            .map(|resolved| resolved.description)
     }
 
     /// Capture the endpoint's current providers. Fails with
     /// [`OutputReadError::NotReady`] while its component is not constructed.
     pub fn resolve(&self, endpoint: &OutputEndpoint) -> ReadResult<OutputHandle> {
-        let resolved = Self::resolve_at(&self.registry_snapshot(), endpoint)?;
+        let resolved = self.resolve_at(&self.registry_snapshot(), endpoint)?;
         self.handle(endpoint.clone(), resolved)
     }
 
@@ -188,7 +299,8 @@ impl OutputCatalogue {
         loop {
             publications.borrow_and_update();
             let publication = self.registry_snapshot();
-            let result = match Self::resolve_at(&publication, endpoint)
+            let result = match self
+                .resolve_at(&publication, endpoint)
                 .and_then(|resolved| self.handle(endpoint.clone(), resolved))
             {
                 Ok(handle) => read(handle).await,
@@ -245,7 +357,8 @@ impl OutputCatalogue {
     }
 
     fn handle(&self, endpoint: OutputEndpoint, resolved: Resolved) -> ReadResult<OutputHandle> {
-        if resolved.description.snapshot == Provision::NotConstructed
+        if resolved.readers.is_none()
+            && resolved.description.snapshot == Provision::NotConstructed
             && resolved.description.replay == Provision::NotConstructed
             && resolved.description.snapshot_follow == Provision::NotConstructed
         {
@@ -260,12 +373,34 @@ impl OutputCatalogue {
             schema: resolved.description.schema,
             stream: resolved.stream,
             generation: resolved.generation,
-            operation: resolved.operation,
+            run_epoch: resolved.run_epoch,
+            read_epoch: resolved.read_epoch,
             readers: resolved.readers,
+            independent: resolved.independent,
+            projection: resolved.projection,
+            current_state: resolved.description.current_state,
         })
     }
 
     fn resolve_at(
+        &self,
+        publication: &GraphRegistrySnapshot,
+        endpoint: &OutputEndpoint,
+    ) -> ReadResult<Resolved> {
+        let mut output = Self::resolve_direct(publication, endpoint)?;
+        if output
+            .readers
+            .as_ref()
+            .and_then(WeakOutputPortReaders::projection)
+            .is_some()
+        {
+            (output.description.current_state, output.projection) =
+                ProjectionRoute::resolve(self, publication, output.clone())?;
+        }
+        Ok(output)
+    }
+
+    fn resolve_direct(
         publication: &GraphRegistrySnapshot,
         endpoint: &OutputEndpoint,
     ) -> ReadResult<Resolved> {
@@ -322,18 +457,31 @@ impl OutputCatalogue {
                 .as_ref()
                 .is_some_and(WeakOutputPortReaders::snapshot_follow_is_provided),
         );
+        let (current_state, independent) = match readers
+            .as_ref()
+            .and_then(WeakOutputPortReaders::provider_input)
+        {
+            Some(input) if snapshot != Provision::Provided => {
+                ProviderAttachment::resolve(publication, endpoint, input)?
+            }
+            _ => (snapshot, None),
+        };
         Ok(Resolved {
             description: OutputDescription {
                 endpoint: endpoint.clone(),
                 schema: port.schema().clone(),
+                current_state,
                 snapshot,
                 replay,
                 snapshot_follow,
             },
             stream: node.output_streams.get(&endpoint.port).cloned(),
             generation: observed.generation,
-            operation: observed.operation,
+            run_epoch: publication.observed.run_epoch,
+            read_epoch: observed.read_epoch,
             readers,
+            independent,
+            projection: None,
         })
     }
 }
@@ -356,8 +504,12 @@ pub struct OutputHandle {
     schema: SchemaDescriptor,
     stream: Option<StreamId>,
     generation: ComponentGeneration,
-    operation: OperationEpoch,
+    run_epoch: u64,
+    read_epoch: OperationEpoch,
     readers: Option<WeakOutputPortReaders>,
+    current_state: Provision,
+    independent: Option<ProviderAttachment>,
+    projection: Option<Arc<ProjectionRoute>>,
 }
 
 impl OutputHandle {
@@ -397,6 +549,14 @@ impl OutputHandle {
             return Err(OutputReadError::Retired);
         }
         let current = self.catalogue.registry_snapshot();
+        self.ensure_local_current(&current)?;
+        if let Some(route) = &self.projection {
+            route.ensure_current(&current)?;
+        }
+        Ok(())
+    }
+
+    fn ensure_local_current(&self, current: &GraphRegistrySnapshot) -> ReadResult<()> {
         let observed = current
             .observed
             .components
@@ -419,9 +579,14 @@ impl OutputHandle {
                     | GraphState::Failed
                     | GraphState::CleanupRequired
             );
-        if observed.generation == self.generation
-            && observed.operation == self.operation
+        if current.observed.run_epoch == self.run_epoch
+            && observed.generation == self.generation
+            && observed.read_epoch == self.read_epoch
             && same_providers
+            && self
+                .independent
+                .as_ref()
+                .is_none_or(|provider| provider.is_current(current))
             && live
         {
             Ok(())
@@ -493,6 +658,128 @@ impl OutputHandle {
         self.check_cursor(snapshot.cursor())
     }
 
+    /// Read this output once. An empty view completes without any data
+    /// envelopes; a missing snapshot provider is `Absent`, not an empty view.
+    pub async fn current_state(
+        &self,
+        options: CurrentStateOptions,
+    ) -> ReadResult<CurrentStateRead> {
+        self.ensure_current()?;
+        let view = match &self.projection {
+            Some(route) => self.fenced(route.capture(options.batches)).await?,
+            None => self.capture_direct(options.batches).await?,
+        };
+        self.deliver_state(view, options, None, None).await
+    }
+
+    async fn capture_direct(&self, limits: SnapshotBatchLimits) -> ReadResult<CapturedView> {
+        if let Some(binding) = &self.independent {
+            let reader = binding.reader.upgrade().ok_or(OutputReadError::Retired)?;
+            let scan = self
+                .fenced(reader.open_state(
+                    &self.endpoint,
+                    &binding.edge.to.port,
+                    &binding.edge.from.port,
+                ))
+                .await?;
+            CapturedView::new(self.endpoint.to_string(), None, |stream| {
+                state_transfer::scan_batches(scan, stream, self.schema.clone(), limits)
+            })
+        } else if self.current_state == Provision::NotConstructed {
+            Err(OutputReadError::NotReady(format!(
+                "waiting for the state provider of {}",
+                self.endpoint
+            )))
+        } else {
+            CapturedView::materialized(self.snapshot().await?, limits)
+        }
+    }
+
+    /// Capture the baseline and protect its suffix in the provider's *one*
+    /// snapshot-and-follow operation, before scanning or spooling any records.
+    /// The caller can take the lease only after the baseline has reached EOF.
+    pub async fn current_state_and_follow(
+        &self,
+        options: CurrentStateOptions,
+        limits: OutputFollowLimits,
+    ) -> ReadResult<CurrentStateRead> {
+        let start = Instant::now();
+        let (snapshot, follow) = self.snapshot_and_follow(limits).await?.into_parts();
+        // snapshot_and_follow validated this lifetime and started the provider lease.
+        self.deliver_state(
+            CapturedView::materialized(snapshot, options.batches)?,
+            options,
+            Some(follow),
+            Some(start + limits.lifetime),
+        )
+        .await
+    }
+
+    fn file_schema(&self) -> ReadResult<Arc<Schema>> {
+        let publication = self.catalogue.registry_snapshot();
+        let factory = publication
+            .desired
+            .specifications
+            .get(&self.endpoint.component)
+            .and_then(|spec| publication.factory(&spec.implementation));
+        transfer_schema(&self.schema, factory.as_deref()).ok_or_else(|| {
+            OutputReadError::invalid(format!(
+                "no executable schema registered for temporary-file transfer of {}",
+                self.endpoint
+            ))
+        })
+    }
+
+    async fn deliver_state(
+        &self,
+        view: CapturedView,
+        options: CurrentStateOptions,
+        follow: Option<Box<dyn OutputFollow>>,
+        deadline: Option<Instant>,
+    ) -> ReadResult<CurrentStateRead> {
+        let CapturedView {
+            session,
+            dataset,
+            cursor,
+            batches,
+        } = view;
+        let baseline = self
+            .fenced(with_lease(deadline, async {
+                Ok(match options.transfer {
+                    StateTransfer::Stream => batches,
+                    StateTransfer::TemporaryFile { max_file_bytes } => {
+                        let scope = state_transfer::file_scope(
+                            session,
+                            &self.endpoint,
+                            self.generation,
+                            self.read_epoch,
+                            &dataset,
+                            cursor.as_ref(),
+                            &self.schema,
+                        )?;
+                        state_transfer::FileTransfer::seal_stream(
+                            batches,
+                            scope,
+                            self.file_schema()?,
+                            options.batches,
+                            max_file_bytes,
+                        )
+                        .await?
+                        .import(scope)
+                    }
+                })
+            }))
+            .await?;
+        Ok(CurrentStateRead {
+            handle: self.clone(),
+            cursor,
+            dataset,
+            baseline: Baseline::Reading(baseline),
+            follow,
+            deadline,
+        })
+    }
+
     /// Capture current state and a bounded live tail with no window between
     /// snapshot capture and retention. The lease starts at this request, is
     /// non-renewing, and is released by dropping the returned follow handle.
@@ -530,6 +817,139 @@ impl OutputHandle {
                 deadline,
             }),
         ))
+    }
+}
+
+async fn with_lease<T>(
+    deadline: Option<Instant>,
+    read: impl Future<Output = ReadResult<T>>,
+) -> ReadResult<T> {
+    let Some(deadline) = deadline else {
+        return read.await;
+    };
+    if Instant::now() >= deadline {
+        return Err(OutputReadError::LeaseExpired);
+    }
+    let result = tokio::time::timeout_at(deadline, read)
+        .await
+        .map_err(|_| OutputReadError::LeaseExpired)?;
+    if Instant::now() >= deadline {
+        return Err(OutputReadError::LeaseExpired);
+    }
+    result
+}
+
+enum Baseline {
+    Reading(BoxStream<'static, ReadResult<ChangeEnvelope>>),
+    Complete,
+    Failed,
+}
+
+struct CapturedView {
+    session: BootstrapSessionId,
+    dataset: String,
+    cursor: Option<OutputCursor>,
+    batches: StateScan,
+}
+
+impl CapturedView {
+    fn new(
+        dataset: String,
+        cursor: Option<OutputCursor>,
+        batches: impl FnOnce(StreamId) -> StateScan,
+    ) -> ReadResult<Self> {
+        let session = BootstrapSessionId::new();
+        let stream = StreamId::try_new(format!("snapshot/{session}"))
+            .map_err(|e| OutputReadError::Failed(e.into()))?;
+        Ok(Self {
+            session,
+            dataset,
+            cursor,
+            batches: batches(stream),
+        })
+    }
+
+    fn materialized(snapshot: OutputSnapshot, limits: SnapshotBatchLimits) -> ReadResult<Self> {
+        Self::new(
+            snapshot.dataset().to_owned(),
+            Some(snapshot.cursor().clone()),
+            |stream| stream::iter(SnapshotBatches::new(&snapshot, stream, limits)).boxed(),
+        )
+    }
+}
+
+/// A generation-fenced delivery session. Drop it to cancel the baseline and
+/// release its file and follow lease. No worker enumerates rows in the background.
+pub struct CurrentStateRead {
+    handle: OutputHandle,
+    cursor: Option<OutputCursor>,
+    dataset: String,
+    baseline: Baseline,
+    follow: Option<Box<dyn OutputFollow>>,
+    deadline: Option<Instant>,
+}
+
+impl CurrentStateRead {
+    /// The actual logical output cut, when one exists. A read-only datastore
+    /// snapshot does not invent a replay cursor for the source's live stream.
+    pub fn cursor(&self) -> Option<&OutputCursor> {
+        self.cursor.as_ref()
+    }
+
+    /// The dataset scope, including for empty views.
+    pub fn dataset(&self) -> &str {
+        &self.dataset
+    }
+
+    /// The output port's complete declared schema.
+    pub fn schema(&self) -> &SchemaDescriptor {
+        &self.handle.schema
+    }
+
+    /// `Ok(None)` completes the baseline. Treat batches as provisional until
+    /// then: an error is terminal, never successful EOF. Cancelling this
+    /// future without dropping the session does not consume a batch.
+    pub async fn next_batch(&mut self) -> ReadResult<Option<ChangeEnvelope>> {
+        let stream = match &mut self.baseline {
+            Baseline::Complete => return Ok(None),
+            Baseline::Failed => {
+                return Err(OutputReadError::invalid(
+                    "current-state read already failed",
+                ))
+            }
+            Baseline::Reading(stream) => stream,
+        };
+        let result = self
+            .handle
+            .fenced(with_lease(self.deadline, async {
+                tokio::task::yield_now().await;
+                stream.next().await.transpose()
+            }))
+            .await;
+        match &result {
+            Ok(None) => self.baseline = Baseline::Complete,
+            Err(_) => {
+                self.baseline = Baseline::Failed;
+                self.follow = None;
+            }
+            Ok(Some(_)) => (),
+        }
+        result
+    }
+
+    /// After reading to EOF and installing the baseline and cut together,
+    /// take the already-armed live lease. Never opens a new subscription.
+    /// The lease still reports retention loss or retirement through `next()`.
+    pub fn into_follow(self) -> ReadResult<Box<dyn OutputFollow>> {
+        self.handle.ensure_current()?;
+        if !matches!(self.baseline, Baseline::Complete) {
+            return Err(OutputReadError::invalid("baseline did not complete"));
+        }
+        if self.deadline.is_some_and(|end| Instant::now() >= end) {
+            return Err(OutputReadError::LeaseExpired);
+        }
+        self.follow
+            .ok_or_else(|| OutputReadError::invalid("one-shot read has no follow lease"))
     }
 }
 

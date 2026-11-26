@@ -42,7 +42,9 @@ impl ImplementationIdentity {
 /// A component's execution role: its port shape and lifecycle contract.
 ///
 /// Continuous queries execute as [`ComponentRole::Transformer`] and declare
-/// [`ComponentSemanticKind::Query`] on their descriptor.
+/// [`ComponentSemanticKind::Query`] on their descriptor. A source that
+/// consumes upstream changes or a reaction that emits results uses that
+/// same input/output execution contract with its own semantic kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ComponentRole {
     Source,

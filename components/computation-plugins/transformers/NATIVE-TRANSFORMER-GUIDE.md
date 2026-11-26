@@ -3,11 +3,12 @@
 This guide states what a production native transformer (`NativeComponent` +
 `NativeTransformer`, or a `TransactionalComponent`) must do beyond compiling
 against the native SDK (`drasi_computation_plugin_abi::ABI_VERSION`). It
-applies to every crate in this directory. The `query` transformer is the
-reference for durable output, durable bootstrap, continuations and
-management; `middleware` and `view` are the references for volatile
-transformers and quiescent bootstrap; `arithmetic` is the reference for a
-transaction participant. The general rules in the
+applies to every crate in this directory. A transformer that maintains state
+is built on the SDK's [stateful transformer runtime](#stateful-transformers),
+which implements durable output, durable bootstrap, recovery, continuations and
+scheduling for it; the `query`, `stateful-middleware`, `view` and `geometry`
+transformers run on it. The stateless `middleware` transformer is the reference for projected
+current state, and `arithmetic` for a transaction participant. The general rules in the
 [native source standard](../sources/NATIVE-SOURCE-GUIDE.md) for
 configuration, errors and documentation apply unchanged, and the
 [native bootstrap provider standard](../bootstrappers/NATIVE-BOOTSTRAP-PROVIDER-GUIDE.md)
@@ -19,6 +20,72 @@ A transformer is driven by the Host: it has no independent worker unless it
 declares one (wakeups, continuations). The graph calls `transform` with one
 input envelope at a time and forwards the returned envelopes through the
 output pipes.
+
+## Stateful transformers
+
+A stateful transformer reads changes on `in`, maintains state, and publishes
+the changes to that state on `out`. A Continuous Query is one such
+transformer. `drasi_computation_plugin_sdk::transformer::StatefulTransformer`
+is the native component for all of them. It owns:
+
+- lifecycle and the atomic, non-atomic and volatile storage profiles;
+- configuration identity, the producer epoch and committed input progress;
+- bootstrap from a bound provider or from the connected input's current state,
+  including a first input connected after the transformer started;
+- restart replay of unconfirmed output, rebuild after a gap in the input's
+  retained history, crash-safe installation, and refusal when retained state
+  cannot be trusted;
+- the materialized output: current rows, retained history, and the snapshot,
+  snapshot-and-follow and replay readers;
+- delivery confirmation and scheduled work.
+
+An implementation supplies a `TransformerLogic`: how a batch of input changes
+updates its private state and which output changes it produces.
+
+| Hook | Supplies |
+|---|---|
+| `State`, `bind`, `open`, `reset` | Private state over the component's host stores, for example a query evaluator and its indexes; `()` when the output is the only state |
+| `prepare`, `evaluate`, `project` | Decode a batch, apply it to the state, and project the output changes numbered by the runtime |
+| `next_due`, `due`, `take_schedule_change` | Optional scheduled work |
+| `decorate`, `verify`, `verify_owner` | Optional annotations on outputs and checks of stored outputs |
+| `row_mutations`, `restore_row`, `difference` | Optional storage keys and rebuild difference; the defaults key graph-element rows by identity and merge patches |
+| `readers`, `plan_update`, `apply_update` | Optional extra output readers and in-place updates |
+
+Construct it from the factory with `StatefulTransformer::new(request,
+descriptor, processing, logic, Settings { stream, capacity, dataset, identity,
+source_transactions })`. `identity` is the logic configuration retained state
+was built from; retained state is reused only with the same value. The factory
+declares `transformer::capabilities(manages_updates)` (adding only its own
+extras, such as a semantic kind), describes components with
+`transformer::describe`, and publishes `transformer::configuration_options()`
+for the shared options `bootstrap`, `volatile`, `publication`, `recovery`,
+`resetConfiguration` and `outboxCapacity`.
+
+The [query transformer](query) supplies query evaluation, its result
+projection and its query read API. The
+[stateful middleware](middleware/README.md#stateful-middleware) supplies only
+its pipeline. The [view](view) supplies its complete-image pipeline and keeps
+each current input and the outputs it produced in its host stores.
+[Geometry](geometry) keeps its inputs, memberships and records there, and
+rebuilds its in-memory members and pair index from them in `open`; it also
+plans updates against its open state, through `plan_update`.
+
+`transformer::HostState` gives any implementation the same durable stores the
+query uses: `apply_inputs` applies a batch of graph changes to the current full
+inputs, kept in the element index (a patch needs a retained full image), and
+`apply_inputs_where` retains only the inputs a filter accepts. `get_value` /
+`set_value` keep JSON values in named private tables, and `get_values` reads a
+whole table, for example to rebuild in-memory structures in `open`. `bind` it
+in `TransformerLogic::bind` so each runtime operation reads and writes the
+operation's stores. With the `test-support` feature, `MemoryState` provides the
+same stores in memory, with transactions, for unit tests.
+
+`transformer::update_plan` applies the update rules every stateful transformer
+shares: the shared options other than `outboxCapacity` cannot change, output
+retention may only grow in place, and a reconstruction initializes from its
+input again when `bootstrap` is configured. An implementation decides only
+whether its own settings can change in place. A factory that accepts
+reconstruction directives checks them with `transformer::validate_reconstruction`.
 
 ## Ports
 
@@ -45,7 +112,7 @@ edge when it binds; it never infers them later.
 
 | Transformer | Description |
 |---|---|
-| Volatile (new producer identity every construction) | `request.volatile_transformer()` (`middleware`, `view`, `arithmetic`). |
+| Volatile (new producer identity every construction) | `request.volatile_transformer()` (`middleware`, `arithmetic`). |
 | Output durability follows a bound resource | `ComponentDescription::new(progress).with_outputs(descriptor, OutputDescription::following(durability))`, from `request.bound_durability("processing")` (`query`). |
 | Output relays its input's progress | `OutputDescription::RELAY` with `Capabilities::output_progress = Relay` (the transformer default). |
 
@@ -74,12 +141,14 @@ Construction still validates against the same declaration.
 | `initialize` | Compile everything configuration-derived (pipelines, expressions, schemas). Start no workers and open no external connections. |
 | `start` | Prepare a fresh processing epoch. A volatile transformer creates its new producer identity here (or at construction) and resets its sequence; a durable one reopens its committed state through `NativeProcessing`. Observe `ctx.cancellation()`/`ctx.deadline()` across every await. A transformer that latched a processing failure refuses to start until it is reconstructed, unless it rebuilds all of its volatile state here. |
 | `pause` | A Host-driven transformer with no workers may return `nothing_to_do()`: the Host calls no `transform` while paused. A transformer with wakeups, continuations or its own workers must gate them or return `lifecycle::unsupported(...)`. |
-| `resume` | Reopen exactly what Pause closed. |
+| `resume` | Reopen exactly what Pause closed. Output reads and their follow leases stay open across a pause and resume. |
 | `stop` | Stop admitting work, settle in-flight state and keep committed state. `Drain` finishes the in-flight operation within the deadline; `Abort` cancels promptly. Never report an earlier transform failure as a Stop failure. |
 | `dispose` | Implement both intents. Under `Erase`, remove exactly the state the transformer owns (its processing and output-retention records) idempotently, and declare `erases_owned_state`. A transformer that owns nothing declares it with a documented no-op. |
 
 A `transform` that fails part-way must not leave half-applied state visible.
-Either stage the whole envelope and roll back on failure (`view`), or latch
+Either stage the whole envelope and roll back on failure (the
+[stateful transformer runtime](#stateful-transformers) rolls back the host
+processing operation), or latch
 the failure so that every later operation fails until the component is
 reconstructed (`middleware`'s `ProcessingGuard`). A transformer holds no state
 outside its future that a dropped (cancelled) `transform` could leave
@@ -87,7 +156,8 @@ inconsistent.
 
 ## Durable output
 
-A transformer whose outputs must survive a restart without recomputation
+The stateful transformer runtime implements this section. A transformer
+whose outputs must survive a restart without recomputation
 declares `durable_output`, `output_replays` for those ports, and uses the
 Host's output-retention service through `NativeProcessing::run_output`, which
 commits business state, the retained output and its sequence together.

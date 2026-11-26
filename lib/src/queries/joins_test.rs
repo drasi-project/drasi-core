@@ -54,6 +54,7 @@ mod query_joins_tests {
             inputs: sources
                 .into_iter()
                 .map(|source_id| QueryInputConfig {
+                    enable_bootstrap: None,
                     nodes: vec![],
                     relations: vec![],
                     component: crate::config::ComponentReference::by_name(source_id),

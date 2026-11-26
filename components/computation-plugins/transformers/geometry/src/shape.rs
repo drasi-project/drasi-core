@@ -23,6 +23,7 @@ pub(crate) struct Rules {
 
 /// A validated geometry and its bounding rectangle.
 #[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
 pub(crate) struct Shape {
     pub geometry: Geometry<f64>,
     pub bounds: Rect<f64>,

@@ -5,7 +5,7 @@ ComputationGraph HTTP/gRPC transport, HTTP bootstrap and browser SSE delivery. E
 registers its own factories and uses its package name as its plugin identity. The
 HTTP sink library registers two: the ordinary sink and the opt-in
 `drasi.network/http-delivery` consumer.
-Native ABI is **0.1.0**, independently of the workspace package version.
+Native ABI is **0.2.0**, independently of the workspace package version.
 Native wire version is **1**, using binary computation envelopes
 and bulk MessagePack buffers. Rebuild libraries built for another native ABI
 major or minor.
@@ -253,7 +253,7 @@ The source's `stream` must match the channel. Missing service support, incompati
 storage, foreign scope or a memory/mixed output path rejects rather than silently
 downgrading. Construction still performs no network I/O.
 
-This uses the optional native service-v1 interface with ABI 0.1 libraries.
+This uses the optional native service-v1 interface with ABI 0.2 libraries.
 Fast-mode support alone does not provide durable admission. No volatile
 event queue, local producer sequence or second journal is allocated in durable
 mode. HTTP and gRPC acknowledge only after host graph validation and the outgoing
@@ -499,7 +499,7 @@ Client requests live in host-polled operation futures, not background sink
 processing queues. Cancellation drops pending calls/backoff, so `Abort` ends an
 in-flight delivery at once and `Drain` waits at most for the retry budget; stop drops owned
 client/channel handles after the host drains/cancels operations. The plugin's I/O
-runtime and library remain process-pinned according to ABI 0.1. Cancellation is
+runtime and library remain process-pinned according to ABI 0.2. Cancellation is
 not rollback or exactly-once delivery.
 
 The optional batching extension leaves frozen native metadata/base layouts

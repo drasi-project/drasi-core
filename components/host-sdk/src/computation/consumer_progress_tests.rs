@@ -617,6 +617,7 @@ async fn consumer_progress_graph_factory_resolves_the_actual_typed_checkpoint_re
         let endpoint = |component: &str, port: &str| {
             Endpoint::new(named_id(component), PortId::try_new(port).unwrap())
         };
+        let live = EdgeDefinition::new(endpoint("producer", "out"), endpoint("first", "in"));
         let graph = ComputationGraph::builder(GRAPH)
             .declare_resource(ResourceSpecification {
                 id: resource.clone(),
@@ -651,9 +652,14 @@ async fn consumer_progress_graph_factory_resolves_the_actual_typed_checkpoint_re
                 StreamId::try_new("producer/out")?,
             )
             .bind_stream(endpoint("first", "out"), StreamId::try_new("first/out")?)
-            .connect(
-                EdgeDefinition::new(endpoint("producer", "out"), endpoint("first", "in")),
-                Box::new(BoundedPipeConfig { capacity: 1 }),
+            .connect(live.clone(), Box::new(BoundedPipeConfig { capacity: 1 }))
+            .relationship_policy(
+                live,
+                // This producer supplies progress, not a snapshot provider.
+                RelationshipPolicy {
+                    initial_state: Some(false),
+                    ..Default::default()
+                },
             )
             .connect(
                 EdgeDefinition::new(
@@ -669,15 +675,22 @@ async fn consumer_progress_graph_factory_resolves_the_actual_typed_checkpoint_re
             let mut graph = graph?;
             let run = graph.start()?;
             let control = run.control();
-            let (result, startup) = tokio::time::timeout(Duration::from_secs(10), async {
-                tokio::join!(run, async {
-                    let startup = control.startup_report().await;
-                    control.cancel();
-                    startup
+            let (result, (startup, observed)) =
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    tokio::join!(run, async {
+                        let startup = control.startup_report().await;
+                        let observed = control.observed();
+                        control.cancel();
+                        (startup, observed)
+                    })
                 })
-            })
-            .await?;
-            assert_eq!(startup?.summary, OperationSummary::Completed);
+                .await?;
+            let startup = startup?;
+            assert_eq!(
+                startup.summary,
+                OperationSummary::Completed,
+                "{observed:#?}"
+            );
             assert!(matches!(result, Ok(()) | Err(GraphError::Cancelled)));
             graph.shutdown().await?;
         }

@@ -443,7 +443,8 @@ impl ComponentHandle {
             .await
     }
 
-    /// Configure a native output stream before its first activation.
+    /// Configure a data output's stream. An unbound output can acquire its
+    /// first stream after activation; changing a running stream requires reconciliation.
     pub async fn bind_stream(&self, port: PortId, stream: StreamId) -> GraphResult<()> {
         self.control
             .observe_control("bind_stream")?
@@ -1175,6 +1176,7 @@ pub(super) fn insert(
             ObservedComponent {
                 generation,
                 operation: OperationEpoch(0),
+                read_epoch: OperationEpoch(0),
                 revision,
                 realization: RealizationState::Pending,
                 lifecycle: ComponentLifecycle::Stopped,

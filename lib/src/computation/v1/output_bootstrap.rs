@@ -248,15 +248,17 @@ impl ComputationBootstrapProvider for OutputBootstrapProvider {
         for (snapshot, output) in snapshots.into_iter().zip(&self.outputs) {
             let stream = StreamId::try_new(format!("bootstrap/{}", uuid::Uuid::new_v4()))?;
             origins.insert(stream.clone(), output.clone());
-            streams.push((stream, snapshot.records().clone()));
+            streams.push(SnapshotBatches::new(
+                &snapshot,
+                stream,
+                SnapshotBatchLimits::default(),
+            ));
         }
         drop(prepared);
-        let changes = streams.into_iter().flat_map(|(stream, records)| {
-            records
-                .into_iter()
-                .enumerate()
-                .map(move |(index, (_, record))| snapshot_record(&stream, index, record))
-        });
+        let changes = streams
+            .into_iter()
+            .flatten()
+            .map(|batch| batch.map_err(anyhow::Error::from));
         Ok(ComputationBootstrapSnapshot {
             changes: Box::pin(futures::stream::iter(changes)),
             watermarks,
@@ -294,32 +296,4 @@ impl ComputationBootstrapProvider for OutputBootstrapProvider {
         *self.prepared()? = None;
         Ok(())
     }
-}
-
-/// One output snapshot record as a graph-change insertion at ordinal
-/// `index + 1` of a fresh bootstrap stream.
-pub(super) fn snapshot_record(
-    stream: &StreamId,
-    index: usize,
-    record: Record,
-) -> anyhow::Result<ChangeEnvelope> {
-    let sequence = u64::try_from(index)?
-        .checked_add(1)
-        .ok_or_else(|| anyhow::anyhow!("bootstrap ordinal exhausted"))?;
-    let changes = ChangeSet::try_new(
-        ChangeSetId::try_new(
-            stream.as_str(),
-            Bytes::copy_from_slice(&sequence.to_be_bytes()),
-        )?,
-        GraphChangeCodec::schema().descriptor().clone(),
-        vec![ChangeOperation::Added {
-            ordinal: 0,
-            after: record,
-        }],
-    )?;
-    Ok(ChangeEnvelope::new(
-        emission_id(stream, sequence)?,
-        changes,
-        SystemMetadata::new(stream.clone(), sequence),
-    ))
 }

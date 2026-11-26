@@ -680,6 +680,7 @@ pub struct NativeComponentProxy {
     processing: Option<super::processing::ProcessingBinding>,
     bootstrap: Option<Box<super::bootstrap_consumer::BootstrapBinding>>,
     graph_bootstrap: Option<BootstrapPorts>,
+    graph_bootstrap_bound: bool,
     /// An ordinary query's source-input bootstrap, bound at start together
     /// with any bootstrap edges from upstream components.
     query_bootstrap: Option<Arc<dyn ComputationBootstrapProvider>>,
@@ -697,6 +698,8 @@ pub struct NativeComponentProxy {
     bootstrap_replay: std::collections::VecDeque<InputEnvelope>,
     source_schema: Option<Arc<super::source_schema::NativeSourceSchemaReader>>,
     output_reads: Option<super::output_reads::NativeOutputReads>,
+    state_reads:
+        std::collections::BTreeMap<PortId, drasi_computation_plugin_sdk::wire::StateReadMode>,
     query_descriptions:
         std::collections::BTreeMap<PortId, drasi_computation_contracts::QueryDescription>,
     query_api: Option<Arc<QueryApi>>,
@@ -1066,6 +1069,7 @@ impl NativeComponentProxy {
             processing: None,
             bootstrap: None,
             graph_bootstrap: None,
+            graph_bootstrap_bound: false,
             query_bootstrap: None,
             bootstrap_relay: None,
             snapshot_server: None,
@@ -1076,6 +1080,7 @@ impl NativeComponentProxy {
             source_schema: None,
             output_reads: None,
             query_descriptions: actual.queries,
+            state_reads: actual.state_reads,
             query_api: None,
             query_construction: None,
             input_bindings: Vec::new(),
@@ -1113,22 +1118,31 @@ impl NativeComponentProxy {
             !self.activated && self.bootstrap.is_none(),
             "bootstrap provider must bind once before activation"
         );
+        self.install_bootstrap_provider(resource)?;
+        self.description.local_seed = true;
+        Ok(())
+    }
+
+    // Unlike a construction-time resource, the graph lane is rebound on each
+    // activation. Both must still validate against the actual processing owner.
+    fn install_bootstrap_provider(
+        &mut self,
+        resource: Arc<super::NativeBootstrapResource>,
+    ) -> anyhow::Result<()> {
         let scope = self.construction_scope.as_ref().ok_or_else(|| {
             anyhow::anyhow!("bootstrap requires the actual component construction scope")
         })?;
-        let input = self
+        let (profile, input) = self
             .metadata
             .capabilities
-            .quiescent_bootstrap
-            .as_ref()
-            .or(self.metadata.capabilities.durable_bootstrap.as_ref())
-            .cloned()
+            .bootstrap_input()
             .ok_or_else(|| {
                 anyhow::anyhow!("native transformer does not declare provider bootstrap")
             })?;
         self.bootstrap = Some(Box::new(super::bootstrap_consumer::BootstrapBinding::new(
             resource,
-            input,
+            input.clone(),
+            profile,
             scope,
             self.descriptor.id(),
             self.processing.as_ref(),
@@ -1166,6 +1180,7 @@ impl NativeComponentProxy {
             &self.descriptor,
             &self.metadata,
             &self.query_descriptions,
+            &self.state_reads,
             &self.schemas,
             &self.codec,
         )?;
@@ -1636,7 +1651,7 @@ impl NativeComponentProxy {
         if self.bootstrap.is_some() {
             return Ok(());
         }
-        let sources = self.query_bootstrap.take();
+        let sources = self.query_bootstrap.clone();
         let edges = match (&self.graph_bootstrap, &self.graph_control) {
             (Some(ports), Some(control)) if !ports.inputs().is_empty() => {
                 let scope = self
@@ -1676,7 +1691,9 @@ impl NativeComponentProxy {
             (Some(provider), None) | (None, Some(provider)) => provider,
             (None, None) => return Ok(()),
         };
-        self.bind_bootstrap_provider(Arc::new(super::NativeBootstrapResource(provider)))
+        self.install_bootstrap_provider(Arc::new(super::NativeBootstrapResource(provider)))?;
+        self.graph_bootstrap_bound = true;
+        Ok(())
     }
 }
 
@@ -1797,6 +1814,9 @@ impl ComputationComponent for NativeComponentProxy {
         }
     }
     fn bind_bootstrap(&mut self, ports: BootstrapPorts) {
+        if let Some(processing) = &self.processing {
+            processing.bind_bootstrap_ports(&ports);
+        }
         match self.metadata.role {
             ComponentRole::Source => {
                 // The provider's watermarks are the native source's own
@@ -1804,28 +1824,28 @@ impl ComputationComponent for NativeComponentProxy {
                 // One relay serves every activation, so the published control
                 // handler stays current. Requests wait until `start` begins
                 // an activation with the bound provider input.
-                let relay = self.bootstrap_relay.get_or_insert_with(|| {
-                    BootstrapRelay::new(Arc::new(|_, watermarks| Ok(watermarks.to_vec())))
-                });
+                let relay = self
+                    .bootstrap_relay
+                    .get_or_insert_with(|| BootstrapRelay::new(Arc::new(|_| Ok(Vec::new()))));
                 relay.end_activation();
                 relay.bind(ports);
             }
             ComponentRole::Transformer => {
-                if let Some(snapshot) = self
+                if let Some((snapshot, replay)) = self
                     .metadata
                     .capabilities
                     .output_snapshots
                     .first()
                     .and_then(|port| {
-                        self.output_readers()
-                            .ports()
-                            .get(port)
-                            .and_then(|readers| readers.snapshot().cloned())
+                        self.output_readers().ports().get(port).and_then(|readers| {
+                            Some((readers.snapshot()?.clone(), readers.replay().cloned()))
+                        })
                     })
                 {
-                    let server = BootstrapSnapshotServer::new(snapshot);
+                    let server = self
+                        .snapshot_server
+                        .get_or_insert_with(|| BootstrapSnapshotServer::new(snapshot, replay));
                     server.bind(ports.clone());
-                    self.snapshot_server = Some(server);
                 }
                 if self.metadata.capabilities.provider_bootstrap().is_some() {
                     self.graph_bootstrap = Some(ports);
@@ -1912,9 +1932,15 @@ impl ComputationComponent for NativeComponentProxy {
             return Err(operation_failure(Failure::closed()));
         }
         self.bind_graph_bootstrap()?;
+        let unconnected = context.unconnected_inputs()
+            && self.graph_bootstrap.is_some()
+            && self.bootstrap.is_none()
+            && self.query_bootstrap.is_none();
         anyhow::ensure!(
-            self.metadata.capabilities.quiescent_bootstrap.is_none()
+            self.metadata.capabilities.provider_bootstrap().is_none()
+                || self.metadata.capabilities.durable_bootstrap.is_some()
                 || self.metadata.capabilities.bootstrap_optional
+                || unconnected
                 || self.bootstrap.is_some(),
             "native bootstrap consumer requires a bound provider"
         );
@@ -1935,7 +1961,7 @@ impl ComputationComponent for NativeComponentProxy {
                     .await?,
             )?;
             anyhow::ensure!(
-                status.configured == self.bootstrap.is_some(),
+                unconnected || status.configured == self.bootstrap.is_some(),
                 "bootstrap configuration requires its actual provider before initialization"
             );
         }
@@ -1961,6 +1987,8 @@ impl ComputationComponent for NativeComponentProxy {
         // Caller-owned resolution is cancelled with this activation. Nothing is
         // cached on the proxy or sent to native code until resolution succeeds.
         let mut request = self.lifecycle_request(context.scope());
+        request.unconnected_inputs = unconnected;
+        request.state_subscribers = context.state_subscribers();
         if let Some(relay) = &self.bootstrap_relay {
             relay.begin_activation();
             self.live_hold_decided = false;
@@ -2012,24 +2040,31 @@ impl ComputationComponent for NativeComponentProxy {
                     .capabilities
                     .input_binding_updates
                     .then_some(self.input_bindings.as_slice());
-                self.bootstrap_replay =
-                    Box::pin(bootstrap.initialize(&self.inner, &self.codec, bindings))
-                        .await?
-                        .into();
-            } else if self.metadata.capabilities.durable_bootstrap.is_some()
+                self.bootstrap_replay = Box::pin(bootstrap.initialize(
+                    &self.inner,
+                    &self.codec,
+                    bindings,
+                    self.processing.as_mut().zip(context.rebuild_destinations()),
+                ))
+                .await?
+                .into();
+            } else if unconnected
+                || self.metadata.capabilities.durable_bootstrap.is_some()
                 || self.metadata.capabilities.bootstrap_optional
             {
-                let status: drasi_computation_contracts::BootstrapStatus = wire::decode(
-                    &self
-                        .inner
-                        .call(abi::operation::BOOTSTRAP_STATUS, &[])
-                        .await?,
-                )?;
-                anyhow::ensure!(
-                    !status.configured && status.complete,
-                    "durable bootstrap requires a bound provider"
-                );
-                let completion = if self.metadata.capabilities.durable_bootstrap.is_some() {
+                if !unconnected {
+                    let status: drasi_computation_contracts::BootstrapStatus = wire::decode(
+                        &self
+                            .inner
+                            .call(abi::operation::BOOTSTRAP_STATUS, &[])
+                            .await?,
+                    )?;
+                    anyhow::ensure!(
+                        !status.configured && status.complete,
+                        "durable bootstrap requires a bound provider"
+                    );
+                }
+                let completion = if self.metadata.capabilities.quiescent_bootstrap.is_none() {
                     wire::encode(&drasi_computation_plugin_sdk::bootstrap::Completed::from(
                         drasi_computation_contracts::BootstrapCompletion::default(),
                     ))?
@@ -2145,6 +2180,12 @@ impl ComputationComponent for NativeComponentProxy {
         }
         if let Some(bootstrap) = &mut self.bootstrap {
             bootstrap.stop().await?;
+        }
+        // An activation's control attachment may be retired. Bind the actual
+        // edge again on start; an explicitly supplied provider is unaffected.
+        if self.graph_bootstrap_bound {
+            self.bootstrap = None;
+            self.graph_bootstrap_bound = false;
         }
         if !self.stop.get_mut().completed {
             if self.stop.get_mut().operation.is_none() {

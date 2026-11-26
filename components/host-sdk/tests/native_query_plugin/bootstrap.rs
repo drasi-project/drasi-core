@@ -16,16 +16,24 @@ pub(crate) async fn connect_with_capacity(
     edges: Vec<EdgeDefinition>,
     capacity: usize,
 ) -> Result<()> {
-    let committed = core.desired_configuration()?;
-    let mut desired = committed.desired;
-    desired
-        .topology
-        .relationships
-        .extend(edges.into_iter().map(|definition| DesiredRelationship {
+    connect_relationships(
+        core,
+        edges.into_iter().map(|definition| DesiredRelationship {
             definition,
             policy: Default::default(),
             pipe: DesiredPipe::Bounded { capacity },
-        }));
+        }),
+    )
+    .await
+}
+
+pub(crate) async fn connect_relationships(
+    core: &DrasiLib,
+    relationships: impl IntoIterator<Item = DesiredRelationship>,
+) -> Result<()> {
+    let committed = core.desired_configuration()?;
+    let mut desired = committed.desired;
+    desired.topology.relationships.extend(relationships);
     let receipt = core
         .apply_desired_state(
             committed.revision,

@@ -4,18 +4,16 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use drasi_computation_contracts::{
-    BootstrapCompletion, BootstrapStatus, ChangeEnvelope, ComponentDescriptor, GraphChangeCodec,
-    GraphProducerIdentity, GraphProducerProgress, InputEnvelope, OutputEnvelope, OutputReaders,
-    PortId, StreamId,
+    ChangeEnvelope, ComponentDescriptor, GraphChangeCodec, GraphProducerIdentity,
+    GraphProducerProgress, InputBinding, InputEnvelope, OutputCursor, OutputEnvelope,
+    OutputReadError, OutputReaders, PortId, StateProjector, StreamId,
 };
 use drasi_computation_middleware_common::{Mode, Pipeline};
 use drasi_computation_plugin_sdk::lifecycle::{
     nothing_to_do, DisposeContext, InitializeContext, LifecycleResult, PauseContext, ResumeContext,
     StartContext, StopContext,
 };
-use drasi_computation_plugin_sdk::{
-    BootstrapInput, NativeBootstrapInput, NativeComponent, NativeTransformer,
-};
+use drasi_computation_plugin_sdk::{NativeComponent, NativeInputBindings, NativeTransformer};
 use drasi_core_types::models::{SourceChange, SourceMiddlewareConfig};
 use serde::{Deserialize, Serialize};
 use std::sync::{
@@ -28,12 +26,10 @@ mod tests;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Configuration {
+pub(super) struct Configuration {
     stream: StreamId,
     middleware: Vec<SourceMiddlewareConfig>,
     pipeline: Vec<String>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    bootstrap: bool,
 }
 
 struct ProcessingGuard {
@@ -49,15 +45,59 @@ impl Drop for ProcessingGuard {
     }
 }
 
+struct Mapping {
+    pipeline: Pipeline,
+    owner: GraphProducerIdentity,
+    positional: bool,
+}
+
+impl Mapping {
+    async fn apply(&self, input: &ChangeEnvelope) -> Result<Vec<SourceChange>> {
+        let mut output = Vec::new();
+        for change in GraphChangeCodec::decode_changes(input)? {
+            output.extend(self.pipeline.apply(change).await.with_context(|| {
+                format!(
+                    "middleware pipeline failed in {}",
+                    self.owner.component_id()
+                )
+            })?);
+        }
+        Ok(output)
+    }
+}
+
+#[async_trait]
+impl StateProjector for Mapping {
+    fn cut_namespace(&self) -> Option<&GraphProducerIdentity> {
+        self.positional.then_some(&self.owner)
+    }
+
+    async fn project(&self, batch: ChangeEnvelope) -> Result<ChangeEnvelope, OutputReadError> {
+        drasi_computation_contracts::validate_state_batch(
+            &batch,
+            GraphChangeCodec::schema().descriptor(),
+        )?;
+        let rows = self.apply(&batch).await.map_err(OutputReadError::Failed)?;
+        GraphChangeCodec::encode_changes(
+            &rows,
+            batch.system().stream().clone(),
+            batch.system().sequence(),
+            None,
+        )
+        .map_err(|error| OutputReadError::Failed(error.into()))
+    }
+}
+
 pub(super) struct Middleware {
     descriptor: ComponentDescriptor,
     configuration: Configuration,
-    pipeline: Pipeline,
+    mapping: Arc<Mapping>,
+    projectable: bool,
+    single_input: Option<InputBinding>,
     identity: GraphProducerIdentity,
     sequence: u64,
     running: bool,
     failed: Arc<AtomicBool>,
-    output: Arc<super::output::Output>,
 }
 
 impl Middleware {
@@ -74,31 +114,41 @@ impl Middleware {
         )?;
         let identity = GraphProducerIdentity::volatile(
             scope
-                .filter(|_| configuration.bootstrap)
                 .map_or("volatile", |scope| scope.instance_id.as_str())
                 .into(),
             scope
-                .filter(|_| configuration.bootstrap)
                 .map_or("volatile", |scope| scope.graph_id.as_str())
                 .into(),
             descriptor.id().clone(),
             configuration.stream.clone(),
         )?;
         let failed = Arc::new(AtomicBool::new(false));
-        let output = Arc::new(super::output::Output::new(
-            configuration.bootstrap,
-            failed.clone(),
-            identity.clone(),
-        )?);
+        let steps = configuration.middleware.iter().filter(|step| {
+            configuration
+                .pipeline
+                .iter()
+                .any(|name| name == step.name.as_ref())
+        });
+        // An event map may create or delete unrelated identities. Selecting
+        // its insert rules alone cannot reconstruct the state of that history;
+        // the stateful middleware maintains that state instead.
+        let projectable = !steps.clone().any(|s| s.kind.as_ref() == "map");
+        let positional = projectable && steps.clone().all(|s| s.kind.as_ref() == "relabel");
+        let mapping = Arc::new(Mapping {
+            pipeline,
+            owner: identity.clone(),
+            positional,
+        });
         Ok(Self {
             descriptor,
             configuration,
-            pipeline,
+            mapping,
+            projectable,
+            single_input: None,
             identity,
             sequence: 0,
             running: false,
             failed,
-            output,
         })
     }
 
@@ -108,21 +158,7 @@ impl Middleware {
             !self.failed.load(Ordering::Acquire),
             "middleware transformer requires reconstruction before processing"
         );
-        anyhow::ensure!(
-            self.output.ready()?,
-            "middleware initialization is not complete"
-        );
         Ok(())
-    }
-
-    async fn process(&self, input: &ChangeEnvelope) -> Result<Vec<SourceChange>> {
-        let mut output = Vec::new();
-        for change in GraphChangeCodec::decode_changes(input)? {
-            output.extend(self.pipeline.apply(change).await.with_context(|| {
-                format!("middleware pipeline failed in {}", self.descriptor.id())
-            })?);
-        }
-        Ok(output)
     }
 }
 
@@ -135,26 +171,25 @@ impl NativeComponent for Middleware {
         Ok(serde_json::to_value(&self.configuration)?)
     }
     fn output_readers(&self) -> OutputReaders {
-        OutputReaders::new().with_snapshot(
-            PortId::try_new("out").expect("constant port"),
-            self.output.clone(),
-        )
+        let readers = OutputReaders::new();
+        let out = PortId::try_new("out").expect("constant port");
+        if self.projectable {
+            readers.with_projection(
+                out,
+                PortId::try_new("in").expect("constant port"),
+                self.mapping.clone(),
+            )
+        } else {
+            readers
+        }
+    }
+    fn input_bindings(&mut self) -> Option<&mut dyn NativeInputBindings> {
+        Some(self)
     }
     async fn initialize(&mut self, _ctx: &InitializeContext) -> LifecycleResult {
         nothing_to_do()
     }
     async fn start(&mut self, _ctx: &mut StartContext) -> LifecycleResult {
-        if self.configuration.bootstrap {
-            self.identity = GraphProducerIdentity::volatile(
-                self.identity.construction_scope().to_owned(),
-                self.identity.graph_id().to_owned(),
-                self.descriptor.id().clone(),
-                self.configuration.stream.clone(),
-            )?;
-            self.sequence = 0;
-            self.failed.store(false, Ordering::Release);
-            self.output.reset(self.identity.clone())?;
-        }
         if self.failed.load(Ordering::Acquire) {
             return Err(anyhow::anyhow!(
                 "middleware transformer must be reconstructed after failed or cancelled processing"
@@ -173,11 +208,21 @@ impl NativeComponent for Middleware {
     }
     async fn stop(&mut self, _ctx: &StopContext) -> LifecycleResult {
         self.running = false;
-        self.output.stop()?;
         Ok(())
     }
     async fn dispose(&mut self, _ctx: &DisposeContext) -> LifecycleResult {
         nothing_to_do()
+    }
+}
+
+#[async_trait]
+impl NativeInputBindings for Middleware {
+    async fn bind_inputs(&mut self, bindings: &[InputBinding]) -> Result<()> {
+        self.single_input = match bindings {
+            [binding] if binding.input_port.as_str() == "in" => Some(binding.clone()),
+            _ => None,
+        };
+        Ok(())
     }
 }
 
@@ -198,15 +243,32 @@ impl NativeTransformer for Middleware {
             .sequence
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("middleware output sequence exhausted"))?;
-        let output = self.process(&input.envelope).await?;
+        let output = self.mapping.apply(&input.envelope).await?;
         let mut envelope = GraphChangeCodec::derive_changes(
             &input.envelope,
             &output,
             self.configuration.stream.clone(),
             sequence,
         )?;
-        GraphProducerProgress::annotate(&mut envelope, &self.identity, sequence)?;
-        self.output.apply(&output, sequence)?;
+        let upstream = if let (Some(owner), Some(binding)) =
+            (self.mapping.cut_namespace(), &self.single_input)
+        {
+            GraphProducerProgress::from_envelope(&input.envelope)?
+                .filter(|p| {
+                    p.identity().component_id() == &binding.output.component
+                        && p.identity().stream() == &binding.stream
+                })
+                .map(|p| {
+                    OutputCursor::try_new(p.identity().clone(), p.sequence())?.projected_by(owner)
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        let (producer, logical) = upstream.as_ref().map_or((&self.identity, sequence), |cut| {
+            (cut.producer(), cut.sequence())
+        });
+        GraphProducerProgress::annotate(&mut envelope, producer, logical)?;
         self.sequence = sequence;
         guard.complete = true;
         Ok(vec![OutputEnvelope {
@@ -214,52 +276,5 @@ impl NativeTransformer for Middleware {
             port: PortId::try_new("out")?,
             envelope,
         }])
-    }
-    fn bootstrap_input(&mut self) -> Option<BootstrapInput<'_>> {
-        Some(BootstrapInput::Quiescent(self))
-    }
-}
-
-#[async_trait]
-impl NativeBootstrapInput for Middleware {
-    fn bootstrap_status(&self) -> Result<BootstrapStatus> {
-        Ok(BootstrapStatus {
-            configured: self.configuration.bootstrap,
-            complete: !self.configuration.bootstrap || self.output.ready()?,
-            reset_allowed: false,
-        })
-    }
-
-    async fn bootstrap(&mut self, input: InputEnvelope) -> Result<()> {
-        anyhow::ensure!(
-            self.configuration.bootstrap
-                && self.running
-                && !self.output.ready()?
-                && !self.failed.load(Ordering::Acquire),
-            "middleware is not accepting initialization"
-        );
-        anyhow::ensure!(
-            input.port.as_str() == "in" && input.envelope.system().control().is_none(),
-            "middleware bootstrap requires data on its initialization input"
-        );
-        let mut guard = ProcessingGuard {
-            failed: self.failed.clone(),
-            complete: false,
-        };
-        self.output
-            .apply(&self.process(&input.envelope).await?, 0)?;
-        guard.complete = true;
-        Ok(())
-    }
-
-    /// The middleware declares a quiescent bootstrap input: the graph refuses a
-    /// durable provider when the edge binds, and the SDK delivers a quiescent
-    /// completion without watermarks or state.
-    async fn bootstrap_completed(&mut self, _completion: BootstrapCompletion) -> Result<()> {
-        anyhow::ensure!(
-            self.running && !self.failed.load(Ordering::Acquire),
-            "middleware initialization completed while not running"
-        );
-        self.output.activate()
     }
 }

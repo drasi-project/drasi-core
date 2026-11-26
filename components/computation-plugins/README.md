@@ -31,8 +31,8 @@ checks every native library independently, including its build dependencies.
 | Source | [drasi-computation-source-postgres](sources/postgres) | `drasi/postgres-transactions`, `drasi.postgres/changes`, `drasi.postgres/shared-changes`, `drasi.postgres/shared-transactions` | Dynamic or Rust SDK |
 | Source | [drasi-computation-source-sqlite](sources/sqlite) | `drasi.sqlite/changes`, `drasi.sqlite/transactions`, `drasi.sqlite/replay-transactions`, `drasi.sqlite/shared-transactions` | Dynamic or Rust SDK |
 | Source | [drasi-computation-source-bridge](sources/bridge) | `drasi.bridge/source` | Static Rust factory |
-| Transformer | [drasi-computation-transformer-middleware](transformers/middleware) | `drasi.standard/middleware` | Dynamic or Rust SDK |
-| Transformer | [drasi-computation-transformer-view](transformers/view) | `drasi.standard/view` | Dynamic or Rust SDK; memory-backed maintained view and snapshots |
+| Transformer | [drasi-computation-transformer-middleware](transformers/middleware) | `drasi.standard/middleware`, `drasi.standard/stateful-middleware` | Dynamic or Rust SDK |
+| Transformer | [drasi-computation-transformer-view](transformers/view) | `drasi.standard/view` | Dynamic or Rust SDK; maintained view on the shared stateful transformer runtime |
 | Transformer | [drasi-computation-transformer-arithmetic](transformers/arithmetic) | `drasi.standard/arithmetic` | Dynamic or Rust SDK |
 | Transformer | [drasi-computation-transformer-query](transformers/query) | `drasi.query/indexed` | Dynamic or Rust SDK; explicit ordinary-query adapter through Host |
 | Transformer | [drasi-computation-transformer-policy](transformers/policy) | `drasi.standard/policy` | Dynamic or Rust SDK; configured Rego decisions per input record, managed policy/data updates |
@@ -117,7 +117,7 @@ field/type-only metadata.
 For example, gRPC sink `batchSize` is bounded to `1..=65536`, and the network
 sources mark `authToken` and `tlsPrivateKeyPem` as secret fields. These
 descriptions do not enable missing features. Rebuild the component library to
-publish the new details; host and plugins must use native ABI 0.1.0 and the
+publish the new details; host and plugins must use native ABI 0.2.0 and the
 UUID wire-version-1 contract. Libraries built for another native ABI major or
 minor are rejected.
 
@@ -140,7 +140,7 @@ minor are rejected.
 Existing implementation names, implementation version `"1"` and configuration
 version `1` remain stable. New factory modes have distinct identities; consult
 each family guide for its schemas, resource requirements and recovery boundaries.
-The native plugin ABI is **0.1.0**, including the six lifecycle operations and
+The native plugin ABI is **0.2.0**, including the six lifecycle operations and
 separate management (assess/apply). Batching, query-snapshot, consumer-progress/cursor-policy,
 source-schema, source/bootstrap coordination and activation credentials remain
 separately negotiated extensions.

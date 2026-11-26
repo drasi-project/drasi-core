@@ -725,9 +725,8 @@ conversion. See
 [Choosing a port format](computation-graph-schemas-ports-pipes.md#choosing-a-port-format).
 
 The [stateful view transformer](../../components/computation-plugins/transformers/view/README.md)
-provides a separate memory-backed maintained projection. It is not a mode of
-`map` or `jq`, and its snapshot capability does not imply replay, durable
-storage or snapshot-input initialization. `ORDER BY`, `LIMIT` and `SKIP` are not
+provides a separate maintained projection on the shared stateful transformer
+runtime. It is not a mode of `map` or `jq`. `ORDER BY`, `LIMIT` and `SKIP` are not
 supported query syntax.
 
 ### Event time and progress sequence answer different questions
@@ -1942,18 +1941,19 @@ and applies its declared stateless middleware, the pipeline it shares with the
 `drasi.standard/middleware` transformer, once to each affected final input. It
 keeps its output associations, so filtering, removed children and key changes
 retract the previously emitted images without rerunning historical mapping.
-Whole-envelope staging protects its state on failure.
+A rejected envelope leaves its state unchanged.
 
 For example, a `map` rule emits an event when `quantity < 5`. It can emit an
 update at quantity 3 and ignore a later event at quantity 8. Ignoring that event
 does **not** emit a deletion of the earlier output. A continuous query
 maintaining `WHERE quantity < 5` can retract the result because it owns the
 indexed prior state, and the view component can do the same for its configured
-projection. The view's profile offers coherent snapshots and volatile producer
-progress, not transactions, durability, replay, follow or input deduplication.
-A stop and start of the same object keeps its state; reconstruction starts empty
-with a fresh epoch. Full initial inputs and ordered lossless delivery remain
-prerequisites. Do not add hidden view storage to `map` or `jq` to imitate it.
+projection. The view runs on the same stateful transformer runtime as the
+query: with a persistent processing provider its state and output survive
+restart, and it bootstraps, follows, replays and rebuilds like any stateful
+transformer. It does not participate in transactions. Without `bootstrap`,
+seed it with full inputs before sending patches. Do not add hidden view
+storage to `map` or `jq` to imitate it.
 
 Read [`middleware.rs`](../src/computation/v1/middleware.rs) with
 [`middleware_recovery.rs`](../src/computation/v1/middleware_recovery.rs). The
@@ -2729,7 +2729,7 @@ defines the compatibility rule:
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `ABI_VERSION` | `0.1.0` (`ABI_MAJOR` 0, `ABI_MINOR` 1) | Version of the C tables. Before 1.0, every minor version is breaking, so a host accepts only its own major and minor (`accepts_abi_version`). From 1.0, it will accept the same major with an older or equal minor. |
+| `ABI_VERSION` | `0.2.0` (`ABI_MAJOR` 0, `ABI_MINOR` 2) | Version of the native interface. Before 1.0, every minor version is breaking, so a host accepts only its own major and minor (`accepts_abi_version`). From 1.0, it will accept the same major with an older or equal minor. |
 | `ABI_MAGIC` | `DRASICG0` | Identifies a native ComputationGraph table header |
 | `WIRE_VERSION` | `1` | Version of the MessagePack messages exchanged through the tables |
 

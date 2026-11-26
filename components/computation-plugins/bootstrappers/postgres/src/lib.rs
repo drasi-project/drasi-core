@@ -96,6 +96,7 @@ impl BootstrapFactory for StandalonePostgresBootstrapFactory {
             configuration_version: 1,
             configuration: standalone::definition().schema(),
             source_progress: false,
+            independent_state: true,
             pairing: None,
         }
     }

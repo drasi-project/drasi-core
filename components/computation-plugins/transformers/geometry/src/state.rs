@@ -3,20 +3,29 @@
 
 //! Retained members and incremental relation evaluation.
 //!
+//! The relevant inputs, each input's set memberships and the emitted records
+//! are durable, in the transformer's host stores. Members with their shapes,
+//! the ordered records and the right-member index are rebuilt from them when
+//! the state opens; memberships are stored rather than re-derived because
+//! arrival order decides which input owns a duplicated key.
+//!
 //! A batch is prepared without mutation (so any failure leaves the state
-//! unchanged) and then committed. Only pairs involving a touched member are
-//! re-evaluated; untouched pairs keep their records.
+//! unchanged), stored and then committed. Only pairs involving a touched
+//! member are re-evaluated; untouched pairs keep their records.
 
 use anyhow::{bail, ensure, Context, Result};
-use drasi_computation_contracts::{ElementImage, ElementPatch};
+use drasi_computation_plugin_sdk::transformer::{
+    apply_inputs_where, get_values, set_value, InputChange, StateStore,
+};
 use drasi_core_types::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, ElementTimestamp, ElementValue,
     SourceChange,
 };
 use geo::{CoordsIter, Distance, Euclidean, Intersects, Rect, Relate};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::config::{GeometryConfig, InvalidGeometry, Limits, Predicate};
 use crate::shape::{self, Rules, Shape};
@@ -43,6 +52,7 @@ pub(crate) enum OutputKey {
 
 /// One emitted record. Records are compared by label and properties only.
 #[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
 pub(crate) struct Record {
     pub element_id: Arc<str>,
     pub label: Arc<str>,
@@ -73,13 +83,14 @@ impl Record {
 
 pub(crate) type Records = BTreeMap<OutputKey, Record>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum Membership {
     Member(String),
     Invalid,
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
 struct Member {
     properties: ElementPropertyMap,
     shape: Shape,
@@ -132,7 +143,7 @@ impl Engine {
         &self.namespace
     }
 
-    fn relevant(&self, element: &Element) -> bool {
+    pub(crate) fn relevant(&self, element: &Element) -> bool {
         element
             .get_metadata()
             .labels
@@ -359,23 +370,97 @@ fn gap(a: &Rect<f64>, b: &Rect<f64>) -> f64 {
     dx.hypot(dy)
 }
 
+/// The private table of each retained input's set memberships.
+const MEMBERSHIPS: &str = "geometry/memberships";
+/// The private table of the records the transformer emitted.
+const RECORDS: &str = "geometry/records";
+
+fn input_key(key: &RefKey) -> Result<String> {
+    Ok(serde_json::to_string(&(&*key.0, &*key.1))?)
+}
+
+fn restore_input_key(key: &str) -> Result<RefKey> {
+    let (namespace, element): (String, String) =
+        serde_json::from_str(key).context("malformed geometry membership key")?;
+    Ok((namespace.into(), element.into()))
+}
+
+/// The stored form of an [`OutputKey`].
+#[derive(Serialize, Deserialize)]
+enum StoredKey {
+    Relation(usize, String, String),
+    Error(usize, String, String),
+}
+
+impl OutputKey {
+    fn stored(&self) -> Result<String> {
+        Ok(serde_json::to_string(&match self {
+            Self::Relation {
+                relation,
+                left,
+                right,
+            } => StoredKey::Relation(*relation, left.clone(), right.clone()),
+            Self::Error { set, element } => {
+                StoredKey::Error(*set, element.0.to_string(), element.1.to_string())
+            }
+        })?)
+    }
+
+    fn restore(key: &str) -> Result<Self> {
+        Ok(
+            match serde_json::from_str(key).context("malformed geometry record key")? {
+                StoredKey::Relation(relation, left, right) => Self::Relation {
+                    relation,
+                    left,
+                    right,
+                },
+                StoredKey::Error(set, namespace, element) => Self::Error {
+                    set,
+                    element: (namespace.into(), element.into()),
+                },
+            },
+        )
+    }
+}
+
+impl Record {
+    fn restore(element: Element) -> Result<Self> {
+        let metadata = element.get_metadata();
+        let [label] = &*metadata.labels else {
+            bail!("a stored geometry record must have exactly one label");
+        };
+        Ok(Self {
+            element_id: metadata.reference.element_id.clone(),
+            label: label.clone(),
+            properties: element.get_properties().clone(),
+            effective_from: metadata.effective_from,
+        })
+    }
+}
+
 /// A prepared batch: everything the commit writes, and the changes to emit.
 pub(crate) struct Delta {
-    inputs: BTreeMap<RefKey, Option<Element>>,
     memberships: BTreeMap<RefKey, BTreeMap<usize, Membership>>,
+    /// The membership entries to store or forget.
+    stored_memberships: Vec<(RefKey, Option<BTreeMap<usize, Membership>>)>,
     removed: Vec<BTreeSet<String>>,
     added: Vec<BTreeMap<String, Member>>,
     retract: BTreeSet<OutputKey>,
     emit: Records,
+    /// The records to store or forget.
+    stored_records: Vec<(OutputKey, Option<Record>)>,
+    retained: usize,
     pub(crate) changes: Vec<SourceChange>,
 }
 
-#[derive(Clone)]
+/// The in-memory structures derived from the stored state.
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub(crate) struct State {
-    inputs: BTreeMap<RefKey, Element>,
+    /// How many relevant inputs are retained.
+    retained: usize,
     memberships: BTreeMap<RefKey, BTreeMap<usize, Membership>>,
     members: Vec<BTreeMap<String, Member>>,
-    outputs: Arc<Records>,
+    outputs: Records,
     /// (relation, right key, left key) for retracting by the right member.
     by_right: BTreeSet<(usize, String, String)>,
 }
@@ -383,21 +468,23 @@ pub(crate) struct State {
 impl State {
     pub(crate) fn new(sets: usize) -> Self {
         Self {
-            inputs: BTreeMap::new(),
+            retained: 0,
             memberships: BTreeMap::new(),
             members: vec![BTreeMap::new(); sets],
-            outputs: Arc::new(Records::new()),
+            outputs: Records::new(),
             by_right: BTreeSet::new(),
         }
     }
 
-    pub(crate) fn outputs(&self) -> Arc<Records> {
-        self.outputs.clone()
+    /// The current records.
+    #[cfg(test)]
+    pub(crate) fn outputs(&self) -> &Records {
+        &self.outputs
     }
 
     /// Whether the retained state already satisfies `limits`.
     pub(crate) fn fits(&self, limits: &Limits) -> bool {
-        self.inputs.len() <= limits.max_elements
+        self.retained <= limits.max_elements
             && self.outputs.len() <= limits.max_outputs
             && self
                 .members
@@ -406,59 +493,29 @@ impl State {
                 .all(|member| member.vertices <= limits.max_vertices)
     }
 
-    pub(crate) fn prepare(&self, changes: Vec<SourceChange>, engine: &Engine) -> Result<Delta> {
+    /// Evaluate the inputs a batch changed, at the batch's latest effective
+    /// time.
+    pub(crate) fn prepare(
+        &self,
+        changed: Vec<InputChange>,
+        time: ElementTimestamp,
+        engine: &Engine,
+    ) -> Result<Delta> {
         let limits = &engine.config.limits;
-        let mut inputs: BTreeMap<RefKey, Option<Element>> = BTreeMap::new();
-        let mut time: ElementTimestamp = 0;
-        for change in changes {
-            change.validate()?;
-            let metadata = match &change {
-                SourceChange::Insert { element }
-                | SourceChange::Replace { element }
-                | SourceChange::Update { element, .. } => element.get_metadata(),
-                SourceChange::Delete { metadata } => metadata,
-                SourceChange::Future { .. } => {
-                    bail!("geometry transforms do not accept scheduled notifications")
-                }
-            };
-            time = time.max(metadata.effective_from);
-            let reference = metadata.reference.clone();
-            let key = ref_key(&reference);
-            let next = match change {
-                SourceChange::Insert { element } | SourceChange::Replace { element } => {
-                    engine.relevant(&element).then_some(element)
-                }
-                SourceChange::Update {
-                    element,
-                    removed_properties,
-                } => {
-                    let base = match inputs.get(&key) {
-                        Some(pending) => pending.as_ref(),
-                        None => self.inputs.get(&key),
-                    };
-                    match base {
-                        Some(base) => {
-                            let patch = ElementPatch::try_new(
-                                ElementImage::try_from(element)?,
-                                removed_properties,
-                            )?;
-                            Some(patch.apply_to(Some(base))?).filter(|e| engine.relevant(e))
-                        }
-                        None if engine.relevant(&element) => {
-                            bail!("geometry patch for {reference} has no retained full input image")
-                        }
-                        None => None,
-                    }
-                }
-                SourceChange::Delete { .. } => None,
-                SourceChange::Future { .. } => unreachable!("rejected above"),
-            };
-            inputs.insert(key, next);
-        }
-        inputs.retain(|key, next| next.is_some() || self.inputs.contains_key(key));
-        let mut retained = self.inputs.len();
-        for (key, next) in &inputs {
-            match (self.inputs.contains_key(key), next.is_some()) {
+        // Each changed input: whether it was retained, and its image now.
+        let inputs: BTreeMap<RefKey, (bool, Option<Element>)> = changed
+            .into_iter()
+            .filter(|input| input.previous.is_some() || input.current.is_some())
+            .map(|input| {
+                (
+                    ref_key(&input.reference),
+                    (input.previous.is_some(), input.current),
+                )
+            })
+            .collect();
+        let mut retained = self.retained;
+        for (was_retained, next) in inputs.values() {
+            match (*was_retained, next.is_some()) {
                 (false, true) => retained += 1,
                 (true, false) => retained -= 1,
                 _ => {}
@@ -491,7 +548,7 @@ impl State {
             }
         }
         let mut memberships = BTreeMap::new();
-        for (key, element) in &inputs {
+        for (key, (_, element)) in &inputs {
             let mut current = BTreeMap::new();
             let Some(element) = element else {
                 memberships.insert(key.clone(), current);
@@ -533,6 +590,12 @@ impl State {
             }
             memberships.insert(key.clone(), current);
         }
+        let stored_memberships = memberships
+            .iter()
+            .filter(|(key, current)| self.memberships.get(*key) != Some(*current))
+            .filter(|(key, current)| !current.is_empty() || self.memberships.contains_key(*key))
+            .map(|(key, current)| (key.clone(), (!current.is_empty()).then(|| current.clone())))
+            .collect();
 
         for (index, &(left, right, _)) in engine.relations.iter().enumerate() {
             for key in removed[left].iter().chain(added[left].keys()) {
@@ -605,6 +668,7 @@ impl State {
 
         let mut deletes = Vec::new();
         let mut upserts = Vec::new();
+        let mut stored_records = Vec::new();
         let namespace = engine.namespace();
         let touched: Vec<OutputKey> = retract
             .iter()
@@ -617,41 +681,47 @@ impl State {
                 .get(output)
                 .filter(|_| retract.contains(output));
             match (previous, emit.get_mut(output)) {
-                (Some(previous), None) => deletes.push(SourceChange::Delete {
-                    metadata: previous.metadata(namespace, time.max(previous.effective_from)),
-                }),
-                (None, Some(current)) => upserts.push(SourceChange::Insert {
-                    element: current.element(namespace),
-                }),
+                (Some(previous), None) => {
+                    deletes.push(SourceChange::Delete {
+                        metadata: previous.metadata(namespace, time.max(previous.effective_from)),
+                    });
+                    stored_records.push((output.clone(), None));
+                }
+                (None, Some(current)) => {
+                    upserts.push(SourceChange::Insert {
+                        element: current.element(namespace),
+                    });
+                    stored_records.push((output.clone(), Some(current.clone())));
+                }
                 (Some(previous), Some(current)) if previous.same(current) => {
                     *current = previous.clone();
                 }
-                (Some(_), Some(current)) => upserts.push(SourceChange::Replace {
-                    element: current.element(namespace),
-                }),
+                (Some(_), Some(current)) => {
+                    upserts.push(SourceChange::Replace {
+                        element: current.element(namespace),
+                    });
+                    stored_records.push((output.clone(), Some(current.clone())));
+                }
                 (None, None) => {}
             }
         }
         deletes.extend(upserts);
         Ok(Delta {
-            inputs,
             memberships,
+            stored_memberships,
             removed,
             added,
             retract,
             emit,
+            stored_records,
+            retained,
             changes: deletes,
         })
     }
 
-    /// Writes a prepared batch. Cannot fail.
+    /// Writes a prepared batch to the in-memory structures. Cannot fail.
     pub(crate) fn commit(&mut self, delta: Delta) {
-        for (key, next) in delta.inputs {
-            match next {
-                Some(element) => self.inputs.insert(key, element),
-                None => self.inputs.remove(&key),
-            };
-        }
+        self.retained = delta.retained;
         for (key, memberships) in delta.memberships {
             if memberships.is_empty() {
                 self.memberships.remove(&key);
@@ -667,7 +737,6 @@ impl State {
         for (set, members) in delta.added.into_iter().enumerate() {
             self.members[set].extend(members);
         }
-        let outputs = Arc::make_mut(&mut self.outputs);
         for key in delta.retract {
             if let OutputKey::Relation {
                 relation,
@@ -678,7 +747,7 @@ impl State {
                 self.by_right
                     .remove(&(*relation, right.clone(), left.clone()));
             }
-            outputs.remove(&key);
+            self.outputs.remove(&key);
         }
         for (key, record) in delta.emit {
             if let OutputKey::Relation {
@@ -690,7 +759,139 @@ impl State {
                 self.by_right
                     .insert((*relation, right.clone(), left.clone()));
             }
-            outputs.insert(key, record);
+            self.outputs.insert(key, record);
         }
     }
+
+    /// Rebuild the in-memory structures from the stored state. Retained state
+    /// must satisfy the configuration, including its limits.
+    pub(crate) async fn open<S: StateStore + ?Sized>(store: &S, engine: &Engine) -> Result<Self> {
+        let mut state = Self::new(engine.config.sets.len());
+        let inputs: BTreeMap<RefKey, Element> = store
+            .inputs()
+            .await?
+            .into_iter()
+            .map(|element| (ref_key(element.get_reference()), element))
+            .collect();
+        state.retained = inputs.len();
+        for (key, memberships) in
+            get_values::<BTreeMap<usize, Membership>, _>(store, MEMBERSHIPS).await?
+        {
+            let key = restore_input_key(&key)?;
+            let element = inputs.get(&key).with_context(|| {
+                format!(
+                    "geometry membership of {}/{} has no retained input",
+                    key.0, key.1
+                )
+            })?;
+            for (set, membership) in &memberships {
+                let name = &engine
+                    .config
+                    .sets
+                    .get(*set)
+                    .context("geometry membership names an unknown set")?
+                    .name;
+                let Membership::Member(member) = membership else {
+                    continue;
+                };
+                let (computed, value) = engine.member(*set, element).with_context(|| {
+                    format!("retained member '{member}' of set '{name}' no longer fits the configuration")
+                })?;
+                ensure!(
+                    computed == *member,
+                    "retained member '{member}' of set '{name}' disagrees with its input"
+                );
+                ensure!(
+                    state.members[*set].insert(computed, value).is_none(),
+                    "retained member '{member}' of set '{name}' is duplicated"
+                );
+            }
+            state.memberships.insert(key, memberships);
+        }
+        for (key, element) in get_values::<Element, _>(store, RECORDS).await? {
+            let key = OutputKey::restore(&key)?;
+            if let OutputKey::Relation {
+                relation,
+                left,
+                right,
+            } = &key
+            {
+                state
+                    .by_right
+                    .insert((*relation, right.clone(), left.clone()));
+            }
+            state.outputs.insert(key, Record::restore(element)?);
+        }
+        let limits = &engine.config.limits;
+        ensure!(
+            state.retained <= limits.max_elements,
+            "retained geometry state holds {} elements, more than limits.maxElements ({})",
+            state.retained,
+            limits.max_elements
+        );
+        ensure!(
+            state.outputs.len() <= limits.max_outputs,
+            "retained geometry state holds {} records, more than limits.maxOutputs ({})",
+            state.outputs.len(),
+            limits.max_outputs
+        );
+        Ok(state)
+    }
+}
+
+/// Store a prepared batch's memberships and records.
+async fn persist<S: StateStore + ?Sized>(store: &S, delta: &Delta, namespace: &str) -> Result<()> {
+    for (key, memberships) in &delta.stored_memberships {
+        let key = input_key(key)?;
+        match memberships {
+            Some(memberships) => set_value(store, MEMBERSHIPS, &key, memberships).await?,
+            None => store.delete_value(MEMBERSHIPS, &key).await?,
+        }
+    }
+    for (key, record) in &delta.stored_records {
+        let key = key.stored()?;
+        match record {
+            Some(record) => set_value(store, RECORDS, &key, &record.element(namespace)).await?,
+            None => store.delete_value(RECORDS, &key).await?,
+        }
+    }
+    Ok(())
+}
+
+fn lock(state: &Mutex<State>) -> Result<std::sync::MutexGuard<'_, State>> {
+    state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("geometry state poisoned"))
+}
+
+/// Apply one batch: retain its relevant inputs, store the resulting
+/// memberships and records, and return the record changes to emit.
+///
+/// The in-memory structures change last. If the surrounding operation still
+/// fails, the runtime fences the transformer and reopens the stored state.
+pub(crate) async fn transform<S: StateStore + ?Sized>(
+    store: &S,
+    state: &Mutex<State>,
+    engine: &Engine,
+    changes: &[SourceChange],
+) -> Result<Vec<SourceChange>> {
+    let mut time: ElementTimestamp = 0;
+    for change in changes {
+        let metadata = match change {
+            SourceChange::Insert { element }
+            | SourceChange::Replace { element }
+            | SourceChange::Update { element, .. } => element.get_metadata(),
+            SourceChange::Delete { metadata } => metadata,
+            SourceChange::Future { .. } => {
+                bail!("geometry transforms do not accept scheduled notifications")
+            }
+        };
+        time = time.max(metadata.effective_from);
+    }
+    let changed = apply_inputs_where(store, changes, |element| engine.relevant(element)).await?;
+    let mut delta = lock(state)?.prepare(changed, time, engine)?;
+    persist(store, &delta, engine.namespace()).await?;
+    let changes = std::mem::take(&mut delta.changes);
+    lock(state)?.commit(delta);
+    Ok(changes)
 }

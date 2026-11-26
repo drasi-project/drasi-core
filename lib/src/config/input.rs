@@ -11,6 +11,7 @@ use super::{ComponentId, ComponentName, ComponentReference};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryInputConfig {
     pub component: ComponentReference,
+    pub enable_bootstrap: Option<bool>,
     pub port: Option<PortId>,
     pub nodes: Vec<String>,
     pub relations: Vec<String>,
@@ -21,6 +22,7 @@ impl QueryInputConfig {
     pub fn new(component: ComponentReference) -> Self {
         Self {
             component,
+            enable_bootstrap: None,
             port: None,
             nodes: Vec::new(),
             relations: Vec::new(),
@@ -39,6 +41,12 @@ impl QueryInputConfig {
     pub fn with_port(mut self, port: PortId) -> Self {
         self.port = Some(port);
         self
+    }
+
+    /// A live-only input opts out even when the query initializes its other
+    /// inputs. No input overrides a query-wide disable.
+    pub fn loads_initial_state(&self, query_enabled: bool) -> bool {
+        query_enabled && self.enable_bootstrap.unwrap_or(true)
     }
 
     pub fn with_pipeline(mut self, pipeline: Vec<String>) -> Self {
@@ -66,6 +74,7 @@ impl QueryInputConfig {
     ) -> anyhow::Result<drasi_computation_contracts::QueryInputConfig> {
         Ok(drasi_computation_contracts::QueryInputConfig {
             component: self.id()?.clone(),
+            enable_bootstrap: self.enable_bootstrap,
             port: self.port.clone(),
             nodes: self.nodes.clone(),
             relations: self.relations.clone(),
@@ -77,6 +86,7 @@ impl QueryInputConfig {
     pub fn from_execution(input: drasi_computation_contracts::QueryInputConfig) -> Self {
         Self {
             component: ComponentReference::by_id(input.component),
+            enable_bootstrap: input.enable_bootstrap,
             port: input.port,
             nodes: input.nodes,
             relations: input.relations,
@@ -89,6 +99,12 @@ impl QueryInputConfig {
 #[serde(deny_unknown_fields)]
 struct ExpandedInput {
     component: ComponentReference,
+    #[serde(
+        default,
+        rename = "enableBootstrap",
+        skip_serializing_if = "Option::is_none"
+    )]
+    enable_bootstrap: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     port: Option<PortId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -104,7 +120,8 @@ impl Serialize for QueryInputConfig {
         &self,
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
-        if self.port.is_none()
+        if self.enable_bootstrap.is_none()
+            && self.port.is_none()
             && self.nodes.is_empty()
             && self.relations.is_empty()
             && self.pipeline.is_empty()
@@ -113,6 +130,7 @@ impl Serialize for QueryInputConfig {
         }
         ExpandedInput {
             component: self.component.clone(),
+            enable_bootstrap: self.enable_bootstrap,
             port: self.port.clone(),
             nodes: self.nodes.clone(),
             relations: self.relations.clone(),
@@ -136,6 +154,7 @@ impl<'de> Deserialize<'de> for QueryInputConfig {
             Input::Reference(reference) => Self::new(reference),
             Input::Expanded(input) => Self {
                 component: input.component,
+                enable_bootstrap: input.enable_bootstrap,
                 port: input.port,
                 nodes: input.nodes,
                 relations: input.relations,

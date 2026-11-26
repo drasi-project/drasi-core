@@ -558,8 +558,8 @@ async fn state_bound_and_changed_metadata_membership_never_overwrite_parent_stat
     composite.prepare_with_state(&state).await?;
     let run = composite.current()?.expect("run");
     let child = NamespacedState {
-        parent: &state,
-        record: &run.record,
+        parent: StateScope::Borrowed(&state),
+        record: run.record.clone(),
         index: 0,
     };
     child.write(Bytes::from_static(b"safe")).await?;

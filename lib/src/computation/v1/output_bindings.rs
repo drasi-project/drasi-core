@@ -90,6 +90,12 @@ pub enum OutputBindingError {
         "complete pending output and unbind its durable destinations before resetting query state"
     )]
     ResetRequiresUnboundDestinations,
+    #[error("cannot replace output '{output}': downstream state at '{consumer}:{input}' requires reconciliation")]
+    ResetRequiresDownstreamRecovery {
+        output: PortId,
+        consumer: ComponentId,
+        input: PortId,
+    },
     #[error("invalid output bindings: {0}")]
     Invalid(String),
     #[error("output binding publication is poisoned")]

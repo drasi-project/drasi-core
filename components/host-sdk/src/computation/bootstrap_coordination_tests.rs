@@ -386,6 +386,7 @@ impl sdk::BootstrapFactory for PairedFactory {
             configuration_version: 1,
             configuration: sdk::ConfigSchema::default(),
             source_progress: true,
+            independent_state: false,
             pairing: Some(protocol()),
         }
     }

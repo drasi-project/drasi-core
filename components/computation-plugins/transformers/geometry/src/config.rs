@@ -4,11 +4,8 @@
 //! Geometry transformer configuration, validation and update planning.
 
 use anyhow::{bail, ensure, Context, Result};
-use drasi_computation_contracts::{ComponentUpdateData, StreamId};
-use drasi_computation_plugin_sdk::{
-    lifecycle::{Assessment, UpdateBoundary},
-    ConfigDefinition, ConfigOption, ConfigType,
-};
+use drasi_computation_contracts::StreamId;
+use drasi_computation_plugin_sdk::{transformer, ConfigDefinition, ConfigOption, ConfigType};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -223,9 +220,18 @@ fn default_max_outputs() -> usize {
 }
 
 impl GeometryConfig {
-    pub(crate) fn parse(value: serde_json::Value) -> Result<Self> {
-        let config: Self =
-            serde_json::from_value(value).context("invalid geometry configuration")?;
+    /// The geometry settings of a configuration, without the shared runtime
+    /// options.
+    pub(crate) fn parse(value: &serde_json::Value) -> Result<Self> {
+        let mut fields = value
+            .as_object()
+            .context("invalid geometry configuration: expected an object")?
+            .clone();
+        for (name, _, _) in transformer::configuration_fields() {
+            fields.remove(name);
+        }
+        let config: Self = serde_json::from_value(serde_json::Value::Object(fields))
+            .context("invalid geometry configuration")?;
         config.validate()?;
         Ok(config)
     }
@@ -399,37 +405,42 @@ impl RelationConfig {
     }
 }
 
-/// Classify a configuration change by the weakest safe boundary.
+/// Whether a configuration change can apply in place, keeping the state.
 ///
-/// * Unsupported: the output `stream`; consumers bind to it.
-/// * Pause (in place, state preserved): `limits` (checked against the
-///   retained state at apply) and switching `invalidGeometry` between `fail`
-///   and `skip`. Neither changes an already emitted record.
-/// * Replace with reset: input bindings and everything that changes which
-///   records exist (sets, relations, epsilon, ring closure, `report`, the
-///   error label). A transformer cannot emit the resulting diff without an
-///   input, so the state is rebuilt from replayed input instead.
-pub(crate) fn plan(
+/// * Refused: the output `stream`; consumers bind to it.
+/// * In place: `limits` (checked against the retained state) and switching
+///   `invalidGeometry` between `fail` and `skip`. Neither changes an already
+///   emitted record.
+/// * Reconstruction: input bindings and everything that changes which records
+///   exist (sets, relations, epsilon, ring closure, `report`, the error
+///   label). A transformer cannot emit the resulting difference without its
+///   input, so it is rebuilt from that input instead.
+pub(crate) fn in_place(
     current: &GeometryConfig,
     proposed: &GeometryConfig,
     inputs_changed: bool,
-) -> Assessment {
-    if current.stream != proposed.stream {
-        return Assessment::unsupported("geometry updates cannot change the output stream");
+) -> Result<bool> {
+    ensure!(
+        current.stream == proposed.stream,
+        "geometry updates cannot change the output stream"
+    );
+    Ok(!inputs_changed && semantic(current) == semantic(proposed))
+}
+
+/// The settings that decide which records exist: everything an in-place
+/// update cannot change.
+fn semantic(config: &GeometryConfig) -> GeometryConfig {
+    let mut config = config.clone();
+    config.limits = Limits::default();
+    if config.invalid_geometry != InvalidGeometry::Report {
+        config.invalid_geometry = InvalidGeometry::Fail;
     }
-    let semantic = |config: &GeometryConfig| {
-        let mut config = config.clone();
-        config.limits = Limits::default();
-        if config.invalid_geometry != InvalidGeometry::Report {
-            config.invalid_geometry = InvalidGeometry::Fail;
-        }
-        config
-    };
-    if inputs_changed || semantic(current) != semantic(proposed) {
-        Assessment::supported(UpdateBoundary::Replace, ComponentUpdateData::Reset)
-    } else {
-        Assessment::supported(UpdateBoundary::Pause, ComponentUpdateData::Preserve)
-    }
+    config
+}
+
+/// The configuration identity retained state is reused with.
+pub(crate) fn identity(config: &GeometryConfig) -> Result<serde_json::Value> {
+    Ok(serde_json::to_value(semantic(config))?)
 }
 
 pub(crate) fn definition() -> ConfigDefinition {
@@ -438,7 +449,7 @@ pub(crate) fn definition() -> ConfigDefinition {
             "stream",
             ConfigType::String,
             true,
-            "Nonempty stream identifier for this transformer's own volatile output.",
+            "Nonempty stream identifier for this transformer's output.",
         ),
         ConfigOption::new(
             "sets",
@@ -493,6 +504,8 @@ pub(crate) fn definition() -> ConfigDefinition {
             "maxVertices": DEFAULT_MAX_VERTICES,
             "maxOutputs": DEFAULT_MAX_OUTPUTS,
         })),
-    ])
+    ]
+    .into_iter()
+    .chain(transformer::configuration_options()))
     .expect("constant geometry configuration")
 }

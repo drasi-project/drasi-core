@@ -1,37 +1,49 @@
 // Copyright 2026 The Drasi Authors.
 // Licensed under the Apache License, Version 2.0.
 
-//! A memory-backed view of complete input elements, distinct from stateless
-//! event middleware. See the crate README for mapping and recovery semantics.
+//! A stateful view of complete input elements, distinct from stateless event
+//! middleware. The view is one implementation of the shared stateful-transformer
+//! runtime: its retained inputs, the outputs each input produced and its output
+//! are durable, and it bootstraps, follows, replays and rebuilds like any other
+//! stateful transformer. See the crate README for mapping semantics.
 
 #![deny(unused, missing_docs)]
 
-mod component;
+mod logic;
 mod mapping;
-mod output;
 mod state;
+#[cfg(test)]
+mod tests;
 
+use anyhow::Context;
 use drasi_computation_contracts::{
-    ComponentRole, GraphChangeCodec, ImplementationIdentity, OutputProgress, PipeRequirements,
-    PortDescriptor, PortDirection, PortId,
+    ComponentRole, GraphChangeCodec, ImplementationIdentity, PipeRequirements, PortDescriptor,
+    PortDirection, PortId,
 };
+use drasi_computation_middleware_common::Mode;
 use drasi_computation_plugin_sdk::{
-    Capabilities, Component, ConfigDefinition, ControlSender, CreateRequest, CreatedComponent,
-    Factory, FactoryMetadata, PluginDefinition,
+    transformer::{self, StatefulTransformer},
+    Component, ConfigDefinition, ControlSender, CreateRequest, CreatedComponent, Factory,
+    FactoryMetadata, PluginDefinition, ServiceBindings,
 };
 use std::sync::Arc;
 
 /// Native library identity.
 pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
-/// Configuration-only factory for the memory-backed view.
+/// The stateful view's implementation name.
 pub const VIEW: &str = "drasi.standard/view";
 
-/// Constructs independent, initially empty view transformers.
+/// Constructs stateful view transformers.
 pub struct ViewFactory;
 
 fn configuration_definition() -> ConfigDefinition {
-    ConfigDefinition::try_new(drasi_computation_middleware_common::Mode::Images.options())
-        .expect("constant view configuration")
+    ConfigDefinition::try_new(
+        Mode::Images
+            .options()
+            .into_iter()
+            .chain(transformer::configuration_options()),
+    )
+    .expect("constant view configuration")
 }
 
 /// The plugin definition, suitable for static registration or native export.
@@ -51,13 +63,13 @@ mod native_exports {
 }
 
 impl Factory for ViewFactory {
-    /// Outputs carry a new volatile producer identity on every construction.
     fn describe(
         &self,
         request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
     ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
-        Ok(request.volatile_transformer())
+        transformer::describe(request)
     }
+
     fn configuration_details(&self) -> drasi_computation_plugin_sdk::ConfigDetails {
         configuration_definition().details()
     }
@@ -68,25 +80,22 @@ impl Factory for ViewFactory {
             role: ComponentRole::Transformer,
             configuration_version: 1,
             configuration: configuration_definition().schema(),
-            ports: [("in", PortDirection::Input), ("out", PortDirection::Output)]
-                .into_iter()
-                .map(|(id, direction)| {
-                    PortDescriptor::new(
-                        PortId::try_new(id).expect("constant port"),
-                        direction,
-                        GraphChangeCodec::schema().descriptor().clone(),
-                        PipeRequirements::default(),
-                    )
-                })
-                .collect(),
+            ports: [
+                (transformer::INPUT_PORT, PortDirection::Input),
+                (transformer::OUTPUT_PORT, PortDirection::Output),
+            ]
+            .into_iter()
+            .map(|(id, direction)| {
+                PortDescriptor::new(
+                    PortId::try_new(id).expect("constant port"),
+                    direction,
+                    GraphChangeCodec::schema().descriptor().clone(),
+                    PipeRequirements::default(),
+                )
+            })
+            .collect(),
             completion: None,
-            capabilities: Capabilities {
-                output_snapshots: vec![PortId::try_new("out").expect("constant port")],
-                output_progress: Some(OutputProgress::Origin),
-                erases_owned_state: true,
-                // Outputs carry a producer identity that is new on every construction.
-                ..Capabilities::default()
-            },
+            capabilities: transformer::capabilities(false),
         }
     }
 
@@ -94,12 +103,17 @@ impl Factory for ViewFactory {
         &self,
         request: &CreateRequest,
         _control: ControlSender,
-        _services: drasi_computation_plugin_sdk::ServiceBindings,
+        services: ServiceBindings,
     ) -> anyhow::Result<CreatedComponent> {
-        Ok(Component::Transformer(Box::new(component::View::new(
+        let (logic, settings) = logic::ViewLogic::create(request)?;
+        Ok(Component::Transformer(Box::new(StatefulTransformer::new(
+            request,
             self.metadata().descriptor(request.id.clone())?,
-            request.configuration.clone(),
-            request.scope.as_ref(),
+            services
+                .processing
+                .context("the view requires host-owned processing")?,
+            logic,
+            settings,
         )?))
         .into())
     }

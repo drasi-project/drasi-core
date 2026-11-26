@@ -15,8 +15,8 @@
 //! process lifetime; this ABI does not provide hot unloading.
 //!
 //! Read and validate the header before reading the rest of a table. Until 1.0
-//! every minor version is breaking: a host accepts only its own major and minor,
-//! and the version stays at 0.1.0 while the design is iterated. From 1.0, tables
+//! every minor version is breaking: a host accepts only its own major and minor.
+//! From 1.0, tables
 //! may only grow by appending fields in a later minor version, and a host accepts
 //! the same major with an older or equal minor. Anything else is rejected before
 //! any callback. Sizes must match the accepted minor's layout. Metadata and tables remain valid until their owning handle is released.
@@ -25,9 +25,9 @@
 
 use std::{ffi::c_void, fmt, mem::size_of, ptr};
 
-pub const ABI_VERSION: &str = "0.1.0";
+pub const ABI_VERSION: &str = "0.2.0";
 pub const ABI_MAJOR: u16 = 0;
-pub const ABI_MINOR: u16 = 1;
+pub const ABI_MINOR: u16 = 2;
 pub const ABI_MAGIC: u64 = 0x4452_4153_4943_4730; // DRASICG0
 pub const WIRE_VERSION: u32 = 1;
 pub const METADATA_SYMBOL: &[u8] = b"drasi_computation_plugin_metadata\0";
@@ -120,7 +120,7 @@ impl Header {
     }
 
     /// Accepts the same family and major, and an accepted minor whose layout
-    /// size is known. Only minor 1 exists in 0.x, so its size is exact.
+    /// size is known. A pre-1.0 runtime supports only its current layout.
     pub fn validate<T>(&self) -> Result<(), InvalidHeader> {
         let current = Self::new::<T>();
         if self.magic == current.magic
@@ -417,6 +417,9 @@ pub mod operation {
     /// It stays pending while that work is healthy and never succeeds. Begun
     /// only while the component runs; STOP and PAUSE end it with CLOSED.
     pub const WORKER_FAILURE: u32 = 29;
+    /// Offer a same-epoch rebuild without resetting the installed output view.
+    /// The payload is the installed input cursor, or none for a first input.
+    pub const BOOTSTRAP_REBUILD: u32 = 30;
 }
 
 pub const POLL_PENDING: u32 = 0;
@@ -546,8 +549,14 @@ mod tests {
             },
             Header { major: 5, ..good },
             Header { major: 1, ..good },
-            Header { minor: 0, ..good },
-            Header { minor: 2, ..good },
+            Header {
+                minor: ABI_MINOR - 1,
+                ..good
+            },
+            Header {
+                minor: ABI_MINOR + 1,
+                ..good
+            },
             Header { size: 16, ..good },
             Header {
                 size: good.size + 8,

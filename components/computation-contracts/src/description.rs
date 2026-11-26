@@ -176,6 +176,9 @@ pub enum BootstrapCompletionKind {
     /// Records only: no watermarks, no completion state, no progress
     /// binding, and preparation is always ready.
     Quiescent,
+    /// Current records and their producer-scoped output cursor. This says
+    /// nothing about retention or whether the producer survives a restart.
+    OutputCut,
     /// May complete with source watermarks and completion state, and may
     /// bind the consumer's source progress.
     Durable,
@@ -243,7 +246,7 @@ impl BootstrapOutputDescription {
     /// A committed-output snapshot (a query or transformer serving its own
     /// results): output-cursor watermarks under its own identities.
     pub const OUTPUT_SNAPSHOT: Self = Self {
-        completion: BootstrapCompletionKind::Durable,
+        completion: BootstrapCompletionKind::OutputCut,
         pairing: None,
         namespace: ElementNamespace::Own,
         identity: None,
@@ -256,8 +259,23 @@ impl BootstrapOutputDescription {
 pub enum BootstrapAcceptance {
     /// Only quiescent providers (no watermarks, state or progress).
     Quiescent,
-    /// Quiescent and durable providers.
+    /// Quiescent providers and materialized outputs with a logical cut.
+    /// No source-driver positions, opaque handover state or recovery.
+    Bounded,
+    /// Quiescent providers, output cuts and durable providers.
     Durable,
+}
+
+impl BootstrapAcceptance {
+    pub fn accepts(self, completion: BootstrapCompletionKind) -> bool {
+        use BootstrapCompletionKind::{OutputCut, Quiescent};
+        matches!(
+            (self, completion),
+            (Self::Durable, _)
+                | (Self::Quiescent, Quiescent)
+                | (Self::Bounded, Quiescent | OutputCut)
+        )
+    }
 }
 
 /// Declared facts of a bootstrap input port.
@@ -285,6 +303,12 @@ impl BootstrapInputDescription {
     /// A quiescent transformer's bootstrap input.
     pub const QUIESCENT: Self = Self {
         accepts: BootstrapAcceptance::Quiescent,
+        source_relay: false,
+    };
+    /// A volatile transformer that rebuilds from records and suppresses
+    /// buffered live input covered by those records' output cuts.
+    pub const BOUNDED: Self = Self {
+        accepts: BootstrapAcceptance::Bounded,
         source_relay: false,
     };
 }
@@ -357,6 +381,19 @@ pub type DependencyCapabilities = BTreeMap<String, Vec<ResourceCapabilities>>;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ComponentDescription {
     pub component: ComponentCapabilities,
+    /// Whether connected data inputs initialize from their producers' current
+    /// state. A factory declares the effective value from this configuration.
+    /// Without a declaration, the connection uses the port capabilities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_initial_state: Option<bool>,
+    /// State-bearing input connections must share one transaction-consistent
+    /// cut. Independent reads are not a substitute, even from the same source.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub requires_shared_input_cut: bool,
+    /// The instance already has a component-wide seed. Its data connections
+    /// carry the live suffix, not an additional baseline from each producer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local_seed: bool,
     pub ports: BTreeMap<PortId, PortDescription>,
     pub dependencies: BTreeMap<String, DependencyRequirement>,
     /// A source's coordination offer to providers on its bootstrap input.
@@ -376,6 +413,9 @@ impl ComponentDescription {
                 progress: ProgressPersistence::Undeclared,
                 on_permanent_failure: super::PermanentFailurePolicy::Stall,
             },
+            upstream_initial_state: None,
+            requires_shared_input_cut: false,
+            local_seed: false,
             ports: BTreeMap::new(),
             dependencies: BTreeMap::new(),
             coordination: None,
@@ -391,6 +431,17 @@ impl ComponentDescription {
             },
             ..Self::undeclared()
         }
+    }
+
+    /// Select current state or live-only delivery for this configuration.
+    pub fn with_upstream_initial_state(mut self, enabled: bool) -> Self {
+        self.upstream_initial_state = Some(enabled);
+        self
+    }
+
+    pub fn with_shared_input_cut(mut self) -> Self {
+        self.requires_shared_input_cut = true;
+        self
     }
 
     /// Declare what the graph does with a sink input that failed permanently.
@@ -642,6 +693,14 @@ impl OutputRelation {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Incompatibility {
     #[error(
+        "the consumer requires a shared input cut; independent input snapshots cannot guarantee it"
+    )]
+    SharedInputCutUnavailable,
+    #[error("the connected output cannot supply the requested initial state")]
+    InitialStateUnavailable,
+    #[error("the connected output does not support the requested state transfer")]
+    StateTransferUnavailable,
+    #[error(
         "input requires {required:?} delivery keyed on producer identity, but the producer's \
          output identity is {identity:?}"
     )]
@@ -800,20 +859,20 @@ pub fn check_bootstrap_edge(
         BootstrapCompletionKind::Relayed => BootstrapCompletionKind::Undeclared,
         completion => completion,
     };
-    match (input.accepts, completion) {
-        (BootstrapAcceptance::Durable, _)
-        | (BootstrapAcceptance::Quiescent, BootstrapCompletionKind::Quiescent) => Ok(()),
-        (accepts, completion) => Err(Incompatibility::BootstrapCompletion {
-            accepts,
+    if input.accepts.accepts(completion) {
+        Ok(())
+    } else {
+        Err(Incompatibility::BootstrapCompletion {
+            accepts: input.accepts,
             completion,
-        }),
+        })
     }
 }
 
 /// The completion a relay's consumers observe, given the completions of the
 /// providers connected to the relay's bootstrap inputs: quiescent with none,
 /// otherwise the weakest guarantee among them (`Undeclared` dominates, then
-/// `Durable`). An unresolved nested relay counts as undeclared.
+/// `Durable`, then `OutputCut`). An unresolved nested relay counts as undeclared.
 pub fn relayed_completion(
     upstream: impl IntoIterator<Item = BootstrapCompletionKind>,
 ) -> BootstrapCompletionKind {
@@ -823,6 +882,7 @@ pub fn relayed_completion(
         .fold(Quiescent, |current, next| match (current, next) {
             (Undeclared, _) | (_, Undeclared) | (_, Relayed) | (Relayed, _) => Undeclared,
             (Durable, _) | (_, Durable) => Durable,
+            (OutputCut, _) | (_, OutputCut) => OutputCut,
             (Quiescent, Quiescent) => Quiescent,
         })
 }
@@ -1115,7 +1175,7 @@ mod tests {
         };
         let quiescent = Some(BootstrapInputDescription::QUIESCENT);
         assert_eq!(check(&own(Quiescent), &source(None), quiescent), Ok(()));
-        for completion in [Durable, Undeclared, Relayed] {
+        for completion in [OutputCut, Durable, Undeclared, Relayed] {
             assert_eq!(
                 check(&own(completion), &source(None), quiescent),
                 Err(Incompatibility::BootstrapCompletion {
@@ -1128,7 +1188,14 @@ mod tests {
                 })
             );
         }
-        for completion in [Quiescent, Durable, Undeclared] {
+        let bounded = Some(BootstrapInputDescription::BOUNDED);
+        for completion in [Quiescent, OutputCut] {
+            assert_eq!(check(&own(completion), &source(None), bounded), Ok(()));
+        }
+        for completion in [Durable, Undeclared, Relayed] {
+            assert!(check(&own(completion), &source(None), bounded).is_err());
+        }
+        for completion in [Quiescent, OutputCut, Durable, Undeclared] {
             assert_eq!(
                 check(
                     &own(completion),
@@ -1140,6 +1207,8 @@ mod tests {
         }
         assert_eq!(relayed_completion([]), Quiescent);
         assert_eq!(relayed_completion([Quiescent, Quiescent]), Quiescent);
+        assert_eq!(relayed_completion([Quiescent, OutputCut]), OutputCut);
+        assert_eq!(relayed_completion([OutputCut, Durable]), Durable);
         assert_eq!(relayed_completion([Quiescent, Durable]), Durable);
         assert_eq!(relayed_completion([Durable, Undeclared]), Undeclared);
         assert_eq!(relayed_completion([Relayed]), Undeclared);

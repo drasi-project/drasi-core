@@ -2,11 +2,13 @@
 // Licensed under the Apache License, Version 2.0.
 
 mod component;
-mod output;
+mod stateful;
+
+pub use stateful::{StatefulMiddlewareFactory, STATEFUL_MIDDLEWARE};
 
 use drasi_computation_contracts::{
-    ComponentRole, GraphChangeCodec, ImplementationIdentity, PipeRequirements, PortDescriptor,
-    PortDirection, PortId,
+    ComponentRole, GraphChangeCodec, ImplementationIdentity, OutputProgress, PipeRequirements,
+    PortDescriptor, PortDirection, PortId,
 };
 use drasi_computation_plugin_sdk::{
     Capabilities, Component, ControlSender, CreateRequest, CreatedComponent, Factory,
@@ -17,20 +19,13 @@ use std::sync::Arc;
 pub const PLUGIN_ID: &str = env!("CARGO_PKG_NAME");
 pub const MIDDLEWARE: &str = "drasi.standard/middleware";
 
+/// Stateless middleware. Its current state is its input's current state,
+/// transformed on read; [`StatefulMiddlewareFactory`] maintains that state.
 pub struct MiddlewareFactory;
 
 fn configuration_definition() -> drasi_computation_plugin_sdk::ConfigDefinition {
-    use drasi_computation_plugin_sdk::{ConfigDefinition, ConfigOption, ConfigType};
-    ConfigDefinition::try_new(
-        drasi_computation_middleware_common::Mode::Events
-            .options()
-            .into_iter()
-            .chain([ConfigOption::new(
-                "bootstrap",
-                ConfigType::Boolean,
-                false,
-                "Initialize from a quiescent provider and expose the transformed current snapshot.",
-            )]),
+    drasi_computation_plugin_sdk::ConfigDefinition::try_new(
+        drasi_computation_middleware_common::Mode::Events.options(),
     )
     .expect("constant middleware configuration")
 }
@@ -39,7 +34,10 @@ pub fn plugin() -> anyhow::Result<PluginDefinition> {
     PluginDefinition::new(
         PLUGIN_ID,
         env!("CARGO_PKG_VERSION"),
-        vec![Arc::new(MiddlewareFactory)],
+        vec![
+            Arc::new(MiddlewareFactory),
+            Arc::new(StatefulMiddlewareFactory),
+        ],
         vec![GraphChangeCodec::schema()],
     )
 }
@@ -53,6 +51,7 @@ impl Factory for MiddlewareFactory {
         &self,
         request: &drasi_computation_plugin_sdk::wire::DescribeRequest,
     ) -> anyhow::Result<drasi_computation_plugin_sdk::ComponentDescription> {
+        serde_json::from_value::<component::Configuration>(request.request.configuration.clone())?;
         Ok(request.volatile_transformer())
     }
     fn configuration_details(&self) -> drasi_computation_plugin_sdk::ConfigDetails {
@@ -78,10 +77,14 @@ impl Factory for MiddlewareFactory {
                 .collect(),
             completion: None,
             capabilities: Capabilities {
-                quiescent_bootstrap: Some(PortId::try_new("in").expect("constant port")),
-                bootstrap_optional: true,
                 output_snapshots: vec![PortId::try_new("out").expect("constant port")],
-                // Outputs carry a producer identity that is new on every construction.
+                output_projections: [(
+                    PortId::try_new("out").expect("constant port"),
+                    PortId::try_new("in").expect("constant port"),
+                )]
+                .into(),
+                input_binding_updates: true,
+                output_progress: Some(OutputProgress::Origin),
                 ..Capabilities::default()
             },
         }

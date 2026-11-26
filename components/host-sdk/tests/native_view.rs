@@ -3,11 +3,11 @@
 
 //! Build `drasi-computation-transformer-view --features dynamic-plugin` first.
 //! This test loads the real library; it has no Rust dependency on the view crate.
+//! The view runs on the shared stateful-transformer runtime; with an in-memory
+//! index provider it uses the runtime's volatile profile.
 
 #[path = "common/hooks.rs"]
 mod hooks;
-#[path = "fixtures/native_sink_inputs.rs"]
-mod native_inputs;
 
 use anyhow::{Context, Result};
 use drasi_computation_contracts::{
@@ -15,10 +15,11 @@ use drasi_computation_contracts::{
     OutputCursor, OutputProgress, OutputReadError, OutputSnapshot, PortId, SnapshotProvider,
     StreamId,
 };
+use drasi_computation_plugin_sdk::Scope;
 use drasi_core_types::models::{
     Element, ElementMetadata, ElementPropertyMap, ElementReference, SourceChange,
 };
-use drasi_host_sdk::computation::{self, NativeComponentProxy, NativePlugin};
+use drasi_host_sdk::computation::{self, NativeComponentProxy, NativeFactory, NativePlugin};
 use drasi_lib::computation::v1::{ComputationComponent, Transformer};
 use serde_json::{json, Value};
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -49,6 +50,20 @@ fn load() -> Result<Arc<NativePlugin>> {
         library.display()
     );
     computation::load(&library).with_context(|| format!("load {}", library.display()))
+}
+
+/// A view over in-memory host stores, so it runs the volatile profile.
+fn create(factory: &NativeFactory, configuration: Value) -> Result<NativeComponentProxy> {
+    factory.create_component_with_processing(
+        ComponentId::try_new(VIEW_ID)?,
+        configuration,
+        Scope {
+            instance_id: "instance".into(),
+            graph_id: "graph".into(),
+            generation: 1,
+        },
+        Arc::new(drasi_core::computation::InMemoryComputationProvider),
+    )
 }
 
 fn node(id: &str, label: &str, time: u64, properties: Value) -> Element {
@@ -94,8 +109,8 @@ fn snapshot_provider(view: &NativeComponentProxy) -> Result<Arc<dyn SnapshotProv
         .ports()
         .get(&PortId::try_new("out")?)
         .context("Host did not expose the advertised view output")?;
-    assert!(output.replay().is_none());
-    assert!(output.snapshot_follow().is_none());
+    assert!(output.replay().is_some());
+    assert!(output.snapshot_follow().is_some());
     output
         .snapshot()
         .cloned()
@@ -129,6 +144,8 @@ async fn process(
     sequence: u64,
 ) -> Result<(Vec<SourceChange>, OutputCursor)> {
     let mut output = view.transform(input(change, sequence)?).await?;
+    // Without a graph, the caller confirms delivery before the next input.
+    view.delivery_completed(&output).await?;
     assert_eq!(output.len(), 1);
     let output = output.pop().context("missing view output")?;
     assert_eq!(output.port.as_str(), "out");
@@ -154,16 +171,19 @@ async fn loaded_view_case() -> Result<()> {
         .find(|factory| factory.metadata().implementation.name.as_ref() == FACTORY)
         .context("view factory missing from the actual native library")?;
     let capabilities = &factory.metadata().capabilities;
-    assert_eq!(capabilities.output_snapshots, vec![PortId::try_new("out")?]);
+    let out = PortId::try_new("out")?;
+    assert_eq!(capabilities.output_snapshots, vec![out.clone()]);
+    assert_eq!(capabilities.output_follows, vec![out.clone()]);
+    assert_eq!(capabilities.output_replays, vec![out]);
     assert_eq!(capabilities.output_progress, Some(OutputProgress::Origin));
     assert!(capabilities.erases_owned_state);
+    assert!(capabilities.durable_output);
+    assert!(capabilities.indexed_processing);
     assert!(!capabilities.transactional);
-    assert!(!capabilities.durable_output);
-    assert!(capabilities.output_replays.is_empty());
-    assert!(capabilities.output_follows.is_empty());
 
     let configuration = json!({
         "stream": "view/out",
+        "volatile": true,
         "middleware": [{
             "name": "project",
             "kind": "map",
@@ -181,11 +201,7 @@ async fn loaded_view_case() -> Result<()> {
         }],
         "pipeline": ["project"]
     });
-    let mut view = native_inputs::create(
-        factory,
-        ComponentId::try_new(VIEW_ID)?,
-        configuration.clone(),
-    )?;
+    let mut view = create(factory, configuration.clone())?;
     assert_eq!(view.configuration()?, configuration);
     let snapshots = snapshot_provider(&view)?;
     assert!(matches!(
@@ -285,7 +301,6 @@ async fn loaded_view_case() -> Result<()> {
         snapshots.snapshot().await,
         Err(OutputReadError::NotReady(_))
     ));
-    assert!(view.transform(input(deletion.clone(), 3)?).await.is_err());
     view.start(&crate::hooks::start_ctx()).await?;
     let resumed = snapshots.snapshot().await?;
     assert_snapshot(&resumed, &next_rows, 2)?;
@@ -348,7 +363,7 @@ async fn loaded_view_case() -> Result<()> {
         Err(OutputReadError::Retired)
     ));
 
-    let mut fresh = native_inputs::create(factory, ComponentId::try_new(VIEW_ID)?, configuration)?;
+    let mut fresh = create(factory, configuration)?;
     let fresh_snapshots = snapshot_provider(&fresh)?;
     fresh.initialize(&crate::hooks::initialize_ctx()).await?;
     fresh.start(&crate::hooks::start_ctx()).await?;
@@ -356,6 +371,17 @@ async fn loaded_view_case() -> Result<()> {
     assert_snapshot(&cold, &[], 0)?;
     assert_ne!(cold.cursor().epoch(), first_cursor.epoch());
     fresh.stop(&crate::hooks::stop_ctx()).await?;
+    // A rejected input fences the component's committed progress, so this
+    // check runs last: a stopped view does not accept input.
+    assert!(fresh
+        .transform(input(
+            SourceChange::Insert {
+                element: node("input", "Parent", 1, json!({"key": "stopped"})),
+            },
+            1
+        )?)
+        .await
+        .is_err());
     fresh.dispose(&crate::hooks::erase_ctx()).await?;
     fresh.dispose(&crate::hooks::dispose_ctx()).await?;
     Ok(())

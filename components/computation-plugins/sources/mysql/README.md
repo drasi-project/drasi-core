@@ -1,7 +1,7 @@
 # Native MySQL sources
 
 `drasi-computation-source-mysql` streams MySQL row-based binary logs into a
-ComputationGraph (native ABI 0.1). Seven factories, each at implementation and
+ComputationGraph (native ABI 0.2). Seven factories, each at implementation and
 configuration version `1`:
 
 | Factory | Output |

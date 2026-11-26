@@ -1,7 +1,7 @@
 # Native SQL Server source: design
 
 `drasi-computation-source-mssql` streams SQL Server change data capture
-(CDC) into a ComputationGraph. It is a native plugin (ABI 0.1) with one
+(CDC) into a ComputationGraph. It is a native plugin (ABI 0.2) with one
 factory, `drasi.mssql/changes`, at implementation and configuration version
 `1`. The CDC engine (settings, catalog and binding, value mapping, paging,
 snapshots and owned markers) lives in `drasi-mssql-common::native`, shared

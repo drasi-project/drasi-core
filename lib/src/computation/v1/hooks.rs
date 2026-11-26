@@ -62,6 +62,9 @@ pub struct InitializeContext {
 #[non_exhaustive]
 pub struct StartContext {
     scope: OperationScope,
+    unconnected_inputs: bool,
+    state_subscribers: bool,
+    rebuild_destinations: Option<super::OutputBindings>,
 }
 
 /// Context for [`super::ComputationComponent::pause`].
@@ -122,7 +125,45 @@ impl InitializeContext {
 impl StartContext {
     /// Context for one Start operation.
     pub fn new(scope: OperationScope) -> Self {
-        Self { scope }
+        Self {
+            scope,
+            unconnected_inputs: false,
+            state_subscribers: false,
+            rebuild_destinations: None,
+        }
+    }
+
+    pub(crate) fn with_unconnected_inputs(mut self, unconnected: bool) -> Self {
+        self.unconnected_inputs = unconnected;
+        self
+    }
+
+    /// The graph has no incoming data or seed relationship configured at this
+    /// activation. A configured relationship waiting to bind is not unconnected.
+    pub fn unconnected_inputs(&self) -> bool {
+        self.unconnected_inputs
+    }
+
+    pub(crate) fn with_state_subscribers(mut self, subscribed: bool) -> Self {
+        self.state_subscribers = subscribed;
+        self
+    }
+
+    /// Another component has installed this component's output state through
+    /// a bound state connection. Replacing that view must publish its change.
+    pub fn state_subscribers(&self) -> bool {
+        self.state_subscribers
+    }
+
+    pub(crate) fn with_rebuild_destinations(mut self, bindings: super::OutputBindings) -> Self {
+        self.rebuild_destinations = Some(bindings);
+        self
+    }
+
+    /// Actual, graph-validated destinations for a producer that must retain a
+    /// correction during Start, before normal post-activation delivery binding.
+    pub fn rebuild_destinations(&self) -> Option<&super::OutputBindings> {
+        self.rebuild_destinations.as_ref()
     }
 }
 

@@ -1240,6 +1240,10 @@ async fn both_network_paths_use_one_host_query_evaluation_per_input() -> Result<
                 PortId::try_new(port)?,
             ))
         };
+        let live = EdgeDefinition::new(
+            endpoint(NETWORK_SOURCE_ID, "out")?,
+            endpoint(RESULT_QUERY_ID, "in")?,
+        );
         let mut graph = ComputationGraph::builder("network-evaluator")
             .declare_resource(ResourceSpecification {
                 id: indexes.clone(),
@@ -1275,13 +1279,8 @@ async fn both_network_paths_use_one_host_query_evaluation_per_input() -> Result<
                 sink_factory.specification(ComponentId::try_new(NETWORK_SINK_ID)?, sink_config)?,
                 sink_factory,
             )
-            .connect(
-                EdgeDefinition::new(
-                    endpoint(NETWORK_SOURCE_ID, "out")?,
-                    endpoint(RESULT_QUERY_ID, "in")?,
-                ),
-                Box::new(BoundedPipeConfig { capacity: 1 }),
-            )
+            .connect(live.clone(), Box::new(BoundedPipeConfig { capacity: 1 }))
+            .relationship_policy(live, RelationshipPolicy::live_only())
             .connect(
                 EdgeDefinition::new(
                     endpoint(RESULT_QUERY_ID, "out")?,

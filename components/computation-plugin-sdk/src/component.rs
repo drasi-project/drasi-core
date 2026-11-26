@@ -106,22 +106,34 @@ pub trait NativeInputBindings: Send + Sync {
 
 /// Provider-driven initialization of a transformer input. Declared by
 /// `Capabilities::quiescent_bootstrap` (the handler is
-/// [`BootstrapInput::Quiescent`]) or `Capabilities::durable_bootstrap`
+/// [`BootstrapInput::Quiescent`]), `Capabilities::bounded_bootstrap`
+/// ([`BootstrapInput::Bounded`], with validated [`crate::BoundedBootstrapCuts`]
+/// to install for this activation), or `Capabilities::durable_bootstrap`
 /// ([`BootstrapInput::Durable`]); the input port comes from that declaration.
 #[async_trait]
-pub trait NativeBootstrapInput: Send + Sync {
+pub trait NativeBootstrapInput<Completion = BootstrapCompletion>: Send + Sync {
     /// Whether this instance's configuration requests initialization and
     /// whether it is complete. A durable input also says whether a reset is
     /// allowed.
     fn bootstrap_status(&self) -> anyhow::Result<BootstrapStatus>;
     async fn bootstrap(&mut self, input: InputEnvelope) -> anyhow::Result<()>;
-    async fn bootstrap_completed(&mut self, completion: BootstrapCompletion) -> anyhow::Result<()>;
+    async fn bootstrap_completed(&mut self, completion: Completion) -> anyhow::Result<()>;
 }
 
 /// Durable initialization: atomic completion with the processing owner's
 /// state, and an explicit reset when the provider can no longer resume.
 #[async_trait]
 pub trait NativeDurableBootstrapInput: NativeBootstrapInput {
+    /// Accept an authoritative replacement read without destroying the installed
+    /// view. On completion, install the new cut and publish only its difference.
+    /// `after` is the installed input cut, or `None` for a first input added
+    /// after this output's empty view was already installed downstream.
+    fn begin_rebuild(
+        &mut self,
+        _after: Option<drasi_computation_contracts::OutputCursor>,
+    ) -> anyhow::Result<bool> {
+        Ok(false)
+    }
     /// Discard partial initialization state; called only while initializing
     /// and only when `bootstrap_status` allowed a reset.
     async fn reset_bootstrap(&mut self) -> anyhow::Result<()>;
@@ -130,6 +142,7 @@ pub trait NativeDurableBootstrapInput: NativeBootstrapInput {
 /// The bootstrap handler a transformer exposes, matching its declaration.
 pub enum BootstrapInput<'a> {
     Quiescent(&'a mut dyn NativeBootstrapInput),
+    Bounded(&'a mut dyn NativeBootstrapInput<crate::BoundedBootstrapCuts>),
     Durable(&'a mut dyn NativeDurableBootstrapInput),
 }
 
@@ -137,12 +150,14 @@ impl BootstrapInput<'_> {
     pub fn bootstrap_status(&self) -> anyhow::Result<BootstrapStatus> {
         match self {
             Self::Quiescent(input) => input.bootstrap_status(),
+            Self::Bounded(input) => input.bootstrap_status(),
             Self::Durable(input) => input.bootstrap_status(),
         }
     }
     pub async fn bootstrap(&mut self, input: InputEnvelope) -> anyhow::Result<()> {
         match self {
             Self::Quiescent(handler) => handler.bootstrap(input).await,
+            Self::Bounded(handler) => handler.bootstrap(input).await,
             Self::Durable(handler) => handler.bootstrap(input).await,
         }
     }
@@ -152,6 +167,7 @@ impl BootstrapInput<'_> {
     ) -> anyhow::Result<()> {
         match self {
             Self::Quiescent(handler) => handler.bootstrap_completed(completion).await,
+            Self::Bounded(handler) => handler.bootstrap_completed(completion.try_into()?).await,
             Self::Durable(handler) => handler.bootstrap_completed(completion).await,
         }
     }

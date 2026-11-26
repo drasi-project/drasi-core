@@ -498,10 +498,6 @@ async fn graph_with_options(
                 Box::new(BoundedPipeConfig { capacity: 8 }),
             )
             .connect(
-                EdgeDefinition::new(endpoint("source", "snapshot"), endpoint(name, "bootstrap")),
-                Box::new(BoundedPipeConfig { capacity: 8 }),
-            )
-            .connect(
                 EdgeDefinition::new(endpoint(name, "out"), endpoint(&output, "in")),
                 Box::new(BoundedPipeConfig { capacity: 8 }),
             );

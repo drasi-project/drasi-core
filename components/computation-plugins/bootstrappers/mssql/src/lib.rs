@@ -106,6 +106,7 @@ fn snapshot_metadata() -> BootstrapFactoryMetadata {
         configuration_version: 1,
         configuration: definition().schema(),
         source_progress: false,
+        independent_state: false,
         pairing: None,
     }
 }

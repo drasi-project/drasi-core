@@ -8,11 +8,13 @@
 //! Each case runs a child process that builds the real graph: the loaded
 //! source library, its paired bootstrap provider node connected to the
 //! source's bootstrap input (the source's coordinator opens the provider),
-//! the source's snapshot output connected to a durable reference query
+//! the source's data output connected to a durable reference query
 //! (RocksDB indexes and query-owned source progress), and a capture sink that
 //! appends every delivered result envelope to a file before acknowledging it.
 //! Test-only fault injection exits the child at a deterministic point:
 //!
+//! - `BeforeIntentCommit` (PostgreSQL): the query is about to stage its
+//!   provider's ownership intent. A crash here must leave no replication slot.
 //! - `MidSnapshot`: the provider stream has yielded its first page and has
 //!   another one ready; the child exits instead of yielding it.
 //! - `BeforeCompletion`: every snapshot row was admitted and the stream
@@ -113,6 +115,7 @@ enum Kind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Point {
+    BeforeIntentCommit,
     MidSnapshot,
     BeforeCompletion,
     AfterCompletion,
@@ -122,6 +125,7 @@ enum Point {
 impl Point {
     fn exit_code(self) -> i32 {
         match self {
+            Self::BeforeIntentCommit => 85,
             Self::MidSnapshot => 81,
             Self::BeforeCompletion => 82,
             Self::AfterCompletion => 83,
@@ -762,6 +766,12 @@ impl CheckpointStore for FaultCheckpoints {
         sequence: u64,
         source_position: Option<&bytes::Bytes>,
     ) -> Result<(), IndexError> {
+        if self.faults.case.point == Point::BeforeIntentCommit
+            && matches!(key, CheckpointKey::Metadata(name) if name == drasi_computation_contracts::BOOTSTRAP_STATE_CHECKPOINT)
+            && source_position.is_some()
+        {
+            self.faults.exit();
+        }
         if self.faults.case.point == Point::AfterCompletion
             && matches!(key, CheckpointKey::Metadata(name) if name == BOOTSTRAP_COMPLETED)
             // Sequence 0 records the initialization intent; 1 completes it.
@@ -1358,13 +1368,6 @@ async fn graph(case: &Case, faults: Option<Arc<Faults>>) -> Result<Graph> {
             pipe(),
         )
         .connect(
-            EdgeDefinition::new(
-                endpoint("source", "snapshot"),
-                endpoint("query", "bootstrap"),
-            ),
-            pipe(),
-        )
-        .connect(
             EdgeDefinition::new(endpoint("query", "out"), endpoint("results", "in")),
             pipe(),
         )
@@ -1523,12 +1526,24 @@ async fn qualify(kind: Kind, point: Point) -> Result<()> {
     let mut expected = initial_rows();
     if point == Point::MidTransaction {
         apply_upstream(&mut expected);
-    } else if kind != Kind::Sqlite {
+    } else if kind != Kind::Sqlite && point != Point::BeforeIntentCommit {
         apply_during(&mut expected);
     }
 
     // The slot never confirmed anything the query did not commit.
-    if kind == Kind::Postgres {
+    if point == Point::BeforeIntentCommit {
+        anyhow::ensure!(kind == Kind::Postgres);
+        let slots = sql(
+            kind,
+            &case.container,
+            "SELECT count(*) FROM pg_replication_slots",
+        )
+        .await?;
+        anyhow::ensure!(
+            slots == "0",
+            "uncommitted provider intent left {slots} external slots"
+        );
+    } else if kind == Kind::Postgres {
         let lsn = lsn.context("the child did not report its WAL position")?;
         let slots = sql(
             kind,
@@ -1572,7 +1587,10 @@ async fn qualify(kind: Kind, point: Point) -> Result<()> {
         let state = restarted.owner.snapshot();
         anyhow::ensure!(state.persistent && state.bootstrap_complete);
         // Only an initialization that never completed is redone.
-        let redone = matches!(point, Point::MidSnapshot | Point::BeforeCompletion);
+        let redone = matches!(
+            point,
+            Point::BeforeIntentCommit | Point::MidSnapshot | Point::BeforeCompletion
+        );
         anyhow::ensure!(
             state.reset_generation == u64::from(redone),
             "reset generation {} after {point:?}",
@@ -1604,10 +1622,12 @@ async fn qualify(kind: Kind, point: Point) -> Result<()> {
     // which reads the database as it is then.
     let base = match point {
         Point::AfterCompletion | Point::MidTransaction => initial_rows(),
-        Point::MidSnapshot | Point::BeforeCompletion => {
+        Point::BeforeIntentCommit | Point::MidSnapshot | Point::BeforeCompletion => {
             let mut base = initial_rows();
             if kind != Kind::Sqlite {
-                apply_during(&mut base);
+                if point != Point::BeforeIntentCommit {
+                    apply_during(&mut base);
+                }
                 apply_after(&mut base);
             }
             base
@@ -1669,6 +1689,12 @@ const HANDOVER: [Point; 3] = [
     Point::BeforeCompletion,
     Point::AfterCompletion,
 ];
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires Podman and the rebuilt native PostgreSQL libraries"]
+async fn native_paired_crash_postgres_before_intent_commit() -> Result<()> {
+    qualify(Kind::Postgres, Point::BeforeIntentCommit).await
+}
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires Podman and the rebuilt native PostgreSQL libraries"]

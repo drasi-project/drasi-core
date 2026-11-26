@@ -231,9 +231,17 @@ fn validate_role(
     let outputs = count(PortDirection::Output, PortKind::Data);
     let bootstrap_inputs = count(PortDirection::Input, PortKind::Bootstrap);
     let bootstrap_outputs = count(PortDirection::Output, PortKind::Bootstrap);
-    // A component consumes bootstrap data on at most one port. Providers have
-    // only bootstrap outputs; sinks serve no snapshots; services have no ports.
-    let valid = bootstrap_inputs <= 1
+    // Several state inputs are valid when each belongs to a distinct data
+    // input. A lone bootstrap input may instead be a component-wide seed.
+    let distinct_input_lanes = || {
+        descriptor
+            .ports()
+            .iter()
+            .filter(|p| p.direction() == PortDirection::Input && p.kind() == PortKind::Data)
+            .filter_map(|p| descriptor.state_port_for(p.id()))
+            .count()
+    };
+    let valid = (bootstrap_inputs <= 1 || distinct_input_lanes() == bootstrap_inputs)
         && match role {
             ComponentRole::Source => inputs == 0 && outputs > 0,
             ComponentRole::Transformer => inputs > 0 && outputs > 0,
@@ -432,6 +440,8 @@ pub struct EdgeSnapshot {
     pub pipe: DesiredPipe,
 }
 
+mod state_lane;
+
 #[derive(Debug, Clone)]
 pub struct GraphSnapshot {
     pub id: Arc<str>,
@@ -459,6 +469,17 @@ pub struct GraphSnapshot {
 }
 
 impl GraphSnapshot {
+    pub(super) fn has_input_definition(&self, component: &ComponentId) -> bool {
+        self.edges
+            .iter()
+            .any(|e| &e.definition.to.component == component)
+            || self
+                .unbound_relationships
+                .iter()
+                .any(|e| &e.definition.to.component == component)
+            || self.subscriptions.iter().any(|(_, to)| to == component)
+    }
+
     /// Whether a relationship connects bootstrap ports rather than data ports.
     pub fn is_bootstrap_relationship(&self, edge: &EdgeDefinition) -> bool {
         self.nodes
@@ -807,8 +828,8 @@ impl Component {
 /// Entire topology is validated by `build` before any provider creation or start.
 ///
 /// Policy: DAG; unique component IDs and names within this graph, port IDs within each
-/// component, edges and output stream IDs within the graph. Unconnected ports
-/// and required reconstructible connections to undeclared components wait for
+/// component, edges and output stream IDs within the graph. Unused ports do
+/// not prevent startup. Required connections to undeclared components wait for
 /// their bindings. Outputs require a stream before connection. Sources have
 /// only outputs, sinks only inputs, transformers both. Graph IDs
 /// are local descriptive IDs (there is no process-wide graph registry).
@@ -1021,11 +1042,6 @@ impl ComputationGraphBuilder {
             .push((name, Component::BootstrapProvider(provider)));
         self
     }
-    pub(crate) fn unbound(mut self, relationship: DesiredRelationship) -> Self {
-        self.unbound_relationships.push(relationship);
-        self
-    }
-
     pub fn connect(mut self, edge: EdgeDefinition, provider: Box<dyn PipeProvider>) -> Self {
         self.edges.push((edge, provider));
         self
@@ -2847,6 +2863,24 @@ async fn bind_output_destinations(
         }
         return Ok(());
     }
+    let bindings = bound_output_destinations(node, outputs, snapshot, resources)?;
+    match component {
+        Component::Transformer(transformer) => transformer
+            .bind_output_destinations(&bindings)
+            .await
+            .map_err(|error| component_error(node, "bind output destinations", error)),
+        _ => Err(topology(
+            "output destination tracking requires a transformer",
+        )),
+    }
+}
+
+fn bound_output_destinations(
+    node: &NodeSnapshot,
+    outputs: &[Outgoing],
+    snapshot: &GraphSnapshot,
+    resources: &BTreeMap<ResourceId, ResourceHandle>,
+) -> GraphResult<super::OutputBindings> {
     let mut bindings = super::OutputBindings::try_new(
         outputs
             .iter()
@@ -2868,15 +2902,7 @@ async fn bind_output_destinations(
                 .into(),
         ));
     }
-    match component {
-        Component::Transformer(transformer) => transformer
-            .bind_output_destinations(&bindings)
-            .await
-            .map_err(|error| component_error(node, "bind output destinations", error)),
-        _ => Err(topology(
-            "output destination tracking requires a transformer",
-        )),
-    }
+    Ok(bindings)
 }
 
 fn admission_channel(
@@ -3098,11 +3124,23 @@ fn validate_admission(
                     .is_none_or(|port| port.kind() == PortKind::Data)
         })
         .peekable();
-    if outputs.peek().is_none() && scope.is_none() {
-        return Ok(());
+    if outputs.peek().is_none() {
+        // Admission still uses its real journal. With no subscriber there is
+        // no destination channel to match and no new delivery obligation.
+        return if node
+            .output_streams
+            .get(admission.port())
+            .is_none_or(|stream| stream == admission.identity().stream())
+        {
+            Ok(())
+        } else {
+            Err(emission_error(
+                node,
+                "source admission stream differs from its declared output",
+            ))
+        };
     }
-    if outputs.peek().is_none()
-        || node.output_streams.get(admission.port()) != Some(admission.identity().stream())
+    if node.output_streams.get(admission.port()) != Some(admission.identity().stream())
         || outputs.any(|edge| {
             let DesiredPipe::Qos(config) = &edge.pipe else {
                 return true;
@@ -3190,9 +3228,10 @@ async fn run_admitted_source(
     admission: Arc<super::SourceAdmission>,
 ) -> GraphResult<()> {
     if admission.component_id() != node.descriptor.id()
-        || node.output_streams.get(admission.port())
-            != Some(&admission.channel().definition().stream)
-        || outputs.is_empty()
+        || node
+            .output_streams
+            .get(admission.port())
+            .is_some_and(|stream| stream != &admission.channel().definition().stream)
         || outputs.iter().any(|output| {
             output.port != *admission.port()
                 || !output
@@ -3759,15 +3798,6 @@ async fn forward_emissions(
     owner.outputs(emissions.len());
     let mut first_branch = true;
     for emission in emissions {
-        if !outputs.iter().any(|output| output.port == emission.port) {
-            if publication_context.is_none() {
-                owner.failed(crate::observability::ObservedOperation::Transform);
-            }
-            return Err(emission_error(
-                node,
-                "output port has no bound relationship",
-            ));
-        }
         let context = owner.telemetry().output_timing(
             publication_context.unwrap_or(&emission.execution_context),
             &emission.envelope,
@@ -3803,6 +3833,13 @@ async fn forward_emissions(
                     context.clone(),
                 )))
                 .await;
+            // A volatile joining subscriber that lost its suffix has a failed
+            // activation, not an acceptance receipt. It must not stop siblings.
+            if matches!(&result, Err(failure) if matches!(&failure.error, PipeError::Backend(error)
+                if error.is::<super::bootstrap_window::WindowGap>()))
+            {
+                continue;
+            }
             result
                 .inspect_err(|_| {
                     if publication_context.is_none() {
@@ -3846,8 +3883,18 @@ fn validate_emissions(
         if port.direction() != PortDirection::Output {
             return Err(emission_error(node, "emission targets an input port"));
         }
+        if port.kind() != PortKind::Data {
+            return Err(emission_error(
+                node,
+                "emission targets a non-data output port",
+            ));
+        }
         validate_schema(port.schema(), emission.envelope.changes().schema())?;
-        if node.output_streams.get(&emission.port) != Some(emission.envelope.system().stream()) {
+        if node
+            .output_streams
+            .get(&emission.port)
+            .is_some_and(|stream| stream != emission.envelope.system().stream())
+        {
             return Err(emission_error(
                 node,
                 "stream is not owned by this producer/output port",

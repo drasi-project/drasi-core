@@ -43,6 +43,7 @@ impl BootstrapFactory for HttpBootstrapFactory {
             configuration_version: 1,
             configuration: snapshot::definition().schema(),
             source_progress: false,
+            independent_state: false,
             pairing: None,
         }
     }

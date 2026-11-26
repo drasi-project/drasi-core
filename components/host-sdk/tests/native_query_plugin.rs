@@ -9,6 +9,8 @@ mod bootstrap;
 mod durable;
 #[path = "common/hooks.rs"]
 mod hooks;
+#[path = "native_query_plugin/materialized_middleware.rs"]
+mod materialized_middleware;
 #[path = "native_query_plugin/semantics.rs"]
 mod semantics;
 #[path = "native_query_plugin/upstream_snapshot.rs"]

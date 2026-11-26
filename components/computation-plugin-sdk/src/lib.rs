@@ -25,6 +25,7 @@ pub mod activation_credentials;
 pub mod admission;
 pub mod bootstrap;
 pub mod bootstrap_coordination;
+mod bounded_bootstrap;
 mod component;
 pub mod configuration;
 pub mod consumer;
@@ -51,6 +52,7 @@ pub mod telemetry_transport;
 pub mod testing;
 pub mod timing_transport;
 mod transaction;
+pub mod transformer;
 pub mod transport;
 pub mod update_planning;
 pub mod wire;
@@ -68,6 +70,7 @@ pub use bootstrap_coordination::{
     NativeSourceBootstrapCoordinator, SourceBootstrapLiveProgress, SourceBootstrapMetadata,
     SourceBootstrapProgress,
 };
+pub use bounded_bootstrap::BoundedBootstrapCuts;
 pub use component::{
     BootstrapInput, NativeBootstrapInput, NativeComponent, NativeDurableBootstrapInput,
     NativeDurableOutput, NativeInputBindings, NativeManagement, NativeService, NativeSink,

@@ -4,6 +4,9 @@
 //! Generic output catalogue tests. Query outputs and independently written
 //! source/transformer fixtures are read through the same `OutputHandle` path.
 
+#[path = "output_catalogue_state_transfer_tests.rs"]
+mod state_transfer;
+
 use super::*;
 use drasi_core_types::data_value::DataValue;
 use std::collections::{BTreeMap as Map, VecDeque};
@@ -137,11 +140,11 @@ impl Shared {
         Self::reporting(component, component, epoch, retention)
     }
 
-    fn persistent(component: &str, epoch: u128, retention: usize) -> Arc<Self> {
+    fn persistent(graph: &str, component: &str, epoch: u128, retention: usize) -> Arc<Self> {
         let mut shared = Self::new(component, epoch, retention);
         Arc::get_mut(&mut shared).unwrap().producer = GraphProducerIdentity::for_epoch(
             "output-tests".into(),
-            "output-tests".into(),
+            graph.into(),
             fixture_id(component),
             StreamId::try_new(format!("{component}/out")).unwrap(),
             uuid::Uuid::from_u128(epoch),
@@ -2121,7 +2124,8 @@ async fn persistent_query_inputs_replay_missed_changes_and_report_retention_gaps
     )
     .unwrap();
     core.initialize().await.unwrap();
-    let inventory = Shared::persistent("inventory", 1, 3);
+    let graph_id = core.output_catalogue().unwrap().graph_id();
+    let inventory = Shared::persistent(&graph_id, "inventory", 1, 3);
     inventory.apply("a", 1);
     let source = add_source(&core, fixture_source("inventory", &inventory, BOTH, "out")).await;
     source.start().await.unwrap();

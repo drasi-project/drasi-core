@@ -40,7 +40,9 @@ fn source(path: &Path, rest_port: u16) -> Result<ComponentAddition> {
     ))
 }
 
-async fn transformed_bootstrap() -> Result<()> {
+async fn transformed_bootstrap(
+    (crate_name, implementation, settings): (&str, &str, serde_json::Value),
+) -> Result<()> {
     let directory = tempfile::tempdir()?;
     let database = directory.path().join("source.sqlite");
     create_database(&database)?;
@@ -73,22 +75,26 @@ async fn transformed_bootstrap() -> Result<()> {
             provider_session("a112a85e-ae22-5dd7-a624-6080d73fbb5e", "sqlite/out")?,
         )?;
     let middleware_plugin = computation::load(library().with_file_name(format!(
-        "{}drasi_computation_transformer_middleware{}",
+        "{}{crate_name}{}",
         std::env::consts::DLL_PREFIX,
         std::env::consts::DLL_SUFFIX
     )))?;
     let middleware = middleware_plugin
         .factories()
         .iter()
-        .find(|factory| {
-            factory.metadata().implementation.name.as_ref() == "drasi.standard/middleware"
-        })
-        .context("missing real middleware factory")?;
-    let mapper = middleware.create_component_with_bootstrap(ComponentId::try_new("3a11845b-6b1d-5d8c-bb88-0d719e15667a")?, json!({
-        "stream":"mapper/out", "bootstrap":true,
-        "middleware":[{"name":"rename","kind":"relabel","config":{"labelMappings":{"items":"ReadyItem"}}}],
-        "pipeline":["rename"]
-    }), scope.clone(), Arc::new(NativeBootstrapResource(bootstrap.clone())))?;
+        .find(|factory| factory.metadata().implementation.name.as_ref() == implementation)
+        .with_context(|| format!("missing real {implementation} factory"))?;
+    let mut configuration = settings;
+    configuration["stream"] = json!("mapper/out");
+    configuration["bootstrap"] = json!(true);
+    configuration["volatile"] = json!(true);
+    let mut mapper = middleware.create_component_with_processing(
+        ComponentId::try_new("3a11845b-6b1d-5d8c-bb88-0d719e15667a")?,
+        configuration,
+        scope.clone(),
+        Arc::new(drasi_core::computation::InMemoryComputationProvider),
+    )?;
+    mapper.bind_bootstrap_provider(Arc::new(NativeBootstrapResource(bootstrap.clone())))?;
     assert_ne!(
         mapper.descriptor().semantic_kind(),
         Some(ComponentSemanticKind::Query)
@@ -133,20 +139,19 @@ async fn transformed_bootstrap() -> Result<()> {
             .auto_start(false),
         )
         .await?;
-    connect(
-        &core,
-        vec![
-            EdgeDefinition::new(
-                Endpoint::new(source.id().clone(), PortId::try_new("out")?),
-                Endpoint::new(mapper.id().clone(), PortId::try_new("in")?),
+    // The mapper's file-bootstrap resource is its seed. A normal data edge
+    // must not also request the SQLite changes output's current state.
+    let live = |from: &ComponentHandle, to: &ComponentHandle| -> Result<DesiredRelationship> {
+        Ok(DesiredRelationship {
+            definition: EdgeDefinition::new(
+                Endpoint::new(from.id().clone(), PortId::try_new("out")?),
+                Endpoint::new(to.id().clone(), PortId::try_new("in")?),
             ),
-            EdgeDefinition::new(
-                Endpoint::new(mapper.id().clone(), PortId::try_new("out")?),
-                Endpoint::new(sink.id().clone(), PortId::try_new("in")?),
-            ),
-        ],
-    )
-    .await?;
+            policy: RelationshipPolicy::default(),
+            pipe: DesiredPipe::Bounded { capacity: 1 },
+        })
+    };
+    connect_relationships(&core, [live(&source, &mapper)?, live(&mapper, &sink)?]).await?;
     let snapshot = || async {
         Ok::<_, anyhow::Error>(
             catalogue
@@ -222,12 +227,72 @@ async fn transformed_bootstrap() -> Result<()> {
     Ok(())
 }
 
+/// Relabel each item.
+fn relabel() -> serde_json::Value {
+    json!({
+        "middleware":[{"name":"rename","kind":"relabel","config":{"labelMappings":{"items":"ReadyItem"}}}],
+        "pipeline":["rename"]
+    })
+}
+
+fn middleware() -> (&'static str, &'static str, serde_json::Value) {
+    (
+        "drasi_computation_transformer_middleware",
+        "drasi.standard/stateful-middleware",
+        relabel(),
+    )
+}
+
+fn view() -> (&'static str, &'static str, serde_json::Value) {
+    (
+        "drasi_computation_transformer_view",
+        "drasi.standard/view",
+        relabel(),
+    )
+}
+
+/// Each item is a point in two sets that intersects only itself, so it has
+/// one relation record, which carries its amount.
+fn geometry() -> (&'static str, &'static str, serde_json::Value) {
+    let point = json!({"type":"point","x":"amount","y":"id"});
+    (
+        "drasi_computation_transformer_geometry",
+        "drasi.standard/geometry",
+        json!({
+            "sets":[{"name":"left","label":"items","geometry":point},
+                    {"name":"right","label":"items","geometry":point}],
+            "relations":[{"name":"same","left":"left","right":"right","predicate":"intersects",
+                          "label":"ReadyItem","copyLeft":{"amount":"amount"}}]
+        }),
+    )
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn real_non_query_middleware_bootstrap_reaches_downstream_current_thread() -> Result<()> {
-    tokio::time::timeout(Duration::from_secs(30), transformed_bootstrap()).await?
+    tokio::time::timeout(Duration::from_secs(30), transformed_bootstrap(middleware())).await?
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_non_query_middleware_bootstrap_reaches_downstream_multi_thread() -> Result<()> {
-    tokio::time::timeout(Duration::from_secs(30), transformed_bootstrap()).await?
+    tokio::time::timeout(Duration::from_secs(30), transformed_bootstrap(middleware())).await?
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn real_view_bootstrap_reaches_downstream_current_thread() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(30), transformed_bootstrap(view())).await?
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_view_bootstrap_reaches_downstream_multi_thread() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(30), transformed_bootstrap(view())).await?
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn real_geometry_bootstrap_reaches_downstream_current_thread() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(30), transformed_bootstrap(geometry())).await?
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_geometry_bootstrap_reaches_downstream_multi_thread() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(30), transformed_bootstrap(geometry())).await?
 }

@@ -203,7 +203,7 @@ impl ComputationComponent for UnboundNativeSource {
         &mut self,
         _context: &crate::computation::v1::StartContext,
     ) -> anyhow::Result<()> {
-        anyhow::bail!("an unbound native source must not start");
+        Ok(())
     }
     async fn stop(&mut self, _context: &crate::computation::v1::StopContext) -> anyhow::Result<()> {
         Ok(())
@@ -4101,7 +4101,7 @@ async fn native_components_share_instance_lifecycle_without_starting_manual_comp
 }
 
 #[tokio::test]
-async fn native_startup_reports_blocked_and_failed_nodes_without_misclassifying_native_config() {
+async fn native_startup_starts_an_unconnected_source_and_reports_only_real_failures() {
     let (source, source_control) = ControlledSource::fixture(
         drasi_core_types::ComponentName::try_new("ordinary").expect("fixture component name"),
     );
@@ -4162,10 +4162,10 @@ async fn native_startup_reports_blocked_and_failed_nodes_without_misclassifying_
         .await
         .unwrap();
     }
-    let blocked = core
+    let unconnected = core
         .add_computation_component(
             ComponentAddition::new(
-                ComponentName::try_new("native-blocked").unwrap(),
+                ComponentName::try_new("native-unconnected").unwrap(),
                 ConstructedComponent::source(Box::new(UnboundNativeSource {
                     descriptor: ComponentDescriptor::try_new(
                         crate::test_helpers::component_id(780),
@@ -4198,10 +4198,10 @@ async fn native_startup_reports_blocked_and_failed_nodes_without_misclassifying_
         runtime.start_native_components(false),
     )
     .await
-    .expect("blocked and failed creation must not leave startup waiting")
+    .expect("an unused output or a failed sibling must not leave startup waiting")
     .unwrap_err();
     let message = format!("{error:#}");
-    assert!(!message.contains("native-blocked"), "{message}");
+    assert!(!message.contains("native-unconnected"), "{message}");
     assert!(
         message.contains("injected native creation failure"),
         "{message}"
@@ -4213,16 +4213,12 @@ async fn native_startup_reports_blocked_and_failed_nodes_without_misclassifying_
     assert!(failures.failures().iter().any(|error| error
         .chain()
         .any(|cause| { cause.downcast_ref::<NativeCreationFailure>().is_some() })));
-    assert_eq!(
-        blocked.observed().unwrap().realization,
-        RealizationState::Blocked
+    let observed = unconnected.observed().unwrap();
+    assert_eq!(observed.realization, RealizationState::Created);
+    assert!(
+        observed.started && observed.waiting_for.is_empty(),
+        "{observed:?}"
     );
-    assert!(blocked
-        .observed()
-        .unwrap()
-        .waiting_reason()
-        .unwrap()
-        .contains(&format!("{}:out", blocked.id())));
     assert_eq!(starts.load(Ordering::Acquire), 1);
     assert_eq!(source_control.starts.load(Ordering::Acquire), 0);
     assert_eq!(

@@ -1,8 +1,11 @@
 # ComputationGraph remaining work
 
 This is the list of open work for ComputationGraph in **drasi-core**, and for the
-parts of **learning-drasi-server** and **test-infra** that exercise it. Every
-entry describes work that still needs doing; finished work is not listed.
+parts of **learning-drasi-server** and **test-infra** that exercise it.
+Implementation and qualification entries describe open work, not completed
+requirements. The separate [existing-code review](#code-review-findings) also
+records retained compromises and questions that need a decision rather than
+necessarily a code change.
 Drasi Server work is tracked in the
 [Drasi Server remaining work](../../../drasi-server/docs/remaining-work.md)
 document (SW entries) and is linked from here only where a Core entry depends
@@ -29,7 +32,7 @@ link to their testing obligations there rather than repeating them. The
 [testing guide](../../docs/contributing/contributing-code/contributing-code-tests/)
 describes ordinary Cargo and CI execution.
 
-The ABI 0.1 design is an unreleased breaking change. Converting every plugin to
+The ABI 0.2 design is an unreleased breaking change. Converting every plugin to
 the native SDK and retiring old adapters are not merge prerequisites, and no
 compatibility shims or automatic migration of old state are planned.
 
@@ -48,6 +51,7 @@ compatibility shims or automatic migration of old state are planned.
 | Behavior coverage | [Backend conformance](#cw-89), [loaded query plugin](#cw-77), [status and results](#cw-10), [query matching](#cw-13), [grouped results](#cw-12) |
 | Recovery and failure | [Native input recovery](#cw-14), [chained bootstrap](#cw-111), [completion proof](#cw-36), [interrupted reset](#cw-20), [safe stop](#cw-05), [overlapping changes](#cw-07), [cleanup](#cw-08), [combined failures](#cw-39), [extension failures](#cw-03), [retry questions](#cw-21), [ownership and limits](#cw-35) |
 | Native boundaries, platforms and performance | [Real plugin libraries](#cw-41), [Protocol Buffers compiler](#cw-67), [isolated host profiles](#cw-91), [complete suites](#cw-78), [large applications](#cw-40), [native query overhead](#cw-79) |
+| Existing-code review | [Core and value types](#code-review-core), [Lib contracts and telemetry](#code-review-lib), [plugins and shared crates](#code-review-plugins), [tradeoffs and workarounds](#code-review-tradeoffs), [tests and comments](#code-review-tests), [unimplemented paths](#code-review-paths) |
 
 Native plugin work is grouped by plugin under [Native sources](#native-sources)
 and [Native sinks](#native-sinks), after the shared plugin work. Plugin entries
@@ -58,13 +62,18 @@ Source X-03, Sink D-3) because the two families number them separately.
 
 Keep IDs and anchors stable. Add new work here, as a new CW entry or a new
 plugin ID in the plugin's section, rather than in a separate backlog or
-checklist.
+checklist. Review-derived items keep their report IDs with a `CR-` prefix in
+the [existing-code review](#code-review-findings). Related-work links connect
+them to existing entries without replacing those entries or their IDs.
 
 ## Implementation and integration
 
 <a id="cw-92"></a>
 
 ### Coordinate safe rebootstrap during managed updates (CW-92)
+
+**Related review finding:** [CR-A02](#cr-a02), the PostgreSQL TRUNCATE reset
+gap; explicit source rejection is not downstream resynchronization.
 
 **Kind:** Unsupported capability. **Area:** Core, native SDK/Host, query plugin, Server.
 **Priority:** Needed for general native graph recovery; ordinary-query
@@ -548,6 +557,10 @@ message, and a test covers it.
 
 ### Finish the remaining data connections (CW-44)
 
+**Related review findings:** [CR-P06](#cr-p06) and [CR-P07](#cr-p07) identify
+Kubernetes capability/configuration decisions for the native port, not already
+implemented behavior that parity alone requires.
+
 **Kind:** Issue/integration. **Area:** Core, Server.
 **Priority:** High for required families. **Effort:** Very large.
 
@@ -595,6 +608,10 @@ Skipped cases and matching test counts are not proof.
 <a id="cw-18"></a>
 
 ### Keep saved data and retries unambiguous (CW-18)
+
+**Related review findings:** [CR-C10](#cr-c10), named-timezone representation,
+and [CR-P18](#cr-p18), redb WAL format refusal. These inform explicit format
+contracts; they do not require automatic migration of old state.
 
 **Kind:** Format/release improvement. **Area:** Core contracts, storage, SDK/Host.
 **Priority:** High. **Effort:** Medium to large.
@@ -708,6 +725,10 @@ shows no advisories other than ones with a documented, still-valid boundary.
 
 ### Make errors explain what happened and what to do (CW-22)
 
+**Related review findings:** [CR-L03](#cr-l03) retains the component-context
+question despite preserved causes; [CR-D02](#cr-d02) is misleading propagation
+documentation; [CR-A01](#cr-a01) needs placeholder reachability established.
+
 **Kind:** Issue/audit and API improvement. **Area:** Core, Server, UI.
 **Priority:** High. **Effort:** Large.
 
@@ -744,6 +765,9 @@ successful work.
 
 ### Make live status and log updates reliable (CW-23)
 
+**Related review finding:** [CR-L02](#cr-l02) distinguishes existing log-loss
+counts from their unverified exported-metric integration.
+
 **Kind:** API improvement. **Area:** Core, Server, SDK/Host.
 **Priority:** High. **Effort:** Medium to large.
 
@@ -778,6 +802,10 @@ component.
 <a id="cw-17"></a>
 
 ### Make components stop their own background work (CW-17)
+
+**Related review findings:** [CR-K04](#cr-k04), ordinary foreign-call retention
+after abandoned cleanup, and [CR-K05](#cr-k05), serialized foreign drops.
+Do not trade away the documented safety boundary to claim cleanup.
 
 **Kind:** Ownership audit/hardening. **Area:** Core, components and providers.
 **Priority:** High. **Effort:** Medium to large.
@@ -839,6 +867,10 @@ indefinitely, and delayed old requests cannot affect new components.
 
 ### Finish memory limits for saved queues and results (CW-29)
 
+**Related review findings:** [CR-K12](#cr-k12), fixed backend buffer sizes, and
+[CR-K17](#cr-k17), ordinary in-memory WAL replay. Their limits are distinct from
+the native queue budgets below.
+
 **Kind:** Capacity improvement. **Area:** Core queues, retained state and providers.
 **Priority:** Medium. **Effort:** Large.
 
@@ -877,6 +909,9 @@ accepted.
 
 ### Reduce unnecessary disk work and growth (CW-28)
 
+**Related review finding:** [CR-P19](#cr-p19), ordinary FFI batches implemented
+as per-item calls. This is not an absence of native batch APIs.
+
 **Kind:** Storage/concurrency improvement. **Area:** Core retained, QoS,
 delivery and merge stores. **Priority:** Medium. **Effort:** Medium to large.
 
@@ -912,6 +947,9 @@ without changing results, recovery or independent query retention choices.
 
 ### Remove measured repetition from data processing (CW-32)
 
+**Related review findings:** [CR-P10](#cr-p10), Garnet's intermediate
+serialization model, and [CR-K10](#cr-k10), whole-set next-member scans.
+
 **Kind:** Measured performance improvement. **Area:** Core processing, codecs and pipes.
 **Priority:** Medium. **Effort:** Medium.
 
@@ -946,6 +984,14 @@ and failure behaviour stay the same.
 <a id="cw-63"></a>
 
 ### Remove the remaining old plugin support (CW-63)
+
+**Related review findings:** [CR-L01](#cr-l01) and [CR-P01](#cr-p01) cover
+ordinary bootstrap boundaries; [CR-P13](#cr-p13), [CR-P14](#cr-p14) and
+[CR-P15](#cr-p15) cover ordinary packaging; [CR-P19](#cr-p19) covers ordinary
+state batching; [CR-K01](#cr-k01), [CR-K02](#cr-k02) and [CR-K03](#cr-k03)
+cover process-pinned libraries, runtime and callbacks. Retirement can remove
+these paths only after their required consumers move; a native counterpart
+alone is not evidence that the ordinary finding is resolved.
 
 **Kind:** Breaking-release cleanup. **Area:** Core, Server and remaining consumers.
 **Priority:** Medium. **Effort:** Medium to large.
@@ -1004,6 +1050,9 @@ not deleted.
 
 ### Make ordinary sources declare whether they can replay (CW-117)
 
+**Related review finding:** [CR-K14](#cr-k14), HERE traffic's Now-only start
+configuration; do not infer historical replay from an inherited default.
+
 **Kind:** Issue. **Area:** Core ordinary source API and source plugins.
 **Priority:** Medium. **Effort:** Small to medium.
 
@@ -1039,6 +1088,13 @@ accepted, and a test covers the Kubernetes case.
 <a id="cw-112"></a>
 
 ### Make the ordinary PostgreSQL source verify its database and survive outages (CW-112)
+
+**Related review findings:** [CR-P02](#cr-p02), [CR-P03](#cr-p03),
+[CR-P04](#cr-p04) and [CR-P05](#cr-p05) cover shared decoder/authentication
+limitations beyond the three ordinary-source gaps below.
+[CR-A02](#cr-a02) distinguishes ordinary TRUNCATE handling from native typed
+rejection. Moving consumers to the native source does not by itself remove
+limitations in shared helpers.
 
 **Kind:** Issue. **Area:** Ordinary PostgreSQL source and initial-data provider.
 **Priority:** Medium. **Effort:** Medium.
@@ -1173,6 +1229,9 @@ after each refactor. Fewer files or lines alone is not completion.
 
 ### Finish logging control for plugins and profiling (CW-24)
 
+**Related review finding:** [CR-K06](#cr-k06) is the narrower ordinary custom-host
+fallback ambiguity, not a general inability to honor configured Drasi `Off`.
+
 **Kind:** Operational capability. **Area:** Core observability, native SDK/Host.
 **Priority:** Medium. **Effort:** Small to medium.
 
@@ -1244,6 +1303,11 @@ Persistent reconstruction has no historical context by design.
 
 ### Fill the remaining measurement gaps (CW-26)
 
+**Related review findings:** [CR-L02](#cr-l02), log-loss metric integration;
+[CR-P16](#cr-p16), ordinary platform timing placeholders; [CR-K08](#cr-k08),
+adaptive backlog estimates. These do not invalidate existing native spans or
+queue counters.
+
 **Kind:** Operational capability. **Area:** Core, plugins, Server.
 **Priority:** Medium. **Effort:** Medium.
 
@@ -1280,6 +1344,11 @@ conformance assertions pass.
 <a id="cw-69"></a>
 
 ### Curate the public API before a stable release (CW-69)
+
+**Related review findings:** [CR-C01](#cr-c01), aggregation interface narrowing;
+[CR-C08](#cr-c08) and [CR-C09](#cr-c09), shared value representation questions;
+[CR-K18](#cr-k18), ordinary broadcast filtering limits. Keep that broadcast
+contract distinct from the native pipe naming question below.
 
 **Kind:** API improvement. **Area:** Core, shared contracts and SDK consumers.
 **Priority:** High before advertising a stable API. **Effort:** Large.
@@ -1387,6 +1456,10 @@ operator-recovery and race tests are in [CW-07](#cw-07) and [CW-39](#cw-39).
 <a id="cw-72"></a>
 
 ### Make component capabilities and wrapper delegation explicit (CW-72)
+
+**Related review finding:** [CR-C02](#cr-c02) retains the middleware factory
+dependency question. Existing element-index injection and native negotiated
+services do not establish that the broader factory proposal is needed or done.
 
 **Kind:** API/design improvement. **Area:** Core component contracts, wrappers, SDK/Host.
 **Priority:** Medium. **Effort:** Large.
@@ -1676,65 +1749,23 @@ query returning a node shows the node's properties in its results.
 
 ### Resume a persistent query bootstrapped over a query edge without gaps (CW-109)
 
-**Kind:** Issue (not yet reproduced). **Area:** Core query bootstrap and
-recovery. **Priority:** High before claiming restart safety for durable
-query-to-query chains. **Effort:** Medium.
+**Runtime contract:** A persistent downstream query commits its upstream output
+identity with the snapshot watermark and completion marker. On restart its
+data connection requests `replay_after` using that identity and its **last
+committed logical input sequence**, not the snapshot cut or the last enqueue.
+Retained envelopes go through normal processing before buffered live input;
+receiving the replay head does not advance the checkpoint.
 
-A query can bootstrap either from a bound output resource
-(`OutputBootstrapProvider`) or over a graph bootstrap edge from an upstream
-query or transformer (`PipeBootstrapProvider`). A query that reads another
-query's output through the query builder (`from_input_by_name`), with bootstrap
-enabled as it is by default, takes the edge path from the upstream query's
-`snapshot` output. The resource path detects a gap after restart
-(`BootstrapPreparation::ResetRequired`) and replays retained input after a
-cursor (`replay_after`, `take_input_replay`). The edge path has neither:
+A retention gap or a different producer epoch reaches startup as a typed `Gap`
+or `EpochChanged`. Strict fails without rescanning; `AutoReset` uses the
+existing guarded reset policy. A paired source instead restores its connector
+handover from opaque session state. That state is not an output cursor.
 
-- A persistent consumer saves resume state only when its producer returns
-  some, and the upstream query's snapshot session completes with a watermark
-  and no resume state. The downstream therefore saves nothing to resume from
-  and sends no resume request when it restarts.
-- `PipeBootstrapProvider` does not supply input replay, and edge inputs are
-  excluded from `OutputBootstrapProvider`.
-- The data edge is a volatile input queue, and the upstream confirms its output
-  as soon as its outgoing edges accept it, before the downstream commits it.
-
-From the code, output that the downstream had received but not committed
-before an abrupt stop is lost. The downstream then fails on the next upstream
-output with "graph input logical progress has a gap", and fails the same way
-after every restart. `AutoReset` does not apply, because the gap is found while
-processing rather than as a recovery error at startup. Volatile downstream
-queries rebuild from a fresh snapshot and are not affected. **Unverified:** no
-test reproduces this yet; the edge-path chain tests use volatile queries, and
-the durable chain test attaches `OutputBootstrapProvider` explicitly.
-
-**What remains:** give the edge path a resume that replays the upstream's
-retained output after the downstream's saved cursor, for example in
-`PipeBootstrapProvider`, mirroring `OutputBootstrapProvider::replay_after`, and
-report a missing range or a changed upstream epoch as a typed recovery error so
-that Strict and `AutoReset` behave as they do for other inputs.
-
-**Example:** a persistent `low-stock-count` query reads a persistent `low-stock`
-query. The process stops after `low-stock` confirmed an output but before
-`low-stock-count` committed it. After a restart, the next `low-stock` change
-fails `low-stock-count`, and every later restart fails it again.
-
-**Evidence:** `drasi-core/lib/src/computation/runtime/query_assembly.rs:778-784,816-819`
-(bootstrap edges for query inputs);
-`drasi-core/lib/src/computation/v1/pipeline.rs:1118-1153` (edge inputs excluded
-from `OutputBootstrapProvider`);
-`drasi-core/lib/src/computation/v1/graph_bootstrap.rs:634-637,947-949,1080-1086`
-(no resume state) and `:766-1180` (`PipeBootstrapProvider`: `RefreshVolatile`
-only, no replay or reset preparation);
-`drasi-core/lib/src/computation/v1/query_bootstrap.rs:177-179` and
-`drasi-core/lib/src/computation/v1/query.rs:1575-1578` (no input replay);
-`drasi-core/lib/src/computation/v1/output_bootstrap.rs:121-145`
-(`ResetRequired`, `replay_after`) and `:266` (`take_input_replay`);
-`drasi-core/lib/src/computation/v1/graph.rs:3614-3626` (upstream confirmation);
-`drasi-core/lib/src/computation/v1/producer_progress.rs:472-479` (the gap
-error); `drasi-core/lib/src/computation/v1/query_recovery.rs:168-262`
-(`AutoReset` triggers); `drasi-core/lib/tests/computation_graph_bootstrap.rs` and
-`drasi-core/components/host-sdk/tests/native_query_plugin/durable_chain.rs`
-(current coverage).
+**Regression coverage:** [Session implementation](../src/computation/v1/graph_bootstrap.rs)
+and [loaded query-chain tests](../../components/host-sdk/tests/native_query_plugin/durable_chain.rs).
+The `indexed_edge_restart_*` cases use the ordinary data connection without
+an application-supplied downstream provider. These consumer-restart cases
+are distinct from both the output-resource tests and the process-kill matrix.
 
 **Done when:** a process-kill test of a durable query-to-query chain over edges,
 for both the linked and the native query, shows no loss or duplicate after
@@ -1761,12 +1792,18 @@ current tree for the middleware facts):
 - `query → middleware`: refused at binding, because the middleware accepts only
   a quiescent bootstrap (`quiescent_bootstrap`, optional) while a query's
   output snapshot completes durably.
-- `query → view`: the view transformer has no bootstrap input, and its own
-  snapshot output is volatile.
+- `query → view`: supported. The view initializes from an upstream query
+  through the edge or a bound output bootstrap provider, and its output is
+  persistent with a persistent processing provider
+  (`components/host-sdk/tests/native_query_plugin/durable_chain.rs`,
+  `stateful_in_the_middle`).
 - Arithmetic has no bootstrap ports; native sinks have none, so a sink never
   receives initial rows as changes, only through snapshot reads.
-- The geometry, optimization and policy transformers were not part of the
-  survey; their bootstrap ports need the same review.
+- `query → geometry`: supported in the same way as the view, through the
+  same chain test; geometry also bootstraps from a SQLite provider
+  (`components/host-sdk/tests/native_query_plugin/middleware_bootstrap.rs`).
+- The optimization and policy transformers were not part of the survey; their
+  bootstrap ports need the same review.
 
 **What remains:** decide per combination whether it should be supported
 (for example a quiescent re-serve of a durable snapshot for middleware, or a
@@ -2170,7 +2207,7 @@ plugin and cause, and the rule is enforced.
 
 **Kind:** Issue. **Priority:** Medium (P1). **Effort:** Small.
 
-The shared documents now state the current versions: native ABI 0.1.0, which
+The shared documents now state the current versions: native ABI 0.2.0, which
 before 1.0 loads only a library with the same major and minor; wire version 1;
 and ordinary ABI 0.19. They also say that native libraries stay loaded for the
 life of the process. `computation-plugin-sdk/tests/documented_abi_version.rs`
@@ -2235,6 +2272,10 @@ job.
 <a id="dx-5"></a>
 
 ### Provide a standalone native plugin starter (DX-1, DX-5)
+
+**Related review findings:** [CR-P13](#cr-p13), [CR-P14](#cr-p14) and
+[CR-P15](#cr-p15) describe ordinary packaging counterparts. Their resolution is
+separate from the native starter's published-dependency release gate.
 
 **Kind:** Improvement. **Priority:** High (P0). **Effort:** Large.
 
@@ -2393,6 +2434,10 @@ The PostgreSQL source now declares `HostServices::bootstrap_coordination` and im
 
 #### Handle TRUNCATE with a typed reset (Source D-9 follow-up)
 
+**Related review finding:** [CR-A02](#cr-a02) is this same remaining reset
+capability, with the ordinary warning-only path distinguished from native
+typed rejection.
+
 **Kind:** Improvement. **Priority:** Low. **Effort:** Medium.
 
 A publication that publishes TRUNCATE is refused at start. A TRUNCATE of a selected table published later (after `ALTER PUBLICATION`) fails the source with a typed `SourceFailure::Unsupported` before anything of its transaction is published; a TRUNCATE of only unselected tables is ignored. The legacy source tolerated TRUNCATE (and silently diverged). Operators must recreate publications without TRUNCATE, which the default `CREATE PUBLICATION` does not do. The graph has no typed source reset that would let downstream queries rebuild from a fresh snapshot.
@@ -2499,6 +2544,10 @@ Readiness changes (streaming, reconnecting, failed), retries, skipped tables and
 <a id="my-15"></a>
 
 #### Carry GTIDs in MySQL checkpoints (MY-15)
+
+**Related review finding:** [CR-K15](#cr-k15) records the ordinary comparator's
+single-lineage assumption; this native failover capability is not an ordinary
+ordering fix.
 
 **Kind:** Improvement. **Priority:** Low. **Effort:** Medium.
 
@@ -4843,6 +4892,9 @@ entries.
 
 #### eventgrid: native sink with deterministic event IDs (LR-05)
 
+**Related review finding:** [CR-P13](#cr-p13) records ordinary standalone
+packaging debt; decide its disposition with the native replacement/retirement.
+
 **Kind:** Issue. **Priority:** Low. **Effort:** Small to medium.
 
 The legacy reaction derives a UUIDv5 event ID from the reaction, query,
@@ -4912,6 +4964,9 @@ destination or in host state.
 
 #### dashboard: server-style sink or rebuild on SSE (LR-08)
 
+**Related review finding:** [CR-K16](#cr-k16), heuristic matching only when row
+identity is unknown; canonical row signatures already work.
+
 **Kind:** Decision and Issue. **Priority:** Low. **Effort:** Large.
 
 The legacy dashboard is an HTTP and WebSocket server with its own persisted
@@ -4932,6 +4987,10 @@ rebuild the UI on the SSE sink.
 
 #### mcp: server-style native sink (LR-10)
 
+**Related review findings:** [CR-P11](#cr-p11), stable-key removal rather than
+linear search, and [CR-P12](#cr-p12), configurable allowed origins. Carry these
+decisions into the native design rather than assuming the ordinary gaps fixed.
+
 **Kind:** Issue. **Priority:** Low. **Effort:** Medium to large.
 
 The legacy reaction is an MCP server with resource subscribe, unsubscribe and
@@ -4950,6 +5009,9 @@ updates.
 <a id="lr-11"></a>
 
 #### platform: owner decision (LR-11)
+
+**Related review finding:** [CR-P16](#cr-p16), compatibility timing placeholders;
+the port/keep decision must distinguish those from actual measurements.
 
 **Kind:** Decision. **Priority:** Low. **Effort:** Medium if ported.
 
@@ -5168,6 +5230,10 @@ tests still pass.
 
 #### Make asynchronous tests reliable (CW-37)
 
+**Related review finding:** [CR-T02](#cr-t02), the ordinary stored-procedure
+container retry workaround. Its Docker Desktop condition is not evidence of a
+Podman failure.
+
 **Kind:** Test-infrastructure improvement. **Area:** Core and CI.
 **Priority:** Medium. **Effort:** Medium to large.
 
@@ -5301,6 +5367,11 @@ backend's exclusion is stated next to the wiring with its reason.
 
 #### Complete query behavior coverage through the loaded plugin (CW-77)
 
+**Related review findings:** [CR-T01](#cr-t01) is a separate ordinary
+status-only join-test gap, not evidence that native semantic tests are absent;
+[CR-K11](#cr-k11) distinguishes persistence assumptions from native Garnet
+qualification or its explicit refusal.
+
 **Kind:** Behavioral-parity qualification. **Area:** Core, Host SDK, test fixtures.
 **Priority:** High before claiming complete native behavioral parity.
 **Effort:** Medium to large, split by behavior.
@@ -5397,6 +5468,9 @@ test asserting each.
 
 #### Verify remaining query matching reports (CW-13)
 
+**Related review finding:** [CR-T01](#cr-t01) identifies status-only join tests;
+those checks cannot serve as result oracles for the reproductions below.
+
 **Kind:** Investigation and fixes. **Area:** Core evaluator and parsers.
 **Priority:** Conditional on reproduction. **Effort:** Medium to large.
 
@@ -5439,6 +5513,10 @@ update and delete, or is closed with evidence that it does not reproduce.
 <a id="cw-12"></a>
 
 #### Investigate reported errors in grouped results (CW-12)
+
+**Related review findings:** [CR-C05](#cr-c05) and [CR-C06](#cr-c06) are
+aggregation design questions, not demonstrated reproductions of the reported
+bugs below.
 
 **Kind:** Investigation and fixes. **Area:** Core evaluator and indexes.
 **Priority:** Conditional on reproduction. **Effort:** Unknown until reproduced.
@@ -5700,6 +5778,10 @@ interleaving.
 
 #### Complete cleanup checks across native providers (CW-08)
 
+**Related review finding:** [CR-K04](#cr-k04) provides ordinary-FFI evidence for
+the retained-owner versus leak distinction. Normal forwarder cleanup is
+improved; abandoned disposal remains separate from native qualification.
+
 **Kind:** Qualification. **Area:** Core, providers, SDK/Host.
 **Priority:** High. **Effort:** Large, mainly testing.
 
@@ -5825,11 +5907,12 @@ classified correctly. Each needs a reproduction or an evidence-backed closure.
 
 **Questions:**
 
-1. **Delivery confirmation content (linked query path).** The loaded query plugin
-   passes the pending envelope to `validate_delivery`, so a confirmation whose
-   operations differ from the pending output is rejected
-   (`drasi-core/components/computation-plugins/transformers/query/src/durable.rs:1084`,
-   `drasi-core/components/query-common/src/query_state.rs:409-417`). The linked
+1. **Delivery confirmation content (linked query path).** The stateful
+   transformer runtime the loaded query plugin runs on passes the pending
+   envelope to `validate_delivery`, so a confirmation whose operations differ
+   from the pending output is rejected
+   (`drasi-core/components/computation-plugin-sdk/src/transformer/engine.rs:1213`,
+   `drasi-core/components/computation-plugin-sdk/src/transformer/output.rs:601`). The linked
    query path passes `None` (`drasi-core/lib/src/computation/v1/query_delivery.rs:383-389`),
    so only identity, generation and sequence are checked. Decide whether to add
    the content check or accept the gap until [CW-80](#cw-80) retires that path.
@@ -6300,3 +6383,158 @@ citing test results:
 - Standalone GDELT/Wikidata generated-file tests in `test-infra` and the
   standalone GPU Lab workspace are outside their parent Cargo workspaces and run
   only when explicitly selected.
+
+<a id="code-review-findings"></a>
+
+## Items derived from a review of existing code
+
+This section incorporates all **59 retained findings** from the review of
+implementation comments and adjacent unfinished paths: **41 Present**,
+**7 Partial** and **11 Uncertain**. It covers the query engine, shared value
+types, Lib, ordinary plugins and their supporting crates, not only native
+ComputationGraph plugins. Definitely resolved or obsolete findings are excluded.
+
+**Evidence basis:** the original scan of main
+`5ec0ed68c158ba7b654d6b26ccc70a183f941a48`, reassessed against
+`fe005b97526a9453381a8f6b8785929ed7ef5996` and the working-tree changes.
+This is source-based evidence, not a new runtime qualification. Source locations
+below are relative to `drasi-core/`; moved files were checked at their current
+locations rather than treated as resolved.
+
+**How to read these items:**
+
+- **Present:** the limitation, compromise or workaround remains observable.
+  This does not by itself establish a bug or mandate its replacement.
+- **Partial:** related improvements exist; only the remaining concern is
+  retained, not the part already fixed.
+- **Uncertain:** an open design question or unresolved applicability needs
+  evidence or a requirements decision before implementation.
+- **Related work:** an overlap, owning-area follow-up or native counterpart,
+  not a claim that two entries describe the same defect. Ordinary-only findings
+  remain distinct from native capabilities.
+
+Ordinary-plugin findings inform [CW-63](#cw-63)'s retirement work and
+[Sink D-7](#sink-d-7)'s port/keep/retire decisions; they are not a blanket plan to
+extend legacy plugins. Working dependency adaptations remain review decisions,
+not missing features. In particular, incompatible saved formats may be
+explicitly refused under [CW-18](#cw-18); automatic migration of old state is
+not a requirement.
+
+<a id="code-review-core"></a>
+
+### Core and shared value types
+
+| ID | Status | Remaining finding | Current evidence | Related work |
+|---|---|---|---|---|
+| <a id="cr-c01"></a>CR-C01 | Present | Aggregation APIs still use the broader `ResultIndex` instead of `LazySortedSetStore`. Both narrowing TODOs remain. Their compiler-prerequisite wording is not a fresh assessment of the current toolchain. | `core/src/evaluation/functions/aggregation/lazy_sorted_set.rs:39`; `core/src/evaluation/functions/mod.rs:85` | [CW-69](#cw-69): API curation |
+| <a id="cr-c02"></a>CR-C02 | Uncertain | Broader middleware dependency injection is not demonstrably implemented. The factory moved to `core-types` and its TODO disappeared, but `create()` still receives only configuration. `process()` receives an element index, and factories can capture dependencies; neither proves the broader evaluator/dependency proposal complete. | `core-types/src/interface/source_middleware.rs:23-38` | [CW-72](#cw-72): explicit services and capabilities |
+| <a id="cr-c03"></a>CR-C03 | Present | Change evaluation still constructs empty query variables. The query-parameter TODO moved from `ContinuousQuery` into the shared evaluator rather than being implemented. | `core/src/query/evaluator.rs:282` | - |
+| <a id="cr-c04"></a>CR-C04 | Present | Duration ordering still treats each month as 30 days, with the questioning comments in all four comparisons. This is an approximation, not calendar-aware ordering. | `core/src/evaluation/expressions/mod.rs:764`, `896`, `1052`, `1184` | - |
+| <a id="cr-c05"></a>CR-C05 | Uncertain | `collect` reversal still removes the first equal occurrence. The provisional comment remains; whether a different occurrence identity or ordering rule is required is not established. | `core/src/evaluation/functions/aggregation/collect.rs:109-116` | [CW-12](#cw-12): related aggregation investigations, not the same reported defect |
+| <a id="cr-c06"></a>CR-C06 | Uncertain | Temporal averaging still covers durations, not broader date/time types. The comment questions whether averaging dates/times makes sense; no requirement for those types is established. | `core/src/evaluation/functions/aggregation/avg.rs:111-119` | [CW-12](#cw-12): related aggregation area |
+| <a id="cr-c07"></a>CR-C07 | Uncertain | The question whether `drasi.stdevp` should be an aggregate remains. It is still a scalar function over a list. | `core/src/evaluation/functions/drasi/stdevp.rs:26-28` | - |
+| <a id="cr-c08"></a>CR-C08 | Uncertain | The custom map representation question moved to `core-types`. Objects still use `BTreeMap<String, VariableValue>`; the comment proposes no concrete replacement or demonstrated defect. | `core-types/src/evaluation/variable_value/mod.rs:43` | [CW-69](#cw-69): public collection-type exposure |
+| <a id="cr-c09"></a>CR-C09 | Uncertain | The positive/negative integer representation question also moved to `core-types`. `PosInt(u64)` and `NegInt(i64)` remain; the questioning comment does not establish that the representation is wrong. | `core-types/src/evaluation/variable_value/integer.rs:26-29` | [CW-69](#cw-69): deliberate public value contracts |
+| <a id="cr-c10"></a>CR-C10 | Present | Element values still cannot preserve IANA timezone names. The shared representation omits them, and conversion back to evaluation values supplies `None`. | `core-types/src/models/element_value.rs:47`, `208` | [CW-18](#cw-18): value-format consequences if this representation changes |
+
+<a id="code-review-lib"></a>
+
+### Lib contracts and telemetry
+
+| ID | Status | Remaining finding | Current evidence | Related work |
+|---|---|---|---|---|
+| <a id="cr-l01"></a>CR-L01 | Present | Ordinary reaction bootstrap-context validity remains contractual rather than lifetime-enforced. Documentation prohibits retaining it past `bootstrap()` because FFI pointers can become invalid and still mentions future lifetime parameters. This is not a claim about native bootstrap handles. | `lib/src/reactions/bootstrap_context.rs:91-105` | [CW-63](#cw-63): ordinary bootstrap boundary |
+| <a id="cr-l02"></a>CR-L02 | Partial | The new logging runtime counts full/closed transport losses, reports them and exposes `losses()`. The remaining uncertainty is their registered/exported metrics integration: no binding was found in that logging path. Generic `drasi.queue.drops` does not prove this binding. Lost logs are no longer wholly uncounted. | `lib/src/observability/log_runtime.rs:150-167`, `202-216`, `236-241`, `376-381`; `lib/src/observability/queues.rs:85` | [CW-23](#cw-23): loss visibility; [CW-26](#cw-26): metric boundaries |
+| <a id="cr-l03"></a>CR-L03 | Partial | State-error mapping now preserves the typed cause, but supplied component type and ID remain reserved and unused. Retain the possible diagnostic-context enhancement, not a claim that the cause is discarded. Whether the cause already carries sufficient identity depends on the caller. | `lib/src/component_ops.rs:144-164` | [CW-22](#cw-22): actual component context |
+
+<a id="code-review-plugins"></a>
+
+### Plugins and shared supporting crates
+
+These entries concern ordinary plugins unless a shared/native scope is stated.
+A native counterpart does not demonstrate that an ordinary path was fixed.
+
+| ID | Status | Remaining finding | Current evidence | Related work |
+|---|---|---|---|---|
+| <a id="cr-p01"></a>CR-P01 | Present | Ordinary gRPC `request_bootstrap` still returns an empty bootstrap response. This is separate from attaching a bootstrap provider to a source or native query. | `components/sources/grpc/src/lib.rs:817` | [CW-63](#cw-63): ordinary source retirement |
+| <a id="cr-p02"></a>CR-P02 | Partial | Shared PostgreSQL origin/type/logical-message handling remains incomplete as an emitted/represented capability. Origin and type now receive strict structural validation but still return `Ok(None)`; logical messages remain skipped. Retain the omissions, not an absence of strict validation. | `components/postgres-common/src/decoder.rs:197-205`, `281-289`, `430-433` | [CW-112](#cw-112): related PostgreSQL work; shared code is not ordinary-only |
+| <a id="cr-p03"></a>CR-P03 | Present | The shared PostgreSQL binary-numeric converter still calls its algorithm simplified, reconstructs a decimal from base-10000 digits and maps numeric NaN to `Decimal::ZERO`. It is not a complete PostgreSQL numeric representation. | `components/postgres-common/src/decoder.rs:925-983` | [CW-112](#cw-112): related PostgreSQL work; shared decoder |
+| <a id="cr-p04"></a>CR-P04 | Present | Shared PostgreSQL SASL preparation still only escapes `=` and `,`. Moving the helper into `postgres-common` did not implement full string preparation. | `components/postgres-common/src/scram.rs:168-171` | [CW-112](#cw-112): related PostgreSQL connection work |
+| <a id="cr-p05"></a>CR-P05 | Uncertain | COPY format-code parsing remains deferred. `CopyBothResponse` ignores its body because replication uses a known format. This is a conditional extension concern, not proof that supported replication needs variable formats. | `components/postgres-common/src/protocol.rs:587-601` | [CW-112](#cw-112): related PostgreSQL scope |
+| <a id="cr-p06"></a>CR-P06 | Present | Kubernetes CRD support remains future work. The shared supported-kind whitelist is limited to the listed core/apps resources. | `components/kubernetes-common/src/config.rs:141-149` | [CW-44](#cw-44): Kubernetes native port scope, not a promise to add CRDs |
+| <a id="cr-p07"></a>CR-P07 | Uncertain | Kubernetes bootstrap-specific concurrency/timeout settings remain a future extension of an empty config. Existing settings come from source configuration; no operational failure is demonstrated. | `components/bootstrappers/kubernetes/src/config.rs:17-26` | [CW-44](#cw-44): initial-data provider scope |
+| <a id="cr-p08"></a>CR-P08 | Present | MSSQL Windows authentication still returns an unimplemented error. The adjacent Azure AD branch is also unimplemented. This finding concerns the reviewed `mssql-common` connection path, not proof about native SQL Server authentication. | `components/mssql-common/src/connection.rs:56-63`, `141` | - |
+| <a id="cr-p09"></a>CR-P09 | Uncertain | Application source/reaction properties still use flexible flattened maps with the same "for now" comments. A stricter schema has not appeared, but no requirement for one is established. | `components/sources/application/src/config.rs:25-27`; `components/reactions/application/src/config.rs:23-25` | - |
+| <a id="cr-p10"></a>CR-P10 | Present | Garnet's serialization-efficiency TODO remains: directly serialize Redis values instead of going through `StoredElement`. | `components/indexes/garnet/src/storage_models/mod.rs:22-27` | [CW-32](#cw-32): measured serialization cost |
+| <a id="cr-p11"></a>CR-P11 | Present | Ordinary MCP result removal still linearly searches a vector. The suggestion to use stable keys for constant-time removal remains. | `components/reactions/mcp/src/mcp.rs:823` | [LR-10](#lr-10): carry the requirement into the native MCP design |
+| <a id="cr-p12"></a>CR-P12 | Present | Ordinary MCP CORS origins are still not configurable here. The TODO remains immediately before `.allow_origin(Any)`. | `components/reactions/mcp/src/mcp.rs:921-922` | [LR-10](#lr-10): native MCP exposure policy |
+| <a id="cr-p13"></a>CR-P13 | Present | Event Grid standalone packaging remains deferred under `TODO(#574)`: workspace dependencies and loader/SDK alignment are not the published standalone model. | `components/reactions/eventgrid/Cargo.toml:33-36`, `49-56` | [LR-05](#lr-05): native replacement; [CW-63](#cw-63): ordinary retirement; [DX-1](#dx-1): native packaging counterpart |
+| <a id="cr-p14"></a>CR-P14 | Present | Ordinary HTTP standalone packaging retains workspace/published dependency and SDK-alignment TODOs. Native HTTP packaging does not change this manifest. | `components/reactions/http/Cargo.toml:33-36`, `48-58` | [CW-63](#cw-63): ordinary retirement; [DX-1](#dx-1): native packaging counterpart |
+| <a id="cr-p15"></a>CR-P15 | Present | Ordinary gRPC standalone packaging retains `FIXME(#575)` and workspace dependencies. Published SDK/core dependencies and standalone test dependencies remain deferred. | `components/reactions/grpc/Cargo.toml:33-38`, `70-73` | [CW-63](#cw-63): ordinary retirement; [DX-1](#dx-1): native packaging counterpart |
+| <a id="cr-p16"></a>CR-P16 | Present | Ordinary platform profiling still reuses source timestamps as dispatcher/router placeholders and fallback values, not distinct measured phases. This is the platform compatibility mapping, not a claim that native telemetry lacks real spans. | `components/reactions/platform/src/transformer.rs:30-37`, `46-79` | [LR-11](#lr-11): platform owner decision; [CW-26](#cw-26): truthful timing boundaries |
+| <a id="cr-p17"></a>CR-P17 | Present | redb state-store table names still use process-lifetime `Box::leak` allocations. Keys are now typed partitions, but retention remains; clearing the lookup cache does not reclaim strings. | `components/state_stores/redb/src/provider.rs:187-198`, `337-339`, `363-375` | - |
+| <a id="cr-p18"></a>CR-P18 | Partial | redb WAL storage now validates format/owner and rejects incompatible or unversioned storage without wiping it. It does not migrate incompatible formats; the old blanket "wiped on upgrade" claim is inaccurate. Document the supported/refused boundary, not automatic migration or a claim that every upgrade changes the format. | `components/wals/redb/src/provider.rs:41-98`, `101-152`, `179-187` | [CW-18](#cw-18): explicit format policy |
+| <a id="cr-p19"></a>CR-P19 | Present | Ordinary FFI state-store `get_many`/`set_many` still loop over individual calls for simplicity. This does not describe the separate native state API. | `components/plugin-sdk/src/ffi/state_store_proxy.rs:141`, `156` | [CW-28](#cw-28): per-item storage cost; [CW-63](#cw-63): ordinary ABI retirement |
+
+<a id="code-review-tradeoffs"></a>
+
+### Retained tradeoffs and dependency workarounds
+
+These are not automatically proposed changes. Several deliberately preserve
+safety or compensate for an external API; decide whether replacement is needed
+before treating them as implementation work.
+
+| ID | Status | Remaining compromise | Current evidence | Related work |
+|---|---|---|---|---|
+| <a id="cr-k01"></a>CR-K01 | Present | Ordinary plugin libraries remain process-pinned. The loader retains an extra library reference to prevent execution of unloaded code. Native libraries also being pinned does not resolve this tradeoff. | `components/host-sdk/src/loader.rs:125-135` | [CW-63](#cw-63): ordinary loader boundary |
+| <a id="cr-k02"></a>CR-K02 | Present | Ordinary plugin shutdown clears its runtime pointer without reclaiming the intentionally retained runtime. This is not a fully joined/destroyed runtime shutdown. | `components/plugin-sdk/src/lib.rs:560-575` | [CW-63](#cw-63): ordinary SDK boundary |
+| <a id="cr-k03"></a>CR-K03 | Present | Ordinary Source/Reaction log/status callback contexts retain process-pinned raw `Arc` references. The retained-call owner preserves this choice; ordinary disposal does not reclaim the transferred raw reference. | `components/host-sdk/src/proxies/source.rs:728-737`; `components/host-sdk/src/proxies/reaction.rs:416-423`; `components/host-sdk/src/proxies/retained_call.rs:54-59` | [CW-63](#cw-63): ordinary callback boundary |
+| <a id="cr-k04"></a>CR-K04 | Partial | Normal reaction stop now joins the result forwarder and releases its context; the former unconditional success-path retention is resolved. Remaining retention is abandonment without confirmed disposal: the actual plugin and unjoined worker are pinned rather than freed unsafely. This is not successful cleanup; retryable awaited cleanup is intended. | `components/host-sdk/src/proxies/reaction.rs:87-110`; `components/host-sdk/src/proxies/retained_call.rs:199-215` | [CW-17](#cw-17): ownership; [CW-08](#cw-08): retention versus leaks, with ordinary/native scope kept distinct |
+| <a id="cr-k05"></a>CR-K05 | Present | The serialized plugin-drop worker still lets a slow or hung foreign `drop_fn` block unrelated drops. Its macOS TLS-destructor safety rationale remains, and the retained-call owner still invokes it. | `components/host-sdk/src/proxies/drop_worker.rs:17-34`; `components/host-sdk/src/proxies/retained_call.rs:54-56` | [CW-17](#cw-17): owned teardown, not permission to weaken the safety boundary |
+| <a id="cr-k06"></a>CR-K06 | Partial | Host logging now consults configured Drasi logging and supports explicit policy injection. Only the custom-host fallback remains ambiguous: without that policy, `log::max_level() == Off` cannot distinguish unset logging from silence, so forwarding can default to Trace. Configured Drasi `Off` is not generally broken. | `components/host-sdk/src/callbacks.rs:105-128`, `171-177` | [CW-24](#cw-24): distinguish the ordinary-host fallback from native logging |
+| <a id="cr-k07"></a>CR-K07 | Present | HTTP XML-to-JSON conversion moved into `http-common` but retains the simplified object/attribute/`_text`/array projection. Parsing fixes do not make it a full XML data model. | `components/http-common/src/content.rs:165-173` | - |
+| <a id="cr-k08"></a>CR-K08 | Present | Adaptive batching estimates backlog from throughput instead of measuring queued messages. The shared HTTP and ordinary HTTP/gRPC reaction helpers retain the heuristic. | `components/http-common/src/adaptive_batcher.rs:300-312`; `components/reactions/http/src/adaptive_batcher.rs:310-320`; `components/reactions/grpc/src/adaptive_batcher.rs:304-314` | [CW-26](#cw-26): measurement boundaries; not evidence that native queue metrics are absent |
+| <a id="cr-k09"></a>CR-K09 | Present | Automatic numeric timestamp units still use magnitude thresholds. Explicit format selection is the alternative; this is not a claim that all timestamps are decoded incorrectly. | `components/sources/mapping/src/engine.rs:654-668` | - |
+| <a id="cr-k10"></a>CR-K10 | Present | Garnet's next sorted-set lookup loads every member to merge buffered mutations. It still relies on aggregation-group sets being typically small rather than performing a targeted next-member query. | `components/indexes/garnet/src/result_index.rs:167-174` | [CW-32](#cw-32): measured rescanning cost |
+| <a id="cr-k11"></a>CR-K11 | Uncertain | Persistence inference still depends on provider/environment assumptions. The config helper assumes persistence without a provider; Garnet declares nonvolatility assuming server persistence. No active native reliance on the config-only fallback, or lack of server persistence, was established. | `lib/src/indexes/config.rs:99-106`; `components/indexes/garnet/src/plugin.rs:209-211` | [CW-77](#cw-77): native Garnet qualification/refusal is separate evidence |
+| <a id="cr-k12"></a>CR-K12 | Present | RocksDB per-column-family buffer sizes remain fixed after construction even when the manager's overall budget changes. | `components/indexes/rocksdb/src/options.rs:27-35` | [CW-29](#cw-29): distinguish backend buffers from queue budgets |
+| <a id="cr-k13"></a>CR-K13 | Present | Ordinary Neo4j timestamp startup still begins at the earliest CDC cursor and filters rather than seeking to the timestamp. This remains a cost imposed by the described CDC API limit. | `components/sources/neo4j/src/config.rs:23-26`; `components/sources/neo4j/src/cdc.rs:95-98` | - |
+| <a id="cr-k14"></a>CR-K14 | Present | HERE traffic start-position configuration supports only `Now`. The comment does not promise historical replay. | `components/sources/here-traffic/src/config.rs:113-120` | [CW-117](#cw-117): declare actual replay support |
+| <a id="cr-k15"></a>CR-K15 | Present | Ordinary MySQL binlog position ordering assumes one lineage, not ordering across failover lineages. | `components/sources/mysql/src/types.rs:180-187` | [MY-15](#my-15): native failover counterpart, not an ordinary ordering fix |
+| <a id="cr-k16"></a>CR-K16 | Present | Dashboard matching falls back to `id`/equality when row signatures are unknown. Canonical signatures already work; only the unknown-identity fallback remains. | `components/reactions/dashboard/src/websocket.rs:447-465`; `components/reactions/dashboard/static/js/widgets.js:345-349` | [LR-08](#lr-08): dashboard replacement/port decision |
+| <a id="cr-k17"></a>CR-K17 | Present | Ordinary SourceBase WAL replay reads events into memory before live delivery. Streaming remains a possible peak-memory improvement; current replay is bounded by WAL capacity. This does not describe every native replay implementation. | `lib/src/sources/base.rs:1249-1265`, `1288-1314`; `lib/src/channels/dispatcher.rs:423-441` | [CW-29](#cw-29): distinguish replay memory and byte limits |
+| <a id="cr-k18"></a>CR-K18 | Present | Ordinary SourceBase broadcast mode still lacks per-subscriber replay filtering. Channel mode has filtering; do not generalize the limitation to all subscriptions or native pipes. | `lib/src/sources/base.rs:250`, `1044` | [CW-69](#cw-69): distinguish similarly named broadcast contracts |
+| <a id="cr-k19"></a>CR-K19 | Present | SDK schema UI hints require JSON post-processing because the schema dependency lacks the property-level extension support. The adaptation works; the dependency workaround remains. | `components/plugin-sdk/src/schema_ui.rs:15-20` | - |
+| <a id="cr-k20"></a>CR-K20 | Present | The proxy macro requires an explicit vtable binding to work around `macro_rules!` hygiene. This is a completed adaptation, not an unimplemented proxy feature. | `components/ffi-primitives/src/macros.rs:80-87` | - |
+| <a id="cr-k21"></a>CR-K21 | Present | Date parsing appends a day because the dependency cannot directly parse `YYYYMM`. Date support is implemented; only the dependency workaround remains relevant. | `core/src/evaluation/functions/temporal_instant/temporal_instant.rs:2025-2034` | - |
+
+<a id="code-review-tests"></a>
+
+### Test gaps and misleading comments
+
+Test changes belong with [Testing and qualification](#testing-and-qualification).
+Documentation mismatches below are not missing implementations.
+
+| ID | Status | Remaining finding | Current evidence | Related work |
+|---|---|---|---|---|
+| <a id="cr-t01"></a>CR-T01 | Present | The three identified join tests still do not assert emitted joined rows. Their status-only compromise remains after working-tree edits. This is not a claim that other tests lack join coverage. | `lib/src/queries/joins_test.rs:260-262`, `281`, `392-393`, `476`, `618`, `635` | [CW-77](#cw-77): related native semantic coverage; [CW-13](#cw-13): result-based reproductions |
+| <a id="cr-t02"></a>CR-T02 | Present | Ordinary stored-procedure MySQL/PostgreSQL helpers retry container creation around Docker Desktop port-mapping problems. This is conditional test infrastructure, not production behavior or evidence that the current Podman setup has this problem. | `components/reactions/storedproc-mysql/tests/mysql_helpers.rs:86-88`; `components/reactions/storedproc-postgres/tests/postgres_helpers.rs:74-76` | [CW-37](#cw-37): infrastructure reliability |
+| <a id="cr-d01"></a>CR-D01 | Present | SourceBase says explicit position-handle cleanup awaits query-manager wiring, but the current subscription adapter calls `remove_position_handle()` when clearing a requested position. The reference-count fallback remains useful; the historical explanation is misleading. | Comment: `lib/src/sources/base.rs:649-652`; current cleanup: `lib/src/computation/v1/plugin_source.rs:952-965` | - |
+| <a id="cr-d02"></a>CR-D02 | Present | Ordinary HTTP checkpoint documentation says errors are not propagated, but the function returns `Result` and explicitly returns `Err(e)` after logging. This is a documentation mismatch, not missing propagation. | `components/reactions/http/src/standard_loop.rs:223-243` | [CW-22](#cw-22): accurate error semantics |
+
+<a id="code-review-paths"></a>
+
+### Adjacent unimplemented code paths
+
+These were separate from comment findings in the original report and remain so.
+
+| ID | Status | Remaining finding | Current evidence | Related work |
+|---|---|---|---|---|
+| <a id="cr-a01"></a>CR-A01 | Uncertain | Unary `Exists` evaluation still contains `todo!()`. Parser/runtime reachability was not established; this is a potential unimplemented path, not a demonstrated reachable crash. | `core/src/evaluation/expressions/mod.rs:147` | [CW-22](#cw-22): classify public-path panic reachability |
+| <a id="cr-a02"></a>CR-A02 | Partial | PostgreSQL TRUNCATE still does not produce graph row removals/reset. The ordinary source warns without applying it. Shared/native replication now permanently rejects selected-table TRUNCATE and requires erase/re-add/bootstrap; unselected tables can be ignored. Explicit rejection is safer but does not implement selected-table recovery. | Ordinary: `components/sources/postgres/src/stream.rs:485-487`; shared/native: `components/postgres-common/src/replication/transaction.rs:240-264` | [Source D-9 follow-up](#pg-truncate-reset): exact reset gap; [CW-92](#cw-92): downstream reset coordination; [CW-112](#cw-112): ordinary source scope |
+
+Close an investigation with code/test evidence or an explicit requirements
+decision. For a deliberate limitation or dependency workaround, record the
+supported contract and replacement decision rather than inventing a missing
+feature. Keep ordinary/native applicability and partial-resolution evidence
+when an item is moved into an implementation or qualification entry.

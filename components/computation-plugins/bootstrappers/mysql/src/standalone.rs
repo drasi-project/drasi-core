@@ -80,6 +80,7 @@ impl BootstrapFactory for MySqlStandaloneBootstrapFactory {
             configuration_version: 1,
             configuration: config::definition().schema(),
             source_progress: false,
+            independent_state: false,
             pairing: None,
         }
     }

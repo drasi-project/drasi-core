@@ -1,7 +1,7 @@
 # Native SQLite source: design
 
 `drasi-computation-source-sqlite` is a native ComputationGraph source (ABI
-0.1.0) that owns one SQLite connection. Every write that reaches the database
+0.2.0) that owns one SQLite connection. Every write that reaches the database
 through the source (its REST API, or a Rust `SqliteHandle` when the crate is
 linked) runs on that connection, under an authorizer, and is captured by
 SQLite's pre-update hook inside the same transaction. A committed transaction
@@ -403,7 +403,7 @@ through a loaded library.
 
 | Legacy (`drasi-source-sqlite`) | Native |
 |---|---|
-| Ordinary Source-plugin ABI; hostname allowed for REST host | ComputationGraph ABI 0.1.0; literal IP |
+| Ordinary Source-plugin ABI; hostname allowed for REST host | ComputationGraph ABI 0.2.0; literal IP |
 | Nested snake_case configuration | Flat camelCase, defaults for every bound |
 | Unauthenticated REST, unbounded `GET /api/tables/{table}` | Optional bearer/TLS, body and time limits, paging |
 | Arbitrary SQL, DDL and transaction callbacks through Rust APIs | REST, `/api/sql` (authorizer applies) and `initSql`; Rust handle when linked |

@@ -222,6 +222,7 @@ mod tests {
             inputs: sources
                 .into_iter()
                 .map(|source_id| QueryInputConfig {
+                    enable_bootstrap: None,
                     nodes: vec![],
                     relations: vec![],
                     component: crate::config::ComponentReference::by_name(source_id),
@@ -1940,6 +1941,7 @@ mod tests {
             inputs: sources
                 .into_iter()
                 .map(|source_id| QueryInputConfig {
+                    enable_bootstrap: None,
                     nodes: vec![],
                     relations: vec![],
                     component: crate::config::ComponentReference::by_name(source_id),
@@ -1970,6 +1972,7 @@ mod tests {
     ) {
         let mut config = create_persistent_query_config(query.clone(), vec![]);
         config.inputs.push(QueryInputConfig {
+            enable_bootstrap: None,
             nodes: vec![],
             relations: vec![],
             component: crate::config::ComponentReference::by_id(source),
@@ -4181,6 +4184,7 @@ mod orchestration_tests {
             inputs: sources
                 .into_iter()
                 .map(|source_id| QueryInputConfig {
+                    enable_bootstrap: None,
                     nodes: vec![],
                     relations: vec![],
                     component: crate::config::ComponentReference::by_name(
@@ -4221,6 +4225,7 @@ mod orchestration_tests {
             inputs: sources
                 .into_iter()
                 .map(|source_id| QueryInputConfig {
+                    enable_bootstrap: None,
                     nodes: vec![],
                     relations: vec![],
                     component: crate::config::ComponentReference::by_name(

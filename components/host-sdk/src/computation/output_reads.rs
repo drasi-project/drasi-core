@@ -14,6 +14,7 @@ use anyhow::Context as _;
 use async_trait::async_trait;
 use bytes::Bytes;
 use drasi_computation_plugin_abi::{self as abi, output_reads as ext};
+use drasi_computation_plugin_sdk::wire::StateReadMode;
 use drasi_computation_plugin_sdk::{
     metadata::FactoryMetadata,
     output_reads::{Outcome, WireCursor, WireQueryHead},
@@ -233,6 +234,29 @@ impl Reader {
             ));
         }
         Ok(bytes)
+    }
+}
+
+struct NativeProjector(Reader, SchemaDescriptor, Option<GraphProducerIdentity>);
+
+#[async_trait::async_trait]
+impl StateProjector for NativeProjector {
+    fn cut_namespace(&self) -> Option<&GraphProducerIdentity> {
+        self.2.as_ref()
+    }
+
+    async fn project(&self, batch: ChangeEnvelope) -> Result<ChangeEnvelope, OutputReadError> {
+        drasi_computation_contracts::validate_state_batch(&batch, &self.1)?;
+        let input = self.0.codec.encode(&batch).map_err(invalid)?;
+        if input.len() > ext::MAX_READ_BYTES {
+            return Err(invalid("state projection input exceeds native page bound"));
+        }
+        let bytes = self.0.read(ext::operation::PROJECT_BATCH, &input).await?;
+        let frame: drasi_computation_plugin_sdk::output_reads::WireFrame<'_> =
+            self.0.outcome(&bytes)?;
+        let batch = self.0.envelope(&frame.envelope)?;
+        drasi_computation_contracts::validate_state_batch(&batch, self.0.schema.descriptor())?;
+        Ok(batch)
     }
 }
 
@@ -652,10 +676,19 @@ impl NativeOutputReads {
         descriptor: &ComponentDescriptor,
         metadata: &FactoryMetadata,
         queries: &std::collections::BTreeMap<PortId, drasi_computation_contracts::QueryDescription>,
+        state_reads: &std::collections::BTreeMap<PortId, StateReadMode>,
         schemas: &[Arc<Schema>],
         codec: &Arc<BinaryEnvelopeCodec>,
     ) -> anyhow::Result<Option<Self>> {
         let capabilities = &metadata.capabilities;
+        for (port, mode) in state_reads {
+            anyhow::ensure!(
+                capabilities.output_projections.contains_key(port)
+                    && (*mode != StateReadMode::Materialized
+                        || capabilities.output_snapshots.contains(port)),
+                "native instance selected an undeclared state reader on {port}"
+            );
+        }
         if !capabilities.declares_output_reads() && !capabilities.declares_output_follows() {
             return Ok(None);
         }
@@ -699,8 +732,41 @@ impl NativeOutputReads {
         };
         let mut readers = OutputReaders::new();
         for port in &capabilities.output_snapshots {
+            if capabilities.output_projections.contains_key(port)
+                && state_reads.get(port) != Some(&StateReadMode::Materialized)
+            {
+                continue;
+            }
             let reader = open(port, ext::capability::SNAPSHOT, OutputCapability::Snapshot)?;
             readers = readers.with_snapshot(port.clone(), Arc::new(NativeSnapshotProvider(reader)));
+        }
+        for (port, input) in &capabilities.output_projections {
+            if let Some(StateReadMode::Projected { cut_namespace }) = state_reads.get(port) {
+                if let Some(owner) = cut_namespace {
+                    owner.validate()?;
+                    anyhow::ensure!(
+                        !owner.persistent() && owner.component_id() == descriptor.id(),
+                        "invalid native projected output owner for {port}"
+                    );
+                }
+                let schema = descriptor
+                    .ports()
+                    .iter()
+                    .find(|p| p.id() == input && p.direction() == PortDirection::Input)
+                    .context("missing native state projection input")?
+                    .schema()
+                    .clone();
+                let reader = open(
+                    port,
+                    ext::capability::PROJECTION,
+                    OutputCapability::Snapshot,
+                )?;
+                readers = readers.with_projection(
+                    port.clone(),
+                    input.clone(),
+                    Arc::new(NativeProjector(reader, schema, cut_namespace.clone())),
+                );
+            }
         }
         for port in &capabilities.output_replays {
             let reader = open(port, ext::capability::REPLAY, OutputCapability::Replay)?;

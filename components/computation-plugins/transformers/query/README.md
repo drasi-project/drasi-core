@@ -25,10 +25,14 @@ the loaded library. Archive queries use the actual provider's archive index.
 The Host SDK registers this factory for ordinary queries as
 `drasi.query/continuous`.
 
-The factory uses the query definition, Core builder configuration, canonical
-result state and readers extracted from the built-in implementation into
-`drasi-query-common`. It does not maintain a separate projection/history engine.
-The native adapter retains the actual host-owned storage and progress boundary.
+A query is a stateful transformer. The component is the SDK's
+[stateful transformer runtime](../NATIVE-TRANSFORMER-GUIDE.md#stateful-transformers)
+running the query's logic: the runtime owns storage, bootstrap, recovery,
+restart replay, rebuild and the materialized output and its readers, exactly
+as for every other stateful transformer; the query supplies evaluation with
+the Core evaluator and its indexes, result projection, scheduled futures and
+its query read API. It uses the query definition and Core builder
+configuration in `drasi-query-common`.
 
 The indexed profile supports ordinary query creation/replacement/removal,
 bootstrap, archives, synthetic joins, input-local middleware, scheduled work,

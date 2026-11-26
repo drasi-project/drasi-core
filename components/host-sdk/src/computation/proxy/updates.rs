@@ -86,7 +86,7 @@ impl NativeComponentProxy {
             Some(binding) => Some(super::super::query::configuration_for_update(
                 specification,
                 Some(binding.construction.provider.is_volatile()),
-                binding.construction.edge_bootstrap,
+                Some(binding.construction.edge_bootstrap),
             )?),
             None => None,
         })
@@ -438,6 +438,7 @@ impl NativeComponentProxy {
         anyhow::ensure!(
             actual.descriptor == self.descriptor
                 && actual.capabilities == self.metadata.capabilities
+                && actual.state_reads == self.state_reads
                 && actual.queries.keys().eq(self.query_descriptions.keys()),
             "native update changed an immutable descriptor or capability"
         );

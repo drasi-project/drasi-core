@@ -605,7 +605,7 @@ async fn unsupported_and_rebootstrap_plans_leave_configuration_and_processing_un
         let error = change(&core, "unsupported", 2).await.unwrap_err();
         if supported {
             assert!(
-                format!("{error:#}").contains("qualified query factory"),
+                format!("{error:#}").contains("rebuilds component state"),
                 "{error:#}"
             );
         }

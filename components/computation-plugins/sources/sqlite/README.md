@@ -1,7 +1,7 @@
 # Native SQLite source
 
 `drasi-computation-source-sqlite` is a native ComputationGraph source (ABI
-0.1.0) that owns a SQLite connection. Writes arrive through its REST API (or a
+0.2.0) that owns a SQLite connection. Writes arrive through its REST API (or a
 Rust `SqliteHandle` when the crate is linked), run under an authorizer and are
 captured in the same transaction. Four factories, each at implementation and
 configuration version `1`:

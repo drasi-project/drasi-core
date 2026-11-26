@@ -1,7 +1,7 @@
 # Native ComputationGraph plugin SDK
 
 This is a separate plugin family, not a replacement or layout change to the
-Source/Reaction/Bootstrap SDK. It uses `drasi-computation-plugin-abi` **0.1.0**
+Source/Reaction/Bootstrap SDK. It uses `drasi-computation-plugin-abi` **0.2.0**
 with native **wire version 1**, independent of workspace package versions.
 Ordinary Source/Reaction/Bootstrap ABI **0.19.0** is independently versioned.
 While the native ABI major is 0, every minor version is breaking, so a host
@@ -211,7 +211,7 @@ test/application tracing layer. No host globals are replaced in static builds.
 `export_computation_plugin!` advertises both the unchanged context-only
 `drasi_computation_plugin_telemetry_v1` and unified
 `drasi_computation_plugin_telemetry_v2` extensions. The host negotiates them
-independently of native ABI 0.1.0/base wire version 1. Contextual creation and
+independently of native ABI 0.2.0/base wire version 1. Contextual creation and
 operation capsules contain unchanged base payload bytes and separate bounded
 context records. Batch operation context is distinct from every input context.
 Admission and handled-consumer callbacks use the same negotiated context family.
@@ -249,7 +249,7 @@ Old hosts retain supported base/V1 behavior with scoped metrics disabled.
 Required native metrics fail before construction when their capability is absent.
 
 Native query instrumentation negotiates telemetry V4, alongside the unchanged
-V1/V2/V3 and native ABI 0.1.0/wire 1 contracts. Its separate query table delegates
+V1/V2/V3 and native ABI 0.2.0/wire 1 contracts. Its separate query table delegates
 allowlisted query boundaries to the host's existing query span and metric
 machinery; it cannot register framework metrics. `query_telemetry::QueryTelemetry`
 captures the current binding and exposes `enabled`, `begin`, and `event`.
@@ -315,7 +315,7 @@ dynamic-plugin = []
 
 [package.metadata.drasi-plugin]
 abi-family = "computation"
-abi-version = "0.1.0"
+abi-version = "0.2.0"
 kind = "example-native"
 ```
 
@@ -338,6 +338,13 @@ conflicting author-supplied provenance is an error. `ConfigSchema` is the graph'
 typed object-field contract, not arbitrary JSON Schema: it checks required keys,
 allowed additional fields and field types. The constructor validates any further
 domain-specific constraints. Secret fields require host-side unresolved references.
+
+Use the execution interface that matches the data ports. For example, a Source
+that consumes an upstream input, or a Reaction that publishes a receipt stream,
+implements `NativeTransformer` and sets `Capabilities::semantic_kind` to
+`Source` or `Reaction`. Its input bindings and output readers work just as for
+other transformers. A Reaction that only performs an action uses `NativeSink`
+and need not offer a snapshot. Reading an output must not repeat the action.
 
 `Capabilities::output_progress` describes whether all outputs originate their
 own replay progress or relay their inputs' progress. Sources default to an origin
@@ -416,7 +423,10 @@ Failed/cancelled stop or disposal retains the cleanup obligation and fences
 restart; retry the cleanup rather than treating cancellation as rollback. A
 retried dispose repeats the same reason and intent.
 
-Temporary pause/resume retains activation and does not call start/stop. A
+Temporary pause/resume retains activation and does not call start/stop.
+Output reads and their follow leases stay open through a pause, because the
+committed output does not change; an update applied while paused closes them,
+and resume opens reads again. A
 component that cannot actually settle its independent work returns
 `unsupported` from `pause`; it never succeeds as a no-op. Stopping a paused
 component does not resume it first. `NativeService::run` remains a processing
@@ -668,7 +678,7 @@ from the declaration.
 The profile is explicitly non-indexed and non-transaction-participant; it does
 not claim durable or coordinated bootstrap.
 
-`bootstrap_optional` lets a quiescent transformer use `bootstrap_status()` to
+`bootstrap_optional` lets a quiescent or bounded transformer use `bootstrap_status()` to
 declare whether its configuration requests a provider. The Host checks that
 choice before activation. Without a connected bootstrap edge it completes the
 initialization barrier without loading records.
@@ -695,9 +705,29 @@ through startup. Source-paired/coordinated providers use the separate
 
 Provider cleanup precedes transformer cleanup on failure/stop. The Host retains
 accepted provider cleanup across waiter cancellation and reports cleanup errors;
-dropping an owner is not proof of completed asynchronous cleanup. The
-`drasi.standard/middleware` transformer exercises this contract using the
-unchanged native SQLite file-bootstrap library.
+dropping an owner is not proof of completed asynchronous cleanup.
+
+### Bounded (volatile) transformer initialization
+
+Declare `bounded_bootstrap = Some(input_port)` and return
+`BootstrapInput::Bounded`, implementing `NativeBootstrapInput<BoundedBootstrapCuts>`.
+Use `with_upstream_initial_state` in the pure description to declare the
+configuration's initialization policy. The Host streams the actual records
+before calling completion, just as for quiescent initialization. A graph
+session requests a fresh snapshot, never retained replay or a persistent
+handover. The typed completion accepts only quiescent completion or validated
+output cuts; a source-driver position, opaque state or ambiguous cut is not
+an output cursor.
+
+Start with empty state and discard old cuts on every activation. Install the
+cuts before making the completed snapshot readable. On the declared data
+input, call `cuts.covers(&input.envelope)?` **before** transforming the live
+envelope: a covered envelope emits nothing and advances no output position.
+The immutable cuts compare the immediate producer's full identity and logical
+sequence; a mismatch on a cut stream fails closed. They do not deduplicate
+post-cut delivery. A component with this profile has no recoverable progress
+or replay promise. A downstream query that rebuilds can consume its volatile
+snapshot; a consumer requiring persistent upstream replay cannot.
 
 ## Optional activation credentials
 
@@ -713,7 +743,7 @@ the metadata schema and enforce their conditional requirements in construction.
 annotation. The separately negotiated versioned creation envelope sets it for
 existing factory callbacks, including progress and coordinated-source creation.
 Ordinary Rust request literals set it to `false`; the base request encoding,
-base ABI 0.1.0 layouts, and wire version 1 remain unchanged.
+base ABI 0.2.0 layouts, and wire version 1 remain unchanged.
 
 A bound instance receives the resolved credentials in `NativeComponent::start`,
 through `StartContext::credentials()` or `take_credentials()`. Credentialed
@@ -743,7 +773,7 @@ operation-ownership contract.
 ## Configuration descriptions
 
 The optional `configuration-v1` entry point publishes field descriptions, defaults,
-integer limits and allowed values without changing the frozen ABI 0.1 metadata or
+integer limits and allowed values without changing the frozen ABI 0.2 metadata or
 wire version 1. A matching-wire plugin may omit the extension; the host does not
 invent missing descriptions. A present but malformed extension is an error,
 including during metadata-only discovery.
@@ -780,7 +810,7 @@ source processing lock. Reads must remain possible while `next()` is pending.
 This is data-schema discovery, not the factory's configuration schema.
 
 The optional `source_schema_v1` extension carries a bounded MessagePack
-`Option<SourceSchema>` without changing ABI 0.1.0 or envelope wire version 1.
+`Option<SourceSchema>` without changing ABI 0.2.0 or envelope wire version 1.
 The SDK permits one schema read per source at a time, limits replies to 1 MiB
 and reads to 30 seconds, and rejects results from stopped or replaced
 activations. Cancellation releases the read slot. Actual failures remain errors;
@@ -1200,9 +1230,18 @@ The same participant also works when the host container uses `SharedStorageGroup
 and shared QoS outputs. Its state, the container's input progress/retained output
 and the selected journal appends then commit together. The host reserves pipe
 capacity before invoking the participant. No new ABI interface or storage handle
-crosses the boundary: ABI 0.1 transaction participants use their existing
+crosses the boundary: ABI 0.2 transaction participants use their existing
 revocable mailbox. This does not give standalone native transformers output
 tracking, make separate stores atomic, or deduplicate external effects.
+
+## Stateful transformers
+
+`transformer::StatefulTransformer` is the native component for any
+transformer that maintains state, a Continuous Query included. It implements
+lifecycle, durable output, durable bootstrap, recovery, rebuild, continuations,
+scheduling and the output readers over host-owned indexed processing; the
+plugin supplies only a `transformer::TransformerLogic`. See the
+[native transformer guide](../computation-plugins/transformers/NATIVE-TRANSFORMER-GUIDE.md#stateful-transformers).
 
 ## Optional host-owned indexed processing
 
@@ -1455,7 +1494,7 @@ service. It has its own exact header, version, reserved fields and read-only
 observation callback. The SDK rejects a base table for a scheduling factory,
 an unexpected scheduling table for an ordinary factory, and malformed or
 unsupported extension versions. Transaction requests still use the same
-revocable mailbox, with no plugin commit method. Base ABI 0.1.0 layouts,
+revocable mailbox, with no plugin commit method. Base ABI 0.2.0 layouts,
 envelope wire version 1 and the independent legacy plugin ABI are unchanged.
 
 The stateful delayed-emission transformer in

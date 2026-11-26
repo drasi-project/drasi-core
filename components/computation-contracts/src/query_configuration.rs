@@ -23,6 +23,12 @@ pub enum ComputationQueryLanguage {
 #[serde(deny_unknown_fields)]
 pub struct QueryInputConfig {
     pub component: ComponentId,
+    #[serde(
+        default,
+        rename = "enableBootstrap",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub enable_bootstrap: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<PortId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -37,6 +43,7 @@ impl QueryInputConfig {
     pub fn new(component: ComponentId) -> Self {
         Self {
             component,
+            enable_bootstrap: None,
             port: None,
             nodes: Vec::new(),
             relations: Vec::new(),
@@ -149,6 +156,9 @@ impl QueryExecutionSettings {
     pub fn fingerprint_settings(&self) -> Self {
         let mut settings = self.clone();
         for input in &mut settings.inputs {
+            // Like the query-wide flag, this selects first initialization;
+            // it does not change how a restored query evaluates a live row.
+            input.enable_bootstrap = None;
             input.nodes.sort();
             input.nodes.dedup();
             input.relations.sort();

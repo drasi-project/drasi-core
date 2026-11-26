@@ -235,13 +235,13 @@ serve different purposes. Do not substitute one for another.
 
 | Host interface | Accepted plugin interface |
 |---|---|
-| Native computation ABI 0.1.0 | Same major and minor (0.1) while pre-1.0, matching target and wire version 1; any other version is rejected before any callback; advertised capabilities/extensions are validated separately |
+| Native computation ABI 0.2.0 | Same major and minor (0.2) while pre-1.0, matching target and wire version 1; any other version is rejected before any callback; advertised capabilities/extensions are validated separately |
 | Ordinary ABI 0.19.x | Ordinary 0.19.x on the same target; mandatory binding and fallible lifecycle tables |
 | Ordinary 0.16.x to 0.18.x component layouts | Reject before plugin initialization; rebuild with the current ordinary SDK |
 | Missing metadata, wrong target, incompatible or unknown interface | Reject; never guess a compatible layout |
 
 Native base tables and strict metadata are checked independently of the wire version 1
-MessagePack payload definition. ABI 0.1 carries the native lifecycle contract
+MessagePack payload definition. ABI 0.2 carries the native lifecycle contract
 (INITIALIZE, START, PAUSE, RESUME, STOP, DISPOSE) and the optional management
 extension for assess/apply; an advertised capability must match the implemented
 tables rather than follow from SDK presence.
@@ -493,7 +493,7 @@ dynamic-plugin = []
 
 [package.metadata.drasi-plugin]
 abi-family = "computation"
-abi-version = "0.1.0"
+abi-version = "0.2.0"
 kind = "example-native"
 ```
 

@@ -1616,6 +1616,78 @@ fn native_application_query_replacement_preserves_bootstrap_and_live_delivery() 
 }
 
 #[test]
+fn configured_graph_seed_is_preserved_when_a_query_is_replaced() -> Result<()> {
+    both_runtimes(|| async {
+        let app = Application::new("named-query-seed").await?;
+        let result = async {
+            let seed_id = component_id(989);
+            let reads = Arc::new(AtomicUsize::new(0));
+            let seed = BootstrapProviderComponent::new(seed_id.clone(), {
+                let reads = reads.clone();
+                Arc::new(move |_| {
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    Ok(Arc::new(ApplicationBootstrapProvider::with_shared_data(
+                        Arc::new(RwLock::new(vec![person("seed", "Seed row")])),
+                    )))
+                })
+            })?;
+            let seed = app
+                .core
+                .add_computation_component(ComponentAddition::new(
+                    component_name("seed")?,
+                    ConstructedComponent::bootstrap_provider(Box::new(seed)),
+                ))
+                .await?;
+            seed.wait_started().await?;
+            app.source.start().await?;
+            let name = component_name("seeded")?;
+            let definition = |text| {
+                drasi_lib::Query::cypher(name.clone())
+                    .query(text)
+                    .from_input_by_id(app.output.component.clone())
+                    .with_bootstrap_provider(drasi_lib::config::ComponentReference::by_id(
+                        seed_id.clone(),
+                    ))
+                    .enable_bootstrap(true)
+                    .build()
+            };
+            let first = app
+                .core
+                .add_query_with_handle(definition("MATCH (p:Person) RETURN p.name AS name")?)
+                .await?;
+            first.wait_started().await?;
+            assert_eq!(
+                app.core.get_query_results_by_name(&name).await?,
+                [json!({"name":"Seed row"})]
+            );
+            app.core
+                .update_query_by_name(
+                    &name,
+                    definition("MATCH (p:Person) RETURN p.name AS name, true AS revised")?,
+                )
+                .await?;
+            app.core.component_by_name(&name)?.wait_started().await?;
+            assert_eq!(
+                app.core.get_query_results_by_name(&name).await?,
+                [json!({"name":"Seed row","revised":true})]
+            );
+            assert_eq!(
+                reads.load(Ordering::SeqCst),
+                2,
+                "one seed per initialization"
+            );
+            assert_eq!(seed.observed()?.generation, seed.generation());
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let cleanup = app.core.shutdown().await;
+        result?;
+        cleanup?;
+        Ok(())
+    })
+}
+
+#[test]
 fn native_application_update_resolves_late_factory_primary_and_preserves_resources() -> Result<()> {
     both_runtimes(deferred_native_primary_preserves_resources)
 }

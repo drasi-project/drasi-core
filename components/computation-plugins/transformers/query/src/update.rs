@@ -2,34 +2,10 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
+use drasi_computation_contracts::ComponentUpdatePlan;
 
 #[cfg(test)]
 mod tests;
-
-fn has_bootstrap(request: &CreateRequest) -> bool {
-    match request.implementation.name.as_ref() {
-        INDEXED_IMPLEMENTATION => {
-            request.configuration.get("bootstrap") == Some(&serde_json::Value::Bool(true))
-        }
-        _ => false,
-    }
-}
-
-pub(super) fn validate_creation(request: &CreateRequest) -> anyhow::Result<()> {
-    if let Some(directive) = &request.update_directive {
-        directive.validate()?;
-        anyhow::ensure!(
-            directive.plan.data
-                == if has_bootstrap(request) {
-                    ComponentUpdateData::Rebootstrap
-                } else {
-                    ComponentUpdateData::Reset
-                },
-            "query reconstruction must match its configured snapshot or streaming startup"
-        );
-    }
-    Ok(())
-}
 
 pub(super) fn plan(
     request: &UpdateRequest,
@@ -64,21 +40,10 @@ pub(super) fn plan(
         current.output_stream == proposed.output_stream,
         "query updates cannot change the producer stream"
     );
-    for field in [
-        "volatile",
-        "publication",
-        "bootstrap",
-        "recovery",
-        "resetConfiguration",
-    ] {
-        anyhow::ensure!(
-            request.current.configuration.get(field) == request.proposed.configuration.get(field),
-            "query updates cannot change the storage, bootstrap or recovery policy"
-        );
-    }
-    if current.configuration_bytes(&current_execution)?
-        == proposed.configuration_bytes(&proposed_execution)?
-    {
+    let in_place = current.configuration_bytes(&current_execution)?
+        == proposed.configuration_bytes(&proposed_execution)?;
+    let plan = transformer::update_plan(request, in_place)?;
+    if in_place {
         let without_retention = |configuration: &serde_json::Value| -> anyhow::Result<_> {
             let mut fields = configuration
                 .as_object()
@@ -92,21 +57,6 @@ pub(super) fn plan(
                 == without_retention(&request.proposed.configuration)?,
             "this query update does not implement changes to non-semantic settings other than output retention"
         );
-        anyhow::ensure!(
-            proposed.outbox_capacity >= current.outbox_capacity,
-            "retained query updates cannot discard history by reducing output retention"
-        );
-        return Ok(ComponentUpdatePlan {
-            mode: ComponentUpdateMode::InPlace,
-            data: ComponentUpdateData::Preserve,
-        });
     }
-    Ok(ComponentUpdatePlan {
-        mode: ComponentUpdateMode::Recreate,
-        data: if has_bootstrap(&request.proposed) {
-            ComponentUpdateData::Rebootstrap
-        } else {
-            ComponentUpdateData::Reset
-        },
-    })
+    Ok(plan)
 }

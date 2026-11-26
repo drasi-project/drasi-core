@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! A downstream native query bootstraps from an upstream native query's
-//! `snapshot` output over a bootstrap edge, then continues from its live output
+//! committed snapshot over the data connection, then continues from its live output
 //! without counting the snapshot's results twice.
 
 use super::*;
@@ -202,13 +202,6 @@ async fn a_native_query_bootstraps_from_an_upstream_native_query_snapshot() -> R
         )
         .connect(
             EdgeDefinition::new(endpoint(&upstream, "out")?, endpoint(&downstream, "in")?),
-            pipe(),
-        )
-        .connect(
-            EdgeDefinition::new(
-                endpoint(&upstream, "snapshot")?,
-                endpoint(&downstream, "bootstrap")?,
-            ),
             pipe(),
         )
         .connect(

@@ -1,7 +1,7 @@
 # Native PostgreSQL source
 
 `drasi-computation-source-postgres` streams a PostgreSQL logical-replication
-publication into a ComputationGraph (native ABI 0.1.0). It provides four
+publication into a ComputationGraph (native ABI 0.2.0). It provides four
 factories, each at implementation and configuration version `1`:
 
 | Factory | Output |

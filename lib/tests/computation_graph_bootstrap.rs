@@ -147,7 +147,7 @@ fn named_relay_source(name: &str) -> (RelaySource, SourceHandle) {
     let relay = BootstrapRelay::new({
         let emitted = emitted.clone();
         let handovers = handovers.clone();
-        Arc::new(move |request, _upstream| {
+        Arc::new(move |request| {
             let sequence = emitted.load(Ordering::SeqCst);
             handovers
                 .lock()
@@ -234,10 +234,25 @@ struct Seed {
     stream: String,
     records: Vec<SourceChange>,
     failure: Option<&'static str>,
+    pause: Option<Arc<ScanPause>>,
+}
+
+#[derive(Default)]
+struct ScanPause {
+    captured: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    stopped: tokio::sync::Notify,
 }
 
 #[async_trait]
 impl ComputationBootstrapProvider for Seed {
+    async fn stop(&self) -> anyhow::Result<()> {
+        if let Some(pause) = &self.pause {
+            pause.stopped.notify_one();
+        }
+        Ok(())
+    }
+
     async fn snapshot(&self) -> anyhow::Result<ComputationBootstrapSnapshot> {
         if let Some(reason) = self.failure {
             anyhow::bail!("{reason}");
@@ -256,6 +271,10 @@ impl ComputationBootstrapProvider for Seed {
                 .map_err(anyhow::Error::from)
             })
             .collect::<Vec<_>>();
+        if let Some(pause) = &self.pause {
+            pause.captured.notify_one();
+            pause.release.notified().await;
+        }
         Ok(ComputationBootstrapSnapshot {
             changes: Box::pin(futures::stream::iter(changes)),
             watermarks: Vec::new(),
@@ -265,6 +284,7 @@ impl ComputationBootstrapProvider for Seed {
 
 struct ProviderHandle {
     sessions: Arc<Mutex<Vec<BootstrapRequest>>>,
+    pause: Arc<Mutex<Option<(ComponentId, Arc<ScanPause>)>>>,
 }
 
 fn provider(
@@ -273,6 +293,7 @@ fn provider(
     failure: Option<&'static str>,
 ) -> (BootstrapProviderComponent, ProviderHandle) {
     let sessions = Arc::new(Mutex::new(Vec::new()));
+    let pause = Arc::new(Mutex::new(None::<(ComponentId, Arc<ScanPause>)>));
     let stream_name = if name == "provider" {
         "seed".to_string()
     } else {
@@ -280,18 +301,25 @@ fn provider(
     };
     let factory: BootstrapProviderFactory = {
         let sessions = sessions.clone();
+        let pause = pause.clone();
         Arc::new(move |request: &BootstrapRequest| {
             sessions.lock().unwrap().push(request.clone());
+            let pause = pause
+                .lock()
+                .unwrap()
+                .take_if(|(id, _)| id == request.origin())
+                .map(|(_, pause)| pause);
             Ok(Arc::new(Seed {
                 stream: stream_name.clone(),
                 records: records.clone(),
                 failure,
+                pause,
             }) as Arc<dyn ComputationBootstrapProvider>)
         })
     };
     (
         BootstrapProviderComponent::new(id(name), factory).unwrap(),
-        ProviderHandle { sessions },
+        ProviderHandle { sessions, pause },
     )
 }
 
@@ -375,25 +403,124 @@ fn names(values: &[&str]) -> Vec<serde_json::Value> {
 
 const PEOPLE: &str = "MATCH (n:Person) RETURN n.name AS name";
 
+/// Only the external source needs a provider attachment. Each query has one
+/// ordinary data input; no caller supplies a second edge or drives the scan.
+async fn upstream_state_through_three_queries(transfer: StateTransfer) {
+    let (source, source_handle) = relay_source();
+    let (seed, seeded) = provider("provider", vec![person("a", "Alice", 1)], None);
+    let (people, people_rows) = query("upstream", PEOPLE).await;
+    let (count, count_rows) = query("left", "MATCH (n) RETURN count(n) AS total").await;
+    let (display, display_rows) = query("right", "MATCH (n) RETURN n.total AS total").await;
+    let builder = ComputationGraph::builder("bootstrap-graph")
+        .fixture_transformer(Box::new(display))
+        .fixture_transformer(Box::new(count))
+        .fixture_transformer(Box::new(people))
+        .fixture_source(Box::new(source))
+        .bootstrap_provider(fixture_support::component_name(), Box::new(seed))
+        .bind_stream(endpoint("source", "out"), stream("source/out"))
+        .bind_stream(endpoint("upstream", "out"), stream("upstream/out"))
+        .bind_stream(endpoint("left", "out"), stream("left/out"))
+        .bind_stream(endpoint("right", "out"), stream("right/out"))
+        .connect(
+            EdgeDefinition::new(
+                endpoint("provider", "snapshot"),
+                endpoint("source", "bootstrap"),
+            ),
+            pipe(),
+        )
+        .connect(
+            EdgeDefinition::new(endpoint("source", "out"), endpoint("upstream", "in")),
+            pipe(),
+        )
+        .connect(
+            EdgeDefinition::new(endpoint("upstream", "out"), endpoint("left", "in")),
+            pipe(),
+        )
+        .connect(
+            EdgeDefinition::new(endpoint("left", "out"), endpoint("right", "in")),
+            pipe(),
+        );
+    let mut graph = [("source", "upstream"), ("upstream", "left"), ("left", "right")]
+        .into_iter()
+        .fold(builder, |builder, (from, to)| {
+            builder.relationship_policy(
+                EdgeDefinition::new(endpoint(from, "out"), endpoint(to, "in")),
+                RelationshipPolicy {
+                    state_transfer: transfer,
+                    ..Default::default()
+                },
+            )
+        })
+        .build()
+        .expect("data connections and source provider");
+    let run = graph.start().unwrap();
+    let control = run.control();
+    let (result, ()) = tokio::join!(run, async {
+        wait_started(&control, &["upstream", "left", "right"]).await;
+        assert_eq!(rows(&people_rows), names(&["Alice"]));
+        assert_eq!(rows(&count_rows), [serde_json::json!({"total": 1})]);
+        assert_eq!(rows(&display_rows), [serde_json::json!({"total": 1})]);
+        assert_eq!(seeded.sessions.lock().unwrap().len(), 1);
+        source_handle.live.send(person("b", "Bob", 2)).unwrap();
+        eventually("three-query live suffix", || {
+            rows(&people_rows) == names(&["Alice", "Bob"])
+                && rows(&display_rows) == [serde_json::json!({"total": 2})]
+        })
+        .await;
+        control.cancel();
+    });
+    assert!(matches!(result, Err(GraphError::Cancelled)), "{result:?}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn connected_queries_bootstrap_without_a_second_edge_current_thread() {
+    upstream_state_through_three_queries(StateTransfer::Stream).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connected_queries_bootstrap_without_a_second_edge_multi_thread() {
+    upstream_state_through_three_queries(StateTransfer::Stream).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connected_queries_bootstrap_through_provider_and_materialized_file_lanes() {
+    upstream_state_through_three_queries(StateTransfer::TemporaryFile {
+        max_file_bytes: std::num::NonZeroU64::new(1 << 20).unwrap(),
+    })
+    .await;
+}
+
 /// Adds a query consuming the source's data and an output sink.
 fn with_query(
     builder: ComputationGraphBuilder,
     name: &str,
     query: ContinuousQueryTransformer,
 ) -> ComputationGraphBuilder {
+    with_query_inputs(builder, name, query, &["source"])
+}
+
+fn with_query_inputs(
+    builder: ComputationGraphBuilder,
+    name: &str,
+    query: ContinuousQueryTransformer,
+    sources: &[&str],
+) -> ComputationGraphBuilder {
     let sink_name = format!("{name}-sink");
-    builder
+    let mut builder = builder
         .fixture_transformer(Box::new(query))
         .fixture_sink(Box::new(sink(&sink_name)))
         .bind_stream(endpoint(name, "out"), stream(&format!("{name}/out")))
         .connect(
-            EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in")),
-            pipe(),
-        )
-        .connect(
             EdgeDefinition::new(endpoint(name, "out"), endpoint(&sink_name, "in")),
             pipe(),
-        )
+        );
+    for source in sources {
+        builder = builder.connect(
+            EdgeDefinition::new(endpoint(source, "out"), endpoint(name, "in")),
+            pipe(),
+        );
+    }
+    builder
 }
 
 async fn eventually(what: &str, mut condition: impl FnMut() -> bool) {
@@ -439,10 +566,7 @@ async fn two_consumers_bootstrap_through_one_source_relay_with_their_own_session
             pipe(),
         );
     for (name, query) in [("left", left), ("right", right)] {
-        builder = with_query(builder, name, query).connect(
-            EdgeDefinition::new(endpoint("source", "snapshot"), endpoint(name, "bootstrap")),
-            pipe(),
-        );
+        builder = with_query(builder, name, query);
     }
     let mut graph = builder.build().unwrap();
     let run = graph.start().unwrap();
@@ -545,16 +669,7 @@ async fn bootstrap_from_two_shared_relaying_sources() {
         ("left", left, ["source", "second-source"]),
         ("right", right, ["second-source", "source"]),
     ] {
-        builder = with_query(builder, name, query).connect(
-            EdgeDefinition::new(endpoint("second-source", "out"), endpoint(name, "in")),
-            pipe(),
-        );
-        for source in sources {
-            builder = builder.connect(
-                EdgeDefinition::new(endpoint(source, "snapshot"), endpoint(name, "bootstrap")),
-                pipe(),
-            );
-        }
+        builder = with_query_inputs(builder, name, query, &sources);
     }
     let mut graph = builder.build().unwrap();
     let run = graph.start().unwrap();
@@ -603,6 +718,48 @@ async fn a_local_provider_is_exclusive_and_inputs_are_never_asked() {
     assert!(matches!(result, Err(GraphError::Cancelled)), "{result:?}");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_direct_seed_wins_even_when_the_connected_output_has_current_state() -> anyhow::Result<()>
+{
+    let (source, handle) = relay_source();
+    let (upstream_seed, upstream_reads) = provider("provider", vec![person("a", "Alice", 1)], None);
+    let (left, results) = query("left", PEOPLE).await;
+    let left = left.with_bootstrap(Arc::new(Seed {
+        stream: "local/seed".into(),
+        records: vec![person("c", "Carol", 1)],
+        failure: None,
+        pause: None,
+    }));
+    let builder = ComputationGraph::builder("bootstrap-graph")
+        .fixture_source(Box::new(source))
+        .bootstrap_provider(fixture_support::component_name(), Box::new(upstream_seed))
+        .bind_stream(endpoint("source", "out"), stream("source/out"))
+        .connect(
+            EdgeDefinition::new(
+                endpoint("provider", "snapshot"),
+                endpoint("source", "bootstrap"),
+            ),
+            pipe(),
+        );
+    let mut graph = with_query(builder, "left", left).build()?;
+    let run = graph.start()?;
+    let control = run.control();
+    let (outcome, ()) = tokio::join!(run, async {
+        wait_started(&control, &["left"]).await;
+        assert_eq!(rows(&results), names(&["Carol"]));
+        assert!(handle.requests().is_empty());
+        assert!(upstream_reads.sessions.lock().unwrap().is_empty());
+        handle.live.send(person("d", "Dan", 2)).unwrap();
+        eventually("seeded component follows the same live input", || {
+            rows(&results) == names(&["Carol", "Dan"])
+        })
+        .await;
+        control.cancel();
+    });
+    assert!(matches!(outcome, Err(GraphError::Cancelled)), "{outcome:?}");
+    Ok(())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn source_relay_and_upstream_query_snapshot_merge() {
     let (source, handle) = relay_source();
@@ -621,32 +778,11 @@ async fn source_relay_and_upstream_query_snapshot_merge() {
                 endpoint("source", "bootstrap"),
             ),
             pipe(),
-        )
-        .connect(
-            EdgeDefinition::new(
-                endpoint("source", "snapshot"),
-                endpoint("upstream", "bootstrap"),
-            ),
-            pipe(),
         );
     let builder = with_query(builder, "upstream", upstream);
     let mut graph = with_query(builder, "left", left)
         .connect(
             EdgeDefinition::new(endpoint("upstream", "out"), endpoint("left", "in")),
-            pipe(),
-        )
-        .connect(
-            EdgeDefinition::new(
-                endpoint("source", "snapshot"),
-                endpoint("left", "bootstrap"),
-            ),
-            pipe(),
-        )
-        .connect(
-            EdgeDefinition::new(
-                endpoint("upstream", "snapshot"),
-                endpoint("left", "bootstrap"),
-            ),
             pipe(),
         )
         .build()
@@ -680,16 +816,7 @@ async fn a_restarted_consumer_bootstraps_again_before_live_changes() {
             ),
             pipe(),
         );
-    let mut graph = with_query(builder, "left", left)
-        .connect(
-            EdgeDefinition::new(
-                endpoint("source", "snapshot"),
-                endpoint("left", "bootstrap"),
-            ),
-            pipe(),
-        )
-        .build()
-        .unwrap();
+    let mut graph = with_query(builder, "left", left).build().unwrap();
     let run = graph.start().unwrap();
     let control = run.control();
     let (result, ()) = tokio::join!(run, async {
@@ -733,16 +860,7 @@ async fn a_failing_provider_fails_the_consumer_bootstrap_with_its_reason() {
             ),
             pipe(),
         );
-    let mut graph = with_query(builder, "left", left)
-        .connect(
-            EdgeDefinition::new(
-                endpoint("source", "snapshot"),
-                endpoint("left", "bootstrap"),
-            ),
-            pipe(),
-        )
-        .build()
-        .unwrap();
+    let mut graph = with_query(builder, "left", left).build().unwrap();
     let run = graph.start().unwrap();
     let control = run.control();
     let (result, ()) = tokio::join!(run, async {
@@ -768,6 +886,15 @@ async fn a_failing_provider_fails_the_consumer_bootstrap_with_its_reason() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_late_consumer_gets_its_own_snapshot_while_live_changes_continue() {
+    late_join_during_scan(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_over_budget_join_cancels_its_scan_without_stopping_the_live_branch() {
+    late_join_during_scan(true).await;
+}
+
+async fn late_join_during_scan(exhaust_window: bool) {
     let (source, handle) = relay_source();
     let (seed, seeded) = provider("provider", vec![person("a", "Alice", 1)], None);
     let (left, left_results) = query("left", PEOPLE).await;
@@ -783,16 +910,7 @@ async fn a_late_consumer_gets_its_own_snapshot_while_live_changes_continue() {
             ),
             pipe(),
         );
-    let mut graph = with_query(builder, "left", left)
-        .connect(
-            EdgeDefinition::new(
-                endpoint("source", "snapshot"),
-                endpoint("left", "bootstrap"),
-            ),
-            pipe(),
-        )
-        .build()
-        .unwrap();
+    let mut graph = with_query(builder, "left", left).build().unwrap();
     let run = graph.start().unwrap();
     let control = run.control();
     let (result, ()) = tokio::join!(run, async {
@@ -828,17 +946,17 @@ async fn a_late_consumer_gets_its_own_snapshot_while_live_changes_continue() {
             .unwrap();
         for (from, to) in [
             (endpoint("source", "out"), endpoint("right", "in")),
-            (
-                endpoint("source", "snapshot"),
-                endpoint("right", "bootstrap"),
-            ),
             (endpoint("right", "out"), endpoint("right-sink", "in")),
         ] {
+            let mut policy = RelationshipPolicy::default();
+            if exhaust_window && to == endpoint("right", "in") {
+                policy.bootstrap_window.max_envelopes = NonZeroUsize::new(1).unwrap();
+            }
             let report = control
                 .connect(
                     EdgeDefinition::new(from, to),
-                    pipe(),
-                    RelationshipPolicy::default(),
+                    Box::new(BoundedPipeConfig { capacity: 1 }),
+                    policy,
                 )
                 .await
                 .unwrap();
@@ -850,7 +968,56 @@ async fn a_late_consumer_gets_its_own_snapshot_while_live_changes_continue() {
             .start()
             .await
             .unwrap();
-        right_handle.start().await.unwrap();
+        let pause = Arc::new(ScanPause::default());
+        *seeded.pause.lock().unwrap() = Some((id("right"), pause.clone()));
+        let (started, ()) = tokio::join!(right_handle.start(), async {
+            tokio::time::timeout(Duration::from_secs(10), pause.captured.notified())
+                .await
+                .expect("joining reader captured its seed");
+            for (key, name, time) in [("d", "Dan", 4), ("e", "Eve", 5), ("f", "Finn", 6)] {
+                handle.live.send(person(key, name, time)).unwrap();
+            }
+            eventually(
+                "active subscriber passes the joining pipe's capacity before release",
+                || rows(&left_results) == names(&["Alice", "Bob", "Carol", "Dan", "Eve", "Finn"]),
+            )
+            .await;
+            if exhaust_window {
+                // Do not unblock the provider: the failed reader must release it.
+                tokio::time::timeout(Duration::from_secs(5), pause.stopped.notified())
+                    .await
+                    .expect("abandoned provider must stop while its scan is paused");
+            } else {
+                pause.release.notify_one();
+            }
+        });
+        if exhaust_window {
+            assert!(
+                started.is_err(),
+                "lost live data cannot produce a successful handoff"
+            );
+            let failure = right_handle
+                .wait_started()
+                .await
+                .expect_err("joining subscriber must fail");
+            assert!(
+                format!("{failure:#}").contains("bootstrap live suffix exceeded"),
+                "{failure:#}"
+            );
+            assert!(!right_handle.observed().unwrap().started);
+            handle.live.send(person("g", "Gail", 7)).unwrap();
+            eventually(
+                "active subscriber continues after sibling overflows",
+                || {
+                    rows(&left_results)
+                        == names(&["Alice", "Bob", "Carol", "Dan", "Eve", "Finn", "Gail"])
+                },
+            )
+            .await;
+            control.cancel();
+            return;
+        }
+        started.unwrap();
         wait_started(&control, &["right"]).await;
 
         // The late consumer's snapshot covers the live changes emitted before
@@ -862,12 +1029,15 @@ async fn a_late_consumer_gets_its_own_snapshot_while_live_changes_continue() {
         assert_eq!(handovers[1].0, id("right"));
         assert_eq!(handovers[1].2, 2);
         assert_eq!(seeded.sessions.lock().unwrap().len(), 2);
-        assert_eq!(rows(&right_results), names(&["Alice"]));
-
-        handle.live.send(person("d", "Dan", 4)).unwrap();
-        eventually("live change for both consumers", || {
-            rows(&left_results) == names(&["Alice", "Bob", "Carol", "Dan"])
-                && rows(&right_results) == names(&["Alice", "Dan"])
+        eventually(
+            "joining subscriber keeps the change made during its scan",
+            || rows(&right_results) == names(&["Alice", "Dan", "Eve", "Finn"]),
+        )
+        .await;
+        handle.live.send(person("g", "Gail", 7)).unwrap();
+        eventually("live change for both consumers after handoff", || {
+            rows(&left_results) == names(&["Alice", "Bob", "Carol", "Dan", "Eve", "Finn", "Gail"])
+                && rows(&right_results) == names(&["Alice", "Dan", "Eve", "Finn", "Gail"])
         })
         .await;
         control.cancel();
@@ -933,7 +1103,7 @@ async fn graph_validation_rejects_invalid_bootstrap_wiring() {
                 ),
                 pipe(),
             ),
-        "not both",
+        "provider attachment",
     );
 
     // A consumer bootstraps only from producers whose data it consumes.
@@ -946,7 +1116,7 @@ async fn graph_validation_rejects_invalid_bootstrap_wiring() {
             ),
             pipe(),
         ),
-        "when it consumes its data",
+        "provider attachment",
     );
 
     // A source's bootstrap input accepts only a local provider.
@@ -974,7 +1144,7 @@ async fn graph_validation_rejects_invalid_bootstrap_wiring() {
     )
     .is_err());
 
-    // Bootstrap ports are optional; data ports still must connect.
+    // Unused ports are valid; they create no connection or bootstrap wait.
     assert!(base().await.build().is_ok());
 }
 
@@ -1118,16 +1288,10 @@ async fn bootstrap_replies_are_delivered_only_on_the_requesting_edge() {
     for name in ["left", "right"] {
         let probe = probe(name);
         probes.push((probe.ports.clone(), probe.seen.clone(), probe.own.clone()));
-        builder = builder
-            .fixture_sink(Box::new(probe))
-            .connect(
-                EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in")),
-                pipe(),
-            )
-            .connect(
-                EdgeDefinition::new(endpoint("source", "snapshot"), endpoint(name, "bootstrap")),
-                pipe(),
-            );
+        builder = builder.fixture_sink(Box::new(probe)).connect(
+            EdgeDefinition::new(endpoint("source", "out"), endpoint(name, "in")),
+            pipe(),
+        );
     }
     let mut graph = builder.build().unwrap();
     let run = graph.start().unwrap();
@@ -1176,16 +1340,7 @@ async fn a_first_start_holds_live_changes_until_the_first_boundary() {
             ),
             pipe(),
         );
-    let mut graph = with_query(builder, "left", left)
-        .connect(
-            EdgeDefinition::new(
-                endpoint("source", "snapshot"),
-                endpoint("left", "bootstrap"),
-            ),
-            pipe(),
-        )
-        .build()
-        .unwrap();
+    let mut graph = with_query(builder, "left", left).build().unwrap();
     let run = graph.start().unwrap();
     let control = run.control();
     let (result, ()) = tokio::join!(run, async {
@@ -1208,6 +1363,16 @@ async fn a_first_start_holds_live_changes_until_the_first_boundary() {
 #[derive(Default)]
 struct DurableState {
     writes: Mutex<Vec<bytes::Bytes>>,
+    second: Option<Arc<SecondIntent>>,
+}
+
+#[derive(Default)]
+struct SecondIntent {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    committed: std::sync::atomic::AtomicBool,
+    effects: AtomicU64,
+    reject: bool,
 }
 
 #[async_trait]
@@ -1219,7 +1384,19 @@ impl BootstrapState for DurableState {
         Ok(self.writes.lock().unwrap().last().cloned())
     }
     async fn write(&self, state: bytes::Bytes) -> anyhow::Result<()> {
+        let second = self
+            .second
+            .as_ref()
+            .filter(|_| self.writes.lock().unwrap().len() == 1);
+        if let Some(gate) = second {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+            anyhow::ensure!(!gate.reject, "injected consumer checkpoint failure");
+        }
         self.writes.lock().unwrap().push(state);
+        if let Some(gate) = second {
+            gate.committed.store(true, Ordering::SeqCst);
+        }
         Ok(())
     }
 }
@@ -1228,6 +1405,8 @@ impl BootstrapState for DurableState {
 /// record, as a provider creating an external snapshot resource does.
 struct Handover {
     seen: Arc<Mutex<Vec<Option<bytes::Bytes>>>>,
+    token: &'static str,
+    second: Option<Arc<SecondIntent>>,
 }
 
 #[async_trait]
@@ -1247,11 +1426,25 @@ impl ComputationBootstrapProvider for Handover {
         &self,
         state: &dyn BootstrapState,
     ) -> anyhow::Result<ComputationBootstrapSnapshot> {
-        state.write(bytes::Bytes::from_static(b"slot-1")).await?;
+        state
+            .write(bytes::Bytes::from_static(self.token.as_bytes()))
+            .await?;
+        if let Some(gate) = &self.second {
+            gate.effects.fetch_add(1, Ordering::SeqCst);
+            anyhow::ensure!(
+                gate.committed.load(Ordering::SeqCst),
+                "external effect before consumer commit"
+            );
+        }
         Ok(ComputationBootstrapSnapshot {
             changes: Box::pin(futures::stream::iter(vec![
-                GraphChangeCodec::encode_change(person("a", "Alice", 1), stream("seed"), 1, None)
-                    .map_err(anyhow::Error::from),
+                GraphChangeCodec::encode_change(
+                    person("a", "Alice", 1),
+                    stream(self.token),
+                    1,
+                    None,
+                )
+                .map_err(anyhow::Error::from),
             ])),
             watermarks: Vec::new(),
         })
@@ -1294,14 +1487,14 @@ impl ComputationComponent for DurableProbe {
                 provider.prepare_with_state(self.state.as_ref()).await?,
                 BootstrapPreparation::Ready
             );
-            let mut snapshot = provider.snapshot_with_state(self.state.as_ref()).await?;
+            let mut snapshot = provider.open_snapshot(self.state.clone()).await?;
             let written = !self.state.writes.lock().unwrap().is_empty();
             let mut records = 0;
             while let Some(record) = snapshot.changes.next().await {
                 record?;
                 records += 1;
             }
-            assert_eq!(records, 1);
+            assert_eq!(records, self.ports.as_ref().unwrap().inputs().len());
             drop(snapshot);
             provider.complete_snapshot().await?;
             if let Some(state) = provider.completion_state()? {
@@ -1338,7 +1531,11 @@ async fn provider_state_is_retained_by_a_persistent_consumer_and_replayed() {
     let durable = BootstrapProviderComponent::new(id("provider"), {
         let seen = seen.clone();
         Arc::new(move |_: &BootstrapRequest| {
-            Ok(Arc::new(Handover { seen: seen.clone() }) as Arc<dyn ComputationBootstrapProvider>)
+            Ok(Arc::new(Handover {
+                seen: seen.clone(),
+                token: "slot-1",
+                second: None,
+            }) as Arc<dyn ComputationBootstrapProvider>)
         })
     })
     .unwrap();
@@ -1349,7 +1546,9 @@ async fn provider_state_is_retained_by_a_persistent_consumer_and_replayed() {
             id("durable"),
             vec![
                 graph_change_port("in", PortDirection::Input, false),
-                graph_change_port("bootstrap", PortDirection::Input, true),
+                graph_change_port("spare", PortDirection::Input, false),
+                graph_change_port("bootstrap", PortDirection::Input, true)
+                    .for_data_port(port("in")),
             ],
         )
         .unwrap(),
@@ -1374,13 +1573,6 @@ async fn provider_state_is_retained_by_a_persistent_consumer_and_replayed() {
             ),
             pipe(),
         )
-        .connect(
-            EdgeDefinition::new(
-                endpoint("source", "snapshot"),
-                endpoint("durable", "bootstrap"),
-            ),
-            pipe(),
-        )
         .build()
         .unwrap();
     let run = graph.start().unwrap();
@@ -1397,6 +1589,139 @@ async fn provider_state_is_retained_by_a_persistent_consumer_and_replayed() {
         control.cancel();
     });
     assert!(matches!(result, Err(GraphError::Cancelled)), "{result:?}");
+}
+
+async fn second_provider_intent(transfer: StateTransfer, reject: bool) -> anyhow::Result<()> {
+    let gate = Arc::new(SecondIntent {
+        reject,
+        ..Default::default()
+    });
+    let state = Arc::new(DurableState {
+        second: Some(gate.clone()),
+        ..Default::default()
+    });
+    let probe = DurableProbe {
+        descriptor: ComponentDescriptor::try_new(
+            id("durable"),
+            vec![
+                graph_change_port("in", PortDirection::Input, false),
+                graph_change_port("bootstrap", PortDirection::Input, true),
+            ],
+        )?,
+        control: None,
+        ports: None,
+        state,
+        first_write_before_records: Default::default(),
+    };
+    let mut builder = ComputationGraph::builder("bootstrap-graph").fixture_sink(Box::new(probe));
+    let mut history = Vec::new();
+    let mut keep_live = Vec::new();
+    for (source, provider, token, second) in [
+        ("source", "provider", "slot-1", None),
+        (
+            "second-source",
+            "second-provider",
+            "slot-2",
+            Some(gate.clone()),
+        ),
+    ] {
+        let (relay, live) = named_relay_source(source);
+        keep_live.push(live);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        history.push((seen.clone(), token));
+        let provider_node = BootstrapProviderComponent::new(
+            id(provider),
+            Arc::new(move |_| {
+                Ok(Arc::new(Handover {
+                    seen: seen.clone(),
+                    token,
+                    second: second.clone(),
+                }))
+            }),
+        )?;
+        let data = EdgeDefinition::new(endpoint(source, "out"), endpoint("durable", "in"));
+        builder = builder
+            .fixture_source(Box::new(relay))
+            .bootstrap_provider(fixture_support::component_name(), Box::new(provider_node))
+            .bind_stream(endpoint(source, "out"), stream(&format!("{source}/out")))
+            .connect(
+                EdgeDefinition::new(
+                    endpoint(provider, "snapshot"),
+                    endpoint(source, "bootstrap"),
+                ),
+                pipe(),
+            )
+            .connect(data.clone(), pipe())
+            .relationship_policy(
+                data,
+                RelationshipPolicy {
+                    state_transfer: transfer,
+                    ..Default::default()
+                },
+            );
+    }
+    let mut graph = builder.build()?;
+    let run = graph.start()?;
+    let control = run.control();
+    let (result, check) = tokio::join!(run, async {
+        let check = tokio::time::timeout(Duration::from_secs(8), async {
+            gate.entered.notified().await;
+            assert_eq!(
+                gate.effects.load(Ordering::SeqCst),
+                0,
+                "receiving an intent is not a commit"
+            );
+            gate.release.notify_one();
+            let started = control
+                .component_handle_by_id(&id("durable"))?
+                .wait_started()
+                .await;
+            if reject {
+                let failure = started.expect_err("failed checkpoint must fail bootstrap");
+                anyhow::ensure!(
+                    format!("{failure:#}").contains("injected consumer checkpoint failure"),
+                    "{failure:#}"
+                );
+                assert_eq!(gate.effects.load(Ordering::SeqCst), 0);
+            } else {
+                started?;
+                assert_eq!(gate.effects.load(Ordering::SeqCst), 2);
+                for (seen, token) in history {
+                    assert_eq!(
+                        *seen.lock().unwrap(),
+                        [None, Some(bytes::Bytes::from_static(token.as_bytes()))]
+                    );
+                }
+            }
+            anyhow::Ok(())
+        })
+        .await;
+        control.cancel();
+        check
+    });
+    check??;
+    anyhow::ensure!(
+        result.is_err(),
+        "graph should end by cancellation or failed start"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn second_relayed_provider_waits_for_its_own_committed_intent() -> anyhow::Result<()> {
+    second_provider_intent(StateTransfer::Stream, false).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_second_checkpoint_cannot_release_a_file_bootstrap_provider() -> anyhow::Result<()>
+{
+    second_provider_intent(
+        StateTransfer::TemporaryFile {
+            max_file_bytes: std::num::NonZeroU64::new(1024 * 1024).expect("file quota"),
+        },
+        true,
+    )
+    .await
 }
 
 /// A provider node whose start waits for a release, so bootstrap requests can
@@ -1464,16 +1789,7 @@ async fn a_request_before_the_provider_starts_waits_for_it() {
             ),
             pipe(),
         );
-    let mut graph = with_query(builder, "left", left)
-        .connect(
-            EdgeDefinition::new(
-                endpoint("source", "snapshot"),
-                endpoint("left", "bootstrap"),
-            ),
-            pipe(),
-        )
-        .build()
-        .unwrap();
+    let mut graph = with_query(builder, "left", left).build().unwrap();
     let run = graph.start().unwrap();
     let control = run.control();
     let (result, ()) = tokio::join!(run, async {

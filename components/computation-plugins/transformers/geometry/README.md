@@ -15,6 +15,11 @@ Load the resulting native library through the Host SDK, or use `plugin()` /
 `GeometryFactory` for native SDK registration. It depends only on the
 computation SDK, the contracts and [`geo`](https://docs.rs/geo).
 
+Geometry is a stateful transformer. It runs on the same runtime as the
+[query transformer](../query), described in the
+[native transformer guide](../NATIVE-TRANSFORMER-GUIDE.md#stateful-transformers),
+and requires host-owned processing.
+
 ## Configuration
 
 ```json
@@ -48,6 +53,17 @@ computation SDK, the contracts and [`geo`](https://docs.rs/geo).
 | `invalidGeometry` | `fail` | `fail`, `skip` or `report` (see below). |
 | `errorLabel` | `GeometryError` | The label of error records under `report`. |
 | `limits` | `{maxElements: 10000, maxVertices: 4096, maxOutputs: 100000}` | Resource bounds. Each must be between 1 and 10,000,000. |
+
+It also accepts the runtime's shared options:
+
+| Option | Effect |
+| --- | --- |
+| `bootstrap` | Initialize from the bound bootstrap provider or the connected input's current state |
+| `volatile` | Keep state in memory; every initialization publishes a new output epoch |
+| `publication` | `atomic` (default) or `non_atomic` |
+| `recovery` | `strict` (default) or `auto_reset` |
+| `resetConfiguration` | Reset retained state when the configuration changed |
+| `outboxCapacity` | Committed outputs retained for replay and restart delivery (default 1) |
 
 ### Sets
 
@@ -126,8 +142,9 @@ Each pair that satisfies the relation becomes one node with the relation's
   pairs involving a changed member are re-evaluated. A bounding-box prefilter
   skips exact distance and topology tests for distant pairs. The output batch
   holds deletes first, then inserts and replaces. A record whose label and
-  properties are unchanged is not re-emitted. Output is ordered by relation
-  and member key, so it is deterministic regardless of input order.
+  properties are unchanged is not re-emitted, and a batch that changes no
+  record publishes nothing. Output is ordered by relation and member key, so
+  it is deterministic regardless of input order.
 - **Patches.** `Update` changes are merged onto the retained full image. A patch
   for a set member with no retained image is an error. A patch for an element
   outside every set is ignored. Deleting an unknown element is ignored.
@@ -143,25 +160,46 @@ Each pair that satisfies the relation becomes one node with the relation's
   Elements outside every set do not count. Pair evaluation is a linear scan
   over the other set, bounded by these limits. An R-tree index (`rstar`) is
   intentionally not used, because it would add a dependency.
-- **Inputs.** Only graph data is accepted. Control, scheduled (`Future`) and
-  query snapshot/progress recovery frames are rejected.
-- **Output and recovery.** The output is volatile. Each envelope carries
-  producer progress at the transformer's own sequence. The `out` port
-  publishes a snapshot of the current records while the transformer is
-  running.
-- **Lifecycle.** Input is refused while paused. Stop and Start retain state. A
-  Preserve dispose keeps state. An erasing dispose, which requires a stopped
-  transformer, drops the state and retires the snapshot.
+- **Inputs.** Only graph changes are evaluated. A scheduled (`Future`)
+  change is rejected.
 - **Updates.**
-  - Changing `stream` is unsupported.
+  - Changing `stream` is unsupported, and so is changing the shared options
+    other than `outboxCapacity`, which may only grow in place.
   - Changing `limits`, or switching `invalidGeometry` between `fail` and
     `skip`, is applied in place at a Pause (state preserved). If the retained
-    state already exceeds the new limits, the update is assessed as Replace
-    instead.
-  - Every other change, including changed input bindings, needs Replace with a
-    reset. A transformer can only emit in response to input, so it cannot emit
-    the retractions a semantic change implies. Its state is rebuilt from the
-    replayed input instead.
+    state already exceeds the new limits, the update is assessed as a
+    reconstruction instead.
+  - Every other change, including changed input bindings, reconstructs the
+    transformer. A transformer can only emit in response to input, so it
+    cannot emit the retractions a semantic change implies. With `bootstrap`
+    it initializes from its input again; otherwise it starts empty.
+
+## Storage, bootstrap and recovery
+
+The transformer retains the current full image of every set member's input in
+the host element index, and each input's memberships and every emitted record
+in private tables. When it starts, it rebuilds its members, their shapes and
+the pair index from them; it never re-evaluates relations to recover records
+it already emitted. Arrival order decides which input owns a duplicated key,
+so memberships are stored rather than derived again. Retained state must fit
+the configured `limits` when the transformer starts.
+
+With a persistent processing provider this state survives restart and
+reconstruction. The transformer replays unconfirmed output and continues from
+its committed input position. With `volatile` or an in-memory provider, state
+is held in memory and each initialization publishes a new output epoch.
+
+With `bootstrap`, it initializes from its bound bootstrap provider or from the
+connected input's current state. `out` supports current-state,
+snapshot-and-follow and replay reads. After a gap in its input's retained
+history, `auto_reset` with a connected input rebuilds the records from that
+input's current state and publishes only the keyed difference, so a running
+dependent follows the correction without a reset. A dependent that installed
+the empty output before the first input connected receives the first input's
+records the same way. A rebuild that would strand a running dependent is
+refused. A crash during a rebuild either keeps the old records and retries, or
+completes the installed rebuild and publishes the owed difference. Deleting
+the component's owned resources erases its retained state.
 
 ## Example: move-a-wall obstructions
 

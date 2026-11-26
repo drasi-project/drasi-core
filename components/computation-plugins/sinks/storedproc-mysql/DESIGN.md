@@ -1,7 +1,7 @@
 # Native MySQL stored-procedure sink: design
 
 `drasi.mysql/storedproc` (crate `drasi-computation-sink-storedproc-mysql`,
-implementation `1`, configuration version `1`, native ABI 0.1) calls MySQL
+implementation `1`, configuration version `1`, native ABI 0.2) calls MySQL
 stored procedures for standard graph changes from any source, transformer or
 query. It is an **external consumer** of the host `DeliveryRunner`
 (`ConsumerMode::External`) with a **destination cursor**: each operation's

@@ -35,7 +35,8 @@ impl SubscriptionSettingsBuilder {
             .map(|source_config| {
                 Ok(SourceSubscriptionSettings {
                     source_id: source_config.id()?.to_owned(),
-                    enable_bootstrap: query_config.enable_bootstrap,
+                    enable_bootstrap: source_config
+                        .loads_initial_state(query_config.enable_bootstrap),
                     query_id: query_config.id.clone(),
                     nodes: source_config.nodes.iter().cloned().collect(),
                     relations: source_config.relations.iter().cloned().collect(),
@@ -199,8 +200,41 @@ mod tests {
     }
 
     #[test]
+    fn live_only_input_survives_configuration_round_trip_and_never_opts_in_a_disabled_query() {
+        let mut configured: QueryInputConfig = serde_json::from_value(serde_json::json!({
+            "component": {"id": SOURCE_2}, "enableBootstrap": false
+        }))
+        .unwrap();
+        configured = QueryInputConfig::from_execution(configured.to_execution_input().unwrap());
+        assert_eq!(
+            serde_json::to_value(&configured).unwrap()["enableBootstrap"],
+            false
+        );
+        let mut query = create_test_query_config(vec![
+            QueryInputConfig::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
+            configured,
+        ]);
+        let labels = QueryLabels {
+            node_labels: vec![],
+            relation_labels: vec![],
+        };
+        let flags = |query: &QueryConfig| {
+            SubscriptionSettingsBuilder::build_subscription_settings(query, &labels)
+                .unwrap()
+                .into_iter()
+                .map(|s| s.enable_bootstrap)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(flags(&query), [true, false]);
+        query.enable_bootstrap = false;
+        query.inputs[1].enable_bootstrap = Some(true);
+        assert_eq!(flags(&query), [false, false]);
+    }
+
+    #[test]
     fn test_node_label_in_one_source() {
         let sources = vec![QueryInputConfig {
+            enable_bootstrap: None,
             component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
             nodes: vec!["Person".to_string()],
             relations: vec![],
@@ -227,6 +261,7 @@ mod tests {
     fn test_node_label_not_in_any_source_goes_to_all() {
         let sources = vec![
             QueryInputConfig {
+                enable_bootstrap: None,
                 component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
                 nodes: vec![],
                 relations: vec![],
@@ -234,6 +269,7 @@ mod tests {
                 port: None,
             },
             QueryInputConfig {
+                enable_bootstrap: None,
                 component: ComponentReference::by_id(ComponentId::try_new(SOURCE_2).unwrap()),
                 nodes: vec![],
                 relations: vec![],
@@ -262,6 +298,7 @@ mod tests {
     fn test_node_label_in_multiple_sources_error() {
         let sources = vec![
             QueryInputConfig {
+                enable_bootstrap: None,
                 component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
                 nodes: vec!["Person".to_string()],
                 relations: vec![],
@@ -269,6 +306,7 @@ mod tests {
                 port: None,
             },
             QueryInputConfig {
+                enable_bootstrap: None,
                 component: ComponentReference::by_id(ComponentId::try_new(SOURCE_2).unwrap()),
                 nodes: vec!["Person".to_string()],
                 relations: vec![],
@@ -292,6 +330,7 @@ mod tests {
     #[test]
     fn test_relation_label_in_one_source() {
         let sources = vec![QueryInputConfig {
+            enable_bootstrap: None,
             component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
             nodes: vec![],
             relations: vec!["KNOWS".to_string()],
@@ -318,6 +357,7 @@ mod tests {
     fn test_relation_label_not_in_any_source_goes_to_all() {
         let sources = vec![
             QueryInputConfig {
+                enable_bootstrap: None,
                 component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
                 nodes: vec![],
                 relations: vec![],
@@ -325,6 +365,7 @@ mod tests {
                 port: None,
             },
             QueryInputConfig {
+                enable_bootstrap: None,
                 component: ComponentReference::by_id(ComponentId::try_new(SOURCE_2).unwrap()),
                 nodes: vec![],
                 relations: vec![],
@@ -353,6 +394,7 @@ mod tests {
     fn test_relation_label_in_multiple_sources_error() {
         let sources = vec![
             QueryInputConfig {
+                enable_bootstrap: None,
                 component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
                 nodes: vec![],
                 relations: vec!["KNOWS".to_string()],
@@ -360,6 +402,7 @@ mod tests {
                 port: None,
             },
             QueryInputConfig {
+                enable_bootstrap: None,
                 component: ComponentReference::by_id(ComponentId::try_new(SOURCE_2).unwrap()),
                 nodes: vec![],
                 relations: vec!["KNOWS".to_string()],
@@ -383,6 +426,7 @@ mod tests {
     #[test]
     fn test_join_relation_not_added_to_source() {
         let sources = vec![QueryInputConfig {
+            enable_bootstrap: None,
             component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
             nodes: vec![],
             relations: vec![],
@@ -426,6 +470,7 @@ mod tests {
     #[test]
     fn test_configured_join_relation_error() {
         let sources = vec![QueryInputConfig {
+            enable_bootstrap: None,
             component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
             nodes: vec![],
             relations: vec!["CUSTOMER".to_string()],
@@ -468,6 +513,7 @@ mod tests {
             let sources = source_ids
                 .iter()
                 .map(|source_id| QueryInputConfig {
+                    enable_bootstrap: None,
                     component: ComponentReference::by_id(ComponentId::try_new(*source_id).unwrap()),
                     nodes: vec![],
                     relations: vec![],
@@ -525,6 +571,7 @@ mod tests {
     #[test]
     fn test_join_relation_with_missing_node_label_error() {
         let sources = vec![QueryInputConfig {
+            enable_bootstrap: None,
             component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
             nodes: vec![],
             relations: vec![],
@@ -565,6 +612,7 @@ mod tests {
     fn test_complex_multi_source_scenario() {
         let sources = vec![
             QueryInputConfig {
+                enable_bootstrap: None,
                 component: ComponentReference::by_id(ComponentId::try_new(SOURCE_1).unwrap()),
                 nodes: vec!["Order".to_string()],
                 relations: vec![],
@@ -572,6 +620,7 @@ mod tests {
                 port: None,
             },
             QueryInputConfig {
+                enable_bootstrap: None,
                 component: ComponentReference::by_id(ComponentId::try_new(SOURCE_2).unwrap()),
                 nodes: vec!["Customer".to_string()],
                 relations: vec![],

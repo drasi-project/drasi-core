@@ -479,8 +479,32 @@ impl InstanceLease {
             self.component.is_constructed(),
             self.component.source_schema_reader(),
         );
-        let readers = self.component.output_readers();
-        let readers_valid = readers.validate(self.component.descriptor());
+        let mut readers = self.component.output_readers();
+        let descriptor = self.component.descriptor();
+        if let Some(description) = self.component.description() {
+            for output in descriptor.ports().iter().filter(|p| {
+                p.direction() == super::PortDirection::Output && p.kind() == super::PortKind::Data
+            }) {
+                if !descriptor.state_port_for(output.id()).is_some_and(|state| {
+                    description.bootstrap_output(state.id()).completion
+                        == drasi_computation_contracts::BootstrapCompletionKind::Relayed
+                }) {
+                    continue;
+                }
+                let mut inputs = descriptor.ports().iter().filter(|p| {
+                    p.direction() == super::PortDirection::Input
+                        && p.kind() == super::PortKind::Bootstrap
+                        && p.schema() == output.schema()
+                        && description
+                            .bootstrap_input(p.id())
+                            .is_some_and(|input| input.source_relay)
+                });
+                if let (Some(input), None) = (inputs.next(), inputs.next()) {
+                    readers = readers.with_provider_input(output.id().clone(), input.id().clone());
+                }
+            }
+        }
+        let readers_valid = readers.validate(descriptor);
         *self.slot.output_readers.lock().unwrap_or_else(|error| {
             log::error!("Output reader publication is poisoned: {}", self.slot.id);
             error.into_inner()
@@ -1452,6 +1476,7 @@ pub(super) fn initial_observations(snapshot: &GraphSnapshot) -> ObservedGraph {
                     ObservedComponent {
                         generation: ComponentGeneration(index as u64 + 1),
                         operation: OperationEpoch(0),
+                        read_epoch: OperationEpoch(0),
                         revision: snapshot.revision,
                         realization: RealizationState::Pending,
                         lifecycle: ComponentLifecycle::Stopped,
@@ -1594,29 +1619,9 @@ fn select(graph: &ComputationGraph, selection: &GraphSelection) -> GraphResult<B
 
 fn binding_dependencies(graph: &ComputationGraph, id: &ComponentId) -> Vec<ComponentId> {
     let state = graph.observed();
-    let node = &graph.nodes[graph.ids[id]];
     let mut missing = BTreeSet::new();
-    for port in node.descriptor.ports() {
-        let endpoint = super::Endpoint::new(id.clone(), port.id().clone());
-        let bound = graph.snapshot.edges.iter().any(|edge| {
-            (edge.definition.from == endpoint || edge.definition.to == endpoint)
-                && state.relationships[&edge.definition].binding == BindingState::Bound
-        });
-        let optional_input =
-            port.direction() == super::super::PortDirection::Input
-                && graph.snapshot.unbound_relationships.iter().any(|edge| {
-                    edge.definition.to == endpoint && !edge.policy.required_for_binding
-                });
-        if !bound && !optional_input && !port.is_optional() {
-            missing.insert(id.clone());
-        }
-        if port.direction() == super::super::PortDirection::Output
-            && port.kind() == super::super::PortKind::Data
-            && !node.output_streams.contains_key(port.id())
-        {
-            missing.insert(id.clone());
-        }
-    }
+    // A port describes what can be connected. Only desired relationships
+    // impose a binding dependency.
     for edge in graph.snapshot.edges.iter() {
         if edge.policy.required_for_binding
             && state.relationships[&edge.definition].binding != BindingState::Bound
@@ -1649,7 +1654,7 @@ fn creation_dependencies(
     graph: &ComputationGraph,
     index: usize,
 ) -> Vec<super::super::DependencyWait> {
-    use super::super::{DependencyWait, Endpoint, PortDirection};
+    use super::super::DependencyWait;
     let id = graph.nodes[index].descriptor.id();
     let resources: BTreeSet<_> = graph
         .snapshot
@@ -1707,30 +1712,6 @@ fn creation_dependencies(
         .specifications
         .get(id)
         .filter(|specification| !graph.factories.contains_key(&specification.implementation));
-    let binds_inputs = graph
-        .snapshot
-        .specifications
-        .get(id)
-        .and_then(|specification| graph.factories.get(&specification.implementation))
-        .is_some_and(|factory| factory.binds_inputs());
-    let undeclared_inputs = graph.nodes[index]
-        .descriptor
-        .ports()
-        .iter()
-        .filter(|port| binds_inputs && port.direction() == PortDirection::Input)
-        .map(|port| Endpoint::new(id.clone(), port.id().clone()))
-        .filter(|endpoint| {
-            !graph
-                .snapshot
-                .edges
-                .iter()
-                .any(|edge| edge.definition.to == *endpoint)
-                && !graph
-                    .snapshot
-                    .unbound_relationships
-                    .iter()
-                    .any(|edge| edge.definition.to == *endpoint)
-        });
     let undeclared_streams: BTreeSet<_> = graph
         .snapshot
         .specifications
@@ -1755,9 +1736,10 @@ fn creation_dependencies(
         })
         .filter(|endpoint| {
             !graph.ids.get(&endpoint.component).is_some_and(|index| {
-                graph.nodes[*index]
-                    .output_streams
-                    .contains_key(&endpoint.port)
+                let producer = &graph.nodes[*index];
+                // A seed provider sends addressed sessions, not a live stream.
+                is_bootstrap_port(graph, endpoint)
+                    || producer.output_streams.contains_key(&endpoint.port)
             })
         })
         .cloned()
@@ -1793,7 +1775,6 @@ fn creation_dependencies(
     dependencies
         .into_iter()
         .map(|id| DependencyWait::Component { id })
-        .chain(undeclared_inputs.map(|endpoint| DependencyWait::Connection { endpoint }))
         .chain(
             undeclared_streams
                 .into_iter()
@@ -1813,31 +1794,22 @@ fn creation_dependencies(
 }
 
 fn binding_waits(graph: &ComputationGraph, id: &ComponentId) -> Vec<super::super::DependencyWait> {
-    use super::super::{DependencyWait, Endpoint, PortDirection};
-    let node = &graph.nodes[graph.ids[id]];
+    use super::super::DependencyWait;
     let observed = graph.observed();
     let mut waiting = Vec::new();
-    for port in node.descriptor.ports() {
-        let endpoint = Endpoint::new(id.clone(), port.id().clone());
-        let connected = graph.snapshot.edges.iter().any(|edge| {
-            (edge.definition.from == endpoint || edge.definition.to == endpoint)
-                && observed.relationships[&edge.definition].binding == BindingState::Bound
-        });
-        let optional_input =
-            port.direction() == PortDirection::Input
-                && graph.snapshot.unbound_relationships.iter().any(|edge| {
-                    edge.definition.to == endpoint && !edge.policy.required_for_binding
-                });
-        if !connected && !optional_input && !port.is_optional() {
-            waiting.push(DependencyWait::Connection {
-                endpoint: endpoint.clone(),
-            });
-        }
-        if port.direction() == PortDirection::Output
-            && port.kind() == super::super::PortKind::Data
-            && !node.output_streams.contains_key(port.id())
-        {
-            waiting.push(DependencyWait::Stream { endpoint });
+    for edge in graph.snapshot.edges.iter().filter(|edge| {
+        edge.policy.required_for_binding
+            && observed.relationships[&edge.definition].binding != BindingState::Bound
+    }) {
+        for endpoint in [&edge.definition.from, &edge.definition.to] {
+            if &endpoint.component == id {
+                let wait = DependencyWait::Connection {
+                    endpoint: endpoint.clone(),
+                };
+                if !waiting.contains(&wait) {
+                    waiting.push(wait);
+                }
+            }
         }
     }
     for edge in graph
@@ -1846,21 +1818,27 @@ fn binding_waits(graph: &ComputationGraph, id: &ComponentId) -> Vec<super::super
         .iter()
         .filter(|edge| edge.policy.required_for_binding)
     {
-        let dependency = if &edge.definition.to.component == id {
-            Some(&edge.definition.from.component)
+        let pair = if &edge.definition.to.component == id {
+            Some((&edge.definition.to, &edge.definition.from.component))
         } else if &edge.definition.from.component == id {
-            Some(&edge.definition.to.component)
+            Some((&edge.definition.from, &edge.definition.to.component))
         } else {
             None
         };
-        if let Some(dependency) =
-            dependency.filter(|dependency| !observed.components.contains_key(*dependency))
+        if let Some((endpoint, dependency)) =
+            pair.filter(|(_, peer)| !observed.components.contains_key(*peer))
         {
             let missing = DependencyWait::Component {
                 id: dependency.clone(),
             };
             if !waiting.contains(&missing) {
                 waiting.push(missing);
+            }
+            let local = DependencyWait::Connection {
+                endpoint: endpoint.clone(),
+            };
+            if !waiting.contains(&local) {
+                waiting.push(local);
             }
         }
     }
@@ -2365,7 +2343,7 @@ struct Starting {
     pending: BTreeSet<usize>,
     outcomes: BTreeMap<ComponentId, StartOutcome>,
     reply: Option<oneshot::Sender<GraphResult<StartReport>>>,
-    force: bool,
+    force: BTreeSet<usize>,
     cancellation: Option<crate::computation::instance::StartupCancellation>,
     stop_after_rebuild: bool,
     rebuild_query: Option<ComponentId>,
@@ -2387,9 +2365,9 @@ impl From<bool> for PendingActivation {
 }
 
 impl Starting {
-    fn intent(&self) -> PendingActivation {
+    fn intent(&self, index: usize) -> PendingActivation {
         PendingActivation {
-            force: self.force,
+            force: self.force.contains(&index),
             cancellation: self.cancellation.clone(),
         }
     }
@@ -2886,7 +2864,24 @@ pub(super) fn check_edge_compatibility(
         return Ok(());
     };
     if is_bootstrap_port(graph, &edge.definition.from) {
-        return check_bootstrap_edge_compatibility(graph, edge, &producer, &consumer);
+        return check_bootstrap_edge_compatibility(
+            graph,
+            edge,
+            producer.bootstrap_output(&edge.definition.from.port),
+            &consumer,
+        );
+    }
+    if let Some(lane) = super::state_lane::StateLane::resolve(graph, edge, &producer, &consumer)? {
+        let offered = if lane.reader.is_some() {
+            drasi_computation_contracts::BootstrapOutputDescription::OUTPUT_SNAPSHOT
+        } else {
+            producer.bootstrap_output(&lane.output.port)
+        };
+        let state = EdgeSnapshot {
+            definition: super::EdgeDefinition::new(lane.output, lane.input),
+            ..edge.clone()
+        };
+        check_bootstrap_edge_compatibility(graph, &state, offered, &consumer)?;
     }
     let output = producer.output(&edge.definition.from.port);
     let input = consumer.input(&edge.definition.to.port);
@@ -2973,11 +2968,10 @@ fn relayed_completion_of(
 fn check_bootstrap_edge_compatibility(
     graph: &ComputationGraph,
     edge: &EdgeSnapshot,
-    producer: &drasi_computation_contracts::ComponentDescription,
+    mut output: drasi_computation_contracts::BootstrapOutputDescription,
     consumer: &drasi_computation_contracts::ComponentDescription,
 ) -> GraphResult<()> {
     use drasi_computation_contracts::{BootstrapCompletionKind, Incompatibility};
-    let mut output = producer.bootstrap_output(&edge.definition.from.port);
     let mut unresolved = false;
     if output.completion == BootstrapCompletionKind::Relayed {
         let mut visited = BTreeSet::new();
@@ -3045,28 +3039,49 @@ fn check_bootstrap_edge_compatibility(
     }
     for downstream in graph.edges.values() {
         if downstream.definition.from.component != edge.definition.to.component
-            || !is_bootstrap_port(graph, &downstream.definition.from)
+            || graph
+                .observed()
+                .relationships
+                .get(&downstream.definition)
+                .is_none_or(|relationship| relationship.binding != BindingState::Bound)
         {
             continue;
         }
         let Some(served) = neighbour_description(graph, &downstream.definition.to.component) else {
             continue;
         };
-        let accepts = served.bootstrap_input(&downstream.definition.to.port);
-        if accepts.is_some_and(|accepts| {
-            accepts.accepts == drasi_computation_contracts::BootstrapAcceptance::Quiescent
-        }) && output.completion != BootstrapCompletionKind::Quiescent
+        if served.local_seed
+            || downstream
+                .policy
+                .initial_state
+                .or(served.upstream_initial_state)
+                == Some(false)
         {
+            continue;
+        }
+        let Some(lane) = super::state_lane::StateLane::for_edge(&graph.snapshot, downstream) else {
+            continue;
+        };
+        if consumer.bootstrap_output(&lane.output.port).completion
+            != BootstrapCompletionKind::Relayed
+        {
+            continue;
+        }
+        let Some(input) = served.bootstrap_input(&lane.input.port) else {
+            continue;
+        };
+        if !input.accepts.accepts(output.completion) {
             return Err(incompatible(
                 Incompatibility::BootstrapCompletion {
-                    accepts: drasi_computation_contracts::BootstrapAcceptance::Quiescent,
+                    accepts: input.accepts,
                     completion: output.completion,
                 },
                 format!(
-                    "source '{}' relays bootstrap output '{}:{}' to quiescent input '{}:{}'",
+                    "source '{}' relays bootstrap output '{}:{}' to {:?} input '{}:{}'",
                     edge.definition.to.component,
                     edge.definition.from.component,
                     edge.definition.from.port,
+                    input.accepts,
                     downstream.definition.to.component,
                     downstream.definition.to.port,
                 ),
@@ -3111,6 +3126,9 @@ pub(super) fn is_edge_incompatibility(failure: &ComponentFailure) -> bool {
             GraphError::Incompatible {
                 source: drasi_computation_contracts::Incompatibility::ProducerIdentity { .. }
                     | drasi_computation_contracts::Incompatibility::Replay { .. }
+                    | drasi_computation_contracts::Incompatibility::InitialStateUnavailable
+                    | drasi_computation_contracts::Incompatibility::SharedInputCutUnavailable
+                    | drasi_computation_contracts::Incompatibility::StateTransferUnavailable
                     | drasi_computation_contracts::Incompatibility::BootstrapPairing { .. }
                     | drasi_computation_contracts::Incompatibility::BootstrapCoordinationRequired { .. }
                     | drasi_computation_contracts::Incompatibility::BootstrapNamespace
@@ -3271,11 +3289,58 @@ fn install_pipe(
     if let Some(cause) = from.damage().or_else(|| to.damage()) {
         return Err(GraphError::Reported { cause });
     }
+    let (lane, capture_live) = match (from.description()?, to.description()?) {
+        (Some(producer), Some(consumer)) => {
+            let lane = super::state_lane::StateLane::resolve(graph, edge, &producer, &consumer)?;
+            let id = &edge.definition.to.component;
+            let capture = !graph.snapshot.is_bootstrap_relationship(&edge.definition)
+                && (lane.is_some()
+                    || consumer.local_seed
+                    || super::state_lane::StateLane::has_seed(&graph.snapshot, id)
+                    || graph
+                        .snapshot
+                        .specifications
+                        .get(id)
+                        .is_some_and(|spec| spec.dependencies.contains_key("bootstrap"))
+                    || graph.snapshot.edges.iter().any(|other| {
+                        &other.definition.to.component == id
+                            && other
+                                .policy
+                                .initial_state
+                                .or(consumer.upstream_initial_state)
+                                != Some(false)
+                            && (other.policy.initial_state == Some(true)
+                                || super::state_lane::StateLane::for_edge(&graph.snapshot, other)
+                                    .is_some())
+                    }));
+            (lane, capture)
+        }
+        _ => return Err(topology("cannot bind an unconstructed endpoint")),
+    };
     let mut from = from.take()?;
     let mut to = to.take()?;
-    controls
-        .0
-        .insert(index, provided.control.take().expect("owned pipe control"));
+    let mut control = provided.control.take().expect("owned pipe control");
+    let mut outgoing = provided.outgoing.take().expect("owned pipe output");
+    let mut incoming = provided.incoming.take().expect("owned pipe input");
+    if capture_live
+        && outgoing.destination.is_none()
+        && outgoing.multicast.is_none()
+        && !incoming.acknowledgement_required
+        && (matches!(
+            edge.pipe,
+            super::DesiredPipe::Bounded { .. } | super::DesiredPipe::ByteBounded(_)
+        ) || matches!(&edge.pipe, super::DesiredPipe::Ranked(pipe) if !pipe.drop_when_full && pipe.source_dispatch.is_none()))
+    {
+        let window = to
+            .bootstrap
+            .window_for(index, edge.policy.bootstrap_window, control);
+        (outgoing.sender, incoming.receiver) = window.endpoints(outgoing.sender, incoming.receiver);
+        control = window;
+    }
+    if let Some(lane) = lane {
+        control = lane.bind(index, &from.bootstrap, &to.bootstrap, control)?;
+    }
+    controls.0.insert(index, control);
     let bootstrap = graph.nodes[graph.ids[&edge.definition.from.component]]
         .descriptor
         .ports()
@@ -3285,19 +3350,14 @@ fn install_pipe(
                 && port.kind() == crate::computation::v1::PortKind::Bootstrap
         });
     if bootstrap {
-        let outgoing = provided.outgoing.take().expect("owned pipe output");
-        let incoming = provided.incoming.take().expect("owned pipe input");
-        from.bootstrap.install_output(
+        from.bootstrap.bind_session_pipe(
+            &to.bootstrap,
             index,
             crate::computation::v1::BootstrapOutputEdge {
                 output_port: edge.definition.from.port.clone(),
                 consumer: edge.definition.to.component.clone(),
                 input_port: edge.definition.to.port.clone(),
             },
-            outgoing.sender,
-        );
-        to.bootstrap.install_input(
-            index,
             crate::computation::v1::BootstrapInputEdge {
                 producer: crate::computation::v1::OutputEndpoint {
                     component: edge.definition.from.component.clone(),
@@ -3307,14 +3367,13 @@ fn install_pipe(
                 local: graph.nodes[graph.ids[&edge.definition.from.component]].role
                     == drasi_computation_contracts::ComponentRole::BootstrapProvider,
             },
-            incoming.receiver,
+            (outgoing.sender, incoming.receiver),
+            None,
         );
         return Ok(());
     }
-    from.outputs
-        .push(provided.outgoing.take().expect("owned pipe output"));
-    to.inputs
-        .push(provided.incoming.take().expect("owned pipe input"));
+    from.outputs.push(outgoing);
+    to.inputs.push(incoming);
     Ok(())
 }
 
@@ -3440,6 +3499,9 @@ struct PeerDriver {
     control: crate::computation::v1::ComponentControl,
     inbox: mpsc::Receiver<crate::computation::v1::PeerMessage>,
     handler: watch::Receiver<Option<Arc<dyn crate::computation::v1::ControlHandler>>>,
+    ports: crate::computation::v1::BootstrapPorts,
+    catalogue: crate::computation::v1::OutputCatalogue,
+    reads: FuturesUnordered<BoxFuture<'static, ()>>,
 }
 
 impl PeerDriver {
@@ -3454,6 +3516,7 @@ impl PeerDriver {
                     break message;
                 }
                 tokio::select! {
+                    _ = self.reads.next(), if !self.reads.is_empty() => continue,
                     message = self.inbox.recv() => match message {
                         Some(message) => break message,
                         None => return Ok(false),
@@ -3469,6 +3532,31 @@ impl PeerDriver {
                 );
                 continue;
             }
+            if let Some(read) = crate::computation::v1::graph_bootstrap::materialized_session(
+                &self.ports,
+                &self.catalogue,
+                self.control.id(),
+                &message,
+            ) {
+                let plane = self.plane.clone();
+                self.reads.push(
+                    async move {
+                        tokio::pin!(read);
+                        loop {
+                            if plane.validate_delivery(&message).is_err() {
+                                break;
+                            }
+                            tokio::select! {
+                                biased;
+                                changed = changes.changed() => if changed.is_err() { break; },
+                                _ = &mut read => break,
+                            }
+                        }
+                    }
+                    .boxed(),
+                );
+                continue;
+            }
             let callback = self.handler.borrow().clone();
             if let Some(callback) = callback {
                 let pending = callback.on_message(message.clone(), self.control.clone());
@@ -3481,6 +3569,7 @@ impl PeerDriver {
                                 return Ok(true);
                             }
                         }
+                        _ = self.reads.next(), if !self.reads.is_empty() => (),
                         result = &mut pending => {
                             result?;
                             return Ok(true);
@@ -4306,6 +4395,7 @@ impl Operations {
                 return Ok(());
             }
         }
+        let ports = slot.take()?.bootstrap.clone();
         let (control, inbox) = graph.peers.attach(slot.id.clone(), slot.generation)?;
         if let Some(previous) = self.control_aborts.remove(&index) {
             previous.abort();
@@ -4321,6 +4411,12 @@ impl Operations {
                 control,
                 inbox,
                 handler,
+                ports,
+                catalogue: crate::computation::v1::OutputCatalogue::from_publications(
+                    graph.registry.subscribe(),
+                    graph.state.subscribe(),
+                ),
+                reads: FuturesUnordered::new(),
             },
         )?;
         Ok(())
@@ -5035,6 +5131,9 @@ impl Operations {
                 && operation == Operation::Dispose
                 && observed.lifecycle == ComponentLifecycle::Stopped;
             observed.operation = epoch;
+            if operation != Operation::Process {
+                observed.read_epoch = epoch;
+            }
             observed.revision = state.revision;
             observed.transition_time = Utc::now();
             if matches!(operation, Operation::Create | Operation::Reconfigure) {
@@ -5342,8 +5441,7 @@ impl Operations {
                             .map_err(|error| {
                                 component_error(&node, "validate admission", error.into())
                             })?;
-                            if lease.outputs.is_empty()
-                                || lease.outputs.iter().any(|output| {
+                            if lease.outputs.iter().any(|output| {
                                     output.port != *admission.port()
                                         || !output.admission_channel.as_ref().is_some_and(
                                             |channel| Arc::ptr_eq(channel, admission.channel()),
@@ -5391,14 +5489,23 @@ impl Operations {
                     lease.component.bind_bootstrap(bootstrap);
                     super::bind_inputs(&mut lease.component, &node, &admission_snapshot).await?;
                     if !already_activated {
-                        let context = crate::computation::v1::StartContext::new(
+                        lease.bootstrap.arm_windows();
+                        lease.bootstrap.check_windows().map_err(|source| component_error(&node, "bootstrap live suffix", source))?;
+                        let mut context = crate::computation::v1::StartContext::new(
                             hooks.scope("start", HookScopes::after(activation_timeout)),
-                        );
+                        ).with_unconnected_inputs(!admission_snapshot.has_input_definition(node.descriptor.id()))
+                        .with_state_subscribers(!lease.bootstrap.outputs().is_empty());
+                        if !lease.bootstrap.outputs().is_empty() && lease.component.recovery_contract().output_bindings.is_some() {
+                            context = context.with_rebuild_destinations(super::bound_output_destinations(
+                                &node, &lease.outputs, &admission_snapshot, &resources,
+                            )?);
+                        }
                         super::observe(&node, crate::observability::ObservedOperation::Start,
                             &lifecycle_parent, Default::default())?
                             .run(lease.component.start(&context))
                             .await
                             .map_err(|source| component_error(&node, "start", source))?;
+                        lease.bootstrap.check_windows().map_err(|source| component_error(&node, "bootstrap live suffix", source))?;
                     }
                     if let Some(update) = lease.pending_update.clone() {
                         if update.plan.mode != crate::computation::v1::ComponentUpdateMode::Recreate
@@ -5642,6 +5749,7 @@ impl Operations {
                             .run(lease.component.stop(&context))
                             .await
                             .map_err(|source| component_error(&node, "stop", source))?;
+                        lease.bootstrap.arm_windows();
                         lease.attempted = false;
                         lease.processing_paused = false;
                         lease.slot.processing_ready.store(true, std::sync::atomic::Ordering::Release);
@@ -5793,6 +5901,22 @@ impl Operations {
         force: bool,
         cancellation: Option<crate::computation::instance::StartupCancellation>,
     ) {
+        let force = if force {
+            selected.clone()
+        } else {
+            BTreeSet::new()
+        };
+        self.begin_selected_start(graph, selected, reply, force, cancellation);
+    }
+
+    fn begin_selected_start(
+        &mut self,
+        graph: &ComputationGraph,
+        selected: BTreeSet<usize>,
+        reply: Option<oneshot::Sender<GraphResult<StartReport>>>,
+        force: BTreeSet<usize>,
+        cancellation: Option<crate::computation::instance::StartupCancellation>,
+    ) {
         if self.draining.is_empty()
             && self.stopping.is_empty()
             && !self
@@ -5812,7 +5936,7 @@ impl Operations {
             for index in &selected {
                 let id = graph.nodes[*index].descriptor.id();
                 let node = state.components.get_mut(id).expect("selected component");
-                if (force
+                if (force.contains(index)
                     || graph.snapshot.lifecycle_policies[id].auto_start
                         && !graph.deferred_activation.contains(id))
                     && node.realization == RealizationState::Created
@@ -5896,6 +6020,7 @@ impl Operations {
             let id = node.descriptor.id();
             let observed = graph.observed();
             let current = &observed.components[id];
+            let force = group.force.contains(&index);
             if group.rebuild_query.is_some()
                 && current.realization != RealizationState::Created
                 && current.failure.is_none()
@@ -5904,7 +6029,7 @@ impl Operations {
             }
             let consumer_waits = graph.consumer_progress_validation(id).waiting_for();
             if graph.components[index].awaiting_update_confirmation()
-                && (group.force
+                && (force
                     || graph.snapshot.lifecycle_policies[id].auto_start
                         && !graph.deferred_activation.contains(id))
             {
@@ -5929,29 +6054,29 @@ impl Operations {
             } else if current.realization != RealizationState::Created {
                 if current.failure.is_none()
                     && !current.waiting_for.is_empty()
-                    && (group.force || graph.snapshot.lifecycle_policies[id].auto_start)
+                    && (force || graph.snapshot.lifecycle_policies[id].auto_start)
                     && !graph.deferred_activation.contains(id)
                 {
-                    self.pending_auto_start.insert(index, group.intent());
+                    self.pending_auto_start.insert(index, group.intent(index));
                 }
                 Some(StartOutcome::NotCreated)
-            } else if !group.force
+            } else if !force
                 && (graph.deferred_activation.contains(id)
                     || !graph.snapshot.lifecycle_policies[id].auto_start)
             {
                 Some(StartOutcome::NotRequested)
             } else if !consumer_waits.is_empty() {
-                self.pending_auto_start.insert(index, group.intent());
+                self.pending_auto_start.insert(index, group.intent(index));
                 Some(StartOutcome::Blocked {
                     dependencies: consumer_waits.into_iter().collect(),
                 })
             } else if !binding_dependencies(graph, id).is_empty() {
-                self.pending_auto_start.insert(index, group.intent());
+                self.pending_auto_start.insert(index, group.intent(index));
                 Some(StartOutcome::Blocked {
                     dependencies: binding_dependencies(graph, id),
                 })
             } else if !self.readiness_satisfied(graph, id) {
-                self.pending_auto_start.insert(index, group.intent());
+                self.pending_auto_start.insert(index, group.intent(index));
                 Some(StartOutcome::Blocked {
                     dependencies: graph
                         .snapshot
@@ -6040,7 +6165,7 @@ impl Operations {
                 if dependencies.is_empty() {
                     None
                 } else {
-                    self.pending_auto_start.insert(index, group.intent());
+                    self.pending_auto_start.insert(index, group.intent(index));
                     Some(StartOutcome::Blocked { dependencies })
                 }
             };
@@ -6703,62 +6828,32 @@ impl Operations {
                     .is_ok_and(|lease| lease.component.is_constructed() && !lease.disposed);
             let outcome = match result {
                 Ok(()) => {
-                    let lease = match self
-                        .attach_control(graph, completion.index)
-                        .and_then(|_| slot.take())
-                    {
-                        Ok(lease) => lease,
-                        Err(error) => {
-                            let failed = self.fail_operation(
+                    if let Err(error) = self.attach_control(graph, completion.index) {
+                        let failed = self.fail_operation(
+                            graph,
+                            completion.index,
+                            completion.operation,
+                            error,
+                        )?;
+                        update(graph, |state| {
+                            let node = state.components.get_mut(id).expect("component");
+                            node.realization = RealizationState::CreationFailed;
+                            node.failure = Some(failed);
+                        });
+                        if completion.operation == Operation::Create {
+                            self.launch_cleanup(
                                 graph,
                                 completion.index,
-                                completion.operation,
-                                error,
+                                Operation::Dispose,
+                                Some(Retirement::preserve(
+                                    crate::computation::v1::DisposeReason::InitializationFailure,
+                                )),
                             )?;
-                            update(graph, |state| {
-                                let node = state.components.get_mut(id).expect("component");
-                                node.realization = RealizationState::CreationFailed;
-                                node.failure = Some(failed);
-                            });
-                            if completion.operation == Operation::Create {
-                                self.launch_cleanup(
-                                    graph,
-                                    completion.index,
-                                    Operation::Dispose,
-                                    Some(Retirement::preserve(
-                                        crate::computation::v1::DisposeReason::InitializationFailure,
-                                    )),
-                                )?;
-                            }
-                            return Ok(());
                         }
-                    };
-                    let connected =
-                        graph.nodes[completion.index]
-                            .descriptor
-                            .ports()
-                            .iter()
-                            .all(|port| match port.direction() {
-                                crate::computation::v1::PortDirection::Input => {
-                                    lease.inputs.iter().any(|input| &input.port == port.id())
-                                        || port.kind() != crate::computation::v1::PortKind::Data
-                                }
-                                crate::computation::v1::PortDirection::Output => {
-                                    port.kind() != crate::computation::v1::PortKind::Data
-                                        || (lease
-                                            .outputs
-                                            .iter()
-                                            .any(|output| &output.port == port.id())
-                                            && graph.nodes[completion.index]
-                                                .output_streams
-                                                .contains_key(port.id()))
-                                }
-                            });
-                    let waiting = if connected {
-                        Vec::new()
-                    } else {
-                        binding_waits(graph, id)
-                    };
+                        return Ok(());
+                    }
+                    let waiting = binding_waits(graph, id);
+                    let connected = waiting.is_empty();
                     update(graph, |state| {
                         let node = state.components.get_mut(id).expect("added component");
                         node.realization = if connected {
@@ -7828,14 +7923,18 @@ fn handle_command<'a>(
                         if state.components[&component].generation != generation {
                             return Err(GraphError::StaleGeneration);
                         }
-                        if state.components[&component].started {
-                            return Err(topology("replace or reconcile a previously started output stream"));
-                        }
                         if !graph.nodes[index].descriptor.ports().iter().any(|candidate| {
                             candidate.id() == &port
                                 && candidate.direction() == crate::computation::v1::PortDirection::Output
+                                && candidate.kind() == crate::computation::v1::PortKind::Data
                         }) {
-                            return Err(topology("stream binding does not name an output port"));
+                            return Err(topology("stream binding does not name a data output port"));
+                        }
+                        // An unused output can gain its first stream while its owner
+                        // is running. This must not rename an established stream.
+                        if let Some(bound) = graph.nodes[index].output_streams.get(&port) {
+                            if bound == &stream { return Ok(()); }
+                            return Err(topology("use topology reconciliation to change an assigned output stream"));
                         }
                         if graph.snapshot.nodes.iter().any(|node| {
                             node.output_streams.iter().any(|(other, value)| {
@@ -8223,9 +8322,10 @@ fn handle_command<'a>(
                     match result {
                         Ok(Some((selected, stopped))) => operations.starting.push(Starting {
                             revision: graph.snapshot.revision,
+                            force: selected.clone(),
                             pending: selected.clone(), selected,
                             outcomes: BTreeMap::new(), reply: Some(reply),
-                            force: true, cancellation: None,
+                            cancellation: None,
                             stop_after_rebuild: stopped, rebuild_query: Some(component),
                         }),
                         Ok(None) => { let _ = reply.send(Ok(StartReport {

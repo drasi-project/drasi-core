@@ -311,7 +311,23 @@ impl Graph {
         } else {
             None
         };
-        crate::bootstrap::connect(&core, edges).await?;
+        // This fixture binds SQLite's exact, progress-bound provider directly
+        // to the first query. Its SQLite data pipe supplies live events only.
+        crate::bootstrap::connect_relationships(
+            &core,
+            edges.into_iter().map(|definition| {
+                let policy = RelationshipPolicy {
+                    initial_state: (&definition.to.component == query.id()).then_some(false),
+                    ..Default::default()
+                };
+                DesiredRelationship {
+                    definition,
+                    policy,
+                    pipe: DesiredPipe::Bounded { capacity: 1 },
+                }
+            }),
+        )
+        .await?;
         Ok(Self {
             core,
             query,

@@ -211,9 +211,10 @@ another evaluator algorithm hidden inside ComputationGraph.
 The query's canonical rows, retained output and read/recovery helpers live in
 `drasi-query-common`; there is no Host result mirror. Non-query scheduled
 processing uses the same contracts-level committed wakeup policy and its
-existing Host transaction, not another scheduler runtime. The memory-backed
-view transformer owns its own input/output associations and snapshots; it does
-not acquire durable or transactional behavior from this common graph.
+existing Host transaction, not another scheduler runtime. The view
+transformer runs on the shared stateful transformer runtime: its inputs and
+output associations live in its host stores, and its output is durable with a
+persistent processing provider. It does not participate in transactions.
 
 ## 3. Matrix scope and interpretation
 

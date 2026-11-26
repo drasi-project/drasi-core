@@ -106,17 +106,31 @@ impl StateRecord {
     }
 }
 
-/// The parent's borrowed transaction authority never escapes an operation.
+#[derive(Clone)]
+enum StateScope<'a> {
+    Borrowed(&'a dyn BootstrapState),
+    Scan(Arc<dyn BootstrapState>),
+}
+
+impl StateScope<'_> {
+    fn state(&self) -> &dyn BootstrapState {
+        match self {
+            Self::Borrowed(state) => *state,
+            Self::Scan(state) => state.as_ref(),
+        }
+    }
+}
+
 struct NamespacedState<'a> {
-    parent: &'a dyn BootstrapState,
-    record: &'a AsyncMutex<StateRecord>,
+    parent: StateScope<'a>,
+    record: Arc<AsyncMutex<StateRecord>>,
     index: usize,
 }
 
 #[async_trait]
 impl BootstrapState for NamespacedState<'_> {
     fn durability(&self) -> drasi_core::interface::StorageDurability {
-        self.parent.durability()
+        self.parent.state().durability()
     }
     async fn read(&self) -> Result<Option<Bytes>> {
         Ok(self.record.lock().await.providers[self.index].state.clone())
@@ -126,7 +140,7 @@ impl BootstrapState for NamespacedState<'_> {
         let mut record = self.record.lock().await;
         let mut next = record.clone();
         next.providers[self.index].state = Some(bytes);
-        self.parent.write(next.encode()?).await?;
+        self.parent.state().write(next.encode()?).await?;
         *record = next;
         Ok(())
     }
@@ -137,7 +151,7 @@ struct Run {
     stopped: watch::Sender<bool>,
     streams: Mutex<VecDeque<SnapshotStream>>,
     waker: AtomicWaker,
-    record: AsyncMutex<StateRecord>,
+    record: Arc<AsyncMutex<StateRecord>>,
     initial_keys: Mutex<BTreeSet<drasi_core::interface::CheckpointKey>>,
     completion: Mutex<Option<Bytes>>,
     pending: Mutex<bool>,
@@ -374,7 +388,7 @@ impl CompositeBootstrapProvider {
             stopped: watch::channel(false).0,
             streams: Mutex::new(VecDeque::new()),
             waker: AtomicWaker::new(),
-            record: AsyncMutex::new(StateRecord::empty(&self.members)),
+            record: Arc::new(AsyncMutex::new(StateRecord::empty(&self.members))),
             initial_keys: Mutex::new(BTreeSet::new()),
             completion: Mutex::new(None),
             pending: Mutex::new(false),
@@ -407,7 +421,7 @@ impl CompositeBootstrapProvider {
                 let mut pending = false;
                 for (index, member) in self.members.iter().enumerate() {
                     let result = match parent {
-                        Some(parent) => member.provider.prepare_with_state(&NamespacedState { parent, record: &run.record, index }).await,
+                        Some(parent) => member.provider.prepare_with_state(&NamespacedState { parent: StateScope::Borrowed(parent), record: run.record.clone(), index }).await,
                         None => member.provider.prepare().await,
                     }.with_context(|| format!("prepare composite bootstrap child {}", member.id))?;
                     preparation = combine(preparation, result);
@@ -435,7 +449,7 @@ impl CompositeBootstrapProvider {
 
     async fn snapshot_operation(
         &self,
-        parent: Option<&dyn BootstrapState>,
+        parent: Option<StateScope<'_>>,
     ) -> Result<ComputationBootstrapSnapshot> {
         let _operation = self.control.operation.lock().await;
         self.available()?;
@@ -456,12 +470,13 @@ impl CompositeBootstrapProvider {
             biased;
             _ = stopped.wait_for(|stopped| *stopped) => Err(anyhow::anyhow!("composite bootstrap snapshot cancelled")),
             result = async {
-                *run.record.lock().await = StateRecord::read(parent, &self.members).await?;
+                *run.record.lock().await = StateRecord::read(parent.as_ref().map(StateScope::state), &self.members).await?;
                 let mut watermarks = Vec::new();
                 let mut keys = BTreeSet::new();
                 for (index, member) in self.members.iter().enumerate() {
-                    let snapshot = match parent {
-                        Some(parent) => member.provider.snapshot_with_state(&NamespacedState { parent, record: &run.record, index }).await,
+                    let snapshot = match &parent {
+                        Some(StateScope::Borrowed(parent)) => member.provider.snapshot_with_state(&NamespacedState { parent: StateScope::Borrowed(*parent), record: run.record.clone(), index }).await,
+                        Some(StateScope::Scan(parent)) => member.provider.open_snapshot(Arc::new(NamespacedState { parent: StateScope::Scan(parent.clone()), record: run.record.clone(), index })).await,
                         None => member.provider.snapshot().await,
                     }.with_context(|| format!("open composite bootstrap child {}", member.id))?;
                     run.streams.lock().map_err(|_| anyhow::anyhow!("composite bootstrap streams poisoned"))?.push_back(snapshot.changes);
@@ -641,7 +656,14 @@ impl ComputationBootstrapProvider for CompositeBootstrapProvider {
         &self,
         state: &dyn BootstrapState,
     ) -> Result<ComputationBootstrapSnapshot> {
-        self.snapshot_operation(Some(state)).await
+        self.snapshot_operation(Some(StateScope::Borrowed(state)))
+            .await
+    }
+    async fn open_snapshot(
+        &self,
+        state: Arc<dyn BootstrapState>,
+    ) -> Result<ComputationBootstrapSnapshot> {
+        self.snapshot_operation(Some(StateScope::Scan(state))).await
     }
     async fn complete_snapshot(&self) -> Result<Vec<BootstrapWatermark>> {
         let _operation = self.control.operation.lock().await;

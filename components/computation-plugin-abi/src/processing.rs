@@ -138,6 +138,8 @@ pub mod request {
     pub const SCHEDULE_GET: u32 = 58;
     pub const SCHEDULE_CLAIM_DUE: u32 = 59;
     pub const SCHEDULE_COMPLETE: u32 = 60;
+    /// Clear only evaluator indexes inside an atomic output rebuild transaction.
+    pub const REBUILD_EVALUATOR: u32 = 61;
 }
 
 /// Processing-specific failure codes. Messages for errors carrying a string
@@ -164,6 +166,6 @@ mod tests {
         assert_eq!(size_of::<ProcessingWorkV1>(), 16 + 4 * pointer);
         assert_eq!(size_of::<OutputProcessingWorkV1>(), 24 + 4 * pointer);
         assert_eq!(size_of::<ComponentVTable>(), 16 + 5 * pointer);
-        assert_eq!(ABI_VERSION, "0.1.0");
+        assert_eq!(ABI_VERSION, "0.2.0");
     }
 }

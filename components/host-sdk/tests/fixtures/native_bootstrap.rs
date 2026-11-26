@@ -93,6 +93,7 @@ impl sdk::BootstrapFactory for Factory {
                 allow_additional: false,
             },
             source_progress: self.progress,
+            independent_state: false,
             pairing: None,
         }
     }

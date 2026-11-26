@@ -85,6 +85,7 @@ pub struct ReconciliationPreview {
     update: BTreeSet<ComponentId>,
     remove: BTreeSet<ComponentId>,
     restart: BTreeSet<ComponentId>,
+    first_input_starts: BTreeSet<ComponentId>,
     reactivate: BTreeSet<ComponentId>,
     pause: BTreeSet<ComponentId>,
     rebind: BTreeSet<EdgeDefinition>,
@@ -106,6 +107,7 @@ impl ReconciliationPreview {
             && self.update == other.update
             && self.remove == other.remove
             && self.restart == other.restart
+            && self.first_input_starts == other.first_input_starts
             && self.reactivate == other.reactivate
             && self.pause == other.pause
             && self.rebind == other.rebind
@@ -1049,11 +1051,11 @@ pub(super) fn preview_with_updates(
             if update.plan.data != ComponentUpdateData::Preserve {
                 if node.streams != old.streams {
                     return Err(topology(
-                        "query reconstruction cannot change output streams",
+                        "state reconstruction cannot change output streams",
                     ));
                 }
                 desired
-                    .validate_query_reset_consumers(id)
+                    .validate_state_reset_consumers(id)
                     .map_err(|source| GraphError::Validation {
                         component: id.clone(),
                         source,
@@ -1173,6 +1175,58 @@ pub(super) fn preview_with_updates(
         .iter()
         .map(|edge| (edge.definition.clone(), edge))
         .collect();
+    // Resume normally keeps the current input baseline. The first state
+    // connection to an already-running, unconnected input has no such baseline.
+    let mut first_input_starts = BTreeSet::new();
+    let before = graph.observed();
+    for relation in desired
+        .relationships
+        .iter()
+        .chain(&desired.boundary_relationships)
+    {
+        let edge = &relation.definition;
+        let id = &edge.to.component;
+        let Some(&index) = graph.ids.get(id) else {
+            continue;
+        };
+        if first_input_starts.contains(id)
+            || replace.contains(id)
+            || updating.contains(id)
+            || graph.snapshot.has_input_definition(id)
+            || !before.components.get(id).is_some_and(|c| {
+                c.lifecycle == ComponentLifecycle::Running && c.started && c.failure.is_none()
+            })
+        {
+            continue;
+        }
+        let Some(consumer) = graph.components[index].description()? else {
+            continue;
+        };
+        if consumer.local_seed {
+            continue;
+        }
+        let target = &graph.nodes[index].descriptor;
+        let requested = relation
+            .policy
+            .initial_state
+            .or(consumer.upstream_initial_state);
+        let first_seed = consumer
+            .bootstrap_input(&edge.to.port)
+            .is_some_and(|p| !p.source_relay);
+        let first_state = target.state_port_for(&edge.to.port).is_some()
+            && match requested {
+                Some(requested) => requested,
+                None => {
+                    new_nodes.get(&edge.from.component).is_some_and(|node| {
+                        node.descriptor.state_port_for(&edge.from.port).is_some()
+                    }) || super::super::state_lane::has_cut_reader(graph, &edge.from)
+                }
+            };
+        if first_seed || first_state {
+            first_input_starts.insert(id.clone());
+            restart.insert(id.clone());
+        }
+    }
     let unbind: BTreeSet<_> = old_edges
         .keys()
         .filter(|edge| !new_edges.contains_key(*edge))
@@ -1181,9 +1235,12 @@ pub(super) fn preview_with_updates(
     let mut rebind = BTreeSet::new();
     let mut reactivate = BTreeSet::new();
     for (edge, description) in &new_edges {
-        let rebound = old_edges
-            .get(edge)
-            .is_none_or(|old| old.pipe != description.pipe);
+        let rebound = old_edges.get(edge).is_none_or(|old| {
+            old.pipe != description.pipe
+                || old.policy.initial_state != description.policy.initial_state
+                || old.policy.state_transfer != description.policy.state_transfer
+                || old.policy.bootstrap_window != description.policy.bootstrap_window
+        });
         let resource_changed = graph
             .snapshot
             .edges
@@ -1409,6 +1466,7 @@ pub(super) fn preview_with_updates(
         update: updating,
         remove,
         restart,
+        first_input_starts,
         reactivate,
         pause,
         rebind,
@@ -3320,9 +3378,14 @@ async fn execute_reserved(
         .filter_map(|id| graph.ids.get(id).copied())
         .collect();
     if !start.is_empty() && realized {
+        let continuing: BTreeSet<_> = plan
+            .first_input_starts
+            .iter()
+            .filter_map(|id| graph.ids.get(id).copied())
+            .collect();
         if settled {
             let (reply, receiver) = oneshot::channel();
-            operations.begin_start(graph, start, Some(reply), false);
+            operations.begin_selected_start(graph, start, Some(reply), continuing, None);
             let startup = drive_reconciliation(
                 graph,
                 operations,
@@ -3340,7 +3403,7 @@ async fn execute_reserved(
         } else {
             // A conflicting lifecycle group is still active. Preserve its
             // report and start these members when their own domain is free.
-            defer_startup(graph, operations, start);
+            defer_startup(graph, operations, start, &continuing);
         }
     }
     if !report.failures.is_empty()
@@ -3452,15 +3515,22 @@ async fn settle(
 /// Queues the components that a reconciliation would have started, applying
 /// the same eligibility as an immediate startup, so they start automatically
 /// once the in-flight lifecycle group completes.
-fn defer_startup(graph: &ComputationGraph, operations: &mut Operations, start: BTreeSet<usize>) {
+fn defer_startup(
+    graph: &ComputationGraph,
+    operations: &mut Operations,
+    start: BTreeSet<usize>,
+    continuing: &BTreeSet<usize>,
+) {
     let observed = graph.observed();
     for index in start {
         let id = graph.nodes[index].descriptor.id();
-        if graph.snapshot.lifecycle_policies[id].auto_start
-            && !graph.deferred_activation.contains(id)
+        let force = continuing.contains(&index);
+        if (force
+            || (graph.snapshot.lifecycle_policies[id].auto_start
+                && !graph.deferred_activation.contains(id)))
             && observed.components[id].realization == RealizationState::Created
         {
-            operations.pending_auto_start.insert(index, false.into());
+            operations.pending_auto_start.insert(index, force.into());
         }
     }
 }
@@ -3968,6 +4038,7 @@ fn commit_desired(
                 ObservedComponent {
                     generation: graph.components[graph.ids[id]].generation,
                     operation: OperationEpoch(0),
+                    read_epoch: OperationEpoch(0),
                     revision: state.revision,
                     realization: RealizationState::Pending,
                     lifecycle: ComponentLifecycle::Stopped,
@@ -4524,9 +4595,8 @@ async fn realize(
     Ok(())
 }
 
-/// A consumer bootstraps either from its data producers' bootstrap outputs or
-/// from exactly one local bootstrap provider, never both. Sources have no data
-/// producers, so their only bootstrap edge is a local provider's.
+/// The only explicit bootstrap relationship is an owner attaching its seed
+/// provider. A producer's data binding owns the lane to each subscriber.
 pub(in crate::computation::v1) fn validate_bootstrap_relationships(
     ids: &BTreeMap<ComponentId, usize>,
     nodes: &[NodeSnapshot],
@@ -4550,32 +4620,18 @@ pub(in crate::computation::v1) fn validate_bootstrap_relationships(
             .push(edge);
     }
     for (consumer, incoming) in consumers {
-        let local = incoming
-            .iter()
-            .filter(|edge| {
-                nodes[ids[&edge.definition.from.component]].role
-                    == super::super::ComponentRole::BootstrapProvider
-            })
-            .count();
-        if local > 0 {
-            if incoming.len() != 1 {
-                return Err(topology(format!(
-                    "{consumer} bootstraps from one local provider or from its inputs, not both"
-                )));
-            }
-            continue;
+        if incoming.iter().any(|edge| {
+            nodes[ids[&edge.definition.from.component]].role
+                != super::super::ComponentRole::BootstrapProvider
+        }) {
+            return Err(topology(format!(
+                "{consumer}: an explicit bootstrap edge must be a provider attachment; connect the data ports to initialize from upstream"
+            )));
         }
-        for edge in incoming {
-            let producer = &edge.definition.from.component;
-            if !edges.iter().any(|data| {
-                !is_bootstrap(data)
-                    && &data.definition.from.component == producer
-                    && &data.definition.to.component == consumer
-            }) {
-                return Err(topology(format!(
-                    "{consumer} can only bootstrap from {producer} when it consumes its data"
-                )));
-            }
+        if incoming.len() != 1 {
+            return Err(topology(format!(
+                "{consumer} can have only one startup provider"
+            )));
         }
     }
     Ok(())

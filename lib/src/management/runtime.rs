@@ -1635,31 +1635,20 @@ fn graph_converged(desired: &DesiredTopology, observed: &ObservedGraph, running:
             state.realization == ResourceRealization::Created && state.failure.is_none()
         })
     }) && desired.components.iter().all(|node| {
-        node.descriptor
-            .ports()
-            .iter()
-            .filter(|port| !port.is_optional())
-            .all(|port| {
-                let endpoint = Endpoint::new(node.descriptor.id().clone(), port.id().clone());
-                desired
-                    .relationships
-                    .iter()
-                    .any(|edge| edge.definition.from == endpoint || edge.definition.to == endpoint)
-            })
-            && observed
-                .components
-                .get(node.descriptor.id())
-                .is_some_and(|actual| {
-                    actual.realization == RealizationState::Created
-                        && actual.failure.is_none()
-                        && match actual.lifecycle {
-                            ComponentLifecycle::Running => true,
-                            ComponentLifecycle::Stopped => {
-                                actual.lifecycle_requested || !running || !node.lifecycle.auto_start
-                            }
-                            _ => false,
+        observed
+            .components
+            .get(node.descriptor.id())
+            .is_some_and(|actual| {
+                actual.realization == RealizationState::Created
+                    && actual.failure.is_none()
+                    && match actual.lifecycle {
+                        ComponentLifecycle::Running => true,
+                        ComponentLifecycle::Stopped => {
+                            actual.lifecycle_requested || !running || !node.lifecycle.auto_start
                         }
-                })
+                        _ => false,
+                    }
+            })
     }) && desired.relationships.iter().all(|edge| {
         observed
             .relationships
