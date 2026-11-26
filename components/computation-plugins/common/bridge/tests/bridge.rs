@@ -32,9 +32,10 @@ use drasi_index_rocksdb::{
 use drasi_lib::computation::v1::*;
 
 use drasi_computation_bridge_common::*;
+use drasi_host_sdk::computation::{NativeFactory, NativePlugin};
 
-/// The bridge failure inside a sink error, which also carries the graph's
-/// delivery-failure classification.
+/// The bridge failure inside a sink or lifecycle error, which also carries the
+/// graph's delivery-failure or lifecycle classification.
 trait BridgeCause {
     fn bridge_cause(&self) -> Option<&BridgeError>;
 }
@@ -44,14 +45,120 @@ impl BridgeCause for anyhow::Error {
         self.chain().find_map(|cause| cause.downcast_ref())
     }
 }
+
+impl BridgeCause for drasi_computation_plugin_sdk::lifecycle::LifecycleError {
+    fn bridge_cause(&self) -> Option<&BridgeError> {
+        self.source_error().bridge_cause()
+    }
+}
 use drasi_computation_sink_bridge::BridgeSink;
 use drasi_computation_source_bridge::BridgeSource;
 
-fn factories() -> Vec<Arc<dyn ComponentFactory>> {
-    vec![
-        drasi_computation_source_bridge::factory(),
-        drasi_computation_sink_bridge::factory(),
-    ]
+/// How a graph reaches the bridge plugins: linked into this test binary, or
+/// through the library staged by `make build-test-plugins`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Link {
+    Static,
+    Loaded,
+}
+
+impl Link {
+    const ALL: [Link; 2] = [Link::Static, Link::Loaded];
+
+    fn plugin(self, role: ComponentRole) -> Result<Arc<NativePlugin>> {
+        let source = role == ComponentRole::Source;
+        match self {
+            Link::Static => NativePlugin::from_definition(if source {
+                drasi_computation_source_bridge::plugin()?
+            } else {
+                drasi_computation_sink_bridge::plugin()?
+            }),
+            Link::Loaded => {
+                let package = if source {
+                    drasi_computation_source_bridge::PLUGIN_ID
+                } else {
+                    drasi_computation_sink_bridge::PLUGIN_ID
+                };
+                static LOADED: std::sync::OnceLock<
+                    std::sync::Mutex<BTreeMap<&'static str, Arc<NativePlugin>>>,
+                > = std::sync::OnceLock::new();
+                let mut loaded = LOADED
+                    .get_or_init(Default::default)
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("loaded bridge plugin cache poisoned"))?;
+                if let Some(plugin) = loaded.get(package) {
+                    return Ok(plugin.clone());
+                }
+                let path = library_directory().join(format!(
+                    "{}{}{}",
+                    std::env::consts::DLL_PREFIX,
+                    package.replace('-', "_"),
+                    std::env::consts::DLL_SUFFIX,
+                ));
+                anyhow::ensure!(
+                    path.is_file(),
+                    "missing {}; first run make build-test-plugins",
+                    path.display()
+                );
+                let plugin = drasi_host_sdk::computation::load(&path)?;
+                loaded.insert(package, plugin.clone());
+                Ok(plugin)
+            }
+        }
+    }
+
+    fn factory(self, role: ComponentRole) -> Result<Arc<NativeFactory>> {
+        let plugin = self.plugin(role)?;
+        let factory = plugin.factories()[0].clone();
+        let expected = if role == ComponentRole::Source {
+            SOURCE_FACTORY
+        } else {
+            SINK_FACTORY
+        };
+        anyhow::ensure!(
+            plugin.factories().len() == 1
+                && factory.metadata().implementation.name.as_ref() == expected,
+            "{self:?} bridge plugin must export exactly {expected}"
+        );
+        Ok(factory)
+    }
+
+    /// One endpoint's construction recipe and the factory that builds it.
+    fn component(
+        self,
+        config: &BridgeConfig,
+        role: ComponentRole,
+    ) -> Result<(ComponentSpecification, Arc<dyn ComponentFactory>)> {
+        let factory = self.factory(role)?;
+        let id = if role == ComponentRole::Source {
+            config.receiver_endpoint.clone()
+        } else {
+            config.sender_endpoint.clone()
+        };
+        let specification = factory.specification(id, serde_json::to_value(config)?)?;
+        Ok((specification, factory))
+    }
+}
+
+/// Honours `CARGO_TARGET_DIR` and `DRASI_NATIVE_PLUGIN_DIR` as
+/// `build-test-plugins` does.
+fn library_directory() -> PathBuf {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(4)
+        .expect("workspace")
+        .to_owned();
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace.join("target"));
+    let target = if target.is_absolute() {
+        target
+    } else {
+        workspace.join(target)
+    };
+    std::env::var_os("DRASI_NATIVE_PLUGIN_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| target.join("debug/plugins"))
 }
 
 const GRAPH: &str = "__drasi_lib_runtime__";
@@ -163,6 +270,9 @@ fn configuration(
             timeout_ms: 2_000,
             ..Limits::default()
         },
+        tls: None,
+        mapping_directory: (!source && profile == Profile::Durable)
+            .then(|| directory.path().join("sender").to_string_lossy().into()),
     }
 }
 
@@ -307,16 +417,6 @@ fn provider(path: &Path) -> Arc<dyn ComputationIndexProvider> {
     ))
 }
 
-async fn indexes(path: &Path) -> Result<ComputationIndexes> {
-    Ok(provider(path)
-        .create_indexes(
-            "mapping",
-            &drasi_core_types::ComponentId::try_new("00000000-0000-0000-0000-0000000000b7")
-                .expect("fixture UUID"),
-        )
-        .await?)
-}
-
 fn envelope_codec() -> Result<EnvelopeCodec> {
     let mut codec = EnvelopeCodec::new(NonZeroUsize::new(8 << 20).expect("nonzero codec capacity"));
     codec.register_schema(GraphChangeCodec::schema())?;
@@ -386,26 +486,49 @@ fn input(envelope: ChangeEnvelope) -> InputEnvelope {
     }
 }
 
-#[allow(dead_code)]
+/// Seals the receiver from the sender's side, as a composition finishing the
+/// link does, and checks that the cut is the sender's last resolved receipt.
+/// The control connection closes on return.
+async fn finish(
+    sink: &BridgeSink,
+    config: &BridgeConfig,
+    tls: Option<Arc<TlsResource>>,
+) -> Result<IngressCut> {
+    let mut endpoint =
+        BridgeEndpointControl::connect(config.clone(), ComponentRole::Sink, tls).await?;
+    let cut = endpoint.seal(DEADLINE).await?;
+    match sink.last_receipt() {
+        Some(receipt) => {
+            assert_eq!(cut.session.as_ref(), Some(&receipt.admission.session));
+            assert_eq!(cut.client_sequence, receipt.admission.sequence);
+            assert_eq!(cut.position, receipt.admission.position);
+            assert_eq!(cut.contract, receipt.contract);
+            assert_eq!(cut.boundary, receipt.boundary);
+        }
+        None => assert_eq!((cut.client_sequence, cut.position), (0, 0)),
+    }
+    Ok(cut)
+}
+
+/// The receiving host's observing control lane.
+async fn observe(
+    config: &BridgeConfig,
+    tls: Option<Arc<TlsResource>>,
+) -> Result<BridgeEndpointControl> {
+    Ok(BridgeEndpointControl::connect(config.clone(), ComponentRole::Source, tls).await?)
+}
+
 pub(crate) mod lifecycle_ctx {
-    use drasi_lib::computation::v1::{
-        ApplyContext, CancellationToken, DisposeContext, DisposeReason, InitializeContext,
-        OperationScope, PauseContext, ResumeContext, StartContext, StateIntent, StopContext,
-        StopMode, UpdateBoundary,
+    use drasi_computation_plugin_sdk::lifecycle::{
+        CancellationToken, DisposeContext, DisposeReason, OperationScope, PauseContext,
+        ResumeContext, StartContext, StateIntent, StopContext, StopMode,
     };
 
-    /// Keeps a context alive for futures that outlive the calling statement.
-    pub(crate) fn held<T>(value: T) -> &'static T {
-        Box::leak(Box::new(value))
-    }
     pub(crate) fn scope() -> OperationScope {
         OperationScope::new("test", "component", 1, None, CancellationToken::new())
     }
-    pub(crate) fn initialize() -> InitializeContext {
-        InitializeContext::new(scope())
-    }
     pub(crate) fn start() -> StartContext {
-        StartContext::new(scope())
+        StartContext::new(scope(), None)
     }
     pub(crate) fn pause() -> PauseContext {
         PauseContext::new(scope())
@@ -423,8 +546,5 @@ pub(crate) mod lifecycle_ctx {
     pub(crate) fn erase() -> DisposeContext {
         DisposeContext::new(scope(), DisposeReason::Removal, StateIntent::Erase, 1)
             .expect("valid dispose context")
-    }
-    pub(crate) fn apply(boundary: UpdateBoundary) -> ApplyContext {
-        ApplyContext::new(scope(), boundary)
     }
 }

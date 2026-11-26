@@ -6,8 +6,8 @@ use std::{num::NonZeroUsize, sync::Arc};
 
 use async_trait::async_trait;
 use drasi_computation_bridge_common::{
-    BridgeConfig, BridgeEgressControl, BridgeEndpointControl, Limits, Namespace, PortableDelivery,
-    Profile, TlsRecipeKind, TlsResourceRecipe, TlsRole, Transport,
+    BridgeConfig, BridgeEndpointControl, Limits, Namespace, PortableDelivery, Profile,
+    TlsRecipeKind, TlsResourceRecipe, TlsRole, Transport,
 };
 use drasi_core::{
     computation::ComputationIndexProvider,
@@ -455,6 +455,8 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
             retry_delay_ms: 50,
             ..Limits::default()
         },
+        tls: Some(client_tls.clone()),
+        mapping_directory: Some(directory.join("mapping").to_string_lossy().into_owned()),
     };
     let mut incoming = outgoing.clone();
     std::mem::swap(&mut incoming.stream, &mut incoming.peer_stream);
@@ -463,6 +465,13 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
         control_address: bind_control,
         server_name: "localhost".into(),
     };
+    incoming.mapping_directory = None;
+    incoming.tls = Some(tls(
+        Path::new(&format!("{root}/tls")),
+        "server",
+        TlsRole::Server,
+        pin("client")?,
+    ));
     let mut config = HostConfig::empty("right", format!("{root}/state"));
     config.configuration_store = Some(ConfigurationStorage {
         key_file: format!("{root}/key").into(),
@@ -499,24 +508,6 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
             .join(filename)
             .with_extension("so");
     }
-    let server_tls = tls(
-        Path::new(&format!("{root}/tls")),
-        "server",
-        TlsRole::Server,
-        pin("client")?,
-    );
-    let identity = resource(
-        &mut config,
-        "tls",
-        ResourceRole::Identity,
-        serde_json::to_value(server_tls)?,
-    )?;
-    dependency(
-        &mut config,
-        &ComponentId::try_new("00000000-0000-0000-0000-00000000032e")?,
-        "tls",
-        identity,
-    );
     let journal_definition = definition("receiver/in", "arithmetic")?;
     let journal = resource(
         &mut config,
@@ -654,14 +645,12 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
         )
         .await?;
         let admission = SourceAdmission::new(journal.clone(), PortId::try_new("out")?).await?;
-        let control = Arc::new(BridgeEgressControl::default());
-        let mut specification = sender.specification(ComponentRole::Sink)?;
-        for (name, resource) in [("state", "mapping"), ("tls", "tls"), ("control", "control")] {
-            specification
-                .dependencies
-                .insert(name.into(), vec![ResourceId::try_new(resource)?]);
-        }
-        let mut builder = ComponentBatch::builder()
+        let plugin = drasi_host_sdk::computation::NativePlugin::from_definition(
+            drasi_computation_sink_bridge::plugin()?,
+        )?;
+        let specification = plugin.factories()[0]
+            .specification(sender.sender_endpoint.clone(), serde_json::to_value(&sender)?)?;
+        let builder = ComponentBatch::builder()
             .source(drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1").expect("fixture component name"), Box::new(AdmissionInput {
                 descriptor: ComponentDescriptor::try_new(
                     id(113),
@@ -678,32 +667,17 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
                 drasi_lib::computation::v1::ComponentName::try_new("bridge-output")
                     .expect("fixture component name"),
                 specification,
-                drasi_computation_sink_bridge::factory(),
+                plugin.factories()[0].clone(),
             );
-        for (name, role, handle) in [
-            ("upstream", ResourceRole::StateStore, journal.resource()),
-            (
-                "mapping",
-                ResourceRole::IndexBackend,
-                drasi_lib::computation::v1::QueryIndexProviderResource::handle(ResourceRole::IndexBackend, provider),
-            ),
-            (
-                "tls",
-                ResourceRole::Identity,
-                ResourceHandle::new(ResourceRole::Identity, client_tls.resolve(&directory.0)?),
-            ),
-            ("control", ResourceRole::Component, control.resource()),
-        ] {
-            let resource = ResourceId::try_new(name)?;
-            builder = builder
-                .declare_resource(ResourceSpecification {
-                    id: resource.clone(),
-                    role,
-                    ownership: ResourceOwnership::Borrowed,
-                    binding: name.into(),
-                })?
-                .provide_resource(resource, handle)?;
-        }
+        let upstream = ResourceId::try_new("upstream")?;
+        let builder = builder
+            .declare_resource(ResourceSpecification {
+                id: upstream.clone(),
+                role: ResourceRole::StateStore,
+                ownership: ResourceOwnership::Borrowed,
+                binding: "upstream".into(),
+            })?
+            .provide_resource(upstream, journal.resource())?;
         let batch = builder
             .connect(
                 EdgeDefinition::new(
@@ -788,8 +762,10 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
             tls(&tls_path, "server", TlsRole::Client, pin("server")?),
         ] {
             recipe.validate()?;
+            let mut wrong = outgoing.clone();
+            wrong.tls = Some(recipe.clone());
             assert!(BridgeEndpointControl::connect(
-                outgoing.clone(),
+                wrong,
                 ComponentRole::Sink,
                 Some(recipe.resolve(&directory.0)?)
             )
@@ -803,7 +779,13 @@ fn durable_tls_cross_os_faults_reopen_and_independent_peer_ownership() -> Result
                 GraphSelection::Exact(vec![id(113), id(813)]),
             )
             .await?;
-        let cut = control.finish(Duration::from_secs(5)).await?;
+        let mut endpoint = BridgeEndpointControl::connect(
+            sender.clone(),
+            ComponentRole::Sink,
+            Some(client_tls.resolve(&directory.0)?),
+        )
+        .await?;
+        let cut = endpoint.seal(Duration::from_secs(5)).await?;
         assert_eq!(cut.client_sequence, 12);
         core.shutdown().await?;
         journal.shutdown().await?;

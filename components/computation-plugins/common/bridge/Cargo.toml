@@ -32,7 +32,10 @@ drasi-computation-source-bridge = { path = "../../sources/bridge" }
 drasi-computation-sink-bridge = { path = "../../sinks/bridge" }
 chrono = "0.4"
 drasi-computation-contracts = { workspace = true }
+drasi-core = { workspace = true }
+drasi-host-sdk = { workspace = true }
 drasi-index-rocksdb = { workspace = true, features = ["computation"] }
+drasi-lib = { workspace = true }
 
 [lints]
 workspace = true

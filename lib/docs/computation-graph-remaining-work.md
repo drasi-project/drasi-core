@@ -3026,24 +3026,7 @@ Malformed, oversize and deeply nested `Struct` input is not tested, and the mapp
 
 ### Bridge source
 
-`drasi-core/components/computation-plugins/sources/bridge` (`drasi.bridge/source`) with `common/bridge`. Static Rust hosting only: it implements the in-process `drasi-lib` component contract rather than the plugin SDK, is registered only by `instance-host`, and has no `DESIGN.md` or `CONFIGURATION.md`. Its hostile-input codec limits, mTLS leaf pinning, bounded queues and owned workers are in place; lifecycle, observability, hosting and documentation work remains. Sink-side bridge work is in the bridge sink section (BS-NN).
-
-<a id="br-06"></a>
-<a id="source-d-3"></a>
-
-#### Port the bridge source to the native plugin SDK (BR-06, Source D-3)
-
-**Kind:** Issue. **Priority:** Medium. **Effort:** Large.
-
-The bridge source and `common/bridge` depend on `drasi-lib`, which breaks the native dependency rule, and the source cannot be built as a loadable plugin. Drasi Server therefore cannot load it, and it has no real-library test coverage. The alternative (record static-only hosting as a supported profile) has not been chosen; porting is recommended.
-
-**What remains:** implement `NativeComponent`/`NativeSource`, declaring `HostServices::source_admission` and taking `ServiceBindings::admission` in `create`; take TLS from configuration via `TlsResourceRecipe`; expose seal/drain through control or management; remove the `drasi-lib` dependency; add `export_computation_plugin!` and plugin metadata so `make check-native-dependencies` covers it. Coordinate with the bridge sink port (BS-10).
-
-**Example:** a Server configuration selecting `drasi.bridge/source` fails because no plugin library exports that factory.
-
-**Evidence:** `drasi-core/components/computation-plugins/sources/bridge/Cargo.toml:13`; `drasi-core/components/computation-plugins/common/bridge/Cargo.toml:13`; `drasi-core/components/computation-plugins/sources/bridge/src/lib.rs:12-16`; `drasi-core/components/instance-host/src/host.rs:724`.
-
-**Done when:** the source builds as a dynamic plugin with no `drasi-lib` dependency, passes `check-native-dependencies`, and the bridge tests run through the loaded library.
+`drasi-core/components/computation-plugins/sources/bridge` (`drasi.bridge/source`) with `common/bridge`. A plugin-SDK source (`NativeSource`, `source_admission`) exported by its own library and linked statically by `instance-host`; TLS comes from its `tls` configuration and seal/drain are served on the link's control lane. It has no `DESIGN.md` or `CONFIGURATION.md`. Its hostile-input codec limits, mTLS leaf pinning, bounded queues and owned workers are in place; lifecycle, observability, hosting and documentation work remains. Sink-side bridge work is in the bridge sink section (BS-NN).
 
 <a id="br-01"></a>
 
@@ -3169,13 +3152,13 @@ Lifecycle paths can panic on `expect`, errors lose their cause through `to_strin
 
 The bridge source crate has no tests; `common/bridge/tests` covers the protocol and link but not the source's lifecycle hooks.
 
-**What remains:** tests for restart on the same object, pause/resume, erase retry, stop timeout and retry, negative factory validation, accept-error resilience and protocol-version mismatch. After [BR-06](#br-06), run the SDK conformance kit and real-library tests. Prepared-peer partition tests are in [CW-91](#cw-91).
+**What remains:** tests for restart on the same object, pause/resume, erase retry, stop timeout and retry, negative factory validation, accept-error resilience and protocol-version mismatch. Run the SDK conformance kit. Prepared-peer partition tests are in [CW-91](#cw-91).
 
 **Example:** `stop` → `start` on the same `BridgeSource` object, then a sender reconnect, is not tested.
 
 **Evidence:** `drasi-core/components/computation-plugins/sources/bridge/` (no `tests/`, no `#[cfg(test)]`); `drasi-core/components/computation-plugins/common/bridge/tests/bridge.rs`.
 
-**Done when:** the listed scenarios pass in CI, and after BR-06 the conformance kit passes on both Tokio flavours.
+**Done when:** the listed scenarios pass in CI, and the conformance kit passes on both Tokio flavours.
 
 <a id="br-05"></a>
 <a id="br-40"></a>
@@ -4376,41 +4359,10 @@ is retired.
 ### Bridge sink
 
 `drasi-core/components/computation-plugins/sinks/bridge` (with
-`drasi-core/components/computation-plugins/common/bridge`) is hosted only by
-the instance host. It is still built on `drasi_lib::computation::v1`. Several
-items are shared with the bridge source (Source BR-xx).
-
-<a id="bs-10"></a><a id="sink-d-8"></a>
-
-#### Port the bridge sink to the native SDK (BS-10, Sink D-8)
-
-**Kind:** Issue. **Priority:** Medium. **Effort:** Medium.
-
-The sink implements the `drasi-lib` computation traits and is registered
-statically in the instance host. It is not a native plugin. The native
-dependency check skips it because it has no `abi-family = "computation"`
-metadata. The accepted direction (Sink D-8, as for the bridge source) is to
-port it.
-
-**What remains:**
-
-- Implement `NativeSink` with `export_computation_plugin!` and no `drasi-lib`
-  dependency.
-- Add plugin metadata so the native dependency check covers it.
-- Consider using the consumer extension for the durable profile instead of the
-  private ledger.
-
-**Example:** the Server should be able to load the bridge sink as a native
-plugin like any other sink.
-
-**Evidence:** `drasi-core/components/computation-plugins/sinks/bridge/src/component.rs:8-11`;
-`drasi-core/components/computation-plugins/sinks/bridge/Cargo.toml:13`;
-`drasi-core/components/computation-plugins/common/bridge/Cargo.toml:13`;
-`drasi-core/components/instance-host/src/host.rs:724-725`;
-`drasi-core/ci/check_native_dependencies.py:49`.
-
-**Done when:** the sink is a native plugin with no `drasi-lib` dependency, and
-the dependency check covers it.
+`drasi-core/components/computation-plugins/common/bridge`) is a plugin-SDK
+sink (`NativeSink`) exported by its own library. A durable sender keeps its
+mapping in a file under `mappingDirectory`. Several items are shared with the
+bridge source (Source BR-xx).
 
 <a id="bs-01"></a>
 
@@ -4730,7 +4682,7 @@ The sink crate has no tests of its own.
 - concurrent control;
 - a limits-only change.
 
-After [BS-10](#bs-10), run the conformance kit. Cover partition qualification
+Run the conformance kit. Cover partition qualification
 with [CW-05](#cw-05) and [CW-91](#cw-91).
 
 **Example:** kill the receiver after it accepts a frame but before the receipt.

@@ -638,10 +638,21 @@ impl Receiver {
             return self.observe_connection(io, contract).await;
         }
         if local {
-            return Err(BridgeError::new(
+            let error = BridgeError::new(
                 ErrorCode::Incompatible,
                 "the receiver's own identity may only observe the link",
-            ));
+            );
+            deadline(
+                timeout,
+                write_message(
+                    &mut io,
+                    Lane::Control,
+                    &ControlResponse::Failure(error.clone()),
+                    CONTROL_BYTES,
+                ),
+            )
+            .await?;
+            return Err(error);
         }
         let ControlRequest::Hello {
             contract,

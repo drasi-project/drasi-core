@@ -1,31 +1,36 @@
-# Native bridge sink
+# Bridge sink
 
-`drasi-computation-sink-bridge` contains the native `BridgeSink` implementation
-and only the `drasi.bridge/sink` factory (implementation `"1"`, configuration
-`1`). It consumes the configured portable schema on `in`.
+`drasi-computation-sink-bridge` is the plugin exporting the `drasi.bridge/sink`
+factory (implementation `"1"`, configuration `1`) and its `BridgeSink`
+(`NativeSink`). It consumes the standard graph schema on `in`.
 
-This endpoint retains **static Rust hosting**, not a dynamic C ABI export:
+Link it statically through the host SDK, or load the library built with the
+`dynamic-plugin` feature (`libdrasi_computation_sink_bridge`):
 
 ```rust,ignore
-registry.register(drasi_computation_sink_bridge::factory())?;
+NativePlugin::from_definition(drasi_computation_sink_bridge::plugin()?)?
+    .register_factories(&mut registry)?;
 ```
-
-Depend only on this crate to use the sink. It re-exports its `BridgeConfig`,
-portable schema/profile/transport types, egress/receipt controls and TLS resource
-types. It does not depend on or register the bridge source component.
 
 The [shared bridge contract](../../common/bridge) covers configuration, volatile
 versus durable acceptance, sender mapping recovery, namespace preservation,
-transports, TLS, explicit cuts and cleanup. Durable mode requires an actual host
-index provider. The saved input/mapping precedes first transmission; a receiver
-receipt proves admission, never downstream completion or whole-graph drain.
+transports, TLS, explicit cuts and cleanup. The durable profile requires
+`mappingDirectory`: the sender's mapping file is saved before first
+transmission, and a receiver receipt proves admission, never downstream
+completion or whole-graph drain. The `tls` configuration key carries the client
+identity for the `tls` transport.
 
-The sender declares what it requires, so the graph checks it when the edge is
-bound: a durable sender keys its mapping on the producer's durable identity and
-declares exactly-once input from a durable producer, a durable progress and a
-durable `state` dependency, so a volatile or unidentified producer is refused at
-wiring (the sender node carries a terminal binding failure). A volatile sender
-declares an unkeyed input.
+The sender completes an input as `Handled` in both profiles, once the receiver
+has admitted it. It declares what it requires, so the graph checks it when the
+edge is bound: a durable sender keys its mapping on the producer's durable
+identity and declares exactly-once input from a durable producer and a durable
+progress, so a volatile or unidentified producer is refused at wiring (the
+sender node carries a terminal binding failure). A volatile sender declares an
+unkeyed input.
+
+The sink has no worker: Pause and Resume succeed because the Host calls no
+`handle` while paused. Stop releases the connection and the mapping lock.
+Erasing disposal removes the durable mapping file idempotently.
 
 Delivery failures follow the shared
 [delivery-failure model](../NATIVE-SINK-GUIDE.md#delivery-failures):

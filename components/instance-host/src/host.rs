@@ -8,7 +8,7 @@ use std::{
         fs::{FileTypeExt, PermissionsExt},
         net::UnixListener,
     },
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, RwLock,
@@ -18,11 +18,14 @@ use std::{
 };
 
 use anyhow::{ensure, Context, Result};
-use drasi_computation_bridge_common::{BridgeEgressControl, BridgeIngressControl, IngressCut};
-use drasi_host_sdk::{management::HostManagementResources, PluginRegistry};
+use drasi_computation_bridge_common::{BridgeConfig, BridgeEndpointControl, IngressCut};
+use drasi_host_sdk::{
+    computation::NativePlugin, management::HostManagementResources, PluginRegistry,
+};
 use drasi_lib::{
     computation::v1::{
-        ComponentHealth, ComponentLifecycle, GraphSelection, GraphState, RealizationState,
+        ComponentHealth, ComponentLifecycle, ComponentRole, GraphSelection, GraphState,
+        RealizationState,
     },
     management::DesiredInstance,
     DrasiLib,
@@ -718,14 +721,15 @@ async fn initialize(shared: &Arc<Shared>) -> Result<()> {
             .push(loaded.metadata().plugin.id.to_string());
         plugins.register_computation_plugin(loaded)?;
     }
+    // The bridge endpoints are statically linked plugins.
+    for plugin in [
+        drasi_computation_source_bridge::plugin()?,
+        drasi_computation_sink_bridge::plugin()?,
+    ] {
+        plugins.register_computation_plugin(NativePlugin::from_definition(plugin)?)?;
+    }
     let mut factories = plugins.computation_factory_registry()?;
     factories.register(Arc::new(SupervisorFactory::new(shared.supervisor.clone())))?;
-    for factory in [
-        drasi_computation_source_bridge::factory(),
-        drasi_computation_sink_bridge::factory(),
-    ] {
-        factories.register(factory)?;
-    }
     let mut middleware = drasi_core::middleware::MiddlewareTypeRegistry::new();
     middleware.register(Arc::new(drasi_middleware::map::MapFactory::new()));
     middleware.register(Arc::new(
@@ -756,10 +760,7 @@ async fn initialize(shared: &Arc<Shared>) -> Result<()> {
             }
         }
     }
-    let resources = Arc::new(InstanceResources::new(
-        Arc::new(resources),
-        shared.config.state_dir.clone(),
-    ));
+    let resources = Arc::new(InstanceResources::new(Arc::new(resources)));
     *shared.resources.write().unwrap_or_else(|e| e.into_inner()) = Some(resources.clone());
     let mut builder = DrasiLib::builder()
         .with_allow_external_component_ids(true)
@@ -883,6 +884,86 @@ async fn execute(shared: &Arc<Shared>, command: ControlCommand) -> Result<serde_
     }
 }
 
+/// A bridge ingress observed over its own control lane, plus the durable
+/// admission journal this instance owns.
+struct Ingress {
+    config: BridgeConfig,
+    journal: Option<Arc<drasi_lib::computation::v1::QosChannel>>,
+}
+
+impl Ingress {
+    /// Observes the receiver locally: over TLS with the receiver's own
+    /// identity, which the receiver admits to observing control only.
+    async fn observe(&self) -> Result<BridgeEndpointControl> {
+        let tls = self
+            .config
+            .tls
+            .as_ref()
+            .map(|tls| tls.resolve_local_observer(Path::new(".")))
+            .transpose()?;
+        Ok(BridgeEndpointControl::connect(self.config.clone(), ComponentRole::Source, tls).await?)
+    }
+
+    /// Volatile: every admitted frame left the receiver's queue. Durable:
+    /// the journal holds only this link's cut and every subscriber that is
+    /// not retired processed it.
+    async fn drained(
+        &self,
+        observer: &mut BridgeEndpointControl,
+        cut: &IngressCut,
+    ) -> Result<bool> {
+        let Some(journal) = &self.journal else {
+            return Ok(observer.drain_status(cut).await?.drained);
+        };
+        let progress = journal.progress().await?;
+        ensure!(
+            progress.accepted == cut.position,
+            "the bridge journal includes history beyond the sealed cut"
+        );
+        Ok(progress
+            .processed
+            .iter()
+            .filter(|(id, _)| !progress.retired.contains(*id))
+            .all(|(_, position)| *position >= cut.position))
+    }
+
+    async fn wait_drained(
+        &self,
+        observer: &mut BridgeEndpointControl,
+        cut: &IngressCut,
+        timeout: Duration,
+    ) -> Result<bool> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if self.drained(observer, cut).await? {
+                return Ok(true);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(false);
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+}
+
+/// A bridge endpoint's literal configuration.
+fn bridge_config(
+    spec: &drasi_lib::computation::v1::ComponentSpecification,
+) -> Result<BridgeConfig> {
+    let mut object = serde_json::Map::new();
+    for (name, value) in &spec.configuration {
+        match value {
+            drasi_lib::computation::v1::ConfigurationValue::Literal(value) => {
+                object.insert(name.to_string(), value.clone());
+            }
+            drasi_lib::computation::v1::ConfigurationValue::Reference { .. } => {
+                anyhow::bail!("composition stop requires a literal bridge configuration")
+            }
+        }
+    }
+    Ok(serde_json::from_value(serde_json::Value::Object(object))?)
+}
+
 async fn stop_tree(shared: &Arc<Shared>) -> Result<()> {
     let core = shared.core().ok();
     if shared
@@ -897,8 +978,8 @@ async fn stop_tree(shared: &Arc<Shared>) -> Result<()> {
         shared.phase(HostPhase::Stopped, None);
         return Ok(());
     }
-    let mut ingress: BTreeMap<String, Arc<BridgeIngressControl>> = BTreeMap::new();
-    let mut egress: BTreeMap<String, Arc<BridgeEgressControl>> = BTreeMap::new();
+    let mut ingress: BTreeMap<String, Ingress> = BTreeMap::new();
+    let mut egress: BTreeMap<String, BridgeConfig> = BTreeMap::new();
     let mut revision = None;
     if let Some(core) = &core {
         let desired: DesiredInstance = core.desired_configuration()?.desired;
@@ -908,7 +989,7 @@ async fn stop_tree(shared: &Arc<Shared>) -> Result<()> {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
-            .context("native resource resolver is unavailable")?;
+            .context("instance resource resolver is unavailable")?;
         revision = Some(core.computation_control()?.desired_snapshot().revision);
         for component in &desired.topology.components {
             let drasi_lib::computation::v1::ComponentConstruction::Factory(spec) =
@@ -920,17 +1001,22 @@ async fn stop_tree(shared: &Arc<Shared>) -> Result<()> {
             if !matches!(implementation, "drasi.bridge/source" | "drasi.bridge/sink") {
                 continue;
             }
-            let controls = spec.dependencies.get("control")
-                .context("bridge composition requires a declared native control resource; endpoints remain open")?;
-            ensure!(
-                controls.len() == 1,
-                "bridge requires exactly one native control resource"
-            );
+            let config = bridge_config(spec)?;
             let id = component.descriptor.id().to_string();
             if implementation == "drasi.bridge/source" {
-                ingress.insert(id, resources.ingress(&controls[0])?);
+                let journal = match spec.dependencies.get("admission") {
+                    Some(journals) => {
+                        ensure!(
+                            journals.len() == 1,
+                            "a durable bridge ingress has exactly one admission journal"
+                        );
+                        Some(resources.journal(&journals[0])?)
+                    }
+                    None => None,
+                };
+                ingress.insert(id, Ingress { config, journal });
             } else {
-                egress.insert(id, resources.egress(&controls[0])?);
+                egress.insert(id, config);
             }
         }
         if !ingress.is_empty() || !egress.is_empty() {
@@ -953,12 +1039,12 @@ async fn stop_tree(shared: &Arc<Shared>) -> Result<()> {
                     .computation_control()?;
                 for id in components {
                     if let Some(input) = ingress.get(id.as_str()) {
-                        let cut = input.sealed_cut().await?
+                        let mut observer = input.observe().await?;
+                        let cut = observer.sealed_cut().await?
                             .context("bridge ingress has no peer-sealed cut; its sender must finish first, and endpoints remain open")?;
-                        let drained = input.wait_drained(&cut, timeout).await?;
                         ensure!(
-                            drained.drained,
-                            "native ingress has not drained its sealed cut"
+                            input.wait_drained(&mut observer, &cut, timeout).await?,
+                            "bridge ingress has not drained its sealed cut"
                         );
                         inlet_cuts.insert(id.to_string(), cut.clone());
                         shared
@@ -986,7 +1072,19 @@ async fn stop_tree(shared: &Arc<Shared>) -> Result<()> {
                         "component {id} failed before its drain could be confirmed"
                     );
                     if let Some(output) = egress.get(id.as_str()) {
-                        let cut = output.finish(timeout).await?;
+                        // The quiesced sender holds no unresolved input, so
+                        // its receiver's cut is the egress frontier.
+                        let mut endpoint = BridgeEndpointControl::connect(
+                            output.clone(),
+                            ComponentRole::Sink,
+                            output
+                                .tls
+                                .as_ref()
+                                .map(|tls| tls.resolve(Path::new(".")))
+                                .transpose()?,
+                        )
+                        .await?;
+                        let cut = endpoint.seal(timeout).await?;
                         shared
                             .state
                             .lock()
@@ -1022,16 +1120,11 @@ async fn stop_tree(shared: &Arc<Shared>) -> Result<()> {
         let cut = inlet_cuts
             .get(id)
             .context("bridge ingress has no validated drain stage")?;
+        let mut observer = input.observe().await?;
         ensure!(
-            input.drain_status(cut).await?.drained,
+            observer.sealed_cut().await?.as_ref() == Some(cut)
+                && input.drained(&mut observer, cut).await?,
             "bridge ingress cut changed before shutdown"
-        );
-    }
-    for output in egress.values() {
-        let status = output.snapshot()?;
-        ensure!(
-            status.sealed && !status.pending && !status.in_flight,
-            "bridge egress still owns an unresolved input"
         );
     }
     shared.supervisor.stop_all().await?;

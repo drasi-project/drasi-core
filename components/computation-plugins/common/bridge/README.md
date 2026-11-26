@@ -1,30 +1,41 @@
-# Native inter-instance bridge
+# Inter-instance bridge
 
 [`drasi-computation-source-bridge`](../../sources/bridge) and
-[`drasi-computation-sink-bridge`](../../sinks/bridge) connect two **normal,
-complete DrasiLib instances**. They supply independent native `EnvelopeSource`
-and `EnvelopeSink` factories, not remote
-component-method execution, a transformer facade, or process supervision.
-Register only the endpoints that process needs in its ordinary `FactoryRegistry`:
+[`drasi-computation-sink-bridge`](../../sinks/bridge) connect two **complete
+DrasiLib instances**. They are plugin-SDK plugins: a `NativeSource` and a
+`NativeSink`, each exported by its own library (`export_computation_plugin!`
+behind the `dynamic-plugin` feature) and linkable in process. They are not
+remote component-method execution, a transformer facade, or process
+supervision. A host links them statically through the host SDK:
 
 ```rust,ignore
-registry.register(drasi_computation_source_bridge::factory())?;
-registry.register(drasi_computation_sink_bridge::factory())?;
+for plugin in [
+    drasi_computation_source_bridge::plugin()?,
+    drasi_computation_sink_bridge::plugin()?,
+] {
+    NativePlugin::from_definition(plugin)?.register_factories(&mut registry)?;
+}
 ```
 
-`drasi-computation-bridge-common` supplies shared protocol, transport, controls and
-recovery helpers. It contains neither component implementation nor an aggregate
-component factory.
+or loads `libdrasi_computation_source_bridge` / `libdrasi_computation_sink_bridge`
+like any other plugin library. `drasi-computation-bridge-common` supplies the
+shared protocol, transport, controls, configuration definition and recovery
+state. It contains no component and depends on neither `drasi-lib` nor
+`drasi-core`.
 
-| Factory | Implementation/configuration version | Port |
-|---|---|---|
-| `drasi.bridge/source` | `"1"` / `1` | output `out` |
-| `drasi.bridge/sink` | `"1"` / `1` | input `in` |
+| Factory | Implementation/configuration version | Port | Host services |
+|---|---|---|---|
+| `drasi.bridge/source` | `"1"` / `1` | output `out` | `source_admission` (bound for the durable profile) |
+| `drasi.bridge/sink` | `"1"` / `1` | input `in` | none |
 
-These remain statically linked native `ComponentFactory` implementations. The
-endpoint crates do **not** export a C plugin ABI or imply that arbitrary host-owned
-index/TLS resources can cross that ABI. The independently versioned bridge wire
-is **1**, containing standard binary computation envelopes **1**.
+Both ports require FIFO and backpressure. Plugin factory ports are fixed, so
+they no longer add the durable pipe requirements per profile: a durable link is
+enforced by the receiver's admission journal and the sender's exactly-once
+input description. The sink completes an input as `Handled` in both profiles
+(see below). Neither factory declares management, so every configuration
+change reconstructs the endpoint. The independently versioned bridge wire is
+**2** (`PROTOCOL_VERSION`), containing standard binary computation envelopes
+**1**.
 
 ## Configuration and registration
 
@@ -88,22 +99,22 @@ source namespace; `events` accepts ordinary batches and validates any marker
 that is present, so an unchanged relay keeps its completeness. A marker
 inherited by a different change set is history, not completeness.
 
-`BridgeConfig::specification(ComponentRole::Source/Sink)` builds the normal
-component specification, descriptor and port requirements. Add these dependencies:
+Two local settings are not part of the link contract and are omitted when
+absent:
 
-| Endpoint/profile | Dependency | Role/concrete resource |
+| Key | Endpoint | Meaning |
 |---|---|---|
-| Durable source | `admission` | `StateStore`, actual `QosChannel` |
-| Durable sink | `state` | `IndexBackend`, `QueryIndexProviderResource` |
-| TLS source or sink | `tls` | `Identity`, this package's `TlsResource` |
-| Source, optional host control | `control` | `Component`, `BridgeIngressControl` |
-| Sink, optional host control | `control` | `Component`, `BridgeEgressControl` |
+| `tls` | both, required exactly for the `tls` transport | The endpoint's mutual-TLS identity as a `bridgeTls` recipe (`kind`, `version`, `role`, `trustRoots`, `certificateChain`, `privateKey`, `peerCertificateSha256`); `role` is `server` for the source and `client` for the sink. Relative paths resolve against the process working directory. Key files are read at Start. |
+| `mappingDirectory` | sink, required exactly for the durable profile | Directory of the sender's mapping file (below). |
 
-Every dependency has cardinality zero or one; configuration makes the listed
-ones mandatory. Volatile endpoints reject admission/state bindings; non-TLS
-endpoints reject a TLS binding. Factories validate the actual instance,
-component, graph and stream identities. Construction never binds sockets or
-starts workers. Startup/stop remain normal graph lifecycle operations.
+A host builds a component specification from the factory
+(`NativeFactory::specification(id, configuration)`). The only resource
+dependency is the durable source's `admission`: a `StateStore` `QosChannel`,
+which the Host binds as the source's admission service. Factories validate the
+component UUID against `senderEndpoint`/`receiverEndpoint`, the instance scope,
+the TLS role and, for an admission binding, its producer scope, graph and
+stream. Construction never binds sockets or starts workers. Startup/stop remain
+normal graph lifecycle operations.
 
 The receiver journal must be dedicated to this link, lossless, persistent, and
 configured for producer admission **before** constructing the source:
@@ -114,21 +125,30 @@ configured for producer admission **before** constructing the source:
 - `failure_scope =` the selected, actually supported failure mode
 - `max_producers = 1`, `receipts_per_producer = 1`
 
-The bridge bounds each dedicated journal to 1–16 required subscribers.
+Every outgoing edge uses that same journal. The standard admission host checks
+reject mixed/memory paths. The source sees only its admission service, not the
+journal: its durability, subscriber set and producer bound are the Host's
+binding, which the source no longer revalidates. The single producer's
+persisted name contains the link contract fingerprint; changing its
+identity/schema/namespace contract cannot silently register a second producer
+(the journal's `max_producers = 1` refuses it).
 
-Every outgoing edge uses that same journal. The standard SourceAdmission host
-checks reject mixed/memory paths. The source revalidates the complete enabled
-admission options, not a provider name. The single producer's persisted name
-contains the link contract fingerprint; changing its identity/schema/namespace
-contract cannot silently register a second producer.
+The durable sender keeps its mapping in a file it owns:
+`<mappingDirectory>/<sha256(senderInstance, graphId, senderEndpoint)>.mapping`,
+replaced atomically (synced temporary file, rename, synced directory) and
+guarded by an exclusive `.lock` file while the sink is started, so a second
+sender cannot share it. A synced local file survives process restarts and
+power loss, so `failureScope: storageLoss` is refused. Erasing disposal
+removes the file idempotently. Use an actual retained/acknowledged input pipe.
+Calling the sink manually makes preserving that upstream obligation the
+caller's job. Receiver journals and sender mappings belong to their respective
+instances.
 
-The sender needs a dedicated, atomic `ComputationIndexProvider` bundle with a
-real asynchronous cleanup owner and the requested failure survival. Its input
-port requires FIFO, backpressure, durable acceptance, replay and explicit
-acknowledgement. Use an actual retained/acknowledged input pipe. Calling the
-sink manually makes preserving that upstream obligation the caller's job.
-Receiver storage and sender mapping storage belong to their respective instances;
-do not open another process's RocksDB directory.
+The SDK's consumer extension (`DeliveryRunner`) is not used for the durable
+profile: it hands a consumer one operation at a time, whereas the bridge admits
+a whole envelope (including a complete transaction, or an envelope with no
+operations) as one unit, and its ledger cannot pin the first-admission frame a
+replayed input must resend byte for byte.
 
 ## Admission, ordering and restart
 
@@ -138,15 +158,18 @@ are consecutive. A complete source transaction stays one envelope and one
 admission. No fragment gets its own acknowledgement.
 
 - **Volatile:** success means acceptance into the explicitly bounded receiver
-  queue. The sink declares `Accepted`. Stop, process failure or reconstruction
-  can lose accepted queued work. No process-restart guarantee is inferred.
+  queue. Stop, process failure or reconstruction of the receiver can lose
+  accepted queued work. No process-restart guarantee is inferred.
 - **Durable:** success means the actual receiver QoS transaction committed both
-  the envelope and its retry receipt, at `failureScope`. The sink declares
-  `Handled` **at this admission boundary only**. This does not mean the receiving
-  query/subgraph finished, an external effect completed, or a composition drained.
+  the envelope and its retry receipt, at `failureScope`.
 
-The durable sender uses the existing `ComputationTransaction`, storing one
-bounded mapping row in its outbox interface. It persists receiver session,
+The sink declares `Handled` in both profiles (plugin sink completion is fixed
+per factory): `handle` returns only once the receiver has admitted the input,
+like a network sink whose destination is volatile. It holds **at this admission
+boundary only**. This does not mean the receiving query/subgraph finished, an
+external effect completed, or a composition drained.
+
+The durable sender stores one bounded mapping record. It persists receiver session,
 consecutive client sequence, canonical upstream logical identity/content and
 the exact first-admission frame **before any data transmission**. Keeping that
 one frame permits an upstream replay with a different transport ID or
@@ -168,8 +191,7 @@ client gaps, changed producer identity, missing sender state with existing
 receiver history, changed receiver incarnation, and changed saved configuration
 fail explicitly. There is no automatic receipt expiry-to-new-input conversion,
 session retirement, state deletion, downgrade, or competing replacement owner.
-An uncertain storage operation uses the existing transaction fencing/cleanup
-contract. Exhausted bounded connection/backpressure retries leave the obligation
+A failed mapping write leaves the previous record in place. Exhausted bounded connection/backpressure retries leave the obligation
 unresolved; they never report success.
 
 Connections carry a receiver-issued generation. Reconnection invalidates old
@@ -257,7 +279,7 @@ The receiver's SourceAdmission mailbox supplies the existing bounded producer
 metadata and commit operations. Full queues return explicit `Busy`; the sender
 holds its input and uses only its bounded retry policy.
 
-`BridgeSink::control()` exposes a cloneable, read-only `BridgeControl`:
+A linked `BridgeSink::control()` exposes a cloneable, read-only `BridgeControl`:
 `status`, `producer_status`, and `receipt` remain independently callable while
 data is pending. `BridgeSource::status()` and `BridgeSink::last_receipt()` expose
 bounded local evidence. None proves whole-graph/composition drain. Supervisors
@@ -271,39 +293,41 @@ that a remote process remains alive across a partition.
 
 ### Explicit composition cuts
 
-Hosts can provide `Arc<BridgeIngressControl>` / `Arc<BridgeEgressControl>` through
-the optional normal `control` resource dependency. `resource()` supplies the
-actual `Component` resource and cleanup; successful endpoint stop revokes its
-lifetime. The controls retain no separate graph registry.
+Seal and drain are served on the receiver's own control lane, never through a
+Host resource object (a plugin cannot share one across its library boundary).
+`BridgeEndpointControl::connect(config, role, tls)` opens an observing
+connection from serialized configuration; it does not register a producer or
+replace the sender's data generation.
 
-After quiescing an egress and its **entire upstream path**, call
-`BridgeEgressControl::finish(timeout)`. It refuses unresolved saved/current inputs,
-forbids new local inputs, and uses the actual configured transport/client TLS to
-seal its peer. The peer resolves the actual accepted session/sequence/journal
-position behind its admission gate; the sender checks that cut against its
-saved final receipt. Failure/cancellation does not reopen admission.
+After quiescing an egress and its **entire upstream path** (so the sender holds
+no unresolved input), its host connects with the sink's configuration and
+client identity and calls `seal(timeout)`. The receiver resolves the actual
+accepted session/sequence/journal position behind its admission gate and
+refuses fresh data from then on (`Sealed`); receipt lookup stays live.
+Failure/cancellation does not reopen admission.
 
-`BridgeIngressControl::sealed_cut()` observes an existing cut without creating
-one, so an uncoordinated child stop cannot seal an active producer implicitly.
-`seal(timeout)` is the explicit local operation. `drain_status(&cut)` and
-`wait_drained(&cut, timeout)` validate the receiver lifetime and exact cut:
+The receiving host observes its ingress locally with the source's
+configuration. Over TLS it presents the receiver's **own** certificate
+(`TlsResourceRecipe::resolve_local_observer`): the receiver accepts that
+identity for observing requests only (seal, sealed cut, drain status) and
+refuses it for producer handshakes and data.
 
-- Volatile: every accepted envelope has been dequeued by the source into the
-  normal graph. The host must then quiesce the source to finish its native
-  in-flight forwarding and apply normal downstream drain rules.
-- Durable: actual required journal subscriber cursors have acknowledged through
-  the cut. Retiring a required subscriber is not accepted as completion.
+- `sealed_cut()` observes an existing cut without creating one, so an
+  uncoordinated child stop cannot seal an active producer implicitly.
+- `drain_status(&cut)` / `wait_drained(&cut, timeout)` validate the receiver
+  lifetime and exact cut. Volatile: every accepted envelope has been dequeued
+  by the source into the graph; the host must then quiesce the source to finish
+  its in-flight forwarding and apply normal downstream drain rules.
+- Durable receivers refuse drain status (`Incompatible`): their drain is the
+  admission journal's subscriber progress, which only the graph that owns the
+  journal can read. That host checks that the journal's accepted position
+  equals the cut (no other history) and that every subscriber that is not
+  retired processed through it. A durable cut's `requiredSubscribers` is empty.
 
 An empty queue, `in_flight=false`, or an admission receipt alone is never used
 as this proof. Cuts are scoped to the running receiver epoch; restart invalidates
 old cut observations. No unseal operation exists. Receipt/control traffic stays
 available while sealed.
-
-`BridgeEndpointControl::connect(config, role, client_tls)` exposes the same
-seal/drain operations from serialized native configuration. Its authenticated
-observing connection does not register a producer or replace the sender's data
-generation. A local TLS source uses its typed ingress control rather than
-pretending its server credential is a client credential.
 
 These are transport-local facts, **not whole-child effects or a completed
 composition algorithm**. The host must keep return ingress/control alive,
@@ -341,11 +365,13 @@ trust roots, a certificate chain/private key, and the expected peer leaf's
 SHA-256 certificate fingerprint. Both directions authenticate certificates,
 the client checks the server name, both pin the configured peer, and ALPN is
 `drasi-bridge/1`. This reuses existing cryptographic implementations; no custom
-cryptography or verification bypass exists. Rotate credentials explicitly with
-normal hosting resource replacement.
+cryptography exists. The only verifier additions are the receiver's own-identity
+observer path above, which accepts exactly the receiver's own leaf certificate.
+Rotate credentials by changing the files and restarting, or by reconstructing
+the endpoint with new configuration.
 
-`TlsResourceRecipe` is the shared host/Server loader, not another certificate
-parser in each host. Its strict JSON shape is:
+`TlsResourceRecipe` is the endpoint's `tls` configuration value and the shared
+loader, not another certificate parser in each host. Its strict JSON shape is:
 
 ```json
 {
@@ -361,15 +387,15 @@ parser in each host. Its strict JSON shape is:
 
 The illustrated pin is a placeholder, not a usable identity. `validate()` is pure.
 `resolve(base)` performs bounded local reads and returns `Arc<TlsResource>`.
-Paths may be absolute or relative to the owning host's supplied base; parent
-traversal rejects. Inputs are DER certificates and unencrypted PKCS8 DER keys:
+The endpoints resolve paths against the process working directory (absolute
+paths are recommended); parent traversal rejects. Inputs are DER certificates and unencrypted PKCS8 DER keys:
 1–16 roots, 1–8 chain entries, 64 KiB per certificate, 32 KiB per key, 1 MiB
 combined. Files must be regular, non-symlink files. Unix private-key files must
 grant no group/other access; opened inode identity is checked. The helper never
 serializes key contents into configuration or diagnostics. Private-key ACL
 validation for this recipe on non-Unix platforms remains explicitly unsupported.
 
-The Host and Server integrate this normal resource recipe. The Host distinguishes
+The instance host distinguishes
 owned local children from independently owned remote peers: a network failure
 does not authorize an unfenced duplicate replacement. Deployment-specific
 certificate/secret provisioning, distributed ownership leases, production

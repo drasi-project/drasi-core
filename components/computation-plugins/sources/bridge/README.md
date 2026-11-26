@@ -1,21 +1,30 @@
-# Native bridge source
+# Bridge source
 
-`drasi-computation-source-bridge` contains the native `BridgeSource` implementation
-and only the `drasi.bridge/source` factory (implementation `"1"`, configuration
-`1`). It emits the configured portable schema on `out`.
+`drasi-computation-source-bridge` is the plugin exporting the `drasi.bridge/source`
+factory (implementation `"1"`, configuration `1`) and its `BridgeSource`
+(`NativeSource`). It emits the standard graph schema on `out`.
 
-This endpoint retains **static Rust hosting**, not a dynamic C ABI export:
+Link it statically through the host SDK, or load the library built with the
+`dynamic-plugin` feature (`libdrasi_computation_source_bridge`):
 
 ```rust,ignore
-registry.register(drasi_computation_source_bridge::factory())?;
+NativePlugin::from_definition(drasi_computation_source_bridge::plugin()?)?
+    .register_factories(&mut registry)?;
 ```
 
-Depend only on this crate to use the source. It re-exports its `BridgeConfig`,
-portable schema/profile/transport types, ingress control and TLS resource types.
-It does not depend on or register the bridge sink component.
+The factory declares the `source_admission` Host service. The durable profile
+requires its `admission` dependency (a QoS journal configured for this link's
+producer admission); the volatile profile forbids it and admits frames into a
+bounded queue that `next` drains. The `tls` configuration key carries the
+server identity for the `tls` transport.
+
+Pause refuses new data with a retryable `Busy` and returns once no admission is
+in flight; receipts and control stay live. Stop cancels the listeners and joins
+their workers within the hook deadline (bounded by `timeoutMs`); an unjoined
+worker keeps ownership and a retried Stop finishes it. The source owns no state
+and refuses erasing disposal. Seal and drain are served on the link's control
+lane (`BridgeEndpointControl`).
 
 The [shared bridge contract](../../common/bridge) covers configuration, volatile
-versus durable admission, namespace preservation, transport limits, TLS, controls
-and shutdown. Durable mode requires the actual configured host `QosChannel`;
-construction does not bind sockets or start workers. Source stop retains owned
-listeners and workers through completed cleanup.
+versus durable admission, namespace preservation, transport limits, TLS, explicit
+cuts and shutdown.

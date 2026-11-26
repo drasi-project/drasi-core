@@ -6,9 +6,9 @@ DrasiLib**. There is no child evaluator, remote transformer, `next` RPC, or
 cross-process Rust resource interface.
 
 The portless native service factory `drasi.host/local-child`, implementation
-version `"1"` and configuration version `1`, owns a **local process**. Native
-`drasi.bridge/source` and `drasi.bridge/sink` factories are registered separately
-and carry data. Supervision relationships do not define the data-flow graph.
+version `"1"` and configuration version `1`, owns a **local process**. The
+`drasi.bridge/source` and `drasi.bridge/sink` plugins are linked statically
+(`NativePlugin::from_definition`) and carry data. Supervision relationships do not define the data-flow graph.
 
 ## Configuration and persistent identity
 
@@ -60,48 +60,33 @@ literal credentials in seed manifests. Accepted redb definitions use the existin
 encrypted store. Processing state, configuration state and host observations are
 different things.
 
-### Bridge control and TLS resources
+### Bridge TLS and durable resources
 
-The executable wraps the existing SDK resolver with public `InstanceResources`.
-These are normal graph-owned resource recipes; `binding` must equal the resource
-ID and no resource dependencies are accepted by these three recipes:
-
-| Recipe | Resource role | Component dependency |
-|---|---|---|
-| `{"kind":"bridgeIngressControl"}` | `Component` | Source `control` |
-| `{"kind":"bridgeEgressControl"}` | `Component` | Sink `control` |
-| `bridgeTls` | `Identity` | Source/sink `tls` |
-
-Each control resource belongs to one endpoint. The resolver retains only a weak
-reference to the actual graph-owned control, not another component registry.
-Ordinary SDK recipes and their recovery guards are forwarded. In-place changes
-to accepted control/TLS recipes are rejected rather than bypassing those guards;
-retirement/reconstruction remains subject to normal management eligibility.
-Use one resolver per instance/graph.
-
-TLS construction delegates to the bridge package's shared
-`TlsResourceRecipe::resolve(base)`, with this host's state directory as `base`.
-There is no second certificate parser or plaintext fallback. For example:
+The bridge endpoints take TLS from their own `tls` configuration value (the
+bridge package's `bridgeTls` recipe; a source requires `server` credentials and
+a sink `client` credentials), resolved by the endpoint at Start against the
+process working directory. Absolute paths are recommended. There is no second
+certificate parser or plaintext fallback. For example:
 
 ```json
 {
   "kind": "bridgeTls",
   "version": 1,
   "role": "client",
-  "trustRoots": ["certs/root.der"],
-  "certificateChain": ["certs/client.der"],
-  "privateKey": "certs/client.pk8",
+  "trustRoots": ["/etc/drasi/certs/root.der"],
+  "certificateChain": ["/etc/drasi/certs/client.der"],
+  "privateKey": "/etc/drasi/certs/client.pk8",
   "peerCertificateSha256": "<64 lowercase hexadecimal characters>"
 }
 ```
 
-A source requires `server` credentials; a sink requires `client` credentials.
-The shared helper enforces bounded DER roots/chains, PKCS8 keys, path validation,
-private-key permissions and peer pinning. Key material is loaded only when the
-owning instance constructs the resource. Durable ingress additionally uses the
-existing `QosChannel` **`StateStore`** resource in `admission`; durable egress uses
-the existing `QueryIndexProviderResource` in `state`. See the
-[bridge contract](../computation-plugins/common/bridge/README.md) for those recipes.
+Durable ingress uses the existing `QosChannel` **`StateStore`** resource in
+`admission`; a durable egress keeps its sender mapping under its own
+`mappingDirectory`. The executable wraps the SDK resolver with
+`InstanceResources`, which forwards every recipe and retains weak access to the
+resolved QoS journals, so composition shutdown can read a durable ingress
+journal's subscriber progress. Use one resolver per instance/graph. See the
+[bridge contract](../computation-plugins/common/bridge/README.md).
 
 ### Declaring an owned child
 
@@ -235,22 +220,24 @@ counter. A bridge egress must have an explicit cut before stopping its owned
 receiver. Return ingress remains active until its owned sender has stopped.
 Each child uses the same protocol recursively. Control stays alive throughout.
 
-After an egress and its complete upstream path quiesce,
-`BridgeEgressControl::finish` rejects unresolved sender obligations and seals
-the actual peer ingress against the sender's resolved receipt. Only then does
-the supervisor request ordinary child `StopTree`.
+After an egress and its complete upstream path quiesce without failure (so the
+sender holds no unresolved input), the host connects to the peer receiver's
+control lane with the sink's configuration and client identity
+(`BridgeEndpointControl`) and seals it. Only then does the supervisor request
+ordinary child `StopTree`.
 
-Before quiescing an ingress, its host requires an already sealed,
-generation-bound `IngressCut` from `BridgeIngressControl::sealed_cut` and
-awaits `wait_drained`. Volatile evidence means every admitted envelope was
-returned by the source; the subsequent normal graph quiescence finishes its
-in-flight forward and downstream processing. Durable evidence checks the
-actual required journal subscriber cursors. A child config therefore includes
+Before quiescing an ingress, its host observes its own receiver on the control
+lane (over TLS with the receiver's own identity, which the receiver admits for
+observation only), requires an already sealed, generation-bound `IngressCut`
+(`sealed_cut`) and waits until it has drained. Volatile evidence means every
+admitted envelope was returned by the source; the subsequent normal graph
+quiescence finishes its in-flight forward and downstream processing. Durable
+evidence reads the admission journal this instance owns: its accepted position
+equals the cut and every subscriber that is not retired processed through it. A child config therefore includes
 its own ingress-to-egress quiesce stage. Its return egress finishes while the
 parent's return source and control lane are still active.
 
-Final checks revalidate the inlet cuts, reject pending/unsealed egress, and
-quiesce the normal graph before `DrasiLib::shutdown`. Successful shutdown
+Final checks revalidate the inlet cuts and quiesce the normal graph before `DrasiLib::shutdown`. Successful shutdown
 observations retain the exact cuts in `stop_cuts`. A partial cleanup retries
 the same library shutdown without reopening admissions or resuming processing.
 No process-control message contains a remote component invocation or a

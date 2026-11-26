@@ -919,29 +919,26 @@ fn connect(config: &mut HostConfig, producer: &ComponentId, consumer: &Component
     Ok(())
 }
 
+/// A bridge endpoint specification from its statically linked plugin.
 fn bridge(
     config: &mut HostConfig,
     name: ComponentName,
     value: &drasi_computation_bridge_common::BridgeConfig,
     role: ComponentRole,
 ) -> Result<()> {
-    let mut specification = value.specification(role)?;
-    let control = ResourceId::try_new(format!("{}-control", specification.descriptor.id()))?;
-    specification
-        .dependencies
-        .insert("control".into(), vec![control.clone()]);
-    config
-        .desired
-        .topology
-        .resources
-        .push(ResourceSpecification {
-            id: control.clone(),
-            role: ResourceRole::Component,
-            ownership: ResourceOwnership::Graph,
-            binding: control.as_str().into(),
-        });
-    config.desired.topology.resource_configurations.insert(control,
-        json!({"kind": if role == ComponentRole::Source { "bridgeIngressControl" } else { "bridgeEgressControl" }}));
+    let (definition, id) = if role == ComponentRole::Source {
+        (
+            drasi_computation_source_bridge::plugin()?,
+            value.receiver_endpoint.clone(),
+        )
+    } else {
+        (
+            drasi_computation_sink_bridge::plugin()?,
+            value.sender_endpoint.clone(),
+        )
+    };
+    let plugin = drasi_host_sdk::computation::NativePlugin::from_definition(definition)?;
+    let specification = plugin.factories()[0].specification(id, serde_json::to_value(value)?)?;
     add(config, name, specification);
     if role == ComponentRole::Source {
         config
@@ -985,6 +982,8 @@ fn real_bidirectional_native_data_drains_through_native_cuts_before_process_exit
             control_path: directory.join("in.c").to_string_lossy().into_owned(),
         },
         limits: Limits::default(),
+        tls: None,
+        mapping_directory: None,
     };
     let mut incoming = outgoing.clone();
     std::mem::swap(&mut incoming.stream, &mut incoming.peer_stream);
@@ -1185,6 +1184,8 @@ fn an_empty_bridge_queue_without_a_peer_cut_cannot_claim_graceful_stop() -> Resu
             control_path: directory.join("in.c").to_string_lossy().into_owned(),
         },
         limits: Limits::default(),
+        tls: None,
+        mapping_directory: None,
     };
     bridge(
         &mut config,

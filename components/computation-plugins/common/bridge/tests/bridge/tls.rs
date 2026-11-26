@@ -2,7 +2,13 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::*;
-use crate::{BridgeError, BridgeSink, BridgeSource, ErrorCode, TlsResource};
+use crate::{
+    client::Client,
+    protocol::{read_message, write_message, DataHello, DataResponse, Lane, CONTROL_BYTES},
+    transport::connect,
+    BridgeSink, BridgeSource, ErrorCode, TlsResourceRecipe,
+};
+use drasi_computation_plugin_sdk::{NativeComponent, NativeSink, NativeSource};
 use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
     RootCertStore,
@@ -132,6 +138,69 @@ fn material(
     Ok((roots, vec![CertificateDer::from(certificate)], key, pin))
 }
 
+fn pin_of(pin: [u8; 32]) -> String {
+    pin.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Recipes whose paths are relative to the working directory, as endpoint
+/// configuration resolves them.
+fn recipe(
+    directory: &Directory,
+    name: &str,
+    role: crate::TlsRole,
+    pin: [u8; 32],
+) -> TlsResourceRecipe {
+    TlsResourceRecipe {
+        kind: crate::TlsRecipeKind::BridgeTls,
+        version: 1,
+        role,
+        trust_roots: vec![directory.path().join("ca.der")],
+        certificate_chain: vec![directory.path().join(format!("{name}.der"))],
+        private_key: directory.path().join(format!("{name}-key.der")),
+        peer_certificate_sha256: pin_of(pin),
+    }
+}
+
+fn restrict_keys(directory: &Directory) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for key in ["client-key.der", "server-key.der"] {
+        std::fs::set_permissions(
+            directory.path().join(key),
+            std::fs::Permissions::from_mode(0o600),
+        )?;
+    }
+    Ok(())
+}
+
+/// Both endpoint configurations over TLS on two free loopback ports.
+fn tls_configurations(
+    directory: &Directory,
+    client: &TlsResourceRecipe,
+    server: &TlsResourceRecipe,
+) -> Result<(BridgeConfig, BridgeConfig, std::net::SocketAddr)> {
+    let data = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let control = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let data_address = data.local_addr()?;
+    let transport = Transport::Tls {
+        data_address: data_address.to_string(),
+        control_address: control.local_addr()?.to_string(),
+        server_name: "localhost".into(),
+    };
+    let mut source_config =
+        configuration(directory, true, Profile::Volatile, PortableDelivery::Events);
+    let mut sink_config = configuration(
+        directory,
+        false,
+        Profile::Volatile,
+        PortableDelivery::Events,
+    );
+    source_config.transport = transport.clone();
+    source_config.tls = Some(server.clone());
+    sink_config.transport = transport;
+    sink_config.tls = Some(client.clone());
+    Ok((source_config, sink_config, data_address))
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn mutual_tls_uses_the_same_protocol_and_rejects_wrong_peer_pins_and_plaintext() -> Result<()>
 {
@@ -139,85 +208,60 @@ async fn mutual_tls_uses_the_same_protocol_and_rejects_wrong_peer_pins_and_plain
     certificates(&directory)?;
     let (_, _, _, client_pin) = material(&directory, "client")?;
     let (_, _, _, server_pin) = material(&directory, "server")?;
-    let recipe = |name: &str, role, pin: [u8; 32]| crate::TlsResourceRecipe {
-        kind: crate::TlsRecipeKind::BridgeTls,
-        version: 1,
-        role,
-        trust_roots: vec!["ca.der".into()],
-        certificate_chain: vec![format!("{name}.der").into()],
-        private_key: format!("{name}-key.der").into(),
-        peer_certificate_sha256: pin.iter().map(|byte| format!("{byte:02x}")).collect(),
-    };
-    let client_recipe = recipe("client", crate::TlsRole::Client, server_pin);
-    let server_recipe = recipe("server", crate::TlsRole::Server, client_pin);
+    let client_recipe = recipe(&directory, "client", crate::TlsRole::Client, server_pin);
+    let server_recipe = recipe(&directory, "server", crate::TlsRole::Server, client_pin);
+    let here = Path::new(".");
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(
         directory.path().join("client-key.der"),
         std::fs::Permissions::from_mode(0o644),
     )?;
-    assert!(client_recipe.resolve(directory.path()).is_err());
-    for key in ["client-key.der", "server-key.der"] {
-        std::fs::set_permissions(
-            directory.path().join(key),
-            std::fs::Permissions::from_mode(0o600),
-        )?;
-    }
+    assert!(client_recipe.resolve(here).is_err());
+    restrict_keys(&directory)?;
     let mut invalid = client_recipe.clone();
     invalid.peer_certificate_sha256 = "bad-pin".into();
     assert!(invalid.validate().is_err());
     std::fs::write(directory.path().join("oversized.der"), vec![0; 65_537])?;
     invalid = client_recipe.clone();
-    invalid.trust_roots = vec!["oversized.der".into()];
-    assert!(invalid.resolve(directory.path()).is_err());
+    invalid.trust_roots = vec![directory.path().join("oversized.der")];
+    assert!(invalid.resolve(here).is_err());
     std::os::unix::fs::symlink("client-key.der", directory.path().join("key-link.der"))?;
     invalid = client_recipe.clone();
-    invalid.private_key = "key-link.der".into();
-    assert!(invalid.resolve(directory.path()).is_err());
-    let client = client_recipe.resolve(directory.path())?;
-    let server = server_recipe.resolve(directory.path())?;
-    let data = std::net::TcpListener::bind("127.0.0.1:0")?;
-    let control = std::net::TcpListener::bind("127.0.0.1:0")?;
-    let data_address = data.local_addr()?;
-    let control_address = control.local_addr()?;
-    let transport = Transport::Tls {
-        data_address: data_address.to_string(),
-        control_address: control_address.to_string(),
-        server_name: "localhost".into(),
-    };
-    let mut source_config = configuration(
-        &directory,
-        true,
-        Profile::Volatile,
-        PortableDelivery::Events,
+    invalid.private_key = directory.path().join("key-link.der");
+    assert!(invalid.resolve(here).is_err());
+    let (source_config, sink_config, data_address) =
+        tls_configurations(&directory, &client_recipe, &server_recipe)?;
+    let mut mismatched = source_config.clone();
+    mismatched.tls = None;
+    assert!(
+        BridgeSource::new(mismatched, GRAPH.into(), None).is_err(),
+        "the TLS transport requires its identity"
     );
-    let mut sink_config = configuration(
-        &directory,
-        false,
-        Profile::Volatile,
-        PortableDelivery::Events,
+    let mut mismatched = sink_config.clone();
+    mismatched.tls = Some(server_recipe.clone());
+    assert!(
+        BridgeSink::new(mismatched, GRAPH.into()).is_err(),
+        "a sender presents a client identity"
     );
-    source_config.transport = transport.clone();
-    sink_config.transport = transport;
-    drop(data);
-    drop(control);
-    let mut source = BridgeSource::new(source_config, GRAPH.into(), None, Some(server))?;
-    let mut sink = BridgeSink::new(sink_config.clone(), GRAPH.into(), None, Some(client))?;
-    source.start(&lifecycle_ctx::start()).await?;
-    sink.start(&lifecycle_ctx::start()).await?;
+    let mut source = BridgeSource::new(source_config.clone(), GRAPH.into(), None)?;
+    let mut sink = BridgeSink::new(sink_config.clone(), GRAPH.into())?;
+    source.start(&mut lifecycle_ctx::start()).await?;
+    sink.start(&mut lifecycle_ctx::start()).await?;
     let input = graph_input(77, 18)?;
     sink.handle(super::input(input.clone())).await?;
-    assert_eq!(sink.control().status().await?.accepted, 1);
+    let control = sink.control().expect("started sink control");
+    assert_eq!(control.status().await?.accepted, 1);
     let output = source.next().await?.unwrap().envelope;
     assert_eq!(output.changes().operations(), input.changes().operations());
     assert_eq!(output.system().timestamp(), input.system().timestamp());
-    let cut = sink.egress_control().finish(DEADLINE).await?;
-    assert!(
-        source
-            .ingress_control()
-            .wait_drained(&cut, DEADLINE)
-            .await?
-            .drained
-    );
+    let cut = finish(&sink, &sink_config, Some(client_recipe.resolve(here)?)).await?;
+    let mut observer = observe(
+        &source_config,
+        Some(server_recipe.resolve_local_observer(here)?),
+    )
+    .await?;
+    assert!(observer.wait_drained(&cut, DEADLINE).await?.drained);
+    drop(observer);
     sink.stop(&lifecycle_ctx::stop()).await?;
 
     let mut plaintext = tokio::net::TcpStream::connect(data_address).await?;
@@ -234,10 +278,12 @@ async fn mutual_tls_uses_the_same_protocol_and_rejects_wrong_peer_pins_and_plain
         );
     }
 
-    let (roots, chain, key, _) = material(&directory, "client")?;
-    let wrong = Arc::new(TlsResource::client(roots, chain, key, [0; 32])?);
-    let mut rejected = BridgeSink::new(sink_config, GRAPH.into(), None, Some(wrong))?;
-    rejected.start(&lifecycle_ctx::start()).await?;
+    let mut wrong = sink_config;
+    if let Some(tls) = &mut wrong.tls {
+        tls.peer_certificate_sha256 = pin_of([0; 32]);
+    }
+    let mut rejected = BridgeSink::new(wrong, GRAPH.into())?;
+    rejected.start(&mut lifecycle_ctx::start()).await?;
     let error = rejected
         .handle(super::input(graph_input(78, 19)?))
         .await
@@ -245,6 +291,73 @@ async fn mutual_tls_uses_the_same_protocol_and_rejects_wrong_peer_pins_and_plain
     assert_eq!(error.bridge_cause().unwrap().code, ErrorCode::Incompatible);
     assert_eq!(source.status().accepted, 1);
     rejected.stop(&lifecycle_ctx::stop()).await?;
+    source.stop(&lifecycle_ctx::stop()).await?;
+    Ok(())
+}
+
+/// The receiver's own certificate observes and seals it over the control
+/// lane, but is never a sender: its Hello and data connections are refused.
+#[tokio::test(flavor = "current_thread")]
+async fn receiver_local_observer_observes_and_seals_but_never_sends() -> Result<()> {
+    let directory = Directory::new()?;
+    certificates(&directory)?;
+    restrict_keys(&directory)?;
+    let (_, _, _, client_pin) = material(&directory, "client")?;
+    let (_, _, _, server_pin) = material(&directory, "server")?;
+    let client_recipe = recipe(&directory, "client", crate::TlsRole::Client, server_pin);
+    let server_recipe = recipe(&directory, "server", crate::TlsRole::Server, client_pin);
+    let here = Path::new(".");
+    assert!(
+        client_recipe.resolve_local_observer(here).is_err(),
+        "only a server identity observes its own receiver"
+    );
+    let local = server_recipe.resolve_local_observer(here)?;
+    let (source_config, sink_config, _) =
+        tls_configurations(&directory, &client_recipe, &server_recipe)?;
+    let mut source = BridgeSource::new(source_config.clone(), GRAPH.into(), None)?;
+    source.start(&mut lifecycle_ctx::start()).await?;
+
+    let mut impostor = Client::new(sink_config.clone(), Some(local.clone()));
+    let error = impostor
+        .connect(None)
+        .await
+        .expect_err("the receiver's own identity cannot open a producer session");
+    assert_eq!(error.code, crate::ErrorCode::Incompatible, "{error}");
+    let refused = async {
+        let mut io = connect(&sink_config.transport, false, Some(&local), DEADLINE).await?;
+        let hello = DataHello {
+            version: crate::PROTOCOL_VERSION,
+            generation: 1,
+            session: ProducerSession {
+                incarnation: uuid::Uuid::new_v4(),
+                producer: ComponentId::try_new("6098fde0-6751-5c81-8647-31b2b083b961")
+                    .expect("fixture UUID"),
+                epoch: 1,
+            },
+            contract: sink_config.contract(false).fingerprint(),
+        };
+        write_message(&mut io, Lane::DataHello, &hello, CONTROL_BYTES).await?;
+        read_message::<_, DataResponse>(&mut io, Lane::Receipt, CONTROL_BYTES).await
+    }
+    .await;
+    assert!(refused.is_err(), "{refused:?}");
+    assert_eq!(source.status().generation, 0, "no sender was welcomed");
+
+    let mut observer = observe(&source_config, Some(local)).await?;
+    assert!(observer.sealed_cut().await?.is_none());
+    let cut = observer.seal(DEADLINE).await?;
+    assert_eq!((cut.client_sequence, cut.position), (0, 0));
+    assert_eq!(observer.sealed_cut().await?, Some(cut.clone()));
+    assert!(observer.drain_status(&cut).await?.drained);
+
+    let mut sink = BridgeSink::new(sink_config, GRAPH.into())?;
+    sink.start(&mut lifecycle_ctx::start()).await?;
+    let error = sink
+        .handle(super::input(graph_input(1, 1)?))
+        .await
+        .unwrap_err();
+    assert_eq!(error.bridge_cause().unwrap().code, ErrorCode::Sealed);
+    sink.stop(&lifecycle_ctx::stop()).await?;
     source.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }

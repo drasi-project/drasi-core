@@ -8,11 +8,12 @@ use crate::{
         read_message, write_message, DataHello, DataRequest, DataResponse, Lane, CONTROL_BYTES,
         PROTOCOL_VERSION,
     },
-    state::{LogicalInput, SenderState},
+    state::{LogicalInput, MappingFile, SenderState},
     transport::connect,
     AcceptanceBoundary, BridgeError, BridgeSink, BridgeSource, ErrorCode, PortableEnvelopeCodec,
 };
 use async_trait::async_trait;
+use drasi_computation_plugin_sdk::{NativeComponent, NativeSink, NativeSource};
 use drasi_lib::DrasiLib;
 use tokio::sync::mpsc;
 
@@ -93,6 +94,7 @@ impl EnvelopeSink for Capture {
 }
 
 async fn receiver_core(
+    link: Link,
     config: &BridgeConfig,
     path: &Path,
 ) -> Result<(
@@ -100,13 +102,26 @@ async fn receiver_core(
     Option<Arc<QosChannel>>,
     mpsc::Receiver<ChangeEnvelope>,
 )> {
-    receiver_core_controlled(config, path, None, None).await
+    receiver_core_gated(link, config, path, None).await
 }
 
-async fn receiver_core_controlled(
+fn query_factory() -> Arc<dyn ComponentFactory> {
+    drasi_lib::computation::v1::FactoryRegistry::standard()
+        .get(
+            &drasi_lib::computation::v1::ImplementationIdentity::try_new(
+                "drasi/continuous-query",
+                "1",
+            )
+            .expect("reference query identity"),
+        )
+        .expect("reference query factory")
+        .clone()
+}
+
+async fn receiver_core_gated(
+    link: Link,
     config: &BridgeConfig,
     path: &Path,
-    control: Option<Arc<crate::BridgeIngressControl>>,
     gate: Option<Arc<tokio::sync::Notify>>,
 ) -> Result<(
     DrasiLib,
@@ -115,23 +130,12 @@ async fn receiver_core_controlled(
 )> {
     let (mut capture, captured) = Capture::new(config.delivery)?;
     capture.gate = gate;
-    let mut specification = config.specification(ComponentRole::Source)?;
+    let (mut specification, factory) = link.component(config, ComponentRole::Source)?;
     let mut builder = ComponentBatch::builder().sink(
         drasi_lib::computation::v1::ComponentName::try_new("fixture-sink-1")
             .expect("fixture component name"),
         Box::new(capture),
     );
-    if let Some(control) = control {
-        let resource = ResourceId::try_new("ingress-control")?;
-        specification
-            .dependencies
-            .insert("control".into(), vec![resource.clone()]);
-        let mut declaration = declaration("ingress-control", ResourceRole::Component);
-        declaration.ownership = ResourceOwnership::Graph;
-        builder = builder
-            .declare_resource(declaration)?
-            .provide_resource(resource, control.resource())?;
-    }
     let channel = if config.profile == Profile::Durable {
         let channel = channel(path, "receiver/in", "right", "bridge-in", "capture", 4).await?;
         let resource = ResourceId::try_new("receiver-journal")?;
@@ -158,7 +162,7 @@ async fn receiver_core_controlled(
             drasi_lib::computation::v1::ComponentName::try_new("fixture-component-1")
                 .expect("fixture component name"),
             specification,
-            crate::factories()[0].clone(),
+            factory,
         )
         .bind_stream(
             endpoint("bridge-in", "out"),
@@ -167,18 +171,7 @@ async fn receiver_core_controlled(
         .build()?;
     let core = DrasiLib::builder()
         .with_allow_external_component_ids(true)
-        .with_query_factory(
-            drasi_lib::computation::v1::FactoryRegistry::standard()
-                .get(
-                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
-                        "drasi/continuous-query",
-                        "1",
-                    )
-                    .expect("reference query identity"),
-                )
-                .expect("reference query factory")
-                .clone(),
-        )
+        .with_query_factory(query_factory())
         .with_id("right")
         .with_components(batch)
         .build()
@@ -319,6 +312,13 @@ async fn wait_ack(channel: &QosChannel, subscriber: &str, count: u64) -> Result<
 
 #[tokio::test(flavor = "current_thread")]
 async fn factories_exchange_each_portable_schema_between_two_normal_instances() -> Result<()> {
+    for link in Link::ALL {
+        exchange_each_portable_schema(link).await?;
+    }
+    Ok(())
+}
+
+async fn exchange_each_portable_schema(link: Link) -> Result<()> {
     for (schema, envelope) in [
         (PortableDelivery::Events, graph_input(1, 42)?),
         (PortableDelivery::Events, query_input(1)?),
@@ -331,8 +331,10 @@ async fn factories_exchange_each_portable_schema_between_two_normal_instances() 
         let source_config = configuration(&directory, true, Profile::Volatile, schema);
         let sink_config = configuration(&directory, false, Profile::Volatile, schema);
         let (right, _, mut captured) =
-            receiver_core(&source_config, &directory.path().join("right")).await?;
+            receiver_core(link, &source_config, &directory.path().join("right")).await?;
         let (send, receive) = mpsc::channel(1);
+        let (sink_specification, sink_factory) =
+            link.component(&sink_config, ComponentRole::Sink)?;
         let batch = ComponentBatch::builder()
             .source(
                 drasi_lib::computation::v1::ComponentName::try_new("fixture-source-1")
@@ -345,8 +347,8 @@ async fn factories_exchange_each_portable_schema_between_two_normal_instances() 
             .component(
                 drasi_lib::computation::v1::ComponentName::try_new("bridge-out")
                     .expect("fixture component name"),
-                sink_config.specification(ComponentRole::Sink)?,
-                crate::factories()[1].clone(),
+                sink_specification,
+                sink_factory,
             )
             .connect(
                 EdgeDefinition::new(endpoint("input", "out"), endpoint("bridge-out", "in")),
@@ -356,18 +358,7 @@ async fn factories_exchange_each_portable_schema_between_two_normal_instances() 
             .build()?;
         let left = DrasiLib::builder()
             .with_allow_external_component_ids(true)
-            .with_query_factory(
-                drasi_lib::computation::v1::FactoryRegistry::standard()
-                    .get(
-                        &drasi_lib::computation::v1::ImplementationIdentity::try_new(
-                            "drasi/continuous-query",
-                            "1",
-                        )
-                        .expect("reference query identity"),
-                    )
-                    .expect("reference query factory")
-                    .clone(),
-            )
+            .with_query_factory(query_factory())
             .with_id("left")
             .with_components(batch)
             .build()
@@ -388,9 +379,12 @@ async fn factories_exchange_each_portable_schema_between_two_normal_instances() 
             output.changes().operations(),
             envelope.changes().operations()
         );
-        assert_eq!(output.lineage().unwrap().envelope_id(), envelope.id());
+        assert_eq!(
+            output.lineage().expect("bridge lineage").envelope_id(),
+            envelope.id()
+        );
         assert!(!GraphProducerProgress::from_envelope(&output)?
-            .unwrap()
+            .expect("producer progress")
             .identity()
             .persistent());
         tokio::time::timeout(DEADLINE, left.shutdown()).await??;
@@ -402,13 +396,20 @@ async fn factories_exchange_each_portable_schema_between_two_normal_instances() 
 #[tokio::test(flavor = "current_thread")]
 async fn durable_factories_use_real_acknowledged_pipes_and_preserve_complete_transactions(
 ) -> Result<()> {
+    for link in Link::ALL {
+        durable_link_preserves_complete_transactions(link).await?;
+    }
+    Ok(())
+}
+
+async fn durable_link_preserves_complete_transactions(link: Link) -> Result<()> {
     let directory = Directory::new()?;
     let schema = PortableDelivery::CompleteTransactions;
     let source_config = configuration(&directory, true, Profile::Durable, schema);
     let sink_config = configuration(&directory, false, Profile::Durable, schema);
     let (right, receiver_journal, mut captured) =
-        receiver_core(&source_config, &directory.path().join("right")).await?;
-    let receiver_journal = receiver_journal.unwrap();
+        receiver_core(link, &source_config, &directory.path().join("right")).await?;
+    let receiver_journal = receiver_journal.expect("durable receiver journal");
     let upstream = channel(
         &directory.path().join("upstream"),
         "sender/out",
@@ -419,10 +420,7 @@ async fn durable_factories_use_real_acknowledged_pipes_and_preserve_complete_tra
     )
     .await?;
     let admission = SourceAdmission::new(upstream.clone(), PortId::try_new("out")?).await?;
-    let mut specification = sink_config.specification(ComponentRole::Sink)?;
-    specification
-        .dependencies
-        .insert("state".into(), vec![ResourceId::try_new("sender-mapping")?]);
+    let (specification, sink_factory) = link.component(&sink_config, ComponentRole::Sink)?;
     let batch = ComponentBatch::builder()
         .source(
             drasi_lib::computation::v1::ComponentName::try_new("fixture-source-2")
@@ -437,18 +435,10 @@ async fn durable_factories_use_real_acknowledged_pipes_and_preserve_complete_tra
             drasi_lib::computation::v1::ComponentName::try_new("fixture-component-2")
                 .expect("fixture component name"),
             specification,
-            crate::factories()[1].clone(),
+            sink_factory,
         )
         .declare_resource(declaration("upstream", ResourceRole::StateStore))?
         .provide_resource(ResourceId::try_new("upstream")?, upstream.resource())?
-        .declare_resource(declaration("sender-mapping", ResourceRole::IndexBackend))?
-        .provide_resource(
-            ResourceId::try_new("sender-mapping")?,
-            drasi_lib::computation::v1::QueryIndexProviderResource::handle(
-                ResourceRole::IndexBackend,
-                provider(&directory.path().join("sender")),
-            ),
-        )?
         .connect(
             EdgeDefinition::new(endpoint("input", "out"), endpoint("bridge-out", "in")),
             Box::new(
@@ -461,18 +451,7 @@ async fn durable_factories_use_real_acknowledged_pipes_and_preserve_complete_tra
         .build()?;
     let left = DrasiLib::builder()
         .with_allow_external_component_ids(true)
-        .with_query_factory(
-            drasi_lib::computation::v1::FactoryRegistry::standard()
-                .get(
-                    &drasi_lib::computation::v1::ImplementationIdentity::try_new(
-                        "drasi/continuous-query",
-                        "1",
-                    )
-                    .expect("reference query identity"),
-                )
-                .expect("reference query factory")
-                .clone(),
-        )
+        .with_query_factory(query_factory())
         .with_id("left")
         .with_components(batch)
         .build()
@@ -498,9 +477,9 @@ async fn durable_factories_use_real_acknowledged_pipes_and_preserve_complete_tra
     );
     assert_eq!(output.system().timestamp(), original.system().timestamp());
     let limits = SourceTransactionLimits {
-        max_changes: NonZeroUsize::new(2).unwrap(),
-        max_bytes: NonZeroUsize::new(65_536).unwrap(),
-        max_duration_ms: std::num::NonZeroU64::new(1000).unwrap(),
+        max_changes: NonZeroUsize::new(2).expect("nonzero limit"),
+        max_bytes: NonZeroUsize::new(65_536).expect("nonzero limit"),
+        max_duration_ms: std::num::NonZeroU64::new(1000).expect("nonzero limit"),
     };
     assert_eq!(
         SourceTransactionCodec::decode(&output, limits)?
@@ -528,6 +507,13 @@ async fn durable_factories_use_real_acknowledged_pipes_and_preserve_complete_tra
 /// input, instead of failing on the first delivery (BSA-1).
 #[tokio::test(flavor = "current_thread")]
 async fn durable_sender_refuses_a_volatile_producer_when_wired() -> Result<()> {
+    for link in Link::ALL {
+        durable_sender_refuses_a_volatile_producer(link).await?;
+    }
+    Ok(())
+}
+
+async fn durable_sender_refuses_a_volatile_producer(link: Link) -> Result<()> {
     let directory = Directory::new()?;
     let schema = PortableDelivery::CompleteTransactions;
     let sink_config = configuration(&directory, false, Profile::Durable, schema);
@@ -541,10 +527,7 @@ async fn durable_sender_refuses_a_volatile_producer_when_wired() -> Result<()> {
     )
     .await?;
     let admission = SourceAdmission::new(upstream.clone(), PortId::try_new("out")?).await?;
-    let mut specification = sink_config.specification(ComponentRole::Sink)?;
-    specification
-        .dependencies
-        .insert("state".into(), vec![ResourceId::try_new("sender-mapping")?]);
+    let (specification, sink_factory) = link.component(&sink_config, ComponentRole::Sink)?;
     let batch = ComponentBatch::builder()
         .source(
             ComponentName::try_new("volatile-producer")?,
@@ -557,18 +540,10 @@ async fn durable_sender_refuses_a_volatile_producer_when_wired() -> Result<()> {
         .component(
             ComponentName::try_new("durable-sender")?,
             specification,
-            crate::factories()[1].clone(),
+            sink_factory,
         )
         .declare_resource(declaration("upstream", ResourceRole::StateStore))?
         .provide_resource(ResourceId::try_new("upstream")?, upstream.resource())?
-        .declare_resource(declaration("sender-mapping", ResourceRole::IndexBackend))?
-        .provide_resource(
-            ResourceId::try_new("sender-mapping")?,
-            QueryIndexProviderResource::handle(
-                ResourceRole::IndexBackend,
-                provider(&directory.path().join("sender")),
-            ),
-        )?
         .connect(
             EdgeDefinition::new(endpoint("input", "out"), endpoint("bridge-out", "in")),
             Box::new(
@@ -631,11 +606,11 @@ async fn full_volatile_queue_keeps_receipts_and_control_live_and_retries_fifo() 
         Profile::Volatile,
         PortableDelivery::Events,
     );
-    let mut source = BridgeSource::new(source_config, GRAPH.into(), None, None)?;
-    let mut sink = BridgeSink::new(sink_config, GRAPH.into(), None, None)?;
-    let control = sink.control();
-    source.start(&lifecycle_ctx::start()).await?;
-    sink.start(&lifecycle_ctx::start()).await?;
+    let mut source = BridgeSource::new(source_config, GRAPH.into(), None)?;
+    let mut sink = BridgeSink::new(sink_config, GRAPH.into())?;
+    source.start(&mut lifecycle_ctx::start()).await?;
+    sink.start(&mut lifecycle_ctx::start()).await?;
+    let control = sink.control().expect("started sink control");
     let first = graph_input(5, 5)?;
     sink.handle(input(first.clone())).await?;
     let first_receipt = sink.last_receipt().unwrap().clone();
@@ -673,7 +648,7 @@ async fn full_volatile_queue_keeps_receipts_and_control_live_and_retries_fifo() 
             .is_err()
     );
     assert_eq!(
-        sink.control()
+        control
             .receipt(&second_receipt.admission.session, 1)
             .await
             .unwrap_err()
@@ -700,11 +675,11 @@ async fn paused_receiver_refuses_new_data_as_busy_and_keeps_control_live() -> Re
         Profile::Volatile,
         PortableDelivery::Events,
     );
-    let mut source = BridgeSource::new(source_config, GRAPH.into(), None, None)?;
-    let mut sink = BridgeSink::new(sink_config, GRAPH.into(), None, None)?;
-    let control = sink.control();
-    source.start(&lifecycle_ctx::start()).await?;
-    sink.start(&lifecycle_ctx::start()).await?;
+    let mut source = BridgeSource::new(source_config, GRAPH.into(), None)?;
+    let mut sink = BridgeSink::new(sink_config, GRAPH.into())?;
+    source.start(&mut lifecycle_ctx::start()).await?;
+    sink.start(&mut lifecycle_ctx::start()).await?;
+    let control = sink.control().expect("started sink control");
     let first = graph_input(5, 5)?;
     sink.handle(input(first.clone())).await?;
     let first_receipt = sink.last_receipt().unwrap().clone();
@@ -776,6 +751,13 @@ fn replay_transport(envelope: &ChangeEnvelope, sequence: u64) -> Result<ChangeEn
 
 #[tokio::test(flavor = "current_thread")]
 async fn lost_wire_ack_and_real_two_sided_reopen_resolve_exact_persisted_mapping() -> Result<()> {
+    for link in Link::ALL {
+        lost_wire_ack_resolves_exact_persisted_mapping(link).await?;
+    }
+    Ok(())
+}
+
+async fn lost_wire_ack_resolves_exact_persisted_mapping(link: Link) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let directory = Directory::new()?;
     let source_config = configuration(&directory, true, Profile::Durable, PortableDelivery::Events);
@@ -796,8 +778,8 @@ async fn lost_wire_ack_and_real_two_sided_reopen_resolve_exact_persisted_mapping
         *data_path = proxy_path.to_string_lossy().into();
     }
     let (right, receiver_journal, mut captured) =
-        receiver_core(&source_config, &directory.path().join("receiver")).await?;
-    let receiver_journal = receiver_journal.unwrap();
+        receiver_core(link, &source_config, &directory.path().join("receiver")).await?;
+    let receiver_journal = receiver_journal.expect("durable receiver journal");
     let original =
         upstream_input(&directory.path().join("upstream"), &graph_input(10, 42)?).await?;
     let proxy = tokio::spawn(async move {
@@ -824,16 +806,14 @@ async fn lost_wire_ack_and_real_two_sided_reopen_resolve_exact_persisted_mapping
         anyhow::ensure!(matches!(&receipt, DataResponse::Receipt(_)));
         Ok::<_, anyhow::Error>(receipt)
     });
-    let mut sink = BridgeSink::new(
-        sink_config.clone(),
-        GRAPH.into(),
-        Some(provider(&directory.path().join("sender"))),
-        None,
-    )?;
-    sink.start(&lifecycle_ctx::start()).await?;
-    let error = sink.handle(input(original.clone())).await.unwrap_err();
+    let mut sink = BridgeSink::new(sink_config.clone(), GRAPH.into())?;
+    sink.start(&mut lifecycle_ctx::start()).await?;
+    let error = sink
+        .handle(input(original.clone()))
+        .await
+        .expect_err("the receipt was lost on the wire");
     assert_eq!(
-        error.bridge_cause().unwrap().code,
+        error.bridge_cause().expect("bridge failure cause").code,
         ErrorCode::AcceptanceUnknown
     );
     let DataResponse::Receipt(remote_receipt) = tokio::time::timeout(DEADLINE, proxy).await???
@@ -866,15 +846,10 @@ async fn lost_wire_ack_and_real_two_sided_reopen_resolve_exact_persisted_mapping
         }
     }
     let (right, reopened, mut captured) =
-        receiver_core(&source_config, &directory.path().join("receiver")).await?;
-    let reopened = reopened.unwrap();
-    let mut sink = BridgeSink::new(
-        sink_config,
-        GRAPH.into(),
-        Some(provider(&directory.path().join("sender"))),
-        None,
-    )?;
-    sink.start(&lifecycle_ctx::start()).await?;
+        receiver_core(link, &source_config, &directory.path().join("receiver")).await?;
+    let reopened = reopened.expect("durable receiver journal");
+    let mut sink = BridgeSink::new(sink_config, GRAPH.into())?;
+    sink.start(&mut lifecycle_ctx::start()).await?;
     sink.handle(input(replay_transport(&original, u64::MAX)?))
         .await?;
     assert_eq!(sink.last_receipt(), Some(&remote_receipt));
@@ -893,9 +868,9 @@ async fn lost_wire_ack_and_real_two_sided_reopen_resolve_exact_persisted_mapping
     assert_eq!(
         sink.handle(input(conflict))
             .await
-            .unwrap_err()
+            .expect_err("changed content conflicts")
             .bridge_cause()
-            .unwrap()
+            .expect("bridge failure cause")
             .code,
         ErrorCode::Conflict
     );
@@ -907,6 +882,13 @@ async fn lost_wire_ack_and_real_two_sided_reopen_resolve_exact_persisted_mapping
 
 #[tokio::test(flavor = "current_thread")]
 async fn receiver_state_loss_and_missing_sender_state_never_create_fresh_input() -> Result<()> {
+    for link in Link::ALL {
+        state_loss_never_creates_fresh_input(link).await?;
+    }
+    Ok(())
+}
+
+async fn state_loss_never_creates_fresh_input(link: Link) -> Result<()> {
     let directory = Directory::new()?;
     let source_config = configuration(&directory, true, Profile::Durable, PortableDelivery::Events);
     let sink_config = configuration(
@@ -916,35 +898,33 @@ async fn receiver_state_loss_and_missing_sender_state_never_create_fresh_input()
         PortableDelivery::Events,
     );
     let (right, journal, mut captured) =
-        receiver_core(&source_config, &directory.path().join("receiver")).await?;
-    let journal = journal.unwrap();
+        receiver_core(link, &source_config, &directory.path().join("receiver")).await?;
+    let journal = journal.expect("durable receiver journal");
     let original = upstream_input(&directory.path().join("upstream"), &graph_input(1, 1)?).await?;
-    let mut sink = BridgeSink::new(
-        sink_config.clone(),
-        GRAPH.into(),
-        Some(provider(&directory.path().join("sender"))),
-        None,
-    )?;
-    sink.start(&lifecycle_ctx::start()).await?;
+    let mut sink = BridgeSink::new(sink_config.clone(), GRAPH.into())?;
+    sink.start(&mut lifecycle_ctx::start()).await?;
     sink.handle(input(original.clone())).await?;
     tokio::time::timeout(DEADLINE, captured.recv())
         .await?
         .expect("one input");
     wait_ack(&journal, "capture", 1).await?;
-    let mut empty_sender = BridgeSink::new(
-        sink_config,
-        GRAPH.into(),
-        Some(provider(&directory.path().join("lost-sender"))),
-        None,
-    )?;
-    empty_sender.start(&lifecycle_ctx::start()).await?;
+    let mut lost_sender = sink_config;
+    lost_sender.mapping_directory = Some(
+        directory
+            .path()
+            .join("lost-sender")
+            .to_string_lossy()
+            .into(),
+    );
+    let mut empty_sender = BridgeSink::new(lost_sender, GRAPH.into())?;
+    empty_sender.start(&mut lifecycle_ctx::start()).await?;
     assert_eq!(
         empty_sender
             .handle(input(original.clone()))
             .await
-            .unwrap_err()
+            .expect_err("missing sender state is refused")
             .bridge_cause()
-            .unwrap()
+            .expect("bridge failure cause")
             .code,
         ErrorCode::StateLost
     );
@@ -953,15 +933,19 @@ async fn receiver_state_loss_and_missing_sender_state_never_create_fresh_input()
     journal.shutdown().await?;
     drop(right);
     drop(journal);
-    let (right, empty, _) =
-        receiver_core(&source_config, &directory.path().join("lost-receiver")).await?;
-    let empty = empty.unwrap();
+    let (right, empty, _) = receiver_core(
+        link,
+        &source_config,
+        &directory.path().join("lost-receiver"),
+    )
+    .await?;
+    let empty = empty.expect("durable receiver journal");
     assert_eq!(
         sink.handle(input(original))
             .await
-            .unwrap_err()
+            .expect_err("lost receiver state is refused")
             .bridge_cause()
-            .unwrap()
+            .expect("bridge failure cause")
             .code,
         ErrorCode::StateLost
     );
@@ -989,8 +973,8 @@ async fn malformed_peer_and_stale_connections_do_not_stop_the_receiver_or_contro
         Profile::Volatile,
         PortableDelivery::Events,
     );
-    let mut source = BridgeSource::new(source_config, GRAPH.into(), None, None)?;
-    source.start(&lifecycle_ctx::start()).await?;
+    let mut source = BridgeSource::new(source_config, GRAPH.into(), None)?;
+    source.start(&mut lifecycle_ctx::start()).await?;
     let mut client = Client::new(sink_config.clone(), None);
     let welcome = client.connect(None).await?;
     let mut io = connect(&sink_config.transport, false, None, DEADLINE).await?;
@@ -1096,8 +1080,8 @@ async fn malformed_peer_and_stale_connections_do_not_stop_the_receiver_or_contro
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn transactional_sender_mapping_persists_gaps_rejects_expiry_and_configuration_changes(
-) -> Result<()> {
+async fn sender_mapping_file_persists_gaps_rejects_expiry_and_configuration_changes() -> Result<()>
+{
     let directory = Directory::new()?;
     let config = configuration(
         &directory,
@@ -1105,15 +1089,20 @@ async fn transactional_sender_mapping_persists_gaps_rejects_expiry_and_configura
         Profile::Durable,
         PortableDelivery::Events,
     );
+    let mapping = || {
+        MappingFile::new(
+            &directory.path().join("mapping"),
+            &config.sender_instance,
+            GRAPH,
+            config.sender_endpoint.as_str(),
+        )
+    };
     let session = ProducerSession {
         incarnation: uuid::Uuid::new_v4(),
         producer: ComponentId::try_new("6098fde0-6751-5c81-8647-31b2b083b961")?,
         epoch: 1,
     };
-    let mut state = SenderState::new(
-        config.contract(false),
-        Some(indexes(&directory.path().join("mapping")).await?),
-    )?;
+    let mut state = SenderState::new(config.contract(false), Some(mapping()?))?;
     state.load().await?;
     state.bind_session(session.clone()).await?;
     let first = LogicalInput {
@@ -1126,10 +1115,7 @@ async fn transactional_sender_mapping_persists_gaps_rejects_expiry_and_configura
     assert_eq!(saved.client_sequence, 1);
     state.shutdown().await?;
     drop(state);
-    let mut state = SenderState::new(
-        config.contract(false),
-        Some(indexes(&directory.path().join("mapping")).await?),
-    )?;
+    let mut state = SenderState::new(config.contract(false), Some(mapping()?))?;
     state.load().await?;
     assert_eq!(state.last().unwrap().envelope, vec![1]);
     let receipt = crate::Receipt {
@@ -1167,12 +1153,9 @@ async fn transactional_sender_mapping_persists_gaps_rejects_expiry_and_configura
     );
     state.shutdown().await?;
     drop(state);
-    let mut changed = config;
+    let mut changed = config.clone();
     changed.namespace.source_prefixes.push("other/".into());
-    let mut invalid = SenderState::new(
-        changed.contract(false),
-        Some(indexes(&directory.path().join("mapping")).await?),
-    )?;
+    let mut invalid = SenderState::new(changed.contract(false), Some(mapping()?))?;
     assert!(invalid.load().await.is_err());
     invalid.shutdown().await?;
     Ok(())
@@ -1194,27 +1177,37 @@ async fn sealed_volatile_cut_requires_actual_queue_handoff_and_revokes_old_lifet
         Profile::Volatile,
         PortableDelivery::Events,
     );
-    let mut source = BridgeSource::new(source_config, GRAPH.into(), None, None)?;
-    let ingress = source.ingress_control();
-    let mut sink = BridgeSink::new(sink_config, GRAPH.into(), None, None)?;
-    let egress = sink.egress_control();
-    source.start(&lifecycle_ctx::start()).await?;
-    sink.start(&lifecycle_ctx::start()).await?;
-    assert!(ingress.sealed_cut().await?.is_none());
+    let mut source = BridgeSource::new(source_config.clone(), GRAPH.into(), None)?;
+    let mut sink = BridgeSink::new(sink_config.clone(), GRAPH.into())?;
+    source.start(&mut lifecycle_ctx::start()).await?;
+    sink.start(&mut lifecycle_ctx::start()).await?;
+    {
+        // The receiver accepts two control connections at a time; this
+        // observer closes before the sender and its finishing seal connect.
+        let mut observer = observe(&source_config, None).await?;
+        assert!(observer.sealed_cut().await?.is_none());
+        assert!(
+            observer.sealed_cut().await?.is_none(),
+            "observing a sealed cut never seals"
+        );
+    }
     sink.handle(input(graph_input(1, 1)?)).await?;
-    let generation = sink.control().status().await?.generation;
-    let cut = egress.finish(DEADLINE).await?;
+    let control = sink.control().expect("started sink control");
+    let generation = control.status().await?.generation;
+    let cut = finish(&sink, &sink_config, None).await?;
     assert_eq!(cut.position, 1);
+    assert!(cut.required_subscribers.is_empty());
     assert_eq!(
-        sink.control().status().await?.generation,
+        control.status().await?.generation,
         generation,
         "observing control cannot replace data ownership"
     );
-    assert_eq!(ingress.sealed_cut().await?, Some(cut.clone()));
-    let status = ingress.drain_status(&cut).await?;
+    let mut observer = observe(&source_config, None).await?;
+    assert_eq!(observer.sealed_cut().await?, Some(cut.clone()));
+    let status = observer.drain_status(&cut).await?;
     assert!(!status.drained);
     assert_eq!(status.queued, 1);
-    assert!(ingress
+    assert!(observer
         .wait_drained(&cut, std::time::Duration::from_millis(10))
         .await
         .is_err());
@@ -1231,26 +1224,40 @@ async fn sealed_volatile_cut_requires_actual_queue_handoff_and_revokes_old_lifet
         .next()
         .await?
         .expect("accepted envelope still retained");
-    assert!(ingress.wait_drained(&cut, DEADLINE).await?.drained);
-    assert!(
-        ResourceCleanup::shutdown(ingress.as_ref()).await.is_err(),
-        "live dependency must retain its control resource"
-    );
+    assert!(observer.wait_drained(&cut, DEADLINE).await?.drained);
     sink.stop(&lifecycle_ctx::stop()).await?;
     source.stop(&lifecycle_ctx::stop()).await?;
-    assert!(ingress.sealed_cut().await.is_err());
-    source.start(&lifecycle_ctx::start()).await?;
+    assert!(observer.sealed_cut().await.is_err());
+    source.start(&mut lifecycle_ctx::start()).await?;
     assert_eq!(
-        ingress.drain_status(&cut).await.unwrap_err().code,
+        observer.drain_status(&cut).await.unwrap_err().code,
+        ErrorCode::StaleGeneration,
+        "an observer never follows a restarted receiver"
+    );
+    let mut restarted = observe(&source_config, None).await?;
+    assert!(restarted.sealed_cut().await?.is_none());
+    assert_eq!(
+        restarted.drain_status(&cut).await.unwrap_err().code,
         ErrorCode::StaleGeneration
     );
+    drop(restarted);
     source.stop(&lifecycle_ctx::stop()).await?;
-    ResourceCleanup::shutdown(ingress.as_ref()).await?;
     Ok(())
 }
 
+/// A durable receiver's drain is its admission journal's subscriber
+/// progress: the cut names no subscribers, the receiver refuses to answer
+/// drain status, and the graph owning the journal observes the cut drained
+/// only once its subscriber acknowledges the cut position.
 #[tokio::test(flavor = "current_thread")]
-async fn durable_cut_waits_for_actual_required_subscriber_acknowledgement() -> Result<()> {
+async fn durable_cut_drains_through_the_journal_owners_subscriber_progress() -> Result<()> {
+    for link in Link::ALL {
+        durable_cut_drains_through_journal_progress(link).await?;
+    }
+    Ok(())
+}
+
+async fn durable_cut_drains_through_journal_progress(link: Link) -> Result<()> {
     let directory = Directory::new()?;
     let source_config = configuration(&directory, true, Profile::Durable, PortableDelivery::Events);
     let sink_config = configuration(
@@ -1259,36 +1266,101 @@ async fn durable_cut_waits_for_actual_required_subscriber_acknowledgement() -> R
         Profile::Durable,
         PortableDelivery::Events,
     );
-    let ingress = Arc::new(crate::BridgeIngressControl::new());
     let release = Arc::new(tokio::sync::Notify::new());
-    let (right, journal, mut captured) = receiver_core_controlled(
+    let (right, journal, mut captured) = receiver_core_gated(
+        link,
         &source_config,
         &directory.path().join("receiver"),
-        Some(ingress.clone()),
         Some(release.clone()),
     )
     .await?;
-    let journal = journal.unwrap();
+    let journal = journal.expect("durable receiver journal");
     let original = upstream_input(&directory.path().join("upstream"), &graph_input(1, 1)?).await?;
-    let mut sink = BridgeSink::new(
-        sink_config,
-        GRAPH.into(),
-        Some(provider(&directory.path().join("sender"))),
-        None,
-    )?;
-    sink.start(&lifecycle_ctx::start()).await?;
+    let mut sink = BridgeSink::new(sink_config.clone(), GRAPH.into())?;
+    sink.start(&mut lifecycle_ctx::start()).await?;
     sink.handle(input(original)).await?;
     tokio::time::timeout(DEADLINE, captured.recv())
         .await?
         .expect("consumer is handling");
-    let cut = sink.egress_control().finish(DEADLINE).await?;
-    assert_eq!(cut.required_subscribers, vec!["capture"]);
-    assert!(!ingress.drain_status(&cut).await?.drained);
+    let cut = finish(&sink, &sink_config, None).await?;
+    assert!(cut.required_subscribers.is_empty());
+    let mut observer = observe(&source_config, None).await?;
+    assert_eq!(observer.sealed_cut().await?, Some(cut.clone()));
+    assert_eq!(
+        observer
+            .drain_status(&cut)
+            .await
+            .expect_err("a durable receiver refuses drain status")
+            .code,
+        ErrorCode::Incompatible
+    );
+    assert!(journal.progress().await?.processed["capture"] < cut.position);
     release.notify_one();
-    assert!(ingress.wait_drained(&cut, DEADLINE).await?.drained);
+    wait_ack(&journal, "capture", cut.position).await?;
     sink.stop(&lifecycle_ctx::stop()).await?;
     right.shutdown().await?;
     journal.shutdown().await?;
-    assert!(ingress.sealed_cut().await.is_err());
+    assert!(observer.sealed_cut().await.is_err());
+    Ok(())
+}
+
+/// Erase removes the durable sender's mapping file, idempotently; a
+/// preserving dispose keeps it.
+#[tokio::test(flavor = "current_thread")]
+async fn durable_sender_erase_removes_its_mapping_idempotently() -> Result<()> {
+    let directory = Directory::new()?;
+    let config = configuration(
+        &directory,
+        false,
+        Profile::Durable,
+        PortableDelivery::Events,
+    );
+    let mapping = MappingFile::new(
+        &directory.path().join("sender"),
+        &config.sender_instance,
+        GRAPH,
+        config.sender_endpoint.as_str(),
+    )?;
+    let path = mapping.path().to_owned();
+    let mut state = SenderState::new(config.contract(false), Some(mapping))?;
+    state
+        .bind_session(ProducerSession {
+            incarnation: uuid::Uuid::new_v4(),
+            producer: ComponentId::try_new("6098fde0-6751-5c81-8647-31b2b083b961")?,
+            epoch: 1,
+        })
+        .await?;
+    state.shutdown().await?;
+    assert!(path.is_file());
+    let mut sink = BridgeSink::new(config, GRAPH.into())?;
+    sink.start(&mut lifecycle_ctx::start()).await?;
+    sink.stop(&lifecycle_ctx::stop()).await?;
+    sink.dispose(&lifecycle_ctx::dispose()).await?;
+    assert!(path.is_file(), "a preserving dispose keeps the mapping");
+    for _ in 0..2 {
+        sink.dispose(&lifecycle_ctx::erase()).await?;
+        assert!(!path.exists());
+    }
+    Ok(())
+}
+
+/// The mapping's lock admits one started sender at a time.
+#[tokio::test(flavor = "current_thread")]
+async fn sender_mapping_lock_refuses_a_second_owner() -> Result<()> {
+    let directory = Directory::new()?;
+    let config = configuration(
+        &directory,
+        false,
+        Profile::Durable,
+        PortableDelivery::Events,
+    );
+    let mut first = BridgeSink::new(config.clone(), GRAPH.into())?;
+    let mut second = BridgeSink::new(config, GRAPH.into())?;
+    first.start(&mut lifecycle_ctx::start()).await?;
+    let error = second.start(&mut lifecycle_ctx::start()).await.unwrap_err();
+    assert_eq!(error.bridge_cause().unwrap().code, ErrorCode::Busy);
+    first.stop(&lifecycle_ctx::stop()).await?;
+    second.start(&mut lifecycle_ctx::start()).await?;
+    second.stop(&lifecycle_ctx::stop()).await?;
     Ok(())
 }
