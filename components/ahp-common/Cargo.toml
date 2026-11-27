@@ -1,0 +1,49 @@
+# Copyright 2026 The Drasi Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[package]
+name = "drasi-ahp-common"
+version = "0.1.0"
+edition = "2021"
+authors = ["Drasi Project"]
+description = "Shared Agent Host Protocol (AHP) client, graph mapping, and test host for Drasi AHP source and bootstrap plugins"
+license = "Apache-2.0"
+repository = "https://github.com/drasi-project/drasi-core"
+keywords = ["drasi", "ahp", "agent", "common"]
+categories = ["network-programming"]
+
+[lints]
+workspace = true
+
+[dependencies]
+drasi-core.workspace = true
+ahp = "1.1"
+ahp-types = "1.1"
+anyhow = "1.0"
+futures-util = "0.3"
+log = "0.4"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake", "rustls-tls-native-roots"] }
+chrono = { version = "0.4", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1.0", features = ["full"] }
+
+[features]
+default = []
+# In-process WebSocket AHP host used by tests and the getting-started example.
+mock-host = ["dep:chrono"]

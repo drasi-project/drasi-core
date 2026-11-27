@@ -2704,6 +2704,42 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1435fa1053d8b2fbbe9be7e97eca7f33d37b28409959813daefc1446a14247f1"
 
 [[package]]
+name = "drasi-ahp-common"
+version = "0.1.0"
+dependencies = [
+ "ahp",
+ "ahp-types",
+ "anyhow",
+ "chrono",
+ "drasi-core",
+ "futures-util",
+ "log",
+ "rustls 0.23.46",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
+name = "drasi-bootstrap-ahp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "drasi-ahp-common",
+ "drasi-core",
+ "drasi-lib",
+ "drasi-plugin-sdk",
+ "log",
+ "serde",
+ "serde_json",
+ "tokio",
+ "utoipa",
+]
+
+[[package]]
 name = "drasi-bootstrap-application"
 version = "0.2.16"
 dependencies = [
@@ -4206,6 +4242,26 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "utoipa",
+]
+
+[[package]]
+name = "drasi-source-ahp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "drasi-ahp-common",
+ "drasi-bootstrap-ahp",
+ "drasi-core",
+ "drasi-lib",
+ "drasi-plugin-sdk",
+ "drasi-reaction-application",
+ "log",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
  "utoipa",
 ]
 
