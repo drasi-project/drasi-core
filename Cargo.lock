@@ -48,6 +48,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "ahp"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "99645ab4be40f6ebdd4efe323322b75f309d6fd8dc30d3692241b8fc9c324b01"
+dependencies = [
+ "ahp-types",
+ "jiff",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ahp-types"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "911f6e93f3e6cf2db84e52528c92d8cf9ba116d2efd843fc7a2acb9a54add5d6"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_repr",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3543,6 +3569,29 @@ dependencies = [
  "urlencoding",
  "utoipa",
  "wiremock",
+]
+
+[[package]]
+name = "drasi-reaction-ahp"
+version = "0.1.0"
+dependencies = [
+ "ahp",
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "drasi-lib",
+ "drasi-plugin-sdk",
+ "futures-util",
+ "handlebars 5.1.2",
+ "log",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tokio-tungstenite",
+ "url",
+ "urlencoding",
+ "utoipa",
 ]
 
 [[package]]
