@@ -45,6 +45,7 @@ external_crates = ["drasi_index_garnet", "drasi_index_rocksdb"]
 # Include static implementations and test plugins, but not shared helpers or SDKs.
 [selectors.plugins]
 packages = [
+    "drasi-bootstrap-ahp",
     "drasi-bootstrap-application",
     "drasi-bootstrap-cloudflare-radar",
     "drasi-bootstrap-dataverse",
@@ -92,6 +93,7 @@ packages = [
     "drasi-secret-store-azure-keyvault",
     "drasi-secret-store-file",
     "drasi-secret-store-keyring",
+    "drasi-source-ahp",
     "drasi-source-application",
     "drasi-source-cloudflare-radar",
     "drasi-source-dataverse",
@@ -120,6 +122,7 @@ packages = [
 
 [selectors.external-plugins]
 external_crates = [
+    "drasi_bootstrap_ahp",
     "drasi_bootstrap_application",
     "drasi_bootstrap_cloudflare_radar",
     "drasi_bootstrap_dataverse",
@@ -167,6 +170,7 @@ external_crates = [
     "drasi_secret_store_azure_keyvault",
     "drasi_secret_store_file",
     "drasi_secret_store_keyring",
+    "drasi_source_ahp",
     "drasi_source_application",
     "drasi_source_cloudflare_radar",
     "drasi_source_dataverse",
