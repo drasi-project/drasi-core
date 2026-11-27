@@ -70,6 +70,7 @@ members = [
   # Reaction Plugins
   "components/reactions/http",
   "components/reactions/a2a",
+  "components/reactions/ahp",
   "components/reactions/temporal",
   "components/reactions/durable-task",
   "components/reactions/grpc",
