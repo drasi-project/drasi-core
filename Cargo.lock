@@ -48,6 +48,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "ahp"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "99645ab4be40f6ebdd4efe323322b75f309d6fd8dc30d3692241b8fc9c324b01"
+dependencies = [
+ "ahp-types",
+ "jiff",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ahp-types"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "911f6e93f3e6cf2db84e52528c92d8cf9ba116d2efd843fc7a2acb9a54add5d6"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_repr",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2678,6 +2704,42 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1435fa1053d8b2fbbe9be7e97eca7f33d37b28409959813daefc1446a14247f1"
 
 [[package]]
+name = "drasi-ahp-common"
+version = "0.1.0"
+dependencies = [
+ "ahp",
+ "ahp-types",
+ "anyhow",
+ "chrono",
+ "drasi-core",
+ "futures-util",
+ "log",
+ "rustls 0.23.46",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
+name = "drasi-bootstrap-ahp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "drasi-ahp-common",
+ "drasi-core",
+ "drasi-lib",
+ "drasi-plugin-sdk",
+ "log",
+ "serde",
+ "serde_json",
+ "tokio",
+ "utoipa",
+]
+
+[[package]]
 name = "drasi-bootstrap-application"
 version = "0.2.16"
 dependencies = [
@@ -3546,6 +3608,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "drasi-reaction-ahp"
+version = "0.1.0"
+dependencies = [
+ "ahp",
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "drasi-lib",
+ "drasi-plugin-sdk",
+ "futures-util",
+ "handlebars 5.1.2",
+ "log",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tokio-tungstenite",
+ "url",
+ "urlencoding",
+ "utoipa",
+]
+
+[[package]]
 name = "drasi-reaction-application"
 version = "0.3.14"
 dependencies = [
@@ -4157,6 +4242,26 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "utoipa",
+]
+
+[[package]]
+name = "drasi-source-ahp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "drasi-ahp-common",
+ "drasi-bootstrap-ahp",
+ "drasi-core",
+ "drasi-lib",
+ "drasi-plugin-sdk",
+ "drasi-reaction-application",
+ "log",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
  "utoipa",
 ]
 

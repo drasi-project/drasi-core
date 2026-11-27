@@ -17,6 +17,7 @@ members = [
   "components/oracle-common",
   "components/postgres-common",
   "components/salesforce-common",
+  "components/ahp-common",
   "components/sources/mapping",
 
   # Bootstrap Plugins
@@ -40,6 +41,7 @@ members = [
   "components/bootstrappers/neo4j",
   "components/neo4j-common",
   "components/bootstrappers/kafka",
+  "components/bootstrappers/ahp",
 
   # Source Plugins
   "components/sources/postgres",
@@ -66,10 +68,12 @@ members = [
   "components/sources/otel",
   "components/sources/websocket",
   "components/sources/salesforce",
+  "components/sources/ahp",
 
   # Reaction Plugins
   "components/reactions/http",
   "components/reactions/a2a",
+  "components/reactions/ahp",
   "components/reactions/temporal",
   "components/reactions/durable-task",
   "components/reactions/grpc",
@@ -225,6 +229,9 @@ drasi-source-neo4j = { version = "0.1.9", path = "components/sources/neo4j" }
 drasi-bootstrap-neo4j = { version = "0.1.9", path = "components/bootstrappers/neo4j" }
 drasi-neo4j-common = { version = "0.1.7", path = "components/neo4j-common" }
 drasi-bootstrap-sqlite = { version = "0.1.14", path = "components/bootstrappers/sqlite" }
+drasi-ahp-common = { version = "0.1.0", path = "components/ahp-common" }
+drasi-source-ahp = { version = "0.1.0", path = "components/sources/ahp" }
+drasi-bootstrap-ahp = { version = "0.1.0", path = "components/bootstrappers/ahp" }
 
 [workspace.lints.rust]
 warnings = "deny"
